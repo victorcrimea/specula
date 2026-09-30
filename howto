@@ -1,0 +1,21 @@
+How to run it
+
+From the repo root:
+
+# 1. build the client (repeat after changing specula-web)
+cargo build -p specula-web --target wasm32-unknown-unknown --release
+wasm-bindgen --target web --out-dir specula-web/pkg \
+  target/wasm32-unknown-unknown/release/specula_web.wasm
+
+# 2. start the server; it serves the page and the WebSocket on :8000
+cargo run -p specula-server --release
+
+# 3. in another terminal, join a game as observer
+scripts/observe.sh HOST PORT
+
+# 4. open http://127.0.0.1:8000
+
+The server has to be started from the repo root, because it serves specula-web/ by relative path.
+To open the page from another machine, start the server with ROCKET_ADDRESS=0.0.0.0.
+Over plain http from a non-localhost address the browser won't offer WebGPU,
+so the WebGL2 fallback draws. The browser console logs which graphics backend was picked.
