@@ -1,4 +1,4 @@
-//! Decoder for the observer hook's feed, format v4. The writer is
+//! Decoder for the observer hook's feed, format v5. The writer is
 //! `source/network/SpeculaFeed.cpp` in the `specula` branch of 0ad-specula.
 
 use std::io;
@@ -6,7 +6,7 @@ use std::io::ErrorKind;
 use std::io::Read;
 
 const MAGIC: [u8; 4] = *b"SPCF";
-const VERSION: u32 = 4;
+const VERSION: u32 = 5;
 const RECORD_TEMPLATE: u8 = 1;
 const RECORD_TURN: u8 = 2;
 const RECORD_MAP: u8 = 3;
@@ -65,9 +65,11 @@ pub enum Record {
         turn: u32,
         entities: Vec<Entity>,
     },
-    /// Map size in metres.
     Map {
+        /// In metres.
         size: u32,
+        /// The sim rate the match was set up with; 1.0 is normal speed.
+        speed: f32,
     },
     Terrain(Terrain),
     Players(Vec<Player>),
@@ -119,9 +121,10 @@ pub fn read_record(reader: &mut impl Read) -> io::Result<Option<Record>> {
             RECORD_TEMPLATE => return decode_template(&payload).map(Some),
             RECORD_TURN => return decode_turn(&payload).map(Some),
             RECORD_MAP => {
-                return Cursor(&payload)
-                    .u32()
-                    .map(|size| Some(Record::Map { size }));
+                let mut cursor = Cursor(&payload);
+                let size = cursor.u32()?;
+                let speed = f32::from_bits(cursor.u32()?);
+                return Ok(Some(Record::Map { size, speed }));
             }
             RECORD_TERRAIN => return decode_terrain(&payload).map(Some),
             RECORD_PLAYERS => return decode_players(&payload).map(Some),

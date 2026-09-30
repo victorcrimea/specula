@@ -1,7 +1,10 @@
-//! Decoder for specula-server's viewer stream, wire format v3; the layout is
-//! documented in `specula-server/src/view.rs`.
+//! Decoder for specula-server's viewer stream and match segments, wire
+//! format v4; the layout is documented in `specula-server/src/view.rs`.
 
 use std::collections::BTreeMap;
+use std::io::Read;
+
+use ruzstd::decoding::StreamingDecoder;
 
 const MESSAGE_KEYFRAME: u8 = 1;
 const MESSAGE_DELTA: u8 = 2;
@@ -35,6 +38,13 @@ pub struct Dot {
 #[derive(Default)]
 pub struct Scene {
     pub turn: u32,
+    /// Names the match's segments.
+    pub match_id: u64,
+    /// The sim rate the match was set up with; 1.0 is normal speed.
+    pub game_speed: f32,
+    /// The turn segment 0 starts at.
+    pub first_turn: u32,
+    pub segment_turns: u32,
     /// In metres; 0 until the first keyframe.
     pub map_size: u32,
     /// Names `/terrain/<id>`; 0 while the server has none.
@@ -98,6 +108,13 @@ impl Scene {
 
     fn apply_keyframe(&mut self, cursor: &mut Cursor) -> Result<(), &'static str> {
         self.turn = cursor.varint_u32()?;
+        self.match_id = cursor.u64()?;
+        self.game_speed = f32::from_bits(cursor.u32()?);
+        self.first_turn = cursor.varint_u32()?;
+        self.segment_turns = cursor.varint_u32()?;
+        if self.segment_turns == 0 {
+            return Err("segments of no turns");
+        }
         self.map_size = cursor.varint_u32()?;
         self.terrain_id = cursor.u64()?;
         self.icons.clear();
@@ -222,6 +239,116 @@ impl Scene {
         }
         self.players_changed = true;
         Ok(())
+    }
+
+    /// A keyframe of the current state, as the server would send it, so a
+    /// scene rebuilt from a segment can be handed on as one message.
+    pub fn encode_keyframe(&self) -> Vec<u8> {
+        let mut out = Writer::default();
+        out.u8(MESSAGE_KEYFRAME);
+        out.varint(u64::from(self.turn));
+        out.u64(self.match_id);
+        out.u32(self.game_speed.to_bits());
+        out.varint(u64::from(self.first_turn));
+        out.varint(u64::from(self.segment_turns));
+        out.varint(u64::from(self.map_size));
+        out.u64(self.terrain_id);
+        out.varint(self.icons.len() as u64);
+        for icon in &self.icons {
+            out.varint(icon.name.len() as u64);
+            out.0.extend_from_slice(icon.name.as_bytes());
+            out.u32(icon.size.to_bits());
+        }
+        out.varint(self.players.len() as u64);
+        for player in &self.players {
+            out.varint(player.name.len() as u64);
+            out.0.extend_from_slice(player.name.as_bytes());
+            out.u32(player.color);
+            out.zigzag(player.team);
+            out.u8(match player.state {
+                PlayerState::Active => 0,
+                PlayerState::Defeated => 1,
+                PlayerState::Won => 2,
+            });
+            for stance in &player.stances {
+                out.u8(match stance {
+                    Stance::Enemy => 0,
+                    Stance::Ally => 1,
+                    Stance::Neutral => 2,
+                });
+            }
+        }
+        out.varint(self.dots.len() as u64);
+        let mut last_id = 0;
+        for (id, dot) in &self.dots {
+            out.varint(u64::from(id - last_id));
+            last_id = *id;
+            out.zigzag(dot.x);
+            out.zigzag(dot.z);
+            out.u32(dot.color);
+            out.varint(u64::from(dot.icon));
+            out.varint(u64::from(dot.player));
+        }
+        out.0
+    }
+}
+
+/// The turn a keyframe or delta is for, without decoding the rest.
+pub fn message_turn(message: &[u8]) -> Result<u32, &'static str> {
+    let (_, body) = message.split_first().ok_or("empty message")?;
+    Cursor(body).varint_u32()
+}
+
+pub fn is_keyframe(message: &[u8]) -> bool {
+    message.first() == Some(&MESSAGE_KEYFRAME)
+}
+
+/// Splits a zstd-compressed segment into its messages.
+pub fn read_segment(compressed: &[u8]) -> Result<Vec<Vec<u8>>, &'static str> {
+    let mut decoder = StreamingDecoder::new(compressed).map_err(|_| "segment not zstd")?;
+    let mut bytes = Vec::new();
+    decoder
+        .read_to_end(&mut bytes)
+        .map_err(|_| "segment zstd corrupt")?;
+    let mut cursor = Cursor(&bytes);
+    let mut messages = Vec::new();
+    while !cursor.0.is_empty() {
+        let length = cursor.varint()? as usize;
+        messages.push(cursor.take(length)?.to_vec());
+    }
+    if !messages.first().is_some_and(|first| is_keyframe(first)) {
+        return Err("segment does not start with a keyframe");
+    }
+    Ok(messages)
+}
+
+#[derive(Default)]
+struct Writer(Vec<u8>);
+
+impl Writer {
+    fn u8(&mut self, value: u8) {
+        self.0.push(value);
+    }
+
+    fn u32(&mut self, value: u32) {
+        self.0.extend_from_slice(&value.to_le_bytes());
+    }
+
+    fn u64(&mut self, value: u64) {
+        self.0.extend_from_slice(&value.to_le_bytes());
+    }
+
+    fn varint(&mut self, mut value: u64) {
+        while value >= 0x80 {
+            self.0.push(value as u8 | 0x80);
+            value >>= 7;
+        }
+        self.0.push(value as u8);
+    }
+
+    fn zigzag(&mut self, value: i32) {
+        let value = i64::from(value);
+        self.varint(((value << 1) ^ (value >> 63)) as u64);
     }
 }
 

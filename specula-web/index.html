@@ -9,11 +9,20 @@ html, body { margin: 0; height: 100%; background: #0f1214; }
 #view { display: block; width: 100vw; height: 100vh; }
 #controls { position: fixed; top: 8px; left: 8px; display: flex; gap: 6px;
   font: 13px system-ui, sans-serif; }
-#controls button, #controls select { font: inherit; color: #e6e9eb;
-  background: rgba(15, 18, 20, 0.85); border: 1px solid #3a4248;
-  border-radius: 4px; padding: 4px 8px; }
-#controls button[aria-pressed="true"] { border-color: #8fa3b0; }
-#controls select:disabled { opacity: 0.5; }
+#playback { position: fixed; left: 8px; right: 8px; bottom: 8px;
+  display: flex; align-items: center; gap: 6px;
+  font: 13px system-ui, sans-serif; }
+#timeline { flex: 1; min-width: 0; accent-color: #8fa3b0; }
+#controls button, #controls select, #playback button, #playback select {
+  font: inherit; color: #e6e9eb; background: rgba(15, 18, 20, 0.85);
+  border: 1px solid #3a4248; border-radius: 4px; padding: 4px 8px; }
+#controls button[aria-pressed="true"], #playback button[aria-pressed="true"] {
+  border-color: #8fa3b0; }
+#controls select:disabled, #playback :disabled { opacity: 0.5; }
+#clock { position: fixed; top: 8px; right: 8px; padding: 4px 8px;
+  font: 600 15px system-ui, sans-serif; font-variant-numeric: tabular-nums;
+  color: #e6e9eb; background: rgba(15, 18, 20, 0.85);
+  border: 1px solid #3a4248; border-radius: 4px; }
 </style>
 </head>
 <body>
@@ -24,9 +33,17 @@ html, body { margin: 0; height: 100%; background: #0f1214; }
 <option value="0">Observer</option>
 </select>
 </div>
+<div id="clock" aria-label="Match time">0:00</div>
+<div id="playback">
+<button id="play" type="button" disabled>Pause</button>
+<select id="speed" aria-label="Playback speed" disabled></select>
+<input id="timeline" type="range" min="0" max="0" value="0" step="1" aria-label="Timeline" disabled>
+<button id="live" type="button" aria-pressed="true" disabled>Live</button>
+</div>
 <script type="module">
-import init from "./pkg/specula_web.js";
-init();
+import init, { page_main } from "./pkg/specula_web.js";
+await init();
+page_main();
 </script>
 </body>
 </html>

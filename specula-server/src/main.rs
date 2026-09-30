@@ -58,7 +58,7 @@ async fn main() {
 
     let result = rocket::build()
         .manage(hub)
-        .mount("/", rocket::routes![viewer, terrain_file])
+        .mount("/", rocket::routes![viewer, terrain_file, segment_file])
         .mount("/", FileServer::from(WEB_ROOT))
         .launch()
         .await;
@@ -128,6 +128,23 @@ fn terrain_file(id: &str, hub: &State<Arc<Hub>>) -> Option<TerrainBytes> {
     Some(TerrainBytes(bytes.to_vec(), cache))
 }
 
+#[derive(rocket::Responder)]
+#[response(content_type = "binary")]
+struct SegmentBytes(Vec<u8>, Header<'static>);
+
+#[rocket::get("/match/<id>/seg/<index>")]
+fn segment_file(id: &str, index: usize, hub: &State<Arc<Hub>>) -> Option<SegmentBytes> {
+    let (bytes, closed) = hub.segment(u64::from_str_radix(id, 16).ok()?, index)?;
+    // The match id is in the URL, so a closed segment never changes; the
+    // open one grows every turn.
+    let cache = if closed {
+        Header::new("Cache-Control", "public, max-age=31536000, immutable")
+    } else {
+        Header::new("Cache-Control", "no-store")
+    };
+    Some(SegmentBytes(bytes.to_vec(), cache))
+}
+
 // Only a socket is removed, so a mistyped path cannot delete a real file.
 fn remove_stale_socket(path: &str) -> io::Result<()> {
     match std::fs::symlink_metadata(path) {
@@ -163,7 +180,7 @@ fn serve(stream: UnixStream, hub: &Hub) -> io::Result<()> {
                     hub.set_template_player_color(index);
                 }
             }
-            Record::Map { size } => hub.set_map_size(size),
+            Record::Map { size, speed } => hub.set_map(size, speed),
             Record::Players(players) => hub.set_players(players),
             Record::Terrain(terrain) => {
                 let resource = terrain::encode(&terrain);
@@ -178,7 +195,7 @@ fn serve(stream: UnixStream, hub: &Hub) -> io::Result<()> {
                 hub.set_terrain(resource.id, resource.bytes);
             }
             Record::Turn { turn, entities } => {
-                hub.publish(turn, &entities);
+                hub.publish(turn, &entities)?;
                 if let Some(summary) = classifier.observe(turn, &entities) {
                     println!("{summary}, {} templates", templates.len());
                 }
