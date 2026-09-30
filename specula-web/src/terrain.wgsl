@@ -1,4 +1,4 @@
-// The view uniform of dots.wgsl, plus the fields only terrain reads.
+// The view uniform of dots.wgsl.
 struct View {
     map_size: f32,
     width: f32,
@@ -6,6 +6,9 @@ struct View {
     dot_size: f32,
     progress: f32,
     circular: f32,
+    pixel_ratio: f32,
+    // WebGL2 needs uniform structs sized in multiples of 16 bytes.
+    _pad: f32,
 }
 
 @group(0) @binding(0) var<uniform> view: View;
