@@ -1,4 +1,4 @@
-//! Decoder for the observer hook's feed, format v2. The writer is
+//! Decoder for the observer hook's feed, format v3. The writer is
 //! `source/network/SpeculaFeed.cpp` in the `specula` branch of 0ad-specula.
 
 use std::io;
@@ -6,7 +6,7 @@ use std::io::ErrorKind;
 use std::io::Read;
 
 const MAGIC: [u8; 4] = *b"SPCF";
-const VERSION: u32 = 2;
+const VERSION: u32 = 3;
 const RECORD_TEMPLATE: u8 = 1;
 const RECORD_TURN: u8 = 2;
 const RECORD_MAP: u8 = 3;
@@ -28,10 +28,19 @@ pub struct Entity {
     pub color: Option<u32>,
 }
 
+/// A template's minimap icon, as the in-game minimap draws it.
+pub struct Icon {
+    /// Relative to art/textures/ui/session/icons/minimap/.
+    pub name: String,
+    /// In GUI pixels.
+    pub size: f32,
+}
+
 pub enum Record {
     Template {
         index: u32,
         name: String,
+        icon: Option<Icon>,
     },
     Turn {
         turn: u32,
@@ -104,9 +113,17 @@ pub fn read_record(reader: &mut impl Read) -> io::Result<Option<Record>> {
 fn decode_template(payload: &[u8]) -> io::Result<Record> {
     let mut cursor = Cursor(payload);
     let index = cursor.u32()?;
-    let name =
-        String::from_utf8(cursor.0.to_vec()).map_err(|_| invalid("template name not UTF-8"))?;
-    Ok(Record::Template { index, name })
+    let length = cursor.u16()? as usize;
+    let name = String::from_utf8(cursor.bytes(length)?.to_vec())
+        .map_err(|_| invalid("template name not UTF-8"))?;
+    let size = f32::from_bits(cursor.u32()?);
+    let icon_name =
+        String::from_utf8(cursor.0.to_vec()).map_err(|_| invalid("icon name not UTF-8"))?;
+    let icon = (!icon_name.is_empty()).then_some(Icon {
+        name: icon_name,
+        size,
+    });
+    Ok(Record::Template { index, name, icon })
 }
 
 fn decode_turn(payload: &[u8]) -> io::Result<Record> {

@@ -149,8 +149,11 @@ fn serve(stream: UnixStream, hub: &Hub) -> io::Result<()> {
     let mut meter = DeltaMeter::new()?;
     while let Some(record) = feed::read_record(&mut reader)? {
         match record {
-            Record::Template { index, name } => {
+            Record::Template { index, name, icon } => {
                 templates.insert(index, name);
+                if let Some(icon) = icon {
+                    hub.set_template_icon(index, icon);
+                }
             }
             Record::Map { size } => hub.set_map_size(size),
             Record::Terrain(terrain) => {

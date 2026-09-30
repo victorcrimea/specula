@@ -1,8 +1,11 @@
 //! Draws the terrain picture, then every entity on top as a screen-space
-//! square, one instance per dot.
+//! square, one instance per dot, then the minimap icons over the dots.
+
+use std::collections::HashMap;
 
 use web_sys::HtmlCanvasElement;
 
+use crate::icons::IconAtlas;
 use crate::stream::Scene;
 use crate::terrain::TerrainImage;
 
@@ -11,8 +14,10 @@ use crate::terrain::TerrainImage;
 const DOT_CSS_PIXELS: f32 = 3.0;
 /// f32x2 from, f32x2 to, unorm8x4 colour.
 const INSTANCE_SIZE: u64 = 20;
-/// Map size, width, height, dot size, progress, circular, padded to 16
-/// bytes.
+/// f32x2 from, f32x2 to, f32x4 atlas rect, f32 size, unorm8x4 colour.
+const ICON_INSTANCE_SIZE: u64 = 40;
+/// Map size, width, height, dot size, progress, circular, pixel ratio,
+/// padded to 16 bytes.
 const VIEW_SIZE: u64 = 32;
 const BACKGROUND: wgpu::Color = wgpu::Color {
     r: 0.06,
@@ -38,6 +43,12 @@ pub struct Renderer {
     terrain_layout: wgpu::BindGroupLayout,
     terrain_sampler: wgpu::Sampler,
     terrain: Option<wgpu::BindGroup>,
+    icon_pipeline: wgpu::RenderPipeline,
+    icon_sampler: wgpu::Sampler,
+    atlas: Option<wgpu::BindGroup>,
+    icon_rects: HashMap<String, [f32; 4]>,
+    icon_instances: wgpu::Buffer,
+    icon_count: u32,
     circular: bool,
     map_size: f32,
     device_pixel_ratio: f32,
@@ -228,6 +239,64 @@ impl Renderer {
             ..Default::default()
         });
 
+        let icon_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("icons"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("icons.wgsl").into()),
+        });
+        // The atlas binds like the terrain picture: one texture, one sampler.
+        let icon_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("icons"),
+            bind_group_layouts: &[Some(&bind_group_layout), Some(&terrain_layout)],
+            immediate_size: 0,
+        });
+        let icon_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("icons"),
+            layout: Some(&icon_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &icon_shader,
+                entry_point: Some("vs_main"),
+                compilation_options: Default::default(),
+                buffers: &[Some(wgpu::VertexBufferLayout {
+                    array_stride: ICON_INSTANCE_SIZE,
+                    step_mode: wgpu::VertexStepMode::Instance,
+                    attributes: &wgpu::vertex_attr_array![
+                        0 => Float32x2,
+                        1 => Float32x2,
+                        2 => Float32x4,
+                        3 => Float32,
+                        4 => Unorm8x4,
+                    ],
+                })],
+            },
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleStrip,
+                ..Default::default()
+            },
+            depth_stencil: None,
+            multisample: Default::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &icon_shader,
+                entry_point: Some("fs_main"),
+                compilation_options: Default::default(),
+                // The icons are shapes on a transparent background.
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+        // Nearest keeps the 16 px pixel art crisp at whole pixel ratios.
+        let icon_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("icons"),
+            mag_filter: wgpu::FilterMode::Nearest,
+            min_filter: wgpu::FilterMode::Nearest,
+            ..Default::default()
+        });
+        let icon_instances = create_instance_buffer(&device, ICON_INSTANCE_SIZE);
+
         Ok(Renderer {
             surface,
             device,
@@ -243,6 +312,12 @@ impl Renderer {
             terrain_layout,
             terrain_sampler,
             terrain: None,
+            icon_pipeline,
+            icon_sampler,
+            atlas: None,
+            icon_rects: HashMap::new(),
+            icon_instances,
+            icon_count: 0,
             circular: false,
             map_size: 0.0,
             device_pixel_ratio,
@@ -281,7 +356,7 @@ impl Renderer {
             DOT_CSS_PIXELS * self.device_pixel_ratio,
             progress,
             if self.circular { 1.0 } else { 0.0 },
-            0.0,
+            self.device_pixel_ratio,
             0.0,
         ];
         let view: Vec<u8> = view.iter().flat_map(|value| value.to_le_bytes()).collect();
@@ -314,6 +389,15 @@ impl Renderer {
                 pass.set_bind_group(0, &self.bind_group, &[]);
                 pass.set_vertex_buffer(0, self.instances.slice(..));
                 pass.draw(0..4, 0..self.count);
+            }
+            if let Some(atlas) = &self.atlas
+                && self.icon_count > 0
+            {
+                pass.set_pipeline(&self.icon_pipeline);
+                pass.set_bind_group(0, &self.bind_group, &[]);
+                pass.set_bind_group(1, atlas, &[]);
+                pass.set_vertex_buffer(0, self.icon_instances.slice(..));
+                pass.draw(0..4, 0..self.icon_count);
             }
         }
         self.queue.submit([encoder.finish()]);
@@ -372,6 +456,53 @@ impl Renderer {
         self.circular = image.circular;
     }
 
+    /// The caller rebuilds the scene afterwards, so icons already in it
+    /// appear.
+    pub fn set_icon_atlas(&mut self, atlas: IconAtlas) {
+        let size = wgpu::Extent3d {
+            width: atlas.width,
+            height: atlas.height,
+            depth_or_array_layers: 1,
+        };
+        // Not sRGB: the tint is an sRGB byte colour, like the dots'.
+        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("icons"),
+            size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        self.queue.write_texture(
+            texture.as_image_copy(),
+            &atlas.pixels,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(atlas.width * 4),
+                rows_per_image: None,
+            },
+            size,
+        );
+        let view = texture.create_view(&Default::default());
+        self.atlas = Some(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("icons"),
+            layout: &self.terrain_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self.icon_sampler),
+                },
+            ],
+        }));
+        self.icon_rects = atlas.rects;
+    }
+
     /// Uploads the dots once per turn; frames in between only move them
     /// with the progress uniform.
     pub fn set_scene(&mut self, scene: &Scene) {
@@ -379,6 +510,7 @@ impl Renderer {
         // Nothing to place dots on before the first keyframe.
         if scene.map_size == 0 {
             self.count = 0;
+            self.icon_count = 0;
             return;
         }
         self.instance_bytes.clear();
@@ -399,6 +531,39 @@ impl Renderer {
         self.queue
             .write_buffer(&self.instances, 0, &self.instance_bytes);
         self.count = scene.dots.len() as u32;
+
+        self.instance_bytes.clear();
+        let mut icon_count = 0;
+        for dot in scene.dots.values() {
+            let Some(icon) = (dot.icon as usize)
+                .checked_sub(1)
+                .and_then(|index| scene.icons.get(index))
+            else {
+                continue;
+            };
+            // An icon the atlas lacks (from a mod) leaves just the dot.
+            let Some(rect) = self.icon_rects.get(&icon.name) else {
+                continue;
+            };
+            let [b, g, r, a] = dot.color.to_le_bytes();
+            let position = [dot.from_x, dot.from_z, dot.x as f32, dot.z as f32];
+            for value in position {
+                let metres = value / POSITION_UNITS_PER_METRE;
+                self.instance_bytes.extend_from_slice(&metres.to_le_bytes());
+            }
+            for value in rect.iter().chain([&icon.size]) {
+                self.instance_bytes.extend_from_slice(&value.to_le_bytes());
+            }
+            self.instance_bytes.extend_from_slice(&[r, g, b, a]);
+            icon_count += 1;
+        }
+        let needed = self.instance_bytes.len() as u64;
+        if needed > self.icon_instances.size() {
+            self.icon_instances = create_instance_buffer(&self.device, needed.next_power_of_two());
+        }
+        self.queue
+            .write_buffer(&self.icon_instances, 0, &self.instance_bytes);
+        self.icon_count = icon_count;
     }
 }
 

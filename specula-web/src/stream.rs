@@ -1,4 +1,4 @@
-//! Decoder for specula-server's viewer stream, wire format v1; the layout is
+//! Decoder for specula-server's viewer stream, wire format v2; the layout is
 //! documented in `specula-server/src/view.rs`.
 
 use std::collections::BTreeMap;
@@ -7,6 +7,7 @@ const MESSAGE_KEYFRAME: u8 = 1;
 const MESSAGE_DELTA: u8 = 2;
 const CHANGED_POSITION: u8 = 1;
 const CHANGED_COLOR: u8 = 2;
+const CHANGED_ICON: u8 = 4;
 /// A move longer than this in one turn is a teleport (ungarrison, a
 /// scripted jump), not walking, so the dot does not slide there. It is well
 /// above cavalry at 2x game speed.
@@ -19,6 +20,8 @@ pub struct Dot {
     pub z: i32,
     /// 0xFFRRGGBB, or 0 when the entity is not on the minimap.
     pub color: u32,
+    /// 1-based index into `Scene::icons`, or 0 for none.
+    pub icon: u32,
     /// Where the dot was on screen when the current turn arrived, in 1/16 m;
     /// the renderer moves it from here to (x, z) over one turn.
     pub from_x: f32,
@@ -32,7 +35,15 @@ pub struct Scene {
     pub map_size: u32,
     /// Names `/terrain/<id>`; 0 while the server has none.
     pub terrain_id: u64,
+    pub icons: Vec<Icon>,
     pub dots: BTreeMap<u32, Dot>,
+}
+
+pub struct Icon {
+    /// An entry of the icon atlas.
+    pub name: String,
+    /// In CSS pixels.
+    pub size: f32,
 }
 
 impl Scene {
@@ -56,6 +67,8 @@ impl Scene {
         self.turn = cursor.varint_u32()?;
         self.map_size = cursor.varint_u32()?;
         self.terrain_id = cursor.u64()?;
+        self.icons.clear();
+        self.read_icons(cursor)?;
         self.dots.clear();
         let count = cursor.varint_u32()?;
         let mut id = 0;
@@ -78,6 +91,7 @@ impl Scene {
             dot.from_z += (dot.z as f32 - dot.from_z) * progress;
         }
         self.turn = cursor.varint_u32()?;
+        self.read_icons(cursor)?;
         let spawned = cursor.varint_u32()?;
         let destroyed = cursor.varint_u32()?;
         let changed = cursor.varint_u32()?;
@@ -112,6 +126,22 @@ impl Scene {
             if mask & CHANGED_COLOR != 0 {
                 dot.color = cursor.u32()?;
             }
+            if mask & CHANGED_ICON != 0 {
+                dot.icon = cursor.varint_u32()?;
+            }
+        }
+        Ok(())
+    }
+
+    fn read_icons(&mut self, cursor: &mut Cursor) -> Result<(), &'static str> {
+        let count = cursor.varint_u32()?;
+        for _ in 0..count {
+            let length = cursor.varint()? as usize;
+            let name = std::str::from_utf8(cursor.take(length)?)
+                .map_err(|_| "icon name not UTF-8")?
+                .to_string();
+            let size = f32::from_bits(cursor.u32()?);
+            self.icons.push(Icon { name, size });
         }
         Ok(())
     }
@@ -119,7 +149,16 @@ impl Scene {
 
 struct Cursor<'a>(&'a [u8]);
 
-impl Cursor<'_> {
+impl<'a> Cursor<'a> {
+    fn take(&mut self, length: usize) -> Result<&'a [u8], &'static str> {
+        if self.0.len() < length {
+            return Err("message truncated");
+        }
+        let (bytes, rest) = self.0.split_at(length);
+        self.0 = rest;
+        Ok(bytes)
+    }
+
     fn u8(&mut self) -> Result<u8, &'static str> {
         let (&value, rest) = self.0.split_first().ok_or("message truncated")?;
         self.0 = rest;
@@ -168,6 +207,7 @@ impl Cursor<'_> {
             x,
             z,
             color: self.u32()?,
+            icon: self.varint_u32()?,
             from_x: x as f32,
             from_z: z as f32,
         })

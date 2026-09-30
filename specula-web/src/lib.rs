@@ -1,3 +1,4 @@
+mod icons;
 mod render;
 mod stream;
 mod terrain;
@@ -120,6 +121,7 @@ async fn run() -> Result<(), String> {
         terrain_id: 0,
     }));
     connect(&window, &app)?;
+    wasm_bindgen_futures::spawn_local(load_icons(Rc::clone(&app)));
     animate(app);
     Ok(())
 }
@@ -196,9 +198,29 @@ async fn load_terrain(app: Rc<RefCell<App>>, id: u64) {
     }
 }
 
+async fn load_icons(app: Rc<RefCell<App>>) {
+    let atlas = fetch_bytes("/icons.bin")
+        .await
+        .and_then(|bytes| icons::decode(&bytes).map_err(String::from));
+    match atlas {
+        Ok(atlas) => {
+            let mut app = app.borrow_mut();
+            app.renderer.set_icon_atlas(atlas);
+            app.scene_changed = true;
+        }
+        // Not fatal: every entity still has its dot.
+        Err(error) => web_sys::console::error_1(&format!("icons: {error}").into()),
+    }
+}
+
 async fn fetch_terrain(id: u64) -> Result<TerrainImage, String> {
+    let bytes = fetch_bytes(&format!("/terrain/{id:016x}")).await?;
+    terrain::build(&bytes).map_err(String::from)
+}
+
+async fn fetch_bytes(url: &str) -> Result<Vec<u8>, String> {
     let window = web_sys::window().ok_or("no window")?;
-    let response: Response = JsFuture::from(window.fetch_with_str(&format!("/terrain/{id:016x}")))
+    let response: Response = JsFuture::from(window.fetch_with_str(url))
         .await
         .map_err(|_| "request failed")?
         .dyn_into()
@@ -208,8 +230,7 @@ async fn fetch_terrain(id: u64) -> Result<TerrainImage, String> {
     }
     let body = response.array_buffer().map_err(|_| "no body")?;
     let buffer = JsFuture::from(body).await.map_err(|_| "body failed")?;
-    let bytes = js_sys::Uint8Array::new(&buffer).to_vec();
-    terrain::build(&bytes).map_err(String::from)
+    Ok(js_sys::Uint8Array::new(&buffer).to_vec())
 }
 
 fn animate(app: Rc<RefCell<App>>) {

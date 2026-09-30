@@ -1,0 +1,7 @@
+icons.bin packs the minimap icons of 0 A.D.
+(binaries/data/mods/public/art/textures/ui/session/icons/minimap/), made by
+Wildfire Games, http://www.wildfiregames.com/
+
+They are licensed under Creative Commons Attribution-Share Alike 3.0,
+http://creativecommons.org/licenses/by-sa/3.0/, and so is icons.bin.
+Rebuild it with: cargo run -p specula-tools --release --bin minimap-icons

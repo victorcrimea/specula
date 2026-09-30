@@ -8,6 +8,10 @@ license.workspace = true
 name = "terrain-colors"
 path = "src/terrain_colors.rs"
 
+[[bin]]
+name = "minimap-icons"
+path = "src/minimap_icons.rs"
+
 [dependencies]
 png = "0.18"
 roxmltree = "0.21"
