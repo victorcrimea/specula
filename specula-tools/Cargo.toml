@@ -1,0 +1,13 @@
+[package]
+name = "specula-tools"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "terrain-colors"
+path = "src/terrain_colors.rs"
+
+[dependencies]
+png = "0.18"
+roxmltree = "0.21"

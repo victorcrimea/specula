@@ -1,0 +1,10 @@
+[package]
+name = "specula-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+zstd = "0.14.0"
+rocket = "0.5.1"
+rocket_ws = "0.1.1"
