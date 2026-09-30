@@ -1,4 +1,4 @@
-//! Decoder for the observer hook's feed, format v3. The writer is
+//! Decoder for the observer hook's feed, format v4. The writer is
 //! `source/network/SpeculaFeed.cpp` in the `specula` branch of 0ad-specula.
 
 use std::io;
@@ -6,13 +6,15 @@ use std::io::ErrorKind;
 use std::io::Read;
 
 const MAGIC: [u8; 4] = *b"SPCF";
-const VERSION: u32 = 3;
+const VERSION: u32 = 4;
 const RECORD_TEMPLATE: u8 = 1;
 const RECORD_TURN: u8 = 2;
 const RECORD_MAP: u8 = 3;
 const RECORD_TERRAIN: u8 = 4;
+const RECORD_PLAYERS: u8 = 5;
 const ENTITY_SIZE: usize = 28;
 const COLOR_MINIMAP: u8 = 1;
+const TEMPLATE_PLAYER_COLOR: u8 = 1;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct Entity {
@@ -36,11 +38,28 @@ pub struct Icon {
     pub size: f32,
 }
 
+/// A player as `GuiInterface.GetSimulationState` reports it; index 0 is
+/// gaia.
+#[derive(Clone, PartialEq, Eq)]
+pub struct Player {
+    pub name: String,
+    /// 0xRRGGBB, quantized like the minimap colour.
+    pub color: u32,
+    /// -1 for none.
+    pub team: i32,
+    /// 0 active, 1 defeated, 2 won.
+    pub state: u8,
+    /// Towards each player by index: 0 enemy, 1 ally, 2 neutral.
+    pub stances: Vec<u8>,
+}
+
 pub enum Record {
     Template {
         index: u32,
         name: String,
         icon: Option<Icon>,
+        /// The minimap colour is the owner's player colour.
+        player_color: bool,
     },
     Turn {
         turn: u32,
@@ -51,6 +70,7 @@ pub enum Record {
         size: u32,
     },
     Terrain(Terrain),
+    Players(Vec<Player>),
 }
 
 /// Sent once per match; heights and tiles are row-major, x fastest.
@@ -104,6 +124,7 @@ pub fn read_record(reader: &mut impl Read) -> io::Result<Option<Record>> {
                     .map(|size| Some(Record::Map { size }));
             }
             RECORD_TERRAIN => return decode_terrain(&payload).map(Some),
+            RECORD_PLAYERS => return decode_players(&payload).map(Some),
             // Newer hooks may add kinds; the length prefix lets them be skipped.
             _ => continue,
         }
@@ -117,13 +138,19 @@ fn decode_template(payload: &[u8]) -> io::Result<Record> {
     let name = String::from_utf8(cursor.bytes(length)?.to_vec())
         .map_err(|_| invalid("template name not UTF-8"))?;
     let size = f32::from_bits(cursor.u32()?);
+    let flags = cursor.u8()?;
     let icon_name =
         String::from_utf8(cursor.0.to_vec()).map_err(|_| invalid("icon name not UTF-8"))?;
     let icon = (!icon_name.is_empty()).then_some(Icon {
         name: icon_name,
         size,
     });
-    Ok(Record::Template { index, name, icon })
+    Ok(Record::Template {
+        index,
+        name,
+        icon,
+        player_color: flags & TEMPLATE_PLAYER_COLOR != 0,
+    })
 }
 
 fn decode_turn(payload: &[u8]) -> io::Result<Record> {
@@ -183,6 +210,32 @@ fn decode_terrain(payload: &[u8]) -> io::Result<Record> {
         textures,
         tiles,
     }))
+}
+
+fn decode_players(payload: &[u8]) -> io::Result<Record> {
+    let mut cursor = Cursor(payload);
+    let count = cursor.u32()? as usize;
+    let mut players = Vec::new();
+    for _ in 0..count {
+        let length = cursor.u16()? as usize;
+        let name = String::from_utf8(cursor.bytes(length)?.to_vec())
+            .map_err(|_| invalid("player name not UTF-8"))?;
+        let [r, g, b] = cursor.bytes(3)?.try_into().unwrap();
+        let team = cursor.i32()?;
+        let state = cursor.u8()?;
+        let stances = cursor.bytes(count)?.to_vec();
+        players.push(Player {
+            name,
+            color: u32::from_be_bytes([0, r, g, b]),
+            team,
+            state,
+            stances,
+        });
+    }
+    if !cursor.0.is_empty() {
+        return Err(invalid("players record longer than its contents"));
+    }
+    Ok(Record::Players(players))
 }
 
 /// The hook writes r, g, b, flags as bytes, so the flags are the top byte.

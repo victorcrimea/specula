@@ -1,24 +1,34 @@
-//! The viewer stream, wire format v2: one binary WebSocket message per
+//! The viewer stream, wire format v3: one binary WebSocket message per
 //! keyframe or turn, varints and zigzag as in `wire.rs`, positions in 1/16 m.
 //!
 //! - kind 1 keyframe: varint turn, varint map size in metres, u64 terrain
 //!   id (0: none yet, else fetch `/terrain/<id as 16 hex digits>`), varint
-//!   icon count, count x icon, varint count, then count x {varint id
-//!   delta, zigzag x, zigzag z, u32 colour, varint icon}.
+//!   icon count, count x icon, player table, varint count, then count x
+//!   {varint id delta, zigzag x, zigzag z, u32 colour, varint icon, varint
+//!   player}.
 //! - kind 2 delta: varint turn, varint count of icons added to the table,
-//!   count x icon, varint spawned, destroyed and changed counts. Spawned
+//!   count x icon, u8 1 if a new player table follows (it replaces the old
+//!   one) else 0, varint spawned, destroyed and changed counts. Spawned
 //!   entries are keyframe entries, destroyed entries are id deltas, changed
 //!   entries are {varint id delta, u8 mask, zigzag dx and dz if mask & 1,
-//!   u32 colour if mask & 2, varint icon if mask & 4}.
+//!   u32 colour if mask & 2, varint icon if mask & 4, varint player if
+//!   mask & 8}.
 //!
 //! An icon is {varint name length, UTF-8 name, f32 size in CSS pixels}; the
 //! name is an entry of `/icons.bin`. An entity's icon is a 1-based index
 //! into the icon table, or 0 for none.
+//! A player table is varint count n, then n x {varint name length, UTF-8
+//! name, u32 colour, zigzag team (-1: none), u8 state (0 active, 1
+//! defeated, 2 won), n x u8 stance towards player j (0 enemy, 1 ally, 2
+//! neutral)}; index 0 is gaia.
 //! Colour is 0xFFRRGGBB, or 0 for an entity that is not on the minimap.
+//! An entity's player is its owner when its colour is that player's colour,
+//! so a viewer may recolour it; 0 when the colour is fixed.
 //! Ids in each list are sorted and delta-coded from 0.
 
 use std::collections::BTreeMap;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::Mutex;
 
@@ -26,6 +36,7 @@ use rocket::tokio::sync::broadcast;
 
 use crate::feed::Entity;
 use crate::feed::Icon;
+use crate::feed::Player;
 use crate::wire::Writer;
 use crate::wire::diff;
 use crate::wire::quantize_position;
@@ -35,6 +46,7 @@ const MESSAGE_DELTA: u8 = 2;
 const CHANGED_POSITION: u8 = 1;
 const CHANGED_COLOR: u8 = 2;
 const CHANGED_ICON: u8 = 4;
+const CHANGED_PLAYER: u8 = 8;
 /// About 50 s of turns; a viewer further behind is resent a keyframe.
 const BACKLOG_MESSAGES: usize = 256;
 
@@ -46,15 +58,22 @@ struct Dot {
     z: i32,
     color: u32,
     icon: u32,
+    player: u32,
 }
 
 impl Dot {
-    fn new(entity: &Entity, icon: u32) -> Self {
+    fn new(entity: &Entity, icon: u32, player_color: bool) -> Self {
+        // Gaia keeps its colour in every diplomacy mode, as in the game.
+        let player = match u32::try_from(entity.owner) {
+            Ok(owner) if player_color && owner > 0 && entity.color.is_some() => owner,
+            _ => 0,
+        };
         Dot {
             x: quantize_position(entity.x),
             z: quantize_position(entity.z),
             color: entity.color.map_or(0, |rgb| 0xFF00_0000 | rgb),
             icon,
+            player,
         }
     }
 }
@@ -75,6 +94,11 @@ struct State {
     icons_sent: usize,
     /// Template index to 1-based icon index.
     template_icons: HashMap<u32, u32>,
+    /// Templates whose minimap colour is the owner's.
+    player_color_templates: HashSet<u32>,
+    players: Vec<Player>,
+    /// The next delta must carry the player table.
+    players_changed: bool,
     has_turn: bool,
     /// Set when a new observer connects: its entity ids belong to another
     /// match, so its first turn must replace, not patch, what viewers have.
@@ -93,6 +117,9 @@ impl Hub {
                 icons: Vec::new(),
                 icons_sent: 0,
                 template_icons: HashMap::new(),
+                player_color_templates: HashSet::new(),
+                players: Vec::new(),
+                players_changed: false,
                 has_turn: false,
                 new_feed: true,
                 sender: broadcast::channel(BACKLOG_MESSAGES).0,
@@ -107,6 +134,24 @@ impl Hub {
         state.icons.clear();
         state.icons_sent = 0;
         state.template_icons.clear();
+        state.player_color_templates.clear();
+        state.players.clear();
+    }
+
+    pub fn set_template_player_color(&self, template: u32) {
+        self.state
+            .lock()
+            .unwrap()
+            .player_color_templates
+            .insert(template);
+    }
+
+    pub fn set_players(&self, players: Vec<Player>) {
+        let mut state = self.state.lock().unwrap();
+        if state.players != players {
+            state.players = players;
+            state.players_changed = true;
+        }
     }
 
     pub fn set_template_icon(&self, template: u32, icon: Icon) {
@@ -150,7 +195,8 @@ impl Hub {
                     .get(&entity.template)
                     .copied()
                     .unwrap_or(0);
-                (entity.id, Dot::new(entity, icon))
+                let player_color = state.player_color_templates.contains(&entity.template);
+                (entity.id, Dot::new(entity, icon, player_color))
             })
             .collect();
         let message = if state.new_feed {
@@ -159,12 +205,20 @@ impl Hub {
                 state.map_size,
                 terrain_id(&state),
                 &state.icons,
+                &state.players,
                 &dots,
             )
         } else {
-            encode_delta(turn, &state.icons[state.icons_sent..], &state.dots, &dots)
+            encode_delta(
+                turn,
+                &state.icons[state.icons_sent..],
+                state.players_changed.then_some(&state.players[..]),
+                &state.dots,
+                &dots,
+            )
         };
         state.icons_sent = state.icons.len();
+        state.players_changed = false;
         state.turn = turn;
         state.dots = dots;
         state.has_turn = true;
@@ -186,6 +240,7 @@ impl Hub {
                 state.map_size,
                 terrain_id(&state),
                 &state.icons[..state.icons_sent],
+                &state.players,
                 &state.dots,
             )
             .into()
@@ -203,6 +258,7 @@ fn encode_keyframe(
     map_size: u32,
     terrain: u64,
     icons: &[Icon],
+    players: &[Player],
     dots: &BTreeMap<u32, Dot>,
 ) -> Vec<u8> {
     let mut out = Writer::default();
@@ -211,6 +267,7 @@ fn encode_keyframe(
     out.varint(u64::from(map_size));
     out.u64(terrain);
     write_icons(&mut out, icons);
+    write_players(&mut out, players);
     out.varint(dots.len() as u64);
     let mut last_id = 0;
     for (id, dot) in dots {
@@ -224,6 +281,7 @@ fn encode_keyframe(
 fn encode_delta(
     turn: u32,
     new_icons: &[Icon],
+    new_players: Option<&[Player]>,
     previous: &BTreeMap<u32, Dot>,
     current: &BTreeMap<u32, Dot>,
 ) -> Vec<u8> {
@@ -232,6 +290,13 @@ fn encode_delta(
     out.u8(MESSAGE_DELTA);
     out.varint(u64::from(turn));
     write_icons(&mut out, new_icons);
+    match new_players {
+        Some(players) => {
+            out.u8(1);
+            write_players(&mut out, players);
+        }
+        None => out.u8(0),
+    }
     out.varint(diff.spawned.len() as u64);
     out.varint(diff.destroyed.len() as u64);
     out.varint(diff.changed.len() as u64);
@@ -253,6 +318,7 @@ fn encode_delta(
         let position = before.x != now.x || before.z != now.z;
         let color = before.color != now.color;
         let icon = before.icon != now.icon;
+        let player = before.player != now.player;
         let mut mask = 0;
         if position {
             mask |= CHANGED_POSITION;
@@ -262,6 +328,9 @@ fn encode_delta(
         }
         if icon {
             mask |= CHANGED_ICON;
+        }
+        if player {
+            mask |= CHANGED_PLAYER;
         }
         out.u8(mask);
         if position {
@@ -273,6 +342,9 @@ fn encode_delta(
         }
         if icon {
             out.varint(u64::from(now.icon));
+        }
+        if player {
+            out.varint(u64::from(now.player));
         }
     }
     out.0
@@ -287,9 +359,22 @@ fn write_icons(out: &mut Writer, icons: &[Icon]) {
     }
 }
 
+fn write_players(out: &mut Writer, players: &[Player]) {
+    out.varint(players.len() as u64);
+    for player in players {
+        out.varint(player.name.len() as u64);
+        out.0.extend_from_slice(player.name.as_bytes());
+        out.u32(0xFF00_0000 | player.color);
+        out.zigzag(i64::from(player.team));
+        out.u8(player.state);
+        out.0.extend_from_slice(&player.stances);
+    }
+}
+
 fn write_dot(out: &mut Writer, dot: &Dot) {
     out.zigzag(i64::from(dot.x));
     out.zigzag(i64::from(dot.z));
     out.u32(dot.color);
     out.varint(u64::from(dot.icon));
+    out.varint(u64::from(dot.player));
 }

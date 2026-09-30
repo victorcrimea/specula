@@ -149,13 +149,22 @@ fn serve(stream: UnixStream, hub: &Hub) -> io::Result<()> {
     let mut meter = DeltaMeter::new()?;
     while let Some(record) = feed::read_record(&mut reader)? {
         match record {
-            Record::Template { index, name, icon } => {
+            Record::Template {
+                index,
+                name,
+                icon,
+                player_color,
+            } => {
                 templates.insert(index, name);
                 if let Some(icon) = icon {
                     hub.set_template_icon(index, icon);
                 }
+                if player_color {
+                    hub.set_template_player_color(index);
+                }
             }
             Record::Map { size } => hub.set_map_size(size),
+            Record::Players(players) => hub.set_players(players),
             Record::Terrain(terrain) => {
                 let resource = terrain::encode(&terrain);
                 println!(

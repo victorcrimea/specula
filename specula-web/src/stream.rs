@@ -1,4 +1,4 @@
-//! Decoder for specula-server's viewer stream, wire format v2; the layout is
+//! Decoder for specula-server's viewer stream, wire format v3; the layout is
 //! documented in `specula-server/src/view.rs`.
 
 use std::collections::BTreeMap;
@@ -8,6 +8,7 @@ const MESSAGE_DELTA: u8 = 2;
 const CHANGED_POSITION: u8 = 1;
 const CHANGED_COLOR: u8 = 2;
 const CHANGED_ICON: u8 = 4;
+const CHANGED_PLAYER: u8 = 8;
 /// A move longer than this in one turn is a teleport (ungarrison, a
 /// scripted jump), not walking, so the dot does not slide there. It is well
 /// above cavalry at 2x game speed.
@@ -22,6 +23,9 @@ pub struct Dot {
     pub color: u32,
     /// 1-based index into `Scene::icons`, or 0 for none.
     pub icon: u32,
+    /// Index into `Scene::players` when `color` is that player's colour,
+    /// else 0.
+    pub player: u32,
     /// Where the dot was on screen when the current turn arrived, in 1/16 m;
     /// the renderer moves it from here to (x, z) over one turn.
     pub from_x: f32,
@@ -36,6 +40,10 @@ pub struct Scene {
     /// Names `/terrain/<id>`; 0 while the server has none.
     pub terrain_id: u64,
     pub icons: Vec<Icon>,
+    /// Index 0 is gaia.
+    pub players: Vec<Player>,
+    /// Set whenever a message replaces `players`; the reader clears it.
+    pub players_changed: bool,
     pub dots: BTreeMap<u32, Dot>,
 }
 
@@ -44,6 +52,31 @@ pub struct Icon {
     pub name: String,
     /// In CSS pixels.
     pub size: f32,
+}
+
+pub struct Player {
+    pub name: String,
+    /// 0xFFRRGGBB.
+    pub color: u32,
+    /// -1 for none.
+    pub team: i32,
+    pub state: PlayerState,
+    /// Towards each player by index.
+    pub stances: Vec<Stance>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum PlayerState {
+    Active,
+    Defeated,
+    Won,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Stance {
+    Enemy,
+    Ally,
+    Neutral,
 }
 
 impl Scene {
@@ -69,6 +102,7 @@ impl Scene {
         self.terrain_id = cursor.u64()?;
         self.icons.clear();
         self.read_icons(cursor)?;
+        self.read_players(cursor)?;
         self.dots.clear();
         let count = cursor.varint_u32()?;
         let mut id = 0;
@@ -92,6 +126,9 @@ impl Scene {
         }
         self.turn = cursor.varint_u32()?;
         self.read_icons(cursor)?;
+        if cursor.u8()? != 0 {
+            self.read_players(cursor)?;
+        }
         let spawned = cursor.varint_u32()?;
         let destroyed = cursor.varint_u32()?;
         let changed = cursor.varint_u32()?;
@@ -129,6 +166,9 @@ impl Scene {
             if mask & CHANGED_ICON != 0 {
                 dot.icon = cursor.varint_u32()?;
             }
+            if mask & CHANGED_PLAYER != 0 {
+                dot.player = cursor.varint_u32()?;
+            }
         }
         Ok(())
     }
@@ -143,6 +183,44 @@ impl Scene {
             let size = f32::from_bits(cursor.u32()?);
             self.icons.push(Icon { name, size });
         }
+        Ok(())
+    }
+
+    fn read_players(&mut self, cursor: &mut Cursor) -> Result<(), &'static str> {
+        let count = cursor.varint()? as usize;
+        self.players.clear();
+        for _ in 0..count {
+            let length = cursor.varint()? as usize;
+            let name = std::str::from_utf8(cursor.take(length)?)
+                .map_err(|_| "player name not UTF-8")?
+                .to_string();
+            let color = cursor.u32()?;
+            let team = cursor.zigzag()?;
+            let state = match cursor.u8()? {
+                0 => PlayerState::Active,
+                1 => PlayerState::Defeated,
+                2 => PlayerState::Won,
+                _ => return Err("unknown player state"),
+            };
+            let stances = cursor
+                .take(count)?
+                .iter()
+                .map(|stance| match stance {
+                    0 => Ok(Stance::Enemy),
+                    1 => Ok(Stance::Ally),
+                    2 => Ok(Stance::Neutral),
+                    _ => Err("unknown stance"),
+                })
+                .collect::<Result<_, _>>()?;
+            self.players.push(Player {
+                name,
+                color,
+                team,
+                state,
+                stances,
+            });
+        }
+        self.players_changed = true;
         Ok(())
     }
 }
@@ -208,6 +286,7 @@ impl<'a> Cursor<'a> {
             z,
             color: self.u32()?,
             icon: self.varint_u32()?,
+            player: self.varint_u32()?,
             from_x: x as f32,
             from_z: z as f32,
         })

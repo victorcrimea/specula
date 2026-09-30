@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use web_sys::HtmlCanvasElement;
 
 use crate::icons::IconAtlas;
+use crate::stream::Dot;
 use crate::stream::Scene;
 use crate::terrain::TerrainImage;
 
@@ -504,8 +505,8 @@ impl Renderer {
     }
 
     /// Uploads the dots once per turn; frames in between only move them
-    /// with the progress uniform.
-    pub fn set_scene(&mut self, scene: &Scene) {
+    /// with the progress uniform. `palette` is the colour of each player id.
+    pub fn set_scene(&mut self, scene: &Scene, palette: &[u32]) {
         self.map_size = scene.map_size as f32;
         // Nothing to place dots on before the first keyframe.
         if scene.map_size == 0 {
@@ -515,7 +516,7 @@ impl Renderer {
         }
         self.instance_bytes.clear();
         for dot in scene.dots.values() {
-            let [b, g, r, a] = dot.color.to_le_bytes();
+            let [b, g, r, a] = dot_color(dot, palette).to_le_bytes();
             let position = [dot.from_x, dot.from_z, dot.x as f32, dot.z as f32];
             for value in position {
                 let metres = value / POSITION_UNITS_PER_METRE;
@@ -545,7 +546,7 @@ impl Renderer {
             let Some(rect) = self.icon_rects.get(&icon.name) else {
                 continue;
             };
-            let [b, g, r, a] = dot.color.to_le_bytes();
+            let [b, g, r, a] = dot_color(dot, palette).to_le_bytes();
             let position = [dot.from_x, dot.from_z, dot.x as f32, dot.z as f32];
             for value in position {
                 let metres = value / POSITION_UNITS_PER_METRE;
@@ -564,6 +565,14 @@ impl Renderer {
         self.queue
             .write_buffer(&self.icon_instances, 0, &self.instance_bytes);
         self.icon_count = icon_count;
+    }
+}
+
+/// Icons take it too: the engine tints them with the minimap colour.
+fn dot_color(dot: &Dot, palette: &[u32]) -> u32 {
+    match dot.player {
+        0 => dot.color,
+        player => palette.get(player as usize).copied().unwrap_or(dot.color),
     }
 }
 

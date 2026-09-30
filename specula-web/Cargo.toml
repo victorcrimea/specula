@@ -19,7 +19,11 @@ version = "0.3"
 features = [
     "BinaryType",
     "Document",
+    "HtmlButtonElement",
     "HtmlCanvasElement",
+    "HtmlElement",
+    "HtmlOptionElement",
+    "HtmlSelectElement",
     "Location",
     "MessageEvent",
     "Response",

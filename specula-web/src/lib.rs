@@ -1,3 +1,4 @@
+mod diplomacy;
 mod icons;
 mod render;
 mod stream;
@@ -11,11 +12,16 @@ use wasm_bindgen::closure::Closure;
 use wasm_bindgen::prelude::wasm_bindgen;
 use wasm_bindgen_futures::JsFuture;
 use web_sys::BinaryType;
+use web_sys::Document;
+use web_sys::HtmlButtonElement;
 use web_sys::HtmlCanvasElement;
+use web_sys::HtmlOptionElement;
+use web_sys::HtmlSelectElement;
 use web_sys::MessageEvent;
 use web_sys::Response;
 use web_sys::WebSocket;
 
+use crate::diplomacy::Perspective;
 use crate::render::Renderer;
 use crate::stream::Scene;
 use crate::terrain::TerrainImage;
@@ -44,6 +50,14 @@ struct App {
     dirty: bool,
     /// The terrain shown or being fetched; 0 for none.
     terrain_id: u64,
+    diplomacy_colors: bool,
+    perspective: Perspective,
+    /// The displayed colour of each player id.
+    palette: Vec<u32>,
+    diplomacy_button: HtmlButtonElement,
+    perspective_select: HtmlSelectElement,
+    /// The players the perspective list was built for, gaia excluded.
+    player_names: Vec<String>,
 }
 
 impl App {
@@ -68,7 +82,7 @@ impl App {
         }
         if self.scene_changed {
             self.scene_changed = false;
-            self.renderer.set_scene(&self.scene);
+            self.renderer.set_scene(&self.scene, &self.palette);
             self.dirty = true;
         }
         let progress = ((now - self.turn_start) / self.turn_interval).clamp(0.0, 1.0) as f32;
@@ -78,6 +92,55 @@ impl App {
                 self.progress = progress;
             }
         }
+    }
+
+    /// A message replaced the player table.
+    fn players_changed(&mut self) {
+        let players = &self.scene.players;
+        if !players
+            .iter()
+            .skip(1)
+            .map(|player| &player.name)
+            .eq(self.player_names.iter())
+        {
+            self.player_names = players
+                .iter()
+                .skip(1)
+                .map(|player| player.name.clone())
+                .collect();
+            // Keeps the "Observer" entry from the page.
+            self.perspective_select.set_length(1);
+            for (index, name) in self.player_names.iter().enumerate() {
+                let id = (index + 1).to_string();
+                if let Ok(option) = HtmlOptionElement::new_with_text_and_value(name, &id) {
+                    let _ = self
+                        .perspective_select
+                        .add_with_html_option_element(&option);
+                }
+            }
+            // Other names are another match, where the old choice means
+            // nothing.
+            self.perspective = Perspective::Observer;
+            self.perspective_select.set_value("0");
+        }
+        self.update_palette();
+    }
+
+    fn show_controls(&self) {
+        let pressed = if self.diplomacy_colors {
+            "true"
+        } else {
+            "false"
+        };
+        let _ = self.diplomacy_button.set_attribute("aria-pressed", pressed);
+        // Without diplomacy colours every perspective looks the same.
+        self.perspective_select.set_disabled(!self.diplomacy_colors);
+    }
+
+    fn update_palette(&mut self) {
+        self.palette =
+            diplomacy::palette(&self.scene.players, self.diplomacy_colors, self.perspective);
+        self.scene_changed = true;
     }
 }
 
@@ -107,6 +170,9 @@ async fn run() -> Result<(), String> {
     canvas.set_width(width);
     canvas.set_height(height);
     let renderer = Renderer::new(canvas.clone(), ratio).await?;
+    let document = window.document().ok_or("no document")?;
+    let diplomacy_button = element(&document, "diplomacy")?;
+    let perspective_select = element(&document, "perspective")?;
 
     let app = Rc::new(RefCell::new(App {
         canvas,
@@ -119,11 +185,57 @@ async fn run() -> Result<(), String> {
         scene_changed: false,
         dirty: true,
         terrain_id: 0,
+        diplomacy_colors: false,
+        perspective: Perspective::Observer,
+        palette: Vec::new(),
+        diplomacy_button,
+        perspective_select,
+        player_names: Vec::new(),
     }));
+    wire_controls(&app);
     connect(&window, &app)?;
     wasm_bindgen_futures::spawn_local(load_icons(Rc::clone(&app)));
     animate(app);
     Ok(())
+}
+
+fn element<T: JsCast>(document: &Document, id: &str) -> Result<T, String> {
+    document
+        .get_element_by_id(id)
+        .and_then(|element| element.dyn_into().ok())
+        .ok_or_else(|| format!("no element #{id} of the right kind"))
+}
+
+fn wire_controls(app: &Rc<RefCell<App>>) {
+    let (button, select) = {
+        let app = app.borrow();
+        (app.diplomacy_button.clone(), app.perspective_select.clone())
+    };
+
+    let target = Rc::clone(app);
+    let on_click = Closure::<dyn FnMut()>::new(move || {
+        let app = &mut *target.borrow_mut();
+        app.diplomacy_colors = !app.diplomacy_colors;
+        app.show_controls();
+        app.update_palette();
+    });
+    button.set_onclick(Some(on_click.as_ref().unchecked_ref()));
+    // The controls live as long as the page, so their handlers do too.
+    on_click.forget();
+
+    let target = Rc::clone(app);
+    let on_change = Closure::<dyn FnMut()>::new(move || {
+        let app = &mut *target.borrow_mut();
+        app.perspective = match app.perspective_select.value().parse() {
+            Ok(0) | Err(_) => Perspective::Observer,
+            Ok(id) => Perspective::Player(id),
+        };
+        app.update_palette();
+    });
+    select.set_onchange(Some(on_change.as_ref().unchecked_ref()));
+    on_change.forget();
+
+    app.borrow().show_controls();
 }
 
 fn connect(window: &web_sys::Window, app: &Rc<RefCell<App>>) -> Result<(), String> {
@@ -152,6 +264,10 @@ fn connect(window: &web_sys::Window, app: &Rc<RefCell<App>>) -> Result<(), Strin
                 app.progress = 0.0;
                 app.turn_arrived = true;
                 app.scene_changed = true;
+                if app.scene.players_changed {
+                    app.scene.players_changed = false;
+                    app.players_changed();
+                }
                 let terrain_id = app.scene.terrain_id;
                 if terrain_id != app.terrain_id {
                     app.terrain_id = terrain_id;

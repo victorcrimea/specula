@@ -7,10 +7,23 @@
 <style>
 html, body { margin: 0; height: 100%; background: #0f1214; }
 #view { display: block; width: 100vw; height: 100vh; }
+#controls { position: fixed; top: 8px; left: 8px; display: flex; gap: 6px;
+  font: 13px system-ui, sans-serif; }
+#controls button, #controls select { font: inherit; color: #e6e9eb;
+  background: rgba(15, 18, 20, 0.85); border: 1px solid #3a4248;
+  border-radius: 4px; padding: 4px 8px; }
+#controls button[aria-pressed="true"] { border-color: #8fa3b0; }
+#controls select:disabled { opacity: 0.5; }
 </style>
 </head>
 <body>
 <canvas id="view"></canvas>
+<div id="controls">
+<button id="diplomacy" type="button" aria-pressed="false">Diplomacy colours</button>
+<select id="perspective" aria-label="Perspective" disabled>
+<option value="0">Observer</option>
+</select>
+</div>
 <script type="module">
 import init from "./pkg/specula_web.js";
 init();
