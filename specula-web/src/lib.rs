@@ -1,8 +1,12 @@
 mod diplomacy;
+mod gpu;
 mod icons;
+mod impostor;
+mod march;
 mod render;
 mod stream;
 mod terrain;
+mod unit;
 mod worker;
 
 use std::cell::RefCell;
@@ -244,6 +248,17 @@ pub fn page_main() {
     set_panic_hook();
     wasm_bindgen_futures::spawn_local(async {
         if let Err(error) = run().await {
+            web_sys::console::error_1(&error.into());
+        }
+    });
+}
+
+/// Entry point of unit.html.
+#[wasm_bindgen]
+pub fn unit_main() {
+    set_panic_hook();
+    wasm_bindgen_futures::spawn_local(async {
+        if let Err(error) = unit::run().await {
             web_sys::console::error_1(&error.into());
         }
     });

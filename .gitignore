@@ -1,2 +1,4 @@
 /target
 /specula-web/pkg
+/specula-web/unit-*.bin
+/specula-web/unit.txt

@@ -1,0 +1,30 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Specula unit</title>
+<style>
+html, body { margin: 0; height: 100%; background: #0f1214; overflow: hidden; }
+#view { display: block; width: 100vw; height: 100vh; cursor: grab; }
+#controls { position: fixed; top: 8px; left: 8px; display: flex; gap: 6px;
+  align-items: center; font: 13px system-ui, sans-serif; color: #e6e9eb; }
+#fps { position: fixed; top: 8px; right: 8px; padding: 4px 8px;
+  font: 600 15px system-ui, sans-serif; font-variant-numeric: tabular-nums;
+  color: #e6e9eb; background: rgba(15, 18, 20, 0.85);
+  border: 1px solid #3a4248; border-radius: 4px; }
+</style>
+</head>
+<body>
+<canvas id="view"></canvas>
+<div id="controls">
+<span>Drag to orbit, wheel to zoom</span>
+</div>
+<div id="fps" aria-label="Frames per second">- FPS</div>
+<script type="module">
+import init, { unit_main } from "./pkg/specula_web.js?v=6544f3a48d54";
+await init();
+unit_main();
+</script>
+</body>
+</html>

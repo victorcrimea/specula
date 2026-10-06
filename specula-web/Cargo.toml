@@ -29,6 +29,7 @@ features = [
     "HtmlSelectElement",
     "Location",
     "MessageEvent",
+    "MouseEvent",
     "Performance",
     "Response",
     "WebSocket",
@@ -37,6 +38,7 @@ features = [
     "WorkerGlobalScope",
     "WorkerLocation",
     "WorkerOptions",
+    "WheelEvent",
     "WorkerType",
     "console",
 ]

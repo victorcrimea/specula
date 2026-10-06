@@ -12,6 +12,11 @@ path = "src/terrain_colors.rs"
 name = "minimap-icons"
 path = "src/minimap_icons.rs"
 
+[[bin]]
+name = "bake-unit"
+path = "src/bake_unit/main.rs"
+
 [dependencies]
+meshopt = "0.6"
 png = "0.18"
 roxmltree = "0.21"
