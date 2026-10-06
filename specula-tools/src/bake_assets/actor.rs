@@ -10,6 +10,7 @@ use std::path::Path;
 use std::rc::Rc;
 
 use roxmltree::Node;
+use specula_assets::files::Decal;
 
 const MAX_QUALITY: u8 = 255;
 /// `MAX_LEVELS_PER_ACTOR_DEF`.
@@ -45,6 +46,7 @@ pub struct Variant {
     /// Paths under the mod.
     pub mesh: Option<String>,
     pub base_texture: Option<String>,
+    pub decal: Option<Decal>,
     /// (attach point, actor); an empty actor only removes.
     pub props: Vec<(String, String)>,
     pub animations: Vec<Animation>,
@@ -298,6 +300,16 @@ impl<'a> Loader<'a> {
         for option in node.children().filter(Node::is_element) {
             match option.tag_name().name() {
                 "mesh" => variant.mesh = Some(format!("art/meshes/{}", text(option))),
+                "decal" => {
+                    let number = |name: &str| option.attribute(name).map_or(0.0, to_float);
+                    variant.decal = Some(Decal {
+                        size_x: number("width"),
+                        size_z: number("depth"),
+                        angle: number("angle").to_radians(),
+                        offset_x: number("offsetx"),
+                        offset_z: number("offsetz"),
+                    });
+                }
                 "textures" => {
                     for texture in option.children().filter(Node::is_element) {
                         if !texture.has_tag_name("texture") {

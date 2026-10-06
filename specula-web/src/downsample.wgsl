@@ -34,7 +34,10 @@ fn fs_downsample(@builtin(position) position: vec4<f32>) -> Halved {
         normal_coverage += packed.a;
     }
     var out: Halved;
-    out.albedo = vec4<f32>(colour / max(coverage, 1e-4), coverage / 4.0);
-    out.normal = vec4<f32>(normal / max(normal_coverage, 1e-4), normal_coverage / 4.0);
+    // Half the coverage, not a quarter: one texel in four still passes the
+    // impostors' 0.5 alpha test, else sparse foliage loses about half its
+    // texels every level and is gone a few levels down.
+    out.albedo = vec4<f32>(colour / max(coverage, 1e-4), min(coverage / 2.0, 1.0));
+    out.normal = vec4<f32>(normal / max(normal_coverage, 1e-4), min(normal_coverage / 2.0, 1.0));
     return out;
 }

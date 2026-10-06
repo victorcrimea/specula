@@ -1,4 +1,5 @@
 mod assets;
+mod blend;
 mod diplomacy;
 mod far;
 mod field;
@@ -6,6 +7,7 @@ mod gpu;
 mod icons;
 mod impostor;
 mod march;
+mod minimap;
 mod opfs;
 mod pose;
 mod render;
@@ -39,9 +41,11 @@ use crate::assets::Progress;
 use crate::diplomacy::Perspective;
 use crate::field::Field;
 use crate::icons::IconAtlas;
+use crate::minimap::Minimap;
 use crate::render::Renderer;
 use crate::stream::Scene;
 use crate::terrain::TerrainImage;
+use crate::worker::COMMAND_CURRENT_MATCH;
 use crate::worker::COMMAND_LIVE;
 use crate::worker::COMMAND_PAUSE;
 use crate::worker::COMMAND_PLAY;
@@ -50,7 +54,9 @@ use crate::worker::COMMAND_SEEK;
 use crate::worker::COMMAND_SPEED;
 use crate::worker::POST_SCENE;
 use crate::worker::POST_STATUS;
+use crate::worker::STATUS_ENDED;
 use crate::worker::STATUS_LIVE;
+use crate::worker::STATUS_NEXT_READY;
 use crate::worker::STATUS_PAUSED;
 
 type FrameCallback = Closure<dyn FnMut(f64)>;
@@ -65,8 +71,8 @@ const TURN_SMOOTHING: f64 = 0.1;
 /// Playback speeds in game time; the match's own speed is added if missing.
 const SPEEDS: [f32; 5] = [0.5, 1.0, 2.0, 4.0, 8.0];
 
-/// What draws the match: the minimap view of `/` or the 3D view of
-/// `/observer.html`. The stream, playback and controls are the same.
+/// What draws the match: the minimap view of `/map.html` or the 3D view
+/// of `/`. The stream, playback and controls are the same.
 trait View {
     fn max_size(&self) -> u32;
     fn resize(&mut self, width: u32, height: u32, device_pixel_ratio: f32);
@@ -87,6 +93,12 @@ trait View {
     }
     /// What the stream has brought since the page loaded, for statistics.
     fn set_stream_bytes(&mut self, _bytes: StreamBytes) {}
+    /// The ground the camera sees, x and z in metres, for the minimap.
+    fn view_outline(&self) -> Option<[[f32; 2]; 4]> {
+        None
+    }
+    /// Looks at the ground point `x`, `z` in metres.
+    fn move_to(&mut self, _x: f32, _z: f32) {}
 }
 
 /// Bytes since the page loaded: live messages and history segments, as the
@@ -173,6 +185,7 @@ impl LoadingBar {
 struct App {
     canvas: HtmlCanvasElement,
     renderer: Box<dyn View>,
+    minimap: Option<Minimap>,
     loading: Option<LoadingBar>,
     scene: Scene,
     /// How far the last drawn frame moved the dots towards the current turn.
@@ -211,6 +224,65 @@ struct App {
     live: bool,
     paused: bool,
     stream_bytes: StreamBytes,
+    match_over: MatchOver,
+}
+
+/// The popup and button shown while the match on screen has ended.
+struct MatchOver {
+    button: HtmlButtonElement,
+    popup: HtmlElement,
+    text: HtmlElement,
+    popup_button: HtmlButtonElement,
+    close_button: HtmlButtonElement,
+    ended: bool,
+    next_ready: bool,
+    /// When the worker moves on, on the frame clock.
+    switch_at: f64,
+    /// Closed by the viewer; it opens again when another match ends.
+    closed: bool,
+    shown: String,
+}
+
+impl MatchOver {
+    fn show_status(&mut self, flags: u8, switch_in_ms: u32, now: f64) {
+        let ended = flags & STATUS_ENDED != 0;
+        if ended && !self.ended {
+            self.closed = false;
+        }
+        self.ended = ended;
+        self.next_ready = flags & STATUS_NEXT_READY != 0;
+        self.switch_at = now + f64::from(switch_in_ms);
+        self.button.set_hidden(!ended);
+        self.button.set_disabled(!self.next_ready);
+        self.popup_button.set_disabled(!self.next_ready);
+        self.popup.set_hidden(!ended || self.closed);
+    }
+
+    fn close(&mut self) {
+        self.closed = true;
+        self.popup.set_hidden(true);
+    }
+
+    fn frame(&mut self, now: f64) {
+        if !self.ended || self.closed {
+            return;
+        }
+        let left = self.switch_at - now;
+        let text = if left > 0.0 {
+            let seconds = (left / 1000.0).ceil() as u64;
+            format!(
+                "Match over. Next match in {}:{:02}",
+                seconds / 60,
+                seconds % 60
+            )
+        } else {
+            "Match over. Waiting for the next match".to_string()
+        };
+        if text != self.shown {
+            self.text.set_text_content(Some(&text));
+            self.shown = text;
+        }
+    }
 }
 
 impl App {
@@ -236,7 +308,13 @@ impl App {
         if self.scene_changed {
             self.scene_changed = false;
             self.renderer.set_scene(&self.scene, &self.palette);
+            if let Some(minimap) = &mut self.minimap {
+                minimap.set_scene(&self.scene, &self.palette);
+            }
             self.dirty = true;
+        }
+        if let Some([x, z]) = self.minimap.as_ref().and_then(Minimap::take_target) {
+            self.renderer.move_to(x, z);
         }
         if let Some(loading) = &mut self.loading {
             loading.show(self.renderer.progress());
@@ -249,6 +327,10 @@ impl App {
                 self.progress = progress;
             }
         }
+        if let Some(minimap) = &mut self.minimap {
+            minimap.frame(progress, self.renderer.view_outline());
+        }
+        self.match_over.frame(now);
     }
 
     /// A message replaced the player table.
@@ -362,7 +444,7 @@ fn set_panic_hook() {
     }));
 }
 
-/// The page's entry point; the stream worker's is `worker::worker_main`.
+/// Entry point of map.html; the stream worker's is `worker::worker_main`.
 #[wasm_bindgen]
 pub fn page_main() {
     set_panic_hook();
@@ -373,7 +455,7 @@ pub fn page_main() {
     });
 }
 
-/// Entry point of observer.html: the same stream and controls as the
+/// Entry point of index.html: the same stream and controls as the
 /// page's, drawn in 3D. `glue` is the URL the page imported this module's
 /// glue from; the stream worker imports the same one, so a cached older
 /// worker can never pair an old glue with this wasm.
@@ -415,6 +497,10 @@ async fn run(page: Page, glue: Option<String>) -> Result<(), String> {
         Page::Observer => Box::new(Field::new(canvas.clone()).await?),
     };
     let document = window.document().ok_or("no document")?;
+    let minimap = match page {
+        Page::Map => None,
+        Page::Observer => Some(Minimap::new(element(&document, "minimap")?).await?),
+    };
     let loading = match page {
         Page::Map => None,
         Page::Observer => Some(LoadingBar {
@@ -438,6 +524,7 @@ async fn run(page: Page, glue: Option<String>) -> Result<(), String> {
     let app = Rc::new(RefCell::new(App {
         canvas,
         renderer,
+        minimap,
         loading,
         scene: Scene::default(),
         progress: 1.0,
@@ -466,14 +553,23 @@ async fn run(page: Page, glue: Option<String>) -> Result<(), String> {
         live: true,
         paused: false,
         stream_bytes: StreamBytes::default(),
+        match_over: MatchOver {
+            button: element(&document, "current")?,
+            popup: element(&document, "match-over")?,
+            text: element(&document, "match-over-text")?,
+            popup_button: element(&document, "match-over-current")?,
+            close_button: element(&document, "match-over-close")?,
+            ended: false,
+            next_ready: false,
+            switch_at: 0.0,
+            closed: false,
+            shown: String::new(),
+        },
     }));
     wire_controls(&app);
     wire_playback(&app);
     connect(&app);
-    // The 3D view has no minimap icons.
-    if page == Page::Map {
-        wasm_bindgen_futures::spawn_local(load_icons(Rc::clone(&app)));
-    }
+    wasm_bindgen_futures::spawn_local(load_icons(Rc::clone(&app)));
     animate(app);
     Ok(())
 }
@@ -582,6 +678,29 @@ fn wire_playback(app: &Rc<RefCell<App>>) {
     });
     live.set_onclick(Some(on_live.as_ref().unchecked_ref()));
     on_live.forget();
+
+    let (current, popup_current, close) = {
+        let app = app.borrow();
+        (
+            app.match_over.button.clone(),
+            app.match_over.popup_button.clone(),
+            app.match_over.close_button.clone(),
+        )
+    };
+    let target = Rc::clone(app);
+    let on_current = Closure::<dyn FnMut()>::new(move || {
+        target.borrow().command(COMMAND_CURRENT_MATCH, 0.0);
+    });
+    current.set_onclick(Some(on_current.as_ref().unchecked_ref()));
+    popup_current.set_onclick(Some(on_current.as_ref().unchecked_ref()));
+    on_current.forget();
+
+    let target = Rc::clone(app);
+    let on_close = Closure::<dyn FnMut()>::new(move || {
+        target.borrow_mut().match_over.close();
+    });
+    close.set_onclick(Some(on_close.as_ref().unchecked_ref()));
+    on_close.forget();
 }
 
 fn connect(app: &Rc<RefCell<App>>) {
@@ -616,6 +735,14 @@ fn connect(app: &Rc<RefCell<App>>) {
                     app.stream_bytes.live = live;
                     app.stream_bytes.segments = segments;
                 }
+                // The frame clock, which the popup's countdown runs on.
+                let now = web_sys::window()
+                    .and_then(|window| window.performance())
+                    .map_or(0.0, |performance| performance.now());
+                receiver
+                    .borrow_mut()
+                    .match_over
+                    .show_status(flags, u32_at(33).unwrap_or(0), now);
                 receiver.borrow_mut().show_status(
                     first,
                     newest,
@@ -668,6 +795,9 @@ fn receive(app_rc: &Rc<RefCell<App>>, turn_ms: f64, message: &[u8]) {
                 app.terrain_id = terrain_id;
                 // A new match: the old picture belongs to another map.
                 app.renderer.set_terrain(None);
+                if let Some(minimap) = &mut app.minimap {
+                    minimap.set_terrain(None);
+                }
                 if terrain_id != 0 {
                     let app = Rc::clone(app_rc);
                     wasm_bindgen_futures::spawn_local(load_terrain(app, terrain_id));
@@ -691,6 +821,9 @@ async fn load_terrain(app: Rc<RefCell<App>>, id: u64) {
             // Another match may have started during the download.
             if app.terrain_id == id {
                 app.renderer.set_terrain(Some(&image));
+                if let Some(minimap) = &mut app.minimap {
+                    minimap.set_terrain(Some(&image));
+                }
                 app.dirty = true;
             }
         }
@@ -708,7 +841,10 @@ async fn load_icons(app: Rc<RefCell<App>>) {
     match atlas {
         Ok(atlas) => {
             let mut app = app.borrow_mut();
-            app.renderer.set_icon_atlas(atlas);
+            match &mut app.minimap {
+                Some(minimap) => minimap.set_icon_atlas(atlas),
+                None => app.renderer.set_icon_atlas(atlas),
+            }
             app.scene_changed = true;
         }
         // Not fatal: every entity still has its dot.

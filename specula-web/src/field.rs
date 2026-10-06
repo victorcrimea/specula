@@ -1,5 +1,5 @@
-//! The observer page's 3D view: the map's heightmap in minimap colours with
-//! a water plane, and every entity with its actor's models, variant and
+//! The observer page's 3D view: the map's heightmap in its terrain
+//! textures (blend.rs) with a water plane, and every entity with its actor's models, variant and
 //! animation as the stream describes them. Pieces stream in on demand
 //! (assets.rs); an entity shows once its own pieces have arrived.
 //!
@@ -9,6 +9,8 @@
 //! and textures start as their coarse files; the detail files are asked
 //! for only for entities drawn finer than the coarsest level. Entities
 //! smaller still are impostors (far.rs) once their look's atlas is ready.
+//! Decals (a field's soil, the dirt under a building) are drawn over the
+//! ground's own triangles, at every distance.
 
 use std::cell::RefCell;
 use std::collections::BTreeSet;
@@ -20,9 +22,11 @@ use std::rc::Rc;
 
 use specula_assets::bc;
 use specula_assets::files::AnimationData;
+use specula_assets::files::Decal;
 use specula_assets::files::FileRef;
 use specula_assets::files::Mesh;
 use specula_assets::files::NO_BONE;
+use specula_assets::files::PropPoint;
 use specula_assets::files::Texture;
 use specula_assets::files::TextureFormat;
 use specula_assets::files::VERTEX_SIZE;
@@ -46,6 +50,8 @@ use crate::assets;
 use crate::assets::Get;
 use crate::assets::Progress;
 use crate::assets::Store;
+use crate::blend;
+use crate::blend::Splat;
 use crate::far;
 use crate::far::Capture;
 use crate::far::CaptureDraw;
@@ -70,6 +76,7 @@ use crate::unit::multiply;
 use crate::variation;
 use crate::variation::Model;
 use crate::variation::ModelAnimation;
+use crate::variation::Shape;
 
 /// The stream's positions are in 1/16 m.
 const POSITION_UNITS_PER_METRE: f32 = 16.0;
@@ -100,10 +107,15 @@ const MIN_DISTANCE: f32 = 10.0;
 const MAX_DISTANCE: f32 = 1500.0;
 const START_DISTANCE: f32 = 120.0;
 const START_PITCH: f32 = 0.85;
+/// The eye south of the target, looking north (+z) as the engine's camera
+/// does at its default view.rotate.y.default of 0.
+const START_YAW: f32 = std::f32::consts::PI;
 /// Radians per CSS pixel of drag.
 const ROTATE_SPEED: f32 = 0.006;
 /// Ground crossed per second by the pan keys, in camera distances.
 const KEY_PAN_SPEED: f32 = 1.0;
+/// Radians per second by the turn keys, the engine's view.rotate.y.speed.
+const KEY_ROTATE_SPEED: f32 = 2.0;
 /// A longer frame is a hidden tab or a stall; the camera should not leap.
 const KEY_STEP_MAX_S: f32 = 0.1;
 /// Zooming at a point near the horizon would throw the camera far off;
@@ -132,8 +144,18 @@ const INSTANCE_ATTRIBUTES: [wgpu::VertexAttribute; 5] = wgpu::vertex_attr_array!
     8 => Uint32x4,
     9 => Float32x4,
 ];
-const TERRAIN_ATTRIBUTES: [wgpu::VertexAttribute; 2] =
+const TERRAIN_ATTRIBUTES: [wgpu::VertexAttribute; 3] =
+    wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x3];
+/// The ground's position and normal; decal.wgsl.
+const DECAL_GROUND_ATTRIBUTES: [wgpu::VertexAttribute; 2] =
     wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3];
+/// `PlacedDecal::place`, two f32x4; decal.wgsl.
+const DECAL_INSTANCE_SIZE: usize = 32;
+const DECAL_ATTRIBUTES: [wgpu::VertexAttribute; 2] =
+    wgpu::vertex_attr_array![3 => Float32x4, 4 => Float32x4];
+/// The anisotropy terrain textures are sampled with, as the engine's
+/// default for them; seen at a slant, they would blur without it.
+const TERRAIN_ANISOTROPY: u16 = 16;
 
 /// (actor, variant set, animation, seed) as the stream indexes them: what
 /// decides an entity's variation.
@@ -141,6 +163,15 @@ type ModelKey = (u32, u32, u32, u32);
 
 /// (mesh, level of detail, texture) of one instanced draw.
 type GroupKey = (u64, usize, u64);
+
+/// A decal laid this frame.
+struct PlacedDecal {
+    /// The texture's coarse file hash.
+    texture: u64,
+    /// `CModelDecal`'s transform (cos and sin of its Y rotation, x, z),
+    /// then the decal's offset x and z and size x and z.
+    place: [f32; 8],
+}
 
 struct GpuMesh {
     vertices: wgpu::Buffer,
@@ -163,8 +194,16 @@ struct Ground {
     image: TerrainImage,
     vertices: wgpu::Buffer,
     indices: wgpu::Buffer,
-    index_count: u32,
-    bind_group: wgpu::BindGroup,
+    base: Vec<Splat>,
+    blends: Vec<Splat>,
+    /// The minimap picture, for a terrain whose texture is not in (yet).
+    minimap: wgpu::BindGroup,
+    /// Per palette entry, its texture's bind group and whether it holds
+    /// the detail; `None` while it is on its way or missing.
+    textures: Vec<Option<(wgpu::BindGroup, bool)>>,
+    /// Palette entries whose texture will not come.
+    missing: Vec<bool>,
+    alpha_maps: Option<wgpu::BindGroup>,
 }
 
 struct Pointer {
@@ -185,7 +224,7 @@ struct Camera {
     pointers: Vec<Pointer>,
     /// Set over the map's centre once the first keyframe tells its size.
     placed: bool,
-    /// Pan keys held, `KEY_*` bits.
+    /// Pan and turn keys held, `KEY_*` bits.
     keys: u8,
     /// When `step` last ran, in page milliseconds.
     last_step: f64,
@@ -195,8 +234,10 @@ const KEY_FORWARD: u8 = 1;
 const KEY_BACK: u8 = 2;
 const KEY_LEFT: u8 = 4;
 const KEY_RIGHT: u8 = 8;
+const KEY_TURN_CW: u8 = 16;
+const KEY_TURN_CCW: u8 = 32;
 
-/// The pan bit of a `KeyboardEvent.code`: by position, so WASD sits under
+/// The camera key bit of a `KeyboardEvent.code`: by position, so WASD sits under
 /// the same fingers on any layout.
 fn key_bit(code: &str) -> u8 {
     match code {
@@ -204,6 +245,9 @@ fn key_bit(code: &str) -> u8 {
         "KeyS" | "ArrowDown" => KEY_BACK,
         "KeyA" | "ArrowLeft" => KEY_LEFT,
         "KeyD" | "ArrowRight" => KEY_RIGHT,
+        // The engine's camera.rotate.cw and camera.rotate.ccw.
+        "KeyQ" => KEY_TURN_CW,
+        "KeyE" => KEY_TURN_CCW,
         _ => 0,
     }
 }
@@ -228,7 +272,12 @@ pub struct Field {
     bc: bool,
     model_pipeline: wgpu::RenderPipeline,
     terrain_pipeline: wgpu::RenderPipeline,
+    blend_pipeline: wgpu::RenderPipeline,
     water_pipeline: wgpu::RenderPipeline,
+    decal_pipeline: wgpu::RenderPipeline,
+    ground_layout: wgpu::BindGroupLayout,
+    /// Repeating, for the terrain textures.
+    terrain_sampler: wgpu::Sampler,
     view_buffer: wgpu::Buffer,
     view_bind_group: wgpu::BindGroup,
     poses: pose::Atlas,
@@ -254,6 +303,10 @@ pub struct Field {
     far: Far,
     far_instances: wgpu::Buffer,
     far_groups: HashMap<LookKey, Vec<u8>>,
+    decals: Vec<PlacedDecal>,
+    decal_instances: wgpu::Buffer,
+    /// Into the ground's vertices, per frame.
+    decal_indices: wgpu::Buffer,
     /// Where the camera is this frame, which impostor cells depend on.
     eye: [f32; 3],
     stats: Stats,
@@ -365,6 +418,48 @@ impl Field {
             ..Default::default()
         });
 
+        let ground_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("ground texture"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+        });
+        let terrain_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("terrain"),
+            address_mode_u: wgpu::AddressMode::Repeat,
+            address_mode_v: wgpu::AddressMode::Repeat,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Linear,
+            anisotropy_clamp: TERRAIN_ANISOTROPY,
+            ..Default::default()
+        });
+
         let depth_stencil = |write: bool| wgpu::DepthStencilState {
             format: DEPTH_FORMAT,
             depth_write_enabled: Some(write),
@@ -418,9 +513,14 @@ impl Field {
         });
         let terrain_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("terrain"),
-            bind_group_layouts: &[Some(&view_layout), Some(&texture_layout)],
+            bind_group_layouts: &[Some(&view_layout), Some(&ground_layout)],
             immediate_size: 0,
         });
+        let terrain_buffers = [Some(wgpu::VertexBufferLayout {
+            array_stride: blend::VERTEX_SIZE as u64,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &TERRAIN_ATTRIBUTES,
+        })];
         let terrain_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("terrain"),
             layout: Some(&terrain_layout),
@@ -428,11 +528,7 @@ impl Field {
                 module: &field_shader,
                 entry_point: Some("vs_terrain"),
                 compilation_options: Default::default(),
-                buffers: &[Some(wgpu::VertexBufferLayout {
-                    array_stride: 24,
-                    step_mode: wgpu::VertexStepMode::Vertex,
-                    attributes: &TERRAIN_ATTRIBUTES,
-                })],
+                buffers: &terrain_buffers,
             },
             primitive: wgpu::PrimitiveState::default(),
             depth_stencil: Some(depth_stencil(true)),
@@ -442,6 +538,44 @@ impl Field {
                 entry_point: Some("fs_terrain"),
                 compilation_options: Default::default(),
                 targets: &[Some(config.format.into())],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+        let blend_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("terrain blend"),
+            bind_group_layouts: &[
+                Some(&view_layout),
+                Some(&ground_layout),
+                Some(&texture_layout),
+            ],
+            immediate_size: 0,
+        });
+        let blend_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("terrain blend"),
+            layout: Some(&blend_layout),
+            vertex: wgpu::VertexState {
+                module: &field_shader,
+                entry_point: Some("vs_terrain"),
+                compilation_options: Default::default(),
+                buffers: &terrain_buffers,
+            },
+            primitive: wgpu::PrimitiveState::default(),
+            // Over the base pass's surface, at the very same depth.
+            depth_stencil: Some(wgpu::DepthStencilState {
+                depth_compare: Some(wgpu::CompareFunction::LessEqual),
+                ..depth_stencil(false)
+            }),
+            multisample: Default::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &field_shader,
+                entry_point: Some("fs_blend"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: config.format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
             }),
             multiview_mask: None,
             cache: None,
@@ -470,6 +604,56 @@ impl Field {
             fragment: Some(wgpu::FragmentState {
                 module: &field_shader,
                 entry_point: Some("fs_water"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: config.format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+        let decal_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("decal"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("decal.wgsl").into()),
+        });
+        let decal_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("decal"),
+            bind_group_layouts: &[Some(&view_layout), Some(&texture_layout)],
+            immediate_size: 0,
+        });
+        let decal_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("decal"),
+            layout: Some(&decal_layout),
+            vertex: wgpu::VertexState {
+                module: &decal_shader,
+                entry_point: Some("vs_decal"),
+                compilation_options: Default::default(),
+                buffers: &[
+                    Some(wgpu::VertexBufferLayout {
+                        array_stride: blend::VERTEX_SIZE as u64,
+                        step_mode: wgpu::VertexStepMode::Vertex,
+                        attributes: &DECAL_GROUND_ATTRIBUTES,
+                    }),
+                    Some(wgpu::VertexBufferLayout {
+                        array_stride: DECAL_INSTANCE_SIZE as u64,
+                        step_mode: wgpu::VertexStepMode::Instance,
+                        attributes: &DECAL_ATTRIBUTES,
+                    }),
+                ],
+            },
+            primitive: wgpu::PrimitiveState::default(),
+            // shaders/effects/terrain_decal.xml: over the ground at its
+            // very depth, without writing it.
+            depth_stencil: Some(wgpu::DepthStencilState {
+                depth_compare: Some(wgpu::CompareFunction::LessEqual),
+                ..depth_stencil(false)
+            }),
+            multisample: Default::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &decal_shader,
+                entry_point: Some("fs_decal"),
                 compilation_options: Default::default(),
                 targets: &[Some(wgpu::ColorTargetState {
                     format: config.format,
@@ -520,9 +704,23 @@ impl Field {
             &[],
             wgpu::BufferUsages::VERTEX,
         );
+        let decal_instances = create_buffer(
+            &device,
+            &queue,
+            "decal instances",
+            &[],
+            wgpu::BufferUsages::VERTEX,
+        );
+        let decal_indices = create_buffer(
+            &device,
+            &queue,
+            "decal indices",
+            &[],
+            wgpu::BufferUsages::INDEX,
+        );
         let camera = Rc::new(RefCell::new(Camera {
             target: [0.0, 0.0],
-            yaw: 0.0,
+            yaw: START_YAW,
             pitch: START_PITCH,
             distance: START_DISTANCE,
             pointers: Vec::new(),
@@ -551,7 +749,11 @@ impl Field {
             bc,
             model_pipeline,
             terrain_pipeline,
+            blend_pipeline,
             water_pipeline,
+            decal_pipeline,
+            ground_layout,
+            terrain_sampler,
             view_buffer,
             view_bind_group,
             poses,
@@ -575,6 +777,9 @@ impl Field {
             far,
             far_instances,
             far_groups: HashMap::new(),
+            decals: Vec::new(),
+            decal_instances,
+            decal_indices,
             eye: [0.0; 3],
             stats,
         })
@@ -644,6 +849,7 @@ impl Field {
             group.clear();
         }
         self.placed = 0;
+        self.decals.clear();
         self.stats.levels = [0; LEVELS];
         let planes = frustum_planes(view_proj);
         let pixel_scale = self.config.height as f32 / (FIELD_OF_VIEW / 2.0).tan();
@@ -695,10 +901,6 @@ impl Field {
         let Some(model) = model else {
             return;
         };
-        let root_mesh = match self.store.borrow_mut().mesh(model.mesh, false) {
-            Get::Ready(mesh) => mesh,
-            Get::Pending | Get::Missing => return,
-        };
 
         let lerp = |from: f32, to: i32| from + (to as f32 - from) * progress;
         let x = lerp(dot.from_x, dot.x) / POSITION_UNITS_PER_METRE;
@@ -719,14 +921,6 @@ impl Field {
             }
             None => lerp(dot.from_y, dot.y) / POSITION_UNITS_PER_METRE,
         };
-        let height = root_mesh.max[1] - root_mesh.min[1];
-        // CCmpPosition::GetConstructionProgressOffset, with the root
-        // mesh's height for the selection box's.
-        let sink = if dot.construction == 0 {
-            0.0
-        } else {
-            (f32::from(dot.construction) / 255.0 - 1.0) * height
-        };
         let angle = dot.from_angle + turn_towards(dot.from_angle, dot.angle) * progress;
         let rot_y = angle / 256.0 * std::f32::consts::TAU;
         // CCmpPosition::GetInterpolatedTransform turns models by rotY + PI.
@@ -737,6 +931,33 @@ impl Field {
             z: 0.0,
             w: half.cos(),
         });
+
+        let root_file = match model.shape {
+            Shape::Mesh(file) => file,
+            Shape::Decal(decal) => {
+                let radius =
+                    decal.size_x.hypot(decal.size_z) / 2.0 + decal.offset_x.hypot(decal.offset_z);
+                let Some(level) = screen_level([x, y, z], radius, view_proj, planes, pixel_scale)
+                else {
+                    return;
+                };
+                transform.translate(Vec3::new(x, y, z));
+                self.place_decal(&model, &decal, &transform, level < COARSE_LEVEL);
+                return;
+            }
+        };
+        let root_mesh = match self.store.borrow_mut().mesh(root_file, false) {
+            Get::Ready(mesh) => mesh,
+            Get::Pending | Get::Missing => return,
+        };
+        let height = root_mesh.max[1] - root_mesh.min[1];
+        // CCmpPosition::GetConstructionProgressOffset, with the root
+        // mesh's height for the selection box's.
+        let sink = if dot.construction == 0 {
+            0.0
+        } else {
+            (f32::from(dot.construction) / 255.0 - 1.0) * height
+        };
         transform.translate(Vec3::new(x, y + sink, z));
 
         let extent = Vec3::new(
@@ -746,21 +967,12 @@ impl Field {
         );
         let radius = extent.length() / 2.0 * REACH_MARGIN + 1.0;
         let centre = [x, y + sink + (root_mesh.min[1] + root_mesh.max[1]) / 2.0, z];
-        let outside = planes.iter().any(|plane| {
-            plane[0] * centre[0] + plane[1] * centre[1] + plane[2] * centre[2] + plane[3] < -radius
-        });
-        if outside {
+        let Some(level) = screen_level(centre, radius, view_proj, planes, pixel_scale) else {
             return;
+        };
+        if has_decal(&model) {
+            self.place_decals(&model, &transform, level < COARSE_LEVEL, 0);
         }
-        let depth = view_proj[3][0] * centre[0]
-            + view_proj[3][1] * centre[1]
-            + view_proj[3][2] * centre[2]
-            + view_proj[3][3];
-        let diameter = 2.0 * radius * pixel_scale / depth.max(NEAR);
-        let level = LEVEL_PIXELS
-            .iter()
-            .position(|pixels| diameter >= *pixels)
-            .unwrap_or(LEVEL_PIXELS.len());
 
         let state = string(&self.entities.strings, dot.animation)
             .map_or_else(|| "idle".to_string(), str::to_lowercase);
@@ -890,7 +1102,11 @@ impl Field {
     /// of it is still on its way.
     fn prepare_capture(&mut self, request: &Request) -> Option<Prepared> {
         let model = Rc::clone(&request.model);
-        let root_mesh = match self.store.borrow_mut().mesh(model.mesh, false) {
+        // A decal at the root is laid on the ground and never asked for.
+        let Shape::Mesh(root_file) = model.shape else {
+            return None;
+        };
+        let root_mesh = match self.store.borrow_mut().mesh(root_file, false) {
             Get::Ready(mesh) => mesh,
             Get::Pending | Get::Missing => return None,
         };
@@ -984,8 +1200,12 @@ impl Field {
         depth: usize,
         groups: &mut HashMap<GroupKey, Vec<u8>>,
     ) -> bool {
+        // place_decals lays decals, whatever the level of detail.
+        let Shape::Mesh(file) = model.shape else {
+            return true;
+        };
         let detail = entity.level < COARSE_LEVEL;
-        let mesh = match self.store.borrow_mut().mesh(model.mesh, detail) {
+        let mesh = match self.store.borrow_mut().mesh(file, detail) {
             Get::Ready(mesh) => mesh,
             Get::Pending => return false,
             Get::Missing => return true,
@@ -1034,7 +1254,7 @@ impl Field {
             }
         }
         self.add_instance(
-            &mesh, model, transform, entity, pose, blend, texture, groups,
+            file.hash, &mesh, model, transform, entity, pose, blend, texture, groups,
         );
 
         if depth >= 8 {
@@ -1050,17 +1270,6 @@ impl Field {
             else {
                 continue;
             };
-            let [px, py, pz] = point.position;
-            let [qx, qy, qz, qw] = point.rotation;
-            let point_matrix = Mat4::from_bone(
-                Vec3::new(px, py, pz),
-                Quat {
-                    x: qx,
-                    y: qy,
-                    z: qz,
-                    w: qw,
-                },
-            );
             // bake.rs pose_frame: parent * bone * point, or parent * point
             // for a point on the model's origin.
             let mut placed = *transform;
@@ -1074,7 +1283,7 @@ impl Field {
                 );
                 placed = placed.mul(&bone);
             }
-            placed = placed.mul(&point_matrix);
+            placed = placed.mul(&point_matrix(point));
             complete &= self.place_model(prop, &placed, entity, root_id, depth + 1, groups);
         }
         complete
@@ -1083,6 +1292,7 @@ impl Field {
     #[allow(clippy::too_many_arguments)]
     fn add_instance(
         &mut self,
+        mesh_hash: u64,
         mesh: &Mesh,
         model: &Model,
         transform: &Mat4,
@@ -1095,7 +1305,7 @@ impl Field {
         let complete = mesh.detail.is_none();
         let current = self
             .meshes
-            .get(&model.mesh.hash)
+            .get(&mesh_hash)
             .is_some_and(|gpu| gpu.complete == complete);
         if !current {
             let gpu = GpuMesh {
@@ -1120,11 +1330,11 @@ impl Field {
                 levels: mesh.levels.clone(),
                 complete,
             };
-            self.meshes.insert(model.mesh.hash, gpu);
+            self.meshes.insert(mesh_hash, gpu);
         }
         self.placed += 1;
         let level = entity.level.min(mesh.levels.len() - 1);
-        let bytes = groups.entry((model.mesh.hash, level, texture)).or_default();
+        let bytes = groups.entry((mesh_hash, level, texture)).or_default();
         for row in &transform.m[..3] {
             for value in row {
                 bytes.extend_from_slice(&value.to_le_bytes());
@@ -1137,6 +1347,83 @@ impl Field {
         for value in [blend, tinted, model.alpha_ref, 0.0f32] {
             bytes.extend_from_slice(&value.to_le_bytes());
         }
+    }
+
+    /// Lays the decals of `model`'s tree on the ground. Apart from
+    /// `place_model`, as an impostor leaves out the ground under it.
+    fn place_decals(&mut self, model: &Model, transform: &Mat4, detail: bool, depth: usize) {
+        let file = match model.shape {
+            Shape::Mesh(file) => file,
+            Shape::Decal(decal) => {
+                self.place_decal(model, &decal, transform, detail);
+                return;
+            }
+        };
+        if depth >= 8 {
+            return;
+        }
+        let mesh = match self.store.borrow_mut().mesh(file, false) {
+            Get::Ready(mesh) => mesh,
+            Get::Pending | Get::Missing => return,
+        };
+        let skeleton = match mesh
+            .skeleton
+            .map(|file| self.store.borrow_mut().skeleton(file))
+        {
+            Some(Get::Ready(skeleton)) => Some(skeleton),
+            _ => None,
+        };
+        for (point_name, prop) in &model.props {
+            if !has_decal(prop) {
+                continue;
+            }
+            let Some(point) = mesh
+                .prop_points
+                .iter()
+                .find(|point| point.name == *point_name)
+            else {
+                continue;
+            };
+            let mut placed = *transform;
+            // The bind pose: decals hang off "root" or still points, and
+            // keep only their parent's place and heading anyway.
+            if point.bone != NO_BONE
+                && let Some(skeleton) = &skeleton
+            {
+                placed = placed.mul(&pose::bone_matrix(None, skeleton, usize::from(point.bone)));
+            }
+            placed = placed.mul(&point_matrix(point));
+            self.place_decals(prop, &placed, detail, depth + 1);
+        }
+    }
+
+    /// `CModelDecal::SetTransform`: the parent's heading and place only,
+    /// as decals lie flat on the ground. Left out until its texture is in;
+    /// the engine draws none without one either.
+    fn place_decal(&mut self, model: &Model, decal: &Decal, transform: &Mat4, detail: bool) {
+        let Some(file) = model.texture else {
+            return;
+        };
+        let Some(Some(texture)) = self.texture(file, detail) else {
+            return;
+        };
+        let m = &transform.m;
+        // CMatrix3D::GetYRotation.
+        let yaw = -m[2][0].atan2(m[0][0]) + decal.angle;
+        let (sin, cos) = yaw.sin_cos();
+        self.decals.push(PlacedDecal {
+            texture,
+            place: [
+                cos,
+                sin,
+                m[0][3],
+                m[2][3],
+                decal.offset_x,
+                decal.offset_z,
+                decal.size_x,
+                decal.size_z,
+            ],
+        });
     }
 
     /// The bind group of a texture: `Some(Some(hash))` when ready,
@@ -1182,45 +1469,7 @@ impl Field {
     }
 
     fn upload_ground(&mut self, image: &TerrainImage) {
-        let tiles = image.size as usize;
-        let side = tiles + 1;
-        let height = |i: usize, j: usize| f32::from(image.heights[j * side + i]) / 92.0;
-        let mut vertices = Vec::with_capacity(side * side * 24);
-        for j in 0..side {
-            for i in 0..side {
-                let left = height(i.saturating_sub(1), j);
-                let right = height((i + 1).min(tiles), j);
-                let down = height(i, j.saturating_sub(1));
-                let up = height(i, (j + 1).min(tiles));
-                let normal = Vec3::new(left - right, 2.0 * TILE_SIZE, down - up).normalized();
-                for value in [
-                    i as f32 * TILE_SIZE,
-                    height(i, j),
-                    j as f32 * TILE_SIZE,
-                    normal.x,
-                    normal.y,
-                    normal.z,
-                ] {
-                    vertices.extend_from_slice(&value.to_le_bytes());
-                }
-            }
-        }
-        let mut indices: Vec<u8> = Vec::with_capacity(tiles * tiles * 24);
-        for j in 0..tiles {
-            for i in 0..tiles {
-                let at = |di: usize, dj: usize| ((j + dj) * side + i + di) as u32;
-                // The same diagonal as CTerrain::GetExactGroundLevel, so
-                // units stand on the surface drawn.
-                let triangles = if image.triangulation_dir(i, j) {
-                    [at(0, 0), at(1, 0), at(0, 1), at(1, 0), at(1, 1), at(0, 1)]
-                } else {
-                    [at(0, 0), at(1, 1), at(0, 1), at(0, 0), at(1, 0), at(1, 1)]
-                };
-                for index in triangles {
-                    indices.extend_from_slice(&index.to_le_bytes());
-                }
-            }
-        }
+        let mesh = blend::build(image);
         let minimap = Texture {
             format: TextureFormat::Rgba8,
             width: image.size,
@@ -1229,15 +1478,19 @@ impl Field {
             detail: None,
         };
         let view = upload_texture(&self.device, &self.queue, &minimap, false);
-        let bind_group =
-            texture_bind_group(&self.device, &self.texture_layout, &view, &self.sampler);
+        let minimap = self.ground_bind_group(&view, &self.sampler, None);
+        let indices: Vec<u8> = mesh
+            .indices
+            .iter()
+            .flat_map(|index| index.to_le_bytes())
+            .collect();
         self.ground = Some(Ground {
             image: image.clone(),
             vertices: create_buffer(
                 &self.device,
                 &self.queue,
                 "terrain",
-                &vertices,
+                &mesh.vertices,
                 wgpu::BufferUsages::VERTEX,
             ),
             indices: create_buffer(
@@ -1247,9 +1500,118 @@ impl Field {
                 &indices,
                 wgpu::BufferUsages::INDEX,
             ),
-            index_count: (tiles * tiles * 6) as u32,
-            bind_group,
+            base: mesh.base,
+            blends: mesh.blends,
+            minimap,
+            textures: vec![None; image.names.len()],
+            missing: vec![false; image.names.len()],
+            alpha_maps: None,
         });
+    }
+
+    /// A terrain texture's bind group: its view, sampler and mapping;
+    /// `None` maps the minimap picture over the map instead.
+    fn ground_bind_group(
+        &self,
+        view: &wgpu::TextureView,
+        sampler: &wgpu::Sampler,
+        mapping: Option<(f32, f32)>,
+    ) -> wgpu::BindGroup {
+        // CTerrainTextureEntry::GenerateTextureMatrix's _11 and _13.
+        let transform = match mapping {
+            Some((angle, size)) => [angle.cos() / size, -angle.sin() / size, 1.0, 0.0],
+            None => [0.0; 4],
+        };
+        let bytes: Vec<u8> = transform
+            .iter()
+            .flat_map(|value| value.to_le_bytes())
+            .collect();
+        let buffer = create_buffer(
+            &self.device,
+            &self.queue,
+            "terrain mapping",
+            &bytes,
+            wgpu::BufferUsages::UNIFORM,
+        );
+        self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("ground texture"),
+            layout: &self.ground_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: buffer.as_entire_binding(),
+                },
+            ],
+        })
+    }
+
+    /// Asks for the ground's textures and the blend masks, the detail
+    /// straight away since the ground is always close somewhere, and
+    /// uploads what has arrived.
+    fn refresh_ground(&mut self) {
+        let Some(mut ground) = self.ground.take() else {
+            return;
+        };
+        for (at, name) in ground.image.names.iter().enumerate() {
+            let complete = ground.textures[at]
+                .as_ref()
+                .is_some_and(|(_, complete)| *complete);
+            if complete || ground.missing[at] {
+                continue;
+            }
+            let terrain = match self.store.borrow().terrain(name) {
+                Get::Ready(terrain) => terrain,
+                Get::Pending => continue,
+                Get::Missing => {
+                    crate::log(&format!("terrain {name} is not in the asset bake"));
+                    ground.missing[at] = true;
+                    continue;
+                }
+            };
+            let texture = match self.store.borrow_mut().texture(terrain.texture, true) {
+                Get::Ready(texture) => texture,
+                Get::Pending => continue,
+                Get::Missing => {
+                    ground.missing[at] = true;
+                    continue;
+                }
+            };
+            let complete = texture.detail.is_none();
+            if ground.textures[at].is_some() && !complete {
+                continue;
+            }
+            let view = upload_texture(&self.device, &self.queue, &texture, self.bc);
+            let group = self.ground_bind_group(
+                &view,
+                &self.terrain_sampler,
+                Some((terrain.angle, terrain.size)),
+            );
+            ground.textures[at] = Some((group, complete));
+        }
+        if ground.alpha_maps.is_none() {
+            let file = self.store.borrow().alpha_maps();
+            if let Get::Ready(file) = file
+                && let Get::Ready(texture) = self.store.borrow_mut().texture(file, false)
+            {
+                // Linear and clamped, as the engine's composite.
+                let view = upload_texture(&self.device, &self.queue, &texture, false);
+                ground.alpha_maps = Some(texture_bind_group(
+                    &self.device,
+                    &self.texture_layout,
+                    &view,
+                    &self.sampler,
+                ));
+            }
+        }
+        self.ground = Some(ground);
     }
 }
 
@@ -1317,6 +1679,52 @@ impl View for Field {
         }
     }
 
+    /// As `CMiniMap::DrawViewRect`: the screen's corners, bottom left
+    /// first and anticlockwise, cast onto the plane at the water level.
+    fn view_outline(&self) -> Option<[[f32; 2]; 4]> {
+        if self.entities.map_size == 0 {
+            return None;
+        }
+        let (_, eye, right, up) = self.view_projection();
+        let forward = [
+            right[1] * up[2] - right[2] * up[1],
+            right[2] * up[0] - right[0] * up[2],
+            right[0] * up[1] - right[1] * up[0],
+        ];
+        let height = self
+            .ground
+            .as_ref()
+            .map_or(0.0, |ground| ground.image.water_level);
+        let aspect = self.config.width as f32 / self.config.height.max(1) as f32;
+        let half = (FIELD_OF_VIEW / 2.0).tan();
+        let corner = |nx: f32, ny: f32| {
+            let ray: [f32; 3] = std::array::from_fn(|i| {
+                forward[i] + right[i] * nx * aspect * half + up[i] * ny * half
+            });
+            let t = (height - eye[1]) / ray[1];
+            // A corner over the horizon (the camera tilts further up than
+            // the engine's) meets the plane behind the eye or nowhere; the
+            // ground under its far end keeps the outline a quad.
+            let length = ray.iter().map(|value| value * value).sum::<f32>().sqrt();
+            let t = if ray[1] < 0.0 && t * length <= FAR {
+                t
+            } else {
+                FAR / length
+            };
+            [eye[0] + ray[0] * t, eye[2] + ray[2] * t]
+        };
+        Some([
+            corner(-1.0, -1.0),
+            corner(1.0, -1.0),
+            corner(1.0, 1.0),
+            corner(-1.0, 1.0),
+        ])
+    }
+
+    fn move_to(&mut self, x: f32, z: f32) {
+        self.camera.borrow_mut().target = [x, z];
+    }
+
     fn set_terrain(&mut self, image: Option<&TerrainImage>) {
         match image {
             Some(image) if image.size > 0 => self.upload_ground(image),
@@ -1351,6 +1759,7 @@ impl View for Field {
                 None => self.far.defer(key, request),
             }
         }
+        self.refresh_ground();
         assets::pump(&self.store);
         self.poses.upload(&self.device, &self.queue);
         if self.poses.generation != self.pose_generation {
@@ -1416,6 +1825,64 @@ impl View for Field {
         if !far_bytes.is_empty() {
             self.queue.write_buffer(&self.far_instances, 0, &far_bytes);
         }
+        // One draw per decal, each reading its own instance: WebGL2 has no
+        // base instance to share one draw among them.
+        let mut decal_bytes = Vec::new();
+        let mut decal_indices: Vec<u32> = Vec::new();
+        let mut decal_draws = Vec::new();
+        if let Some(ground) = &self.ground {
+            for decal in &self.decals {
+                let Some([i0, j0, i1, j1]) = decal_extents(ground.image.size, &decal.place) else {
+                    continue;
+                };
+                let first = decal_indices.len() as u32;
+                for j in j0..j1 {
+                    for i in i0..i1 {
+                        decal_indices.extend_from_slice(&blend::tile_triangles(
+                            &ground.image,
+                            i,
+                            j,
+                        ));
+                    }
+                }
+                let start = decal_bytes.len() as u64;
+                for value in decal.place {
+                    decal_bytes.extend_from_slice(&value.to_le_bytes());
+                }
+                let count = decal_indices.len() as u32 - first;
+                decal_draws.push((decal.texture, start, first, count));
+            }
+        }
+        if decal_bytes.len() as u64 > self.decal_instances.size() {
+            self.decal_instances = create_buffer(
+                &self.device,
+                &self.queue,
+                "decal instances",
+                &vec![0; (decal_bytes.len() as u64).next_power_of_two() as usize],
+                wgpu::BufferUsages::VERTEX,
+            );
+        }
+        if !decal_bytes.is_empty() {
+            self.queue
+                .write_buffer(&self.decal_instances, 0, &decal_bytes);
+        }
+        let decal_index_bytes: Vec<u8> = decal_indices
+            .iter()
+            .flat_map(|index| index.to_le_bytes())
+            .collect();
+        if decal_index_bytes.len() as u64 > self.decal_indices.size() {
+            self.decal_indices = create_buffer(
+                &self.device,
+                &self.queue,
+                "decal indices",
+                &vec![0; (decal_index_bytes.len() as u64).next_power_of_two() as usize],
+                wgpu::BufferUsages::INDEX,
+            );
+        }
+        if !decal_index_bytes.is_empty() {
+            self.queue
+                .write_buffer(&self.decal_indices, 0, &decal_index_bytes);
+        }
 
         let target = frame.texture.create_view(&Default::default());
         let mut encoder = self.device.create_command_encoder(&Default::default());
@@ -1443,11 +1910,41 @@ impl View for Field {
             });
             pass.set_bind_group(0, &self.view_bind_group, &[]);
             if let Some(ground) = &self.ground {
+                let group = |texture: u16| {
+                    ground
+                        .textures
+                        .get(usize::from(texture))
+                        .and_then(Option::as_ref)
+                        .map_or(&ground.minimap, |(group, _)| group)
+                };
                 pass.set_pipeline(&self.terrain_pipeline);
-                pass.set_bind_group(1, &ground.bind_group, &[]);
                 pass.set_vertex_buffer(0, ground.vertices.slice(..));
                 pass.set_index_buffer(ground.indices.slice(..), wgpu::IndexFormat::Uint32);
-                pass.draw_indexed(0..ground.index_count, 0, 0..1);
+                for splat in &ground.base {
+                    pass.set_bind_group(1, group(splat.texture), &[]);
+                    pass.draw_indexed(splat.first..splat.first + splat.count, 0, 0..1);
+                }
+                if let Some(alpha_maps) = &ground.alpha_maps {
+                    pass.set_pipeline(&self.blend_pipeline);
+                    pass.set_bind_group(2, alpha_maps, &[]);
+                    for splat in &ground.blends {
+                        pass.set_bind_group(1, group(splat.texture), &[]);
+                        pass.draw_indexed(splat.first..splat.first + splat.count, 0, 0..1);
+                    }
+                }
+                if !decal_draws.is_empty() {
+                    pass.set_pipeline(&self.decal_pipeline);
+                    pass.set_index_buffer(self.decal_indices.slice(..), wgpu::IndexFormat::Uint32);
+                    for (texture, start, first, count) in &decal_draws {
+                        let Some((group, _)) = self.textures.get(texture) else {
+                            continue;
+                        };
+                        let end = start + DECAL_INSTANCE_SIZE as u64;
+                        pass.set_bind_group(1, group, &[]);
+                        pass.set_vertex_buffer(1, self.decal_instances.slice(*start..end));
+                        pass.draw_indexed(*first..first + count, 0, 0..1);
+                    }
+                }
             }
             if !draws.is_empty() {
                 pass.set_pipeline(&self.model_pipeline);
@@ -1533,6 +2030,69 @@ impl Field {
         stats.frames = 0;
         stats.since = now;
     }
+}
+
+/// The level of detail a sphere is drawn at, `None` when it is out of
+/// view.
+fn screen_level(
+    centre: [f32; 3],
+    radius: f32,
+    view_proj: &[[f32; 4]; 4],
+    planes: &[[f32; 4]; 6],
+    pixel_scale: f32,
+) -> Option<usize> {
+    let outside = planes.iter().any(|plane| {
+        plane[0] * centre[0] + plane[1] * centre[1] + plane[2] * centre[2] + plane[3] < -radius
+    });
+    if outside {
+        return None;
+    }
+    let depth = view_proj[3][0] * centre[0]
+        + view_proj[3][1] * centre[1]
+        + view_proj[3][2] * centre[2]
+        + view_proj[3][3];
+    let diameter = 2.0 * radius * pixel_scale / depth.max(NEAR);
+    Some(
+        LEVEL_PIXELS
+            .iter()
+            .position(|pixels| diameter >= *pixels)
+            .unwrap_or(LEVEL_PIXELS.len()),
+    )
+}
+
+fn has_decal(model: &Model) -> bool {
+    matches!(model.shape, Shape::Decal(_)) || model.props.iter().any(|(_, prop)| has_decal(prop))
+}
+
+/// A prop point's place on its bone or the model's origin.
+fn point_matrix(point: &PropPoint) -> Mat4 {
+    let [px, py, pz] = point.position;
+    let [x, y, z, w] = point.rotation;
+    Mat4::from_bone(Vec3::new(px, py, pz), Quat { x, y, z, w })
+}
+
+/// `CModelDecal::CalcVertexExtents`: the ground vertices i0, j0, i1, j1
+/// around the decal's square, clamped to the map; `None` when empty.
+fn decal_extents(tiles: u32, place: &[f32; 8]) -> Option<[usize; 4]> {
+    let [cos, sin, x, z, offset_x, offset_z, size_x, size_z] = *place;
+    let mut min = [f32::MAX; 2];
+    let mut max = [f32::MIN; 2];
+    for (sx, sz) in [(1.0, 1.0), (1.0, -1.0), (-1.0, -1.0), (-1.0, 1.0)] {
+        let cx = offset_x + sx * size_x / 2.0;
+        let cz = offset_z + sz * size_z / 2.0;
+        // CMatrix3D::SetYRotation, then the translation.
+        let corner = [cos * cx + sin * cz + x, -sin * cx + cos * cz + z];
+        for axis in 0..2 {
+            min[axis] = min[axis].min(corner[axis]);
+            max[axis] = max[axis].max(corner[axis]);
+        }
+    }
+    let clamp = |vertex: f32| (vertex as i64).clamp(0, i64::from(tiles)) as usize;
+    let i0 = clamp((min[0] / TILE_SIZE).floor());
+    let j0 = clamp((min[1] / TILE_SIZE).floor());
+    let i1 = clamp((max[0] / TILE_SIZE).ceil());
+    let j1 = clamp((max[1] / TILE_SIZE).ceil());
+    (i1 > i0 && j1 > j0).then_some([i0, j0, i1, j1])
 }
 
 fn now() -> f64 {
@@ -1865,7 +2425,7 @@ impl Camera {
         self.target[1] += point[1] * moved;
     }
 
-    /// Moves the camera by the pan keys held since the last frame.
+    /// Moves and turns the camera by the keys held since the last frame.
     fn step(&mut self, now: f64) {
         let seconds = (((now - self.last_step) / 1000.0) as f32).clamp(0.0, KEY_STEP_MAX_S);
         self.last_step = now;
@@ -1876,6 +2436,9 @@ impl Camera {
             f32::from(u8::from(self.keys & plus != 0)) - f32::from(u8::from(self.keys & minus != 0))
         };
         let (ahead, side) = (axis(KEY_FORWARD, KEY_BACK), axis(KEY_RIGHT, KEY_LEFT));
+        // The camera orbits clockwise seen from above, so the ground turns
+        // anticlockwise on screen, as the yaw going up does.
+        self.yaw += axis(KEY_TURN_CW, KEY_TURN_CCW) * KEY_ROTATE_SPEED * seconds;
         let metres = self.distance * KEY_PAN_SPEED * seconds;
         let (sin, cos) = self.yaw.sin_cos();
         // As `pan`: forward over the ground is (-sin, -cos), right (-cos, sin).
@@ -1884,7 +2447,8 @@ impl Camera {
     }
 
     /// One pointer pans (or, with a mouse's other buttons, turns and tilts);
-    /// two pan by their midpoint, pinch to zoom and twist to turn.
+    /// two pan by their midpoint and pinch to zoom. They do not turn: no
+    /// pinch is free of twist, so every zoom would turn the view a little.
     fn pointer_moved(&mut self, id: i32, x: f32, y: f32) {
         let Some(index) = self.pointers.iter().position(|pointer| pointer.id == id) else {
             return;
@@ -1894,20 +2458,10 @@ impl Camera {
             let (ox, oy) = (other.x, other.y);
             let before = &self.pointers[index];
             let span = |ax: f32, ay: f32| (ax - ox).hypot(ay - oy).max(1.0);
-            let angle = |ax: f32, ay: f32| (ay - oy).atan2(ax - ox);
             let zoom = span(before.x, before.y) / span(x, y);
-            let mut twist = angle(x, y) - angle(before.x, before.y);
-            if twist > std::f32::consts::PI {
-                twist -= std::f32::consts::TAU;
-            } else if twist < -std::f32::consts::PI {
-                twist += std::f32::consts::TAU;
-            }
             // The midpoint moves by half of this pointer's move.
             let (dx, dy) = ((x - before.x) / 2.0, (y - before.y) / 2.0);
             self.zoom(zoom);
-            // Turning the yaw up turns the ground anticlockwise on screen;
-            // the ground follows the fingers.
-            self.yaw -= twist;
             self.pan(dx, dy);
         } else {
             let pointer = &self.pointers[index];
@@ -1926,7 +2480,7 @@ impl Camera {
 }
 
 /// `pointerId`, read through the base `MouseEvent` a `PointerEvent` is.
-fn pointer_id(event: &MouseEvent) -> i32 {
+pub fn pointer_id(event: &MouseEvent) -> i32 {
     js_sys::Reflect::get(event, &"pointerId".into())
         .ok()
         .and_then(|id| id.as_f64())
@@ -1934,8 +2488,7 @@ fn pointer_id(event: &MouseEvent) -> i32 {
 }
 
 /// Mouse, touch and pen through pointer events: drag to pan, the right
-/// mouse button to turn and tilt, two fingers to pinch and twist, the wheel
-/// to zoom. The handlers live as long as the page.
+/// mouse button to turn and tilt, two fingers to pinch, the wheel to zoom. The handlers live as long as the page.
 fn wire_camera(canvas: &HtmlCanvasElement, camera: &Rc<RefCell<Camera>>) -> Result<(), String> {
     let window = web_sys::window().ok_or("no window")?;
     let listen =

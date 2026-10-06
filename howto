@@ -7,10 +7,13 @@ cargo build -p specula-web --target wasm32-unknown-unknown --release
 wasm-bindgen --target web --out-dir specula-web/pkg \
   target/wasm32-unknown-unknown/release/specula_web.wasm
 
-# 2. start the server; it serves the page and the WebSocket on :8000
-cargo run -p specula-server --release
+# 2. start the server; it serves the page and the WebSocket on :8000, and
+#    keeps an observer joined to the game at HOST:PORT, starting it again
+#    whenever a match ends or the observer goes silent
+cargo run -p specula-server --release -- --observe HOST:PORT
 
-# 3. in another terminal, join a game as observer
+#    or, without --observe, start the server alone and join a game by hand
+#    in another terminal
 scripts/observe.sh HOST PORT
 
 # 4. open http://127.0.0.1:8000

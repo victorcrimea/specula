@@ -1,4 +1,4 @@
-//! The split asset files, format v2. Little-endian; every file starts with
+//! The split asset files, format v4. Little-endian; every file starts with
 //! a 4-byte magic and a u8 version. Strings are u16 length and UTF-8,
 //! counts are u32. A file is served as `assets/<kind>-<16 hex>.bin`, the
 //! hex being a hash of its content, so a cached copy is never stale and
@@ -10,7 +10,12 @@
 //! so a unit shows after one round trip and far ones never need more.
 //!
 //! - index "SPCI": count x {actor path under art/actors, as the stream
-//!   names actors, file ref of its manifest}.
+//!   names actors, file ref of its manifest}, count x {terrain name, as
+//!   the terrain resource names it, file ref of its baseTex texture, f32
+//!   angle in radians, f32 size in metres}, optional alpha map atlas.
+//!   The atlas is an RGBA8 texture, one mip, holding the engine's 14
+//!   standard blend masks in its alpha, side by side in
+//!   `CTerrainTextureManager::LoadAlphaMap`'s order and layout.
 //! - actor manifest "SPCA": count x object. Object 0 is the actor, the rest
 //!   every actor it can prop, transitively, so one fetch resolves an
 //!   entity. An object is {name, count x definition, count x {u8 quality,
@@ -18,8 +23,9 @@
 //!   them, the last at 255. A definition is {u8 flags (1: player colour),
 //!   f32 alpha reference (0: none), count x group}; a group is count x
 //!   variant; a variant is {name (lower case), i32 frequency, optional
-//!   mesh, optional baseTex texture, count x {prop point, u32 object (NONE:
-//!   removes the point's props)}, count x {animation name, id, i32
+//!   mesh, optional baseTex texture, optional decal {f32 width, f32 depth,
+//!   f32 angle in radians, f32 offset x, f32 offset z}, count x {prop
+//!   point, u32 object (NONE: removes the point's props)}, count x {animation name, id, i32
 //!   frequency, f32 speed, f32 event and f32 load (fractions, -1: none),
 //!   optional animation file}}. Mesh and texture refs name coarse files.
 //! - mesh "SPCM", the coarsest level of detail: u32 vertex count, vertices
@@ -53,7 +59,7 @@
 use crate::half::f16_bits;
 use crate::half::f16_to_f32;
 
-pub const VERSION: u8 = 2;
+pub const VERSION: u8 = 4;
 /// Bytes per mesh vertex.
 pub const VERTEX_SIZE: usize = 40;
 /// A prop that names no object only removes what was on its point.
@@ -115,6 +121,18 @@ pub struct FileRef {
 
 pub struct Index {
     pub actors: Vec<(String, FileRef)>,
+    pub terrains: Vec<(String, TerrainTexture)>,
+    pub alpha_maps: Option<FileRef>,
+}
+
+/// `CTerrainTextureEntry`'s diffuse texture and its planar mapping.
+#[derive(Clone, Copy, Debug)]
+pub struct TerrainTexture {
+    pub texture: FileRef,
+    /// Radians.
+    pub angle: f32,
+    /// Metres the texture spans.
+    pub size: f32,
 }
 
 pub struct Manifest {
@@ -139,8 +157,21 @@ pub struct Variant {
     pub frequency: i32,
     pub mesh: Option<FileRef>,
     pub texture: Option<FileRef>,
+    pub decal: Option<Decal>,
     pub props: Vec<Prop>,
     pub animations: Vec<Animation>,
+}
+
+/// `CObjectBase::Decal`: a texture laid on the terrain under the object.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct Decal {
+    /// Metres, along the object's x and z.
+    pub size_x: f32,
+    pub size_z: f32,
+    /// Radians.
+    pub angle: f32,
+    pub offset_x: f32,
+    pub offset_z: f32,
 }
 
 pub struct Prop {
@@ -250,6 +281,14 @@ impl Index {
             out.string(name);
             out.file(*manifest);
         }
+        out.count(self.terrains.len());
+        for (name, terrain) in &self.terrains {
+            out.string(name);
+            out.file(terrain.texture);
+            out.f32(terrain.angle);
+            out.f32(terrain.size);
+        }
+        out.optional_file(self.alpha_maps);
         out.0
     }
 
@@ -258,8 +297,29 @@ impl Index {
         let actors = (0..input.count()?)
             .map(|_| Ok((input.string()?, input.file()?)))
             .collect::<Result<_, &'static str>>()?;
+        let terrains = (0..input.count()?)
+            .map(|_| {
+                let name = input.string()?;
+                let texture = input.file()?;
+                let angle = input.f32()?;
+                let size = input.f32()?;
+                Ok((
+                    name,
+                    TerrainTexture {
+                        texture,
+                        angle,
+                        size,
+                    },
+                ))
+            })
+            .collect::<Result<_, &'static str>>()?;
+        let alpha_maps = input.optional_file()?;
         input.finish()?;
-        Ok(Index { actors })
+        Ok(Index {
+            actors,
+            terrains,
+            alpha_maps,
+        })
     }
 }
 
@@ -800,6 +860,19 @@ impl Writer {
         self.i32(variant.frequency);
         self.optional_file(variant.mesh);
         self.optional_file(variant.texture);
+        match variant.decal {
+            Some(decal) => {
+                self.u8(1);
+                self.f32s(&[
+                    decal.size_x,
+                    decal.size_z,
+                    decal.angle,
+                    decal.offset_x,
+                    decal.offset_z,
+                ]);
+            }
+            None => self.u8(0),
+        }
         self.count(variant.props.len());
         for prop in &variant.props {
             self.string(&prop.point);
@@ -966,6 +1039,20 @@ impl<'a> Reader<'a> {
         let frequency = self.i32()?;
         let mesh = self.optional_file()?;
         let texture = self.optional_file()?;
+        let decal = match self.u8()? {
+            0 => None,
+            1 => {
+                let [size_x, size_z, angle, offset_x, offset_z] = self.f32s()?;
+                Some(Decal {
+                    size_x,
+                    size_z,
+                    angle,
+                    offset_x,
+                    offset_z,
+                })
+            }
+            _ => return Err("bad decal flag"),
+        };
         let props = (0..self.count()?)
             .map(|_| {
                 Ok(Prop {
@@ -992,6 +1079,7 @@ impl<'a> Reader<'a> {
             frequency,
             mesh,
             texture,
+            decal,
             props,
             animations,
         })

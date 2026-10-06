@@ -19,10 +19,42 @@ html, body { margin: 0; height: 100%; background: #0f1214; }
 #controls button[aria-pressed="true"], #playback button[aria-pressed="true"] {
   border-color: #8fa3b0; }
 #controls select:disabled, #playback :disabled { opacity: 0.5; }
+#loading { position: fixed; left: 50%; bottom: 52px; width: min(420px, calc(100vw - 32px));
+  transform: translateX(-50%); padding: 6px 8px; border: 1px solid #3a4248;
+  border-radius: 4px; background: rgba(15, 18, 20, 0.85);
+  font: 13px system-ui, sans-serif; color: #e6e9eb; }
+#loading-track { height: 6px; margin-top: 4px; border-radius: 3px; background: #2a3035;
+  overflow: hidden; }
+#loading-fill { height: 100%; width: 0; background: #8fa3b0; transition: width 0.2s; }
+#view { cursor: grab; touch-action: none; }
+#minimap { position: fixed; left: 8px; bottom: 52px;
+  width: min(220px, 40vw); height: min(220px, 40vw);
+  border: 1px solid #3a4248; border-radius: 4px; background: #0f1214;
+  cursor: pointer; touch-action: none; }
+#errors { position: fixed; top: 120px; left: 8px; right: 8px; max-height: 40vh;
+  overflow: auto; margin: 0; padding: 6px 8px; white-space: pre-wrap;
+  font: 12px ui-monospace, monospace; color: #ffb4a8;
+  background: rgba(15, 18, 20, 0.9); border: 1px solid #6b3a34;
+  border-radius: 4px; user-select: text; -webkit-user-select: text; }
+#errors:empty { display: none; }
+#fps { position: fixed; top: 44px; right: 8px; padding: 4px 8px;
+  white-space: pre-wrap; text-align: right; max-width: calc(100vw - 32px);
+  font: 600 13px system-ui, sans-serif; font-variant-numeric: tabular-nums;
+  color: #e6e9eb; background: rgba(15, 18, 20, 0.85);
+  border: 1px solid #3a4248; border-radius: 4px; }
 #clock { position: fixed; top: 8px; right: 8px; padding: 4px 8px;
   font: 600 15px system-ui, sans-serif; font-variant-numeric: tabular-nums;
   color: #e6e9eb; background: rgba(15, 18, 20, 0.85);
   border: 1px solid #3a4248; border-radius: 4px; }
+#match-over { position: fixed; left: 50%; top: 30%; transform: translateX(-50%);
+  display: flex; align-items: center; gap: 8px; padding: 8px 10px;
+  max-width: calc(100vw - 32px); box-sizing: border-box;
+  font: 13px system-ui, sans-serif; color: #e6e9eb;
+  background: rgba(15, 18, 20, 0.9); border: 1px solid #3a4248; border-radius: 4px; }
+#match-over[hidden], #current[hidden] { display: none; }
+#match-over button { font: inherit; color: #e6e9eb; background: rgba(15, 18, 20, 0.85);
+  border: 1px solid #3a4248; border-radius: 4px; padding: 4px 8px; }
+#match-over :disabled { opacity: 0.5; }
 </style>
 </head>
 <body>
@@ -34,16 +66,44 @@ html, body { margin: 0; height: 100%; background: #0f1214; }
 </select>
 </div>
 <div id="clock" aria-label="Match time">0:00</div>
+<canvas id="minimap" aria-label="Minimap"></canvas>
+<div id="fps" aria-label="Frames per second">- FPS</div>
+<div id="loading" role="status">
+<span id="loading-text">Loading</span>
+<div id="loading-track"><div id="loading-fill"></div></div>
+</div>
 <div id="playback">
 <button id="play" type="button" disabled>Pause</button>
 <select id="speed" aria-label="Playback speed" disabled></select>
 <input id="timeline" type="range" min="0" max="0" value="0" step="1" aria-label="Timeline" disabled>
 <button id="live" type="button" aria-pressed="true" disabled>Live</button>
+<button id="current" type="button" hidden disabled>Current match</button>
 </div>
+<div id="match-over" role="status" hidden>
+<span id="match-over-text">Match over</span>
+<button id="match-over-current" type="button" disabled>Current match</button>
+<button id="match-over-close" type="button" aria-label="Close">x</button>
+</div>
+<pre id="errors" aria-live="polite"></pre>
+<script>
+// Phones have no console to read, so errors and the console's lines are
+// shown on the page too.
+(() => {
+  const box = document.getElementById("errors");
+  const show = (text) => { box.textContent += text + "\n"; };
+  const error = console.error.bind(console);
+  const log = console.log.bind(console);
+  console.error = (...args) => { error(...args); show(args.join(" ")); };
+  console.log = (...args) => { log(...args); show(args.join(" ")); };
+  window.addEventListener("error", (event) => show(event.message));
+  window.addEventListener("unhandledrejection", (event) => show(String(event.reason)));
+})();
+</script>
 <script type="module">
-import init, { page_main } from "./pkg/specula_web.js";
+const glue = "./pkg/specula_web.js?v=5958be043dbd";
+const { default: init, observer_main } = await import(glue);
 await init();
-page_main();
+observer_main(glue);
 </script>
 </body>
 </html>

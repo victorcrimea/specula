@@ -1,6 +1,7 @@
 mod classify;
 mod delta;
 mod feed;
+mod observer;
 mod terrain;
 mod view;
 mod wire;
@@ -35,9 +36,14 @@ const WEB_ROOT: &str = "specula-web";
 
 #[rocket::main]
 async fn main() {
-    let path = std::env::args()
-        .nth(1)
-        .unwrap_or_else(|| DEFAULT_SOCKET.to_string());
+    let (path, observe) = match parse_args() {
+        Ok(args) => args,
+        Err(error) => {
+            eprintln!("{error}");
+            eprintln!("usage: specula-server [SOCKET] [--observe HOST:PORT]");
+            std::process::exit(2);
+        }
+    };
     if let Err(error) = remove_stale_socket(&path) {
         eprintln!("cannot remove stale socket {path}: {error}");
         std::process::exit(1);
@@ -56,6 +62,12 @@ async fn main() {
     // The feed is blocking std I/O, so it gets its own thread rather than
     // a slot in Rocket's async runtime.
     std::thread::spawn(move || accept_observers(listener, &feed_hub));
+    let supervised = observe.is_some();
+    if let Some((host, port)) = observe {
+        let supervisor_hub = Arc::clone(&hub);
+        let socket = path.clone();
+        std::thread::spawn(move || observer::supervise(&host, &port, &socket, &supervisor_hub));
+    }
 
     let result = rocket::build()
         .manage(hub)
@@ -82,6 +94,9 @@ async fn main() {
         }))
         .launch()
         .await;
+    if supervised {
+        observer::kill_recorded(&path);
+    }
     if let Err(error) = result {
         eprintln!("web server failed: {error}");
         std::process::exit(1);
@@ -99,6 +114,10 @@ fn accept_observers(listener: UnixListener, hub: &Hub) {
                     Ok(()) => println!("observer disconnected"),
                     Err(error) => eprintln!("observer feed failed: {error}"),
                 }
+                // Whether the host quit, the game was won or the observer
+                // died, this match gets no more turns; a new observer starts
+                // a new one.
+                hub.end_match();
             }
             Err(error) => eprintln!("accept failed: {error}"),
         }
@@ -110,9 +129,9 @@ fn viewer(socket: WebSocket, hub: &State<Arc<Hub>>) -> Channel<'static> {
     let hub = Arc::clone(hub);
     socket.channel(move |mut stream| {
         Box::pin(async move {
-            let (mut keyframe, mut receiver) = hub.subscribe();
+            let (mut first, mut receiver) = hub.subscribe();
             loop {
-                if let Some(message) = keyframe.take() {
+                for message in first.drain(..) {
                     stream.send(rocket_ws::Message::binary(&*message)).await?;
                 }
                 rocket::tokio::select! {
@@ -120,7 +139,7 @@ fn viewer(socket: WebSocket, hub: &State<Arc<Hub>>) -> Channel<'static> {
                         Ok(message) => stream.send(rocket_ws::Message::binary(&*message)).await?,
                         // Missed deltas cannot be patched over; start again
                         // from a fresh keyframe.
-                        Err(RecvError::Lagged(_)) => (keyframe, receiver) = hub.subscribe(),
+                        Err(RecvError::Lagged(_)) => (first, receiver) = hub.subscribe(),
                         Err(RecvError::Closed) => return Ok(()),
                     },
                     incoming = stream.next() => match incoming {
@@ -163,6 +182,31 @@ fn segment_file(id: &str, index: usize, hub: &State<Arc<Hub>>) -> Option<Segment
         Header::new("Cache-Control", "no-store")
     };
     Some(SegmentBytes(bytes.to_vec(), cache))
+}
+
+/// `[SOCKET] [--observe HOST:PORT]`, in any order.
+fn parse_args() -> Result<(String, Option<(String, String)>), String> {
+    let mut socket = None;
+    let mut observe = None;
+    let mut args = std::env::args().skip(1);
+    while let Some(arg) = args.next() {
+        if arg == "--observe" {
+            let target = args.next().ok_or("--observe needs HOST:PORT")?;
+            let (host, port) = target
+                .rsplit_once(':')
+                .filter(|(host, port)| !host.is_empty() && port.parse::<u16>().is_ok())
+                .ok_or_else(|| format!("--observe {target}: expected HOST:PORT"))?;
+            observe = Some((host.to_string(), port.to_string()));
+        } else if socket.is_none() && !arg.starts_with("--") {
+            socket = Some(arg);
+        } else {
+            return Err(format!("unexpected argument {arg}"));
+        }
+    }
+    Ok((
+        socket.unwrap_or_else(|| DEFAULT_SOCKET.to_string()),
+        observe,
+    ))
 }
 
 // Only a socket is removed, so a mistyped path cannot delete a real file.

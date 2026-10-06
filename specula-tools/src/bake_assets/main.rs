@@ -2,7 +2,8 @@
 //! page streams (format in specula-assets' `files.rs`): one manifest per
 //! actor holding all of its variants and quality levels, and meshes,
 //! skeletons, animations and textures as separate files named by their
-//! content, so pieces shared by many actors are fetched once.
+//! content, so pieces shared by many actors are fetched once. Also every
+//! terrain's diffuse texture and the blend mask atlas for the ground.
 //!
 //! Usage: bake-assets [output dir]
 //! Default: specula-web. MOD_DIR overrides the mod,
@@ -16,6 +17,7 @@
 
 mod actor;
 mod mesh;
+mod terrain;
 mod texture;
 
 use std::collections::BTreeMap;
@@ -41,6 +43,7 @@ use specula_assets::files::Index;
 use specula_assets::files::Kind;
 use specula_assets::files::Manifest;
 use specula_assets::files::Object;
+use specula_assets::files::TerrainTexture;
 use specula_tools::convert;
 use specula_tools::convert::cached_path;
 use specula_tools::pmd;
@@ -141,7 +144,21 @@ fn run() -> Result<(), String> {
         println!("  {error}");
     }
 
-    let (sources, rejected) = collect_sources(&mod_dir, loader.actors());
+    let (terrains, unreadable) = terrain::load(&mod_dir);
+    println!(
+        "{} terrains, {} could not be read",
+        terrains.len(),
+        unreadable.len()
+    );
+    for error in &unreadable {
+        println!("  {error}");
+    }
+
+    let terrain_textures: Vec<String> = terrains
+        .iter()
+        .map(|terrain| terrain.base_texture.clone())
+        .collect();
+    let (sources, rejected) = collect_sources(&mod_dir, loader.actors(), &terrain_textures);
     println!("{} sources left out", rejected.len());
     for reason in &rejected {
         println!("  {reason}");
@@ -169,7 +186,11 @@ fn run() -> Result<(), String> {
     let missing: HashSet<String> = missing.into_iter().collect();
     let pieces = write_pieces(&converted, &sources, &missing, &mut output)?;
 
-    let mut index = Index { actors: Vec::new() };
+    let mut index = Index {
+        actors: Vec::new(),
+        terrains: Vec::new(),
+        alpha_maps: None,
+    };
     let mut skipped = Vec::new();
     for name in &names {
         let Ok(actor) = loader.actors()[name].clone() else {
@@ -191,6 +212,30 @@ fn run() -> Result<(), String> {
     for error in &skipped {
         println!("  {error}");
     }
+    for terrain in &terrains {
+        if let Some(texture) = pieces
+            .textures
+            .get(&terrain.base_texture)
+            .copied()
+            .flatten()
+        {
+            index.terrains.push((
+                terrain.tag.clone(),
+                TerrainTexture {
+                    texture,
+                    angle: terrain.angle,
+                    size: terrain.size,
+                },
+            ));
+        }
+    }
+    println!(
+        "{} terrains baked, {} without a texture",
+        index.terrains.len(),
+        terrains.len() - index.terrains.len()
+    );
+    let alpha_maps = terrain::alpha_maps(&mod_dir)?;
+    index.alpha_maps = Some(output.write(Kind::Texture, &alpha_maps.encode())?);
     let index_file = output.write(Kind::Index, &index.encode())?;
     print_sample(&index, &asset_dir);
     remove_stale(&asset_dir, &output.written)?;
@@ -225,15 +270,17 @@ fn list_actors(dir: &Path, prefix: &str, out: &mut Vec<String>) -> Result<(), St
     Ok(())
 }
 
-/// Every mesh, animation and colour map the actors name, and the
-/// textures.xml files whose settings the converter applies to them.
+/// Every mesh, animation and colour map the actors name, the terrain
+/// textures, and the textures.xml files whose settings the converter
+/// applies to them.
 /// Also returns the sources left out, with why: the archive builder fails
 /// an `ENSURE` on a texture it cannot convert, so those must not reach it.
 fn collect_sources(
     mod_dir: &Path,
     actors: &BTreeMap<String, Result<Rc<ActorDef>, String>>,
+    terrain_textures: &[String],
 ) -> (Vec<String>, Vec<String>) {
-    let mut sources = BTreeSet::new();
+    let mut sources: BTreeSet<String> = terrain_textures.iter().cloned().collect();
     for actor in actors.values().flatten() {
         for variant in actor
             .definitions
@@ -509,6 +556,7 @@ fn manifest(
                         frequency: variant.frequency,
                         mesh,
                         texture,
+                        decal: variant.decal,
                         props,
                         animations,
                     });

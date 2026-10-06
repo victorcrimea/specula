@@ -1,5 +1,5 @@
-//! The viewer stream, wire format v5: one binary WebSocket message per
-//! keyframe or turn, varints and zigzag as in `wire.rs`, positions and
+//! The viewer stream, wire format v6: one binary WebSocket message per
+//! keyframe, turn or match end, varints and zigzag as in `wire.rs`, positions and
 //! heights in 1/16 m.
 //!
 //! - kind 1 keyframe: varint turn, u64 match id, f32 game speed (the
@@ -20,6 +20,10 @@
 //!   varint actor, zigzag seed - id; 1024 varint variant set; 2048 u8
 //!   construction}. An animation (32) starts, and a sync (128) is set, at
 //!   the delta's turn.
+//! - kind 3 ended: u64 match id, varint ms since the match ended. No more
+//!   turns of that match follow; the next keyframe with another id is the
+//!   next match. A viewer joining between matches gets the final keyframe
+//!   and then this message.
 //!
 //! An entity is {zigzag x, zigzag z, zigzag y, u8 angle, u32 colour, varint
 //! icon, varint player, zigzag owner, varint template, varint actor, zigzag
@@ -73,7 +77,10 @@
 //! starts at the first turn it has. Its first message is a keyframe of its
 //! first turn T, then comes the delta into T from the turn before (absent
 //! in segment 0), so playback can cross into it without a keyframe, then
-//! the deltas of the later turns. Every segment but the last is immutable.
+//! the deltas of the later turns. Every segment but the last is immutable;
+//! once the match has ended, the last is too. The segments and terrain of
+//! the match before the current one stay served, so its viewers can keep
+//! watching it.
 
 use std::collections::BTreeMap;
 use std::collections::HashMap;
@@ -82,6 +89,7 @@ use std::io;
 use std::io::ErrorKind;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::time::Instant;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
@@ -97,6 +105,7 @@ use crate::wire::quantize_position;
 
 const MESSAGE_KEYFRAME: u8 = 1;
 const MESSAGE_DELTA: u8 = 2;
+const MESSAGE_ENDED: u8 = 3;
 const CHANGED_POSITION: u64 = 1;
 const CHANGED_COLOR: u64 = 2;
 const CHANGED_ICON: u64 = 4;
@@ -252,6 +261,22 @@ pub struct Hub {
     state: Mutex<State>,
 }
 
+/// A finished match's history, kept for its viewers once the next one
+/// starts.
+struct Archive {
+    match_id: u64,
+    segments: Vec<Message>,
+    terrain: Option<(u64, Message)>,
+}
+
+struct Ended {
+    at: Instant,
+    /// The final state, for viewers who join before the next match: the
+    /// tables a keyframe would be built from belong to the next feed by
+    /// then.
+    keyframe: Message,
+}
+
 struct State {
     turn: u32,
     map_size: u32,
@@ -283,6 +308,12 @@ struct State {
     /// Set when a new observer connects: its entity ids belong to another
     /// match, so its first turn must replace, not patch, what viewers have.
     new_feed: bool,
+    /// Set from the end of a match until the next one's first turn.
+    ended: Option<Ended>,
+    previous: Option<Archive>,
+    /// When the feed last connected or sent a turn, for the observer
+    /// watchdog.
+    feed_activity: Option<Instant>,
     sender: broadcast::Sender<Message>,
 }
 
@@ -329,6 +360,9 @@ impl Hub {
                 players_changed: false,
                 has_turn: false,
                 new_feed: true,
+                ended: None,
+                previous: None,
+                feed_activity: None,
                 sender: broadcast::channel(BACKLOG_MESSAGES).0,
             }),
         }
@@ -337,6 +371,7 @@ impl Hub {
     pub fn start_feed(&self) {
         let mut state = self.state.lock().unwrap();
         state.new_feed = true;
+        state.feed_activity = Some(Instant::now());
         state.terrain = None;
         state.icons.clear();
         state.templates.clear();
@@ -407,11 +442,53 @@ impl Hub {
         self.state.lock().unwrap().terrain = Some((id, bytes.into()));
     }
 
-    /// Only the current match's terrain is kept; an old id is gone.
+    /// Only the current and the previous match's terrain are kept; an
+    /// older id is gone.
     pub fn terrain(&self, id: u64) -> Option<Message> {
         let state = self.state.lock().unwrap();
-        let (current, bytes) = state.terrain.as_ref()?;
-        (*current == id).then(|| Arc::clone(bytes))
+        let archived = state
+            .previous
+            .as_ref()
+            .and_then(|archive| archive.terrain.as_ref());
+        [state.terrain.as_ref(), archived]
+            .into_iter()
+            .flatten()
+            .find(|(known, _)| *known == id)
+            .map(|(_, bytes)| Arc::clone(bytes))
+    }
+
+    pub fn feed_activity(&self) -> Option<Instant> {
+        self.state.lock().unwrap().feed_activity
+    }
+
+    /// Called when the feed is gone. A feed that never sent a turn ends
+    /// nothing.
+    pub fn end_match(&self) {
+        let state = &mut *self.state.lock().unwrap();
+        if !state.has_turn || state.ended.is_some() {
+            return;
+        }
+        match zstd::bulk::compress(&state.open, SEGMENT_ZSTD_LEVEL) {
+            Ok(closed) => {
+                state.segments.push(closed.into());
+                state.open.clear();
+            }
+            // The history then ends at the last closed segment.
+            Err(error) => eprintln!("cannot compress the last segment: {error}"),
+        }
+        let keyframe: Message =
+            encode_keyframe(state, state.turn, &state.tables(true), &state.dots).into();
+        state.previous = Some(Archive {
+            match_id: state.match_id,
+            segments: std::mem::take(&mut state.segments),
+            terrain: state.terrain.clone(),
+        });
+        state.ended = Some(Ended {
+            at: Instant::now(),
+            keyframe,
+        });
+        println!("match {:016x} ended at turn {}", state.match_id, state.turn);
+        let _ = state.sender.send(encode_ended(state.match_id, 0).into());
     }
 
     pub fn set_map(&self, size: u32, game_speed: f32) {
@@ -452,6 +529,7 @@ impl Hub {
             // The history restarts only now, so until the new match's first
             // turn, viewers and segment requests still get the old one.
             state.match_id = new_match_id(state.match_id);
+            state.ended = None;
             state.first_turn = turn;
             state.segments.clear();
             state.open.clear();
@@ -492,15 +570,26 @@ impl Hub {
         state.dots = dots;
         state.has_turn = true;
         state.new_feed = false;
+        state.feed_activity = Some(Instant::now());
         // No receivers is not an error: nobody is watching yet.
         let _ = state.sender.send(message);
         Ok(())
     }
 
-    /// A segment of the current match, and whether it is closed. The open
-    /// one is compressed on each request; it changes every turn anyway.
+    /// A segment of the current or the previous match, and whether it is
+    /// closed. The open one is compressed on each request; it changes every
+    /// turn anyway.
     pub fn segment(&self, match_id: u64, index: usize) -> Option<(Message, bool)> {
         let state = self.state.lock().unwrap();
+        // An ended match is archived but keeps its id until the next one
+        // starts, so the archive is asked first.
+        if let Some(archive) = state
+            .previous
+            .as_ref()
+            .filter(|archive| archive.match_id == match_id)
+        {
+            return Some((Arc::clone(archive.segments.get(index)?), true));
+        }
         if match_id != state.match_id || !state.has_turn {
             return None;
         }
@@ -519,15 +608,23 @@ impl Hub {
         }
     }
 
-    /// The keyframe (none before the first turn) and the receiver are taken
-    /// under one lock, so the first delta a viewer receives applies to
-    /// exactly that keyframe.
-    pub fn subscribe(&self) -> (Option<Message>, broadcast::Receiver<Message>) {
+    /// What a new viewer is sent first (nothing before the first turn) and
+    /// the receiver are taken under one lock, so the first delta a viewer
+    /// receives applies to exactly that keyframe.
+    pub fn subscribe(&self) -> (Vec<Message>, broadcast::Receiver<Message>) {
         let state = self.state.lock().unwrap();
-        let keyframe = state
-            .has_turn
-            .then(|| encode_keyframe(&state, state.turn, &state.tables(false), &state.dots).into());
-        (keyframe, state.sender.subscribe())
+        let first = if let Some(ended) = &state.ended {
+            let since = ended.at.elapsed().as_millis() as u64;
+            vec![
+                Arc::clone(&ended.keyframe),
+                encode_ended(state.match_id, since).into(),
+            ]
+        } else if state.has_turn {
+            vec![encode_keyframe(&state, state.turn, &state.tables(false), &state.dots).into()]
+        } else {
+            Vec::new()
+        };
+        (first, state.sender.subscribe())
     }
 }
 
@@ -541,6 +638,14 @@ fn new_match_id(previous: u64) -> u64 {
         .duration_since(UNIX_EPOCH)
         .map_or(0, |elapsed| elapsed.as_nanos() as u64);
     if now == previous { now + 1 } else { now }
+}
+
+fn encode_ended(match_id: u64, since_ms: u64) -> Vec<u8> {
+    let mut out = Writer::default();
+    out.u8(MESSAGE_ENDED);
+    out.u64(match_id);
+    out.varint(since_ms);
+    out.0
 }
 
 fn append_framed(segment: &mut Vec<u8>, message: &[u8]) {

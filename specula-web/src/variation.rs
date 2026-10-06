@@ -10,6 +10,7 @@
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 
+use specula_assets::files::Decal;
 use specula_assets::files::Definition;
 use specula_assets::files::FileRef;
 use specula_assets::files::Manifest;
@@ -29,7 +30,7 @@ type Selections = BTreeSet<String>;
 
 /// One model of an entity's tree, ready to draw.
 pub struct Model {
-    pub mesh: FileRef,
+    pub shape: Shape,
     pub texture: Option<FileRef>,
     pub player_color: bool,
     pub alpha_ref: f32,
@@ -37,6 +38,15 @@ pub struct Model {
     pub animations: Vec<ModelAnimation>,
     /// (prop point, model), in the order the engine adds them.
     pub props: Vec<(String, Model)>,
+}
+
+/// What `CObjectEntry::BuildVariation` makes of a variation.
+#[derive(Clone, Copy)]
+pub enum Shape {
+    Mesh(FileRef),
+    /// `CModelDecal`: the texture laid on the terrain; it has no props
+    /// and no animations.
+    Decal(Decal),
 }
 
 pub struct ModelAnimation {
@@ -49,8 +59,9 @@ pub struct ModelAnimation {
     pub file: FileRef,
 }
 
-/// The model tree an entity shows, or `None` when its variation has no
-/// mesh (a decal, particles or nothing), which this client does not draw.
+/// The model tree an entity shows, or `None` when its variation has
+/// neither a decal nor a mesh (particles or nothing), which this client
+/// does not draw.
 /// `entity` holds the entity's selections, lower case.
 pub fn resolve(manifest: &Manifest, entity: &Selections, seed: u32) -> Option<Model> {
     let actor = random_remaining(manifest, 0, MAX_QUALITY, seed, &[]);
@@ -196,6 +207,7 @@ fn build(
 ) -> Option<Model> {
     let (level, definition) = base(&manifest.objects[object], quality);
     let mut mesh = None;
+    let mut decal = None;
     let mut texture = None;
     let mut props: BTreeMap<String, Vec<u32>> = BTreeMap::new();
     let mut animations: BTreeMap<String, Vec<&specula_assets::files::Animation>> = BTreeMap::new();
@@ -209,6 +221,12 @@ fn build(
         };
         if variant.mesh.is_some() {
             mesh = variant.mesh;
+        }
+        if let Some(found) = variant.decal
+            && found.size_x != 0.0
+            && found.size_z != 0.0
+        {
+            decal = Some(found);
         }
         if variant.texture.is_some() {
             texture = variant.texture;
@@ -233,6 +251,17 @@ fn build(
                 .or_default()
                 .push(animation);
         }
+    }
+    // The engine tries a decal before the mesh.
+    if let Some(decal) = decal {
+        return Some(Model {
+            shape: Shape::Decal(decal),
+            texture,
+            player_color: definition.player_color,
+            alpha_ref: definition.alpha_ref,
+            animations: Vec::new(),
+            props: Vec::new(),
+        });
     }
     // Without a mesh the engine makes a dummy model, which has no props.
     let mesh = mesh?;
@@ -268,7 +297,7 @@ fn build(
         }
     }
     Some(Model {
-        mesh,
+        shape: Shape::Mesh(mesh),
         texture,
         player_color: definition.player_color,
         alpha_ref: definition.alpha_ref,

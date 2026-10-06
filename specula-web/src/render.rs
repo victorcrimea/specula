@@ -19,6 +19,8 @@ const DOT_CSS_PIXELS: f32 = 3.0;
 const INSTANCE_SIZE: u64 = 20;
 /// f32x2 from, f32x2 to, f32x4 atlas rect, f32 size, unorm8x4 colour.
 const ICON_INSTANCE_SIZE: u64 = 40;
+/// f32x2 from, f32x2 to of one outline segment, in metres.
+const OUTLINE_INSTANCE_SIZE: u64 = 16;
 /// Map size, width, height, dot size, progress, circular, pixel ratio,
 /// padded to 16 bytes.
 const VIEW_SIZE: u64 = 32;
@@ -52,6 +54,9 @@ pub struct Renderer {
     icon_rects: HashMap<String, [f32; 4]>,
     icon_instances: wgpu::Buffer,
     icon_count: u32,
+    outline_pipeline: wgpu::RenderPipeline,
+    outline_instances: wgpu::Buffer,
+    outline_count: u32,
     circular: bool,
     map_size: f32,
     device_pixel_ratio: f32,
@@ -260,6 +265,43 @@ impl Renderer {
         });
         let icon_instances = create_instance_buffer(&device, ICON_INSTANCE_SIZE);
 
+        let outline_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("outline"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("outline.wgsl").into()),
+        });
+        let outline_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("outline"),
+            layout: Some(&layout),
+            vertex: wgpu::VertexState {
+                module: &outline_shader,
+                entry_point: Some("vs_main"),
+                compilation_options: Default::default(),
+                buffers: &[Some(wgpu::VertexBufferLayout {
+                    array_stride: OUTLINE_INSTANCE_SIZE,
+                    step_mode: wgpu::VertexStepMode::Instance,
+                    attributes: &wgpu::vertex_attr_array![
+                        0 => Float32x2,
+                        1 => Float32x2,
+                    ],
+                })],
+            },
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleStrip,
+                ..Default::default()
+            },
+            depth_stencil: None,
+            multisample: Default::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &outline_shader,
+                entry_point: Some("fs_main"),
+                compilation_options: Default::default(),
+                targets: &[Some(format.into())],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+        let outline_instances = create_instance_buffer(&device, OUTLINE_INSTANCE_SIZE);
+
         Ok(Renderer {
             surface,
             device,
@@ -281,6 +323,9 @@ impl Renderer {
             icon_rects: HashMap::new(),
             icon_instances,
             icon_count: 0,
+            outline_pipeline,
+            outline_instances,
+            outline_count: 0,
             circular: false,
             map_size: 0.0,
             device_pixel_ratio,
@@ -361,6 +406,12 @@ impl Renderer {
                 pass.set_bind_group(1, atlas, &[]);
                 pass.set_vertex_buffer(0, self.icon_instances.slice(..));
                 pass.draw(0..4, 0..self.icon_count);
+            }
+            if self.outline_count > 0 {
+                pass.set_pipeline(&self.outline_pipeline);
+                pass.set_bind_group(0, &self.bind_group, &[]);
+                pass.set_vertex_buffer(0, self.outline_instances.slice(..));
+                pass.draw(0..4, 0..self.outline_count);
             }
         }
         self.queue.submit([encoder.finish()]);
@@ -464,6 +515,23 @@ impl Renderer {
             ],
         }));
         self.icon_rects = atlas.rects;
+    }
+
+    /// The segments, from and to in metres, drawn over everything else;
+    /// none hides the outline.
+    pub fn set_outline(&mut self, segments: &[[f32; 4]]) {
+        let bytes: Vec<u8> = segments
+            .iter()
+            .flatten()
+            .flat_map(|value| value.to_le_bytes())
+            .collect();
+        let needed = bytes.len() as u64;
+        if needed > self.outline_instances.size() {
+            self.outline_instances =
+                create_instance_buffer(&self.device, needed.next_power_of_two());
+        }
+        self.queue.write_buffer(&self.outline_instances, 0, &bytes);
+        self.outline_count = segments.len() as u32;
     }
 
     /// Uploads the dots once per turn; frames in between only move them

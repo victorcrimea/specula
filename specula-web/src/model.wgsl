@@ -122,11 +122,23 @@ fn vs_model(
     return out;
 }
 
+// The skin's mips average alpha, so a thin leaf or stalk falls under the
+// alpha reference a level or two down and foliage thins out with distance;
+// raising alpha with the mip level the sampler picks keeps its coverage
+// (Ben Golus, "Anti-aliased Alpha Test").
+fn tested_alpha(alpha: f32, uv: vec2<f32>) -> f32 {
+    let texels = uv * vec2<f32>(textureDimensions(skin, 0));
+    let dx = dpdx(texels);
+    let dy = dpdy(texels);
+    let level = max(0.5 * log2(max(dot(dx, dx), dot(dy, dy))), 0.0);
+    return alpha * (1.0 + level * 0.25);
+}
+
 // model_common.fs: the alpha of a player-coloured skin masks the tint.
 @fragment
 fn fs_model(in: ModelVaryings) -> @location(0) vec4<f32> {
     let tex = textureSample(skin, skin_sampler, in.uv);
-    if tex.a < in.alpha_ref {
+    if tested_alpha(tex.a, in.uv) < in.alpha_ref {
         discard;
     }
     let tint = mix(in.color.rgb, vec3<f32>(1.0), tex.a);
@@ -160,7 +172,7 @@ fn octahedral(n: vec3<f32>) -> vec2<f32> {
 @fragment
 fn fs_capture(in: ModelVaryings) -> Captured {
     let tex = textureSample(skin, skin_sampler, in.uv);
-    if tex.a < in.alpha_ref {
+    if tested_alpha(tex.a, in.uv) < in.alpha_ref {
         discard;
     }
     var out: Captured;

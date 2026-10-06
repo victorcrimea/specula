@@ -1,13 +1,15 @@
-//! The terrain resource, format v0, served once per match at
+//! The terrain resource, format v1, served once per match at
 //! `/terrain/<id>`. Little-endian:
 //!
 //! u8 version, u32 tiles per side n, f32 water level (m), f32 shallow water
-//! depth (m), u8 circular, u32 palette count, count x u32 0xRRGGBB,
-//! (n+1)^2 x u16 heights (1/92 m), n^2 x u16 palette index (0xFFFF: none).
-//! Heights and tiles are row-major, x fastest.
+//! depth (m), u8 circular, u32 palette count, count x {u32 0xRRGGBB, u16
+//! name length, UTF-8 name}, (n+1)^2 x u16 heights (1/92 m), n^2 x u16
+//! palette index (0xFFFF: none), n^2 x u32 blend priority. Heights and
+//! tiles are row-major, x fastest.
 //!
 //! The palette holds each texture's minimap base colour, so the client can
-//! shade the tiles itself, as the engine's minimap does.
+//! shade the tiles itself, as the engine's minimap does, and its name, by
+//! which the 3D view finds the baked texture.
 
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -20,7 +22,7 @@ use std::sync::Mutex;
 use crate::feed::Terrain;
 use crate::wire::Writer;
 
-const VERSION: u8 = 0;
+const VERSION: u8 = 1;
 /// What the minimap shows for a tile without a known texture.
 const UNKNOWN_COLOR: u32 = 0xFF_FF_FF;
 
@@ -69,14 +71,19 @@ pub fn encode(terrain: &Terrain) -> Resource {
     out.f32(terrain.shallow_depth);
     out.u8(u8::from(terrain.circular));
     out.u32(palette.len() as u32);
-    for color in &palette {
+    for (color, name) in palette.iter().zip(&terrain.textures) {
         out.u32(*color);
+        out.u16(name.len() as u16);
+        out.0.extend_from_slice(name.as_bytes());
     }
     for height in &terrain.heights {
         out.u16(*height);
     }
     for tile in &terrain.tiles {
         out.u16(*tile);
+    }
+    for priority in &terrain.priorities {
+        out.u32(*priority);
     }
 
     // Only this process serves the id, so a hash that is not stable across

@@ -22,6 +22,7 @@ use specula_assets::files::Manifest;
 use specula_assets::files::Mesh;
 use specula_assets::files::MeshDetail;
 use specula_assets::files::Skeleton;
+use specula_assets::files::TerrainTexture;
 use specula_assets::files::Texture;
 use specula_assets::files::TextureDetail;
 
@@ -95,6 +96,9 @@ struct Job {
 pub struct Store {
     /// Actor path -> manifest; `None` until the index arrives.
     index: Option<HashMap<String, FileRef>>,
+    /// Terrain name -> its texture, from the same index.
+    terrains: HashMap<String, TerrainTexture>,
+    alpha_maps: Option<FileRef>,
     index_failed: bool,
     /// The index's path, `assets/index-<hash>.bin`, once loaded.
     index_name: Option<String>,
@@ -174,6 +178,36 @@ impl Store {
             Kind::Actor,
             file,
         )
+    }
+
+    /// A terrain's texture and mapping, as the terrain resource names it.
+    pub fn terrain(&self, name: &str) -> Get<TerrainTexture> {
+        if self.index.is_none() {
+            return if self.index_failed {
+                Get::Missing
+            } else {
+                Get::Pending
+            };
+        }
+        match self.terrains.get(name) {
+            Some(terrain) => Get::Ready(*terrain),
+            None => Get::Missing,
+        }
+    }
+
+    /// The blend mask atlas's file.
+    pub fn alpha_maps(&self) -> Get<FileRef> {
+        if self.index.is_none() {
+            return if self.index_failed {
+                Get::Missing
+            } else {
+                Get::Pending
+            };
+        }
+        match self.alpha_maps {
+            Some(file) => Get::Ready(file),
+            None => Get::Missing,
+        }
     }
 
     /// Names the asset bake, so what is derived from its files can be
@@ -422,9 +456,15 @@ fn decode(kind: Kind, bytes: &[u8]) -> Result<Decoded, &'static str> {
 async fn load_index(store: Rc<RefCell<Store>>) {
     match fetch_index(&store).await {
         Ok((index, name)) => {
-            crate::log(&format!("assets: {} actors", index.actors.len()));
+            crate::log(&format!(
+                "assets: {} actors, {} terrains",
+                index.actors.len(),
+                index.terrains.len()
+            ));
             let mut store = store.borrow_mut();
             store.index = Some(index.actors.into_iter().collect());
+            store.terrains = index.terrains.into_iter().collect();
+            store.alpha_maps = index.alpha_maps;
             store.index_name = Some(name);
         }
         // Not fatal: the map and the minimap colours still show.

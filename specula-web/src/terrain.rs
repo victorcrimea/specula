@@ -1,8 +1,8 @@
-//! Decoder for specula-server's terrain resource, format v0 (layout in
+//! Decoder for specula-server's terrain resource, format v1 (layout in
 //! `specula-server/src/terrain.rs`), and the minimap-style picture made
 //! from it.
 
-const VERSION: u8 = 0;
+const VERSION: u8 = 1;
 /// Engine heights are u16 in these units (HEIGHT_UNITS_PER_METRE).
 const HEIGHT_UNITS_PER_METRE: f32 = 92.0;
 const NO_TEXTURE: u16 = 0xFFFF;
@@ -23,6 +23,13 @@ pub struct TerrainImage {
     pub heights: Vec<u16>,
     /// In metres.
     pub water_level: f32,
+    /// The terrain names the tiles index.
+    pub names: Vec<String>,
+    /// size^2 indices into `names`, row-major, x fastest; 0xFFFF for
+    /// none.
+    pub tiles: Vec<u16>,
+    /// size^2 blend priorities, likewise.
+    pub priorities: Vec<u32>,
 }
 
 /// `TERRAIN_TILE_SIZE`, in metres.
@@ -84,10 +91,19 @@ pub fn build(resource: &[u8]) -> Result<TerrainImage, &'static str> {
     let shallow_depth = f32::from_bits(cursor.u32()?);
     let circular = cursor.u8()? != 0;
     let palette_size = cursor.u32()? as usize;
-    let palette = cursor.take(palette_size * 4)?;
+    let mut palette = Vec::with_capacity(palette_size);
+    let mut names = Vec::with_capacity(palette_size);
+    for _ in 0..palette_size {
+        palette.push(cursor.u32()?);
+        let length = cursor.u16()? as usize;
+        let name =
+            std::str::from_utf8(cursor.take(length)?).map_err(|_| "terrain name not UTF-8")?;
+        names.push(name.to_owned());
+    }
     let vertices = tiles + 1;
     let heights = cursor.take(vertices * vertices * 2)?;
     let tile_textures = cursor.take(tiles * tiles * 2)?;
+    let priorities = cursor.take(tiles * tiles * 4)?;
     if !cursor.0.is_empty() {
         return Err("terrain resource has trailing bytes");
     }
@@ -99,11 +115,13 @@ pub fn build(resource: &[u8]) -> Result<TerrainImage, &'static str> {
     let base_color = |tile: usize| {
         let at = tile * 2;
         let index = u16::from_le_bytes([tile_textures[at], tile_textures[at + 1]]);
-        if index == NO_TEXTURE || usize::from(index) >= palette_size {
+        if index == NO_TEXTURE {
             return UNKNOWN_COLOR;
         }
-        let at = usize::from(index) * 4;
-        u32::from_le_bytes(palette[at..at + 4].try_into().unwrap())
+        palette
+            .get(usize::from(index))
+            .copied()
+            .unwrap_or(UNKNOWN_COLOR)
     };
 
     let mut pixels = Vec::with_capacity(tiles * tiles * 4);
@@ -142,6 +160,15 @@ pub fn build(resource: &[u8]) -> Result<TerrainImage, &'static str> {
             .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
             .collect(),
         water_level,
+        names,
+        tiles: tile_textures
+            .chunks_exact(2)
+            .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+            .collect(),
+        priorities: priorities
+            .chunks_exact(4)
+            .map(|quad| u32::from_le_bytes(quad.try_into().unwrap()))
+            .collect(),
     })
 }
 
@@ -159,6 +186,10 @@ impl<'a> Cursor<'a> {
 
     fn u8(&mut self) -> Result<u8, &'static str> {
         Ok(self.take(1)?[0])
+    }
+
+    fn u16(&mut self) -> Result<u16, &'static str> {
+        Ok(u16::from_le_bytes(self.take(2)?.try_into().unwrap()))
     }
 
     fn u32(&mut self) -> Result<u32, &'static str> {

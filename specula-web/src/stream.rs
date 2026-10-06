@@ -1,5 +1,5 @@
 //! Decoder for specula-server's viewer stream and match segments, wire
-//! format v5; the layout is documented in `specula-server/src/view.rs`.
+//! format v6; the layout is documented in `specula-server/src/view.rs`.
 
 use std::collections::BTreeMap;
 use std::io::Read;
@@ -8,6 +8,7 @@ use ruzstd::decoding::StreamingDecoder;
 
 const MESSAGE_KEYFRAME: u8 = 1;
 const MESSAGE_DELTA: u8 = 2;
+const MESSAGE_ENDED: u8 = 3;
 const CHANGED_POSITION: u64 = 1;
 const CHANGED_COLOR: u64 = 2;
 const CHANGED_ICON: u64 = 4;
@@ -451,6 +452,22 @@ pub fn message_turn(message: &[u8]) -> Result<u32, &'static str> {
 
 pub fn is_keyframe(message: &[u8]) -> bool {
     message.first() == Some(&MESSAGE_KEYFRAME)
+}
+
+pub fn is_ended(message: &[u8]) -> bool {
+    message.first() == Some(&MESSAGE_ENDED)
+}
+
+/// An ended message's match id and ms since the match ended.
+pub fn read_ended(message: &[u8]) -> Result<(u64, u64), &'static str> {
+    let (_, body) = message.split_first().ok_or("empty message")?;
+    let mut cursor = Cursor(body);
+    let match_id = cursor.u64()?;
+    let since_ms = cursor.varint()?;
+    if !cursor.0.is_empty() {
+        return Err("trailing bytes");
+    }
+    Ok((match_id, since_ms))
 }
 
 /// Splits a zstd-compressed segment into its messages.

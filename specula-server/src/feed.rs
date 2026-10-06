@@ -6,7 +6,7 @@ use std::io::ErrorKind;
 use std::io::Read;
 
 const MAGIC: [u8; 4] = *b"SPCF";
-const VERSION: u32 = 6;
+const VERSION: u32 = 7;
 const RECORD_TEMPLATE: u8 = 1;
 const RECORD_TURN: u8 = 2;
 const RECORD_MAP: u8 = 3;
@@ -128,6 +128,9 @@ pub struct Terrain {
     pub textures: Vec<String>,
     /// tiles^2 indices into `textures`; 0xFFFF for none.
     pub tiles: Vec<u16>,
+    /// tiles^2 blend priorities: a tile's texture is drawn over the
+    /// neighbours of lower priority.
+    pub priorities: Vec<u32>,
 }
 
 pub fn read_header(reader: &mut impl Read) -> io::Result<()> {
@@ -271,6 +274,9 @@ fn decode_terrain(payload: &[u8]) -> io::Result<Record> {
     let tiles = (0..(tiles_per_side as usize).pow(2))
         .map(|_| cursor.u16())
         .collect::<io::Result<_>>()?;
+    let priorities = (0..(tiles_per_side as usize).pow(2))
+        .map(|_| cursor.u32())
+        .collect::<io::Result<_>>()?;
     if !cursor.0.is_empty() {
         return Err(invalid("terrain record longer than its contents"));
     }
@@ -282,6 +288,7 @@ fn decode_terrain(payload: &[u8]) -> io::Result<Record> {
         heights,
         textures,
         tiles,
+        priorities,
     }))
 }
 

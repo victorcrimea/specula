@@ -3,11 +3,18 @@
 //! its scene moves forward one turn at a time, or is replaced by a keyframe
 //! on a seek.
 //!
+//! When the match ends, its viewers keep it, history and all, while the
+//! next match is followed in the background; they move to it when they ask
+//! or `SWITCH_DELAY_MS` after the end, whichever is first, or on its first
+//! turn if that comes later.
+//!
 //! Page to worker: u8 command, f64 argument. Worker to page: u8 `POST_SCENE`,
 //! f64 real milliseconds per turn (0: live, measure the pace), then a wire
 //! message; or u8 `POST_STATUS`, u32 first turn, u32 newest turn, u32
 //! playhead turn, u8 `STATUS_*` flags, f32 speed, u64 bytes of live
-//! messages and u64 bytes of segments received since the worker started.
+//! messages and u64 bytes of segments received since the worker started,
+//! u32 ms until the move to the next match (0 once due; meaningful with
+//! `STATUS_ENDED`).
 
 use std::cell::RefCell;
 use std::collections::VecDeque;
@@ -33,6 +40,10 @@ pub const POST_SCENE: u8 = 1;
 pub const POST_STATUS: u8 = 2;
 pub const STATUS_LIVE: u8 = 1;
 pub const STATUS_PAUSED: u8 = 2;
+/// The shown match has ended.
+pub const STATUS_ENDED: u8 = 4;
+/// The next match has started and can be switched to.
+pub const STATUS_NEXT_READY: u8 = 8;
 /// Shows the keyframe at or before the turn; for dragging the timeline.
 pub const COMMAND_SCRUB: u8 = 1;
 /// Shows exactly the turn.
@@ -42,6 +53,8 @@ pub const COMMAND_PAUSE: u8 = 4;
 /// In game time: 1 is one game second per second.
 pub const COMMAND_SPEED: u8 = 5;
 pub const COMMAND_LIVE: u8 = 6;
+/// Leaves an ended match for the one being played now.
+pub const COMMAND_CURRENT_MATCH: u8 = 7;
 
 /// Only a few segments around the playhead are decoded at a time
 /// (init.md 2.4).
@@ -53,6 +66,10 @@ const RECENT_DELTAS: usize = 256;
 /// continues from now instead of racing through the missed turns.
 const MAX_BEHIND_MS: f64 = 1000.0;
 const RETRY_MS: f64 = 1000.0;
+/// How long viewers stay on a finished match before being moved on.
+const SWITCH_DELAY_MS: f64 = 5.0 * 60.0 * 1000.0;
+const RECONNECT_MIN_MS: f64 = 1000.0;
+const RECONNECT_MAX_MS: f64 = 10_000.0;
 
 struct Segment {
     index: u32,
@@ -69,11 +86,23 @@ enum Next {
 struct Playback {
     this: Weak<RefCell<Playback>>,
     scope: DedicatedWorkerGlobalScope,
-    socket: WebSocket,
+    socket: Option<WebSocket>,
+    /// The current socket's handlers, dropped with it.
+    socket_handlers: Option<SocketHandlers>,
+    reconnect_ms: f64,
     /// Calls `resume`, for timers.
     wake: js_sys::Function,
+    /// Calls `switch_due`, for the switch timer.
+    switch_wake: js_sys::Function,
     /// Every live message applied: the newest state of the match.
     live_scene: Scene,
+    /// When `live_scene`'s match ended, on the performance clock.
+    ended_at: Option<f64>,
+    /// The match after an ended one, kept up to date until the viewer
+    /// moves to it, and when it ended in turn.
+    next_scene: Option<Scene>,
+    next_ended_at: Option<f64>,
+    switch_timer: Option<i32>,
     newest_turn: u32,
     /// Live deltas without a gap between them; a live keyframe breaks the
     /// chain and clears it.
@@ -119,12 +148,50 @@ impl Playback {
         turn.saturating_sub(self.live_scene.first_turn) / self.live_scene.segment_turns
     }
 
+    /// Every later delta would build on a half-patched scene, so the
+    /// stream starts again from the keyframe a new connection gets.
+    fn drop_stream(&mut self, error: &str) {
+        web_sys::console::error_1(&format!("bad stream message: {error}").into());
+        if let Some(socket) = &self.socket {
+            let _ = socket.close();
+        }
+    }
+
     fn on_live(&mut self, message: Vec<u8>) {
+        self.reconnect_ms = RECONNECT_MIN_MS;
+        if stream::is_ended(&message) {
+            match stream::read_ended(&message) {
+                Ok((match_id, since_ms)) => self.on_ended(match_id, since_ms),
+                Err(error) => self.drop_stream(error),
+            }
+            return;
+        }
+        if self.ended_at.is_some() {
+            if let Some(next) = &mut self.next_scene {
+                if let Err(error) = next.apply(&message, 1.0) {
+                    self.next_scene = None;
+                    self.drop_stream(error);
+                }
+                return;
+            }
+            if stream::is_keyframe(&message) {
+                let mut scene = Scene::default();
+                if let Err(error) = scene.apply(&message, 1.0) {
+                    self.drop_stream(error);
+                    return;
+                }
+                // A reconnect resends the ended match itself; that replaces
+                // it as any keyframe does, below.
+                if scene.match_id != self.live_scene.match_id {
+                    self.next_scene = Some(scene);
+                    self.switch_due();
+                    return;
+                }
+            }
+        }
         let previous_match = self.live_scene.match_id;
         if let Err(error) = self.live_scene.apply(&message, 1.0) {
-            // Every later delta would build on a half-patched scene.
-            web_sys::console::error_1(&format!("bad stream message: {error}").into());
-            let _ = self.socket.close();
+            self.drop_stream(error);
             return;
         }
         let turn = self.live_scene.turn;
@@ -148,6 +215,71 @@ impl Playback {
         self.post_status();
     }
 
+    fn on_ended(&mut self, match_id: u64, since_ms: u64) {
+        let at = self.now() - since_ms as f64;
+        if match_id == self.live_scene.match_id {
+            self.ended_at = Some(at);
+            self.schedule_switch();
+            self.post_status();
+        } else if self
+            .next_scene
+            .as_ref()
+            .is_some_and(|next| next.match_id == match_id)
+        {
+            self.next_ended_at = Some(at);
+        }
+    }
+
+    fn switch_deadline(&self) -> Option<f64> {
+        self.ended_at.map(|at| at + SWITCH_DELAY_MS)
+    }
+
+    fn schedule_switch(&mut self) {
+        if let Some(timer) = self.switch_timer.take() {
+            self.scope.clear_timeout_with_handle(timer);
+        }
+        let Some(deadline) = self.switch_deadline() else {
+            return;
+        };
+        self.switch_timer = self
+            .scope
+            .set_timeout_with_callback_and_timeout_and_arguments_0(
+                &self.switch_wake,
+                (deadline - self.now()).max(0.0).ceil() as i32,
+            )
+            .ok();
+    }
+
+    /// Moves on if the deadline has passed and the next match is there;
+    /// else only tells the page how things stand.
+    fn switch_due(&mut self) {
+        if self
+            .switch_deadline()
+            .is_some_and(|deadline| self.now() >= deadline)
+        {
+            self.switch_match();
+        } else {
+            self.post_status();
+        }
+    }
+
+    fn switch_match(&mut self) {
+        let Some(next) = self.next_scene.take() else {
+            self.post_status();
+            return;
+        };
+        self.live_scene = next;
+        self.newest_turn = self.live_scene.turn;
+        self.ended_at = self.next_ended_at.take();
+        // Nothing cached belongs to the new match; a fetch still in flight
+        // is dropped on arrival.
+        self.recent.clear();
+        self.segments.clear();
+        self.live = false;
+        self.go_live(true);
+        self.schedule_switch();
+    }
+
     fn on_command(&mut self, command: u8, value: f64) {
         match command {
             COMMAND_SCRUB => self.seek(value as u32, false),
@@ -156,6 +288,7 @@ impl Playback {
             COMMAND_PAUSE => self.pause(),
             COMMAND_SPEED => self.set_speed(value as f32),
             COMMAND_LIVE => self.go_live(true),
+            COMMAND_CURRENT_MATCH => self.switch_match(),
             _ => {}
         }
     }
@@ -480,6 +613,15 @@ impl Playback {
         if self.paused {
             flags |= STATUS_PAUSED;
         }
+        if self.ended_at.is_some() {
+            flags |= STATUS_ENDED;
+        }
+        if self.next_scene.is_some() {
+            flags |= STATUS_NEXT_READY;
+        }
+        let switch_in = self
+            .switch_deadline()
+            .map_or(0.0, |deadline| (deadline - self.now()).max(0.0));
         let mut out = vec![POST_STATUS];
         out.extend_from_slice(&self.live_scene.first_turn.to_le_bytes());
         out.extend_from_slice(&self.newest_turn.to_le_bytes());
@@ -488,6 +630,7 @@ impl Playback {
         out.extend_from_slice(&self.speed.to_le_bytes());
         out.extend_from_slice(&self.live_bytes.to_le_bytes());
         out.extend_from_slice(&self.segment_bytes.to_le_bytes());
+        out.extend_from_slice(&(switch_in.ceil() as u32).to_le_bytes());
         self.post(&out);
     }
 
@@ -510,16 +653,9 @@ fn start() -> Result<(), String> {
     let scope: DedicatedWorkerGlobalScope = js_sys::global()
         .dyn_into()
         .map_err(|_| "not a dedicated worker")?;
-    let location = scope.location();
-    let scheme = match location.protocol().as_str() {
-        "https:" => "wss",
-        _ => "ws",
-    };
-    let url = format!("{scheme}://{}/ws", location.host());
-    let socket = WebSocket::new(&url).map_err(|_| format!("cannot open {url}"))?;
-    socket.set_binary_type(BinaryType::Arraybuffer);
 
     let playback = Rc::new_cyclic(|this: &Weak<RefCell<Playback>>| {
+        // The timer targets live as long as the worker.
         let target = this.clone();
         let wake = Closure::<dyn FnMut()>::new(move || {
             if let Some(playback) = target.upgrade() {
@@ -527,14 +663,33 @@ fn start() -> Result<(), String> {
             }
         });
         let function = wake.as_ref().unchecked_ref::<js_sys::Function>().clone();
-        // The timer target lives as long as the worker.
         wake.forget();
+        let target = this.clone();
+        let switch_wake = Closure::<dyn FnMut()>::new(move || {
+            if let Some(playback) = target.upgrade() {
+                let mut playback = playback.borrow_mut();
+                playback.switch_timer = None;
+                playback.switch_due();
+            }
+        });
+        let switch_function = switch_wake
+            .as_ref()
+            .unchecked_ref::<js_sys::Function>()
+            .clone();
+        switch_wake.forget();
         RefCell::new(Playback {
             this: this.clone(),
             scope: scope.clone(),
-            socket: socket.clone(),
+            socket: None,
+            socket_handlers: None,
+            reconnect_ms: RECONNECT_MIN_MS,
             wake: function,
+            switch_wake: switch_function,
             live_scene: Scene::default(),
+            ended_at: None,
+            next_scene: None,
+            next_ended_at: None,
+            switch_timer: None,
             newest_turn: 0,
             recent: VecDeque::new(),
             segments: Vec::new(),
@@ -552,24 +707,7 @@ fn start() -> Result<(), String> {
             segment_bytes: 0,
         })
     });
-
-    let receiver = Rc::clone(&playback);
-    let on_message = Closure::<dyn FnMut(MessageEvent)>::new(move |event: MessageEvent| {
-        let Ok(buffer) = event.data().dyn_into::<js_sys::ArrayBuffer>() else {
-            return;
-        };
-        let bytes = js_sys::Uint8Array::new(&buffer).to_vec();
-        let mut playback = receiver.borrow_mut();
-        playback.live_bytes += bytes.len() as u64;
-        playback.on_live(bytes);
-    });
-    socket.set_onmessage(Some(on_message.as_ref().unchecked_ref()));
-    // The socket lives as long as the worker, so its handler does too.
-    on_message.forget();
-
-    let on_close = Closure::<dyn FnMut()>::new(|| crate::log("stream closed"));
-    socket.set_onclose(Some(on_close.as_ref().unchecked_ref()));
-    on_close.forget();
+    connect(&Rc::downgrade(&playback))?;
 
     let on_command = Closure::<dyn FnMut(MessageEvent)>::new(move |event: MessageEvent| {
         let bytes = js_sys::Uint8Array::new(&event.data()).to_vec();
@@ -585,6 +723,75 @@ fn start() -> Result<(), String> {
     });
     scope.set_onmessage(Some(on_command.as_ref().unchecked_ref()));
     on_command.forget();
+    Ok(())
+}
+
+struct SocketHandlers {
+    _on_message: Closure<dyn FnMut(MessageEvent)>,
+    _on_close: Closure<dyn FnMut()>,
+}
+
+/// Opens the stream. A closed one is opened again after a growing pause, as
+/// the server may be restarting; its first message is a keyframe, which
+/// replaces whatever the old connection left.
+fn connect(playback: &Weak<RefCell<Playback>>) -> Result<(), String> {
+    let Some(strong) = playback.upgrade() else {
+        return Ok(());
+    };
+    let location = strong.borrow().scope.location();
+    let scheme = match location.protocol().as_str() {
+        "https:" => "wss",
+        _ => "ws",
+    };
+    let url = format!("{scheme}://{}/ws", location.host());
+    let socket = WebSocket::new(&url).map_err(|_| format!("cannot open {url}"))?;
+    socket.set_binary_type(BinaryType::Arraybuffer);
+
+    let receiver = playback.clone();
+    let on_message = Closure::<dyn FnMut(MessageEvent)>::new(move |event: MessageEvent| {
+        let Ok(buffer) = event.data().dyn_into::<js_sys::ArrayBuffer>() else {
+            return;
+        };
+        let bytes = js_sys::Uint8Array::new(&buffer).to_vec();
+        if let Some(playback) = receiver.upgrade() {
+            let mut playback = playback.borrow_mut();
+            playback.live_bytes += bytes.len() as u64;
+            playback.on_live(bytes);
+        }
+    });
+    socket.set_onmessage(Some(on_message.as_ref().unchecked_ref()));
+
+    let target = playback.clone();
+    let on_close = Closure::<dyn FnMut()>::new(move || {
+        let Some(strong) = target.upgrade() else {
+            return;
+        };
+        let (scope, delay) = {
+            let mut playback = strong.borrow_mut();
+            let delay = playback.reconnect_ms;
+            playback.reconnect_ms = (delay * 2.0).min(RECONNECT_MAX_MS);
+            (playback.scope.clone(), delay)
+        };
+        crate::log(&format!("stream closed, reconnecting in {delay} ms"));
+        let again = target.clone();
+        let retry = Closure::once_into_js(move || {
+            if let Err(error) = connect(&again) {
+                web_sys::console::error_1(&error.into());
+            }
+        });
+        let _ = scope.set_timeout_with_callback_and_timeout_and_arguments_0(
+            retry.unchecked_ref(),
+            delay as i32,
+        );
+    });
+    socket.set_onclose(Some(on_close.as_ref().unchecked_ref()));
+
+    let mut strong = strong.borrow_mut();
+    strong.socket = Some(socket);
+    strong.socket_handlers = Some(SocketHandlers {
+        _on_message: on_message,
+        _on_close: on_close,
+    });
     Ok(())
 }
 
