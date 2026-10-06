@@ -67,6 +67,8 @@ use crate::stream::VariantSet;
 use crate::stream::turn_towards;
 use crate::terrain::TILE_SIZE;
 use crate::terrain::TerrainImage;
+use crate::territory;
+use crate::territory::Borders;
 use crate::unit::DEPTH_FORMAT;
 use crate::unit::create_buffer;
 use crate::unit::create_depth;
@@ -275,6 +277,7 @@ pub struct Field {
     blend_pipeline: wgpu::RenderPipeline,
     water_pipeline: wgpu::RenderPipeline,
     decal_pipeline: wgpu::RenderPipeline,
+    borders: Borders,
     ground_layout: wgpu::BindGroupLayout,
     /// Repeating, for the terrain textures.
     terrain_sampler: wgpu::Sampler,
@@ -295,6 +298,8 @@ pub struct Field {
     entities: Entities,
     palette: Vec<u32>,
     models: HashMap<ModelKey, Option<Rc<Model>>>,
+    /// `tree_bounds`, once every piece of the tree has arrived.
+    bounds: HashMap<ModelKey, (Vec3, Vec3)>,
     camera: Rc<RefCell<Camera>>,
     instances: wgpu::Buffer,
     groups: HashMap<GroupKey, Vec<u8>>,
@@ -309,12 +314,15 @@ pub struct Field {
     decal_indices: wgpu::Buffer,
     /// Where the camera is this frame, which impostor cells depend on.
     eye: [f32; 3],
+    device_pixel_ratio: f32,
     stats: Stats,
 }
 
-/// What the `#fps` box shows, as on the unit page.
+/// What the `#fps` box shows, as on the unit page, and the `#stats` box
+/// under it.
 struct Stats {
     element: HtmlElement,
+    detail: HtmlElement,
     /// Frames drawn since `since`, in page milliseconds.
     frames: u32,
     since: f64,
@@ -665,6 +673,7 @@ impl Field {
             cache: None,
         });
 
+        let borders = Borders::new(&device, &queue, config.format, &view_layout)?;
         let far = Far::new(
             &device,
             config.format,
@@ -734,6 +743,7 @@ impl Field {
             .ok_or("no document")?;
         let stats = Stats {
             element: crate::element(&document, "fps")?,
+            detail: crate::element(&document, "stats")?,
             frames: 0,
             since: now(),
             models: 0,
@@ -752,6 +762,7 @@ impl Field {
             blend_pipeline,
             water_pipeline,
             decal_pipeline,
+            borders,
             ground_layout,
             terrain_sampler,
             view_buffer,
@@ -770,6 +781,7 @@ impl Field {
             entities: Entities::default(),
             palette: Vec::new(),
             models: HashMap::new(),
+            bounds: HashMap::new(),
             camera,
             instances,
             groups: HashMap::new(),
@@ -781,6 +793,7 @@ impl Field {
             decal_instances,
             decal_indices,
             eye: [0.0; 3],
+            device_pixel_ratio: 1.0,
             stats,
         })
     }
@@ -960,13 +973,18 @@ impl Field {
         };
         transform.translate(Vec3::new(x, y + sink, z));
 
-        let extent = Vec3::new(
-            root_mesh.max[0] - root_mesh.min[0],
-            height,
-            root_mesh.max[2] - root_mesh.min[2],
-        );
-        let radius = extent.length() / 2.0 * REACH_MARGIN + 1.0;
-        let centre = [x, y + sink + (root_mesh.min[1] + root_mesh.max[1]) / 2.0, z];
+        let (low, high) = self.tree_bounds(key, &model).unwrap_or((
+            Vec3::new(root_mesh.min[0], root_mesh.min[1], root_mesh.min[2]),
+            Vec3::new(root_mesh.max[0], root_mesh.max[1], root_mesh.max[2]),
+        ));
+        // Around the entity's position, holding the bounds at any turn.
+        let reach = [low.x, high.x]
+            .into_iter()
+            .flat_map(|x| [low.z, high.z].map(|z| x.hypot(z)))
+            .fold(0.0, f32::max);
+        let radius = reach.hypot((high.y - low.y) / 2.0) * REACH_MARGIN + 1.0;
+        let centre_y = (low.y + high.y) / 2.0;
+        let centre = [x, y + sink + centre_y, z];
         let Some(level) = screen_level(centre, radius, view_proj, planes, pixel_scale) else {
             return;
         };
@@ -989,7 +1007,16 @@ impl Field {
             level,
             time: None,
         };
-        if level == FAR_LEVEL && self.place_far(&model, &root_mesh, &entity, centre, rot_y) {
+        if level == FAR_LEVEL
+            && self.place_far(
+                &model,
+                &root_mesh,
+                &entity,
+                [x, centre[1], z, radius],
+                centre_y,
+                rot_y,
+            )
+        {
             self.stats.levels[FAR_LEVEL] += 1;
             return;
         }
@@ -1008,9 +1035,14 @@ impl Field {
         model: &Rc<Model>,
         root_mesh: &Mesh,
         entity: &EntityState,
-        centre: [f32; 3],
+        // The bounding sphere's centre and radius.
+        sphere: [f32; 4],
+        // Its centre's height in the model's own space.
+        centre_y: f32,
         rot_y: f32,
     ) -> bool {
+        let [x, y, z, radius] = sphere;
+        let centre = [x, y, z];
         // One look per animation, not per variant of it: at this size the
         // variant does not show, and every look is an atlas to hold.
         let Some(animation) = self.root_animation(model, root_mesh, &entity.state, FAR_PICK) else {
@@ -1024,18 +1056,13 @@ impl Field {
                 return false;
             }
             let actor = string(&self.entities.strings, dot.actor).unwrap_or_default();
-            let extent = Vec3::new(
-                root_mesh.max[0] - root_mesh.min[0],
-                root_mesh.max[1] - root_mesh.min[1],
-                root_mesh.max[2] - root_mesh.min[2],
-            );
             let request = Request {
                 model: Rc::clone(model),
                 dot: *dot,
                 state: entity.state.clone(),
                 pick: FAR_PICK,
-                radius: extent.length() / 2.0 * REACH_MARGIN + 1.0,
-                centre_y: (root_mesh.min[1] + root_mesh.max[1]) / 2.0,
+                radius,
+                centre_y,
                 file: far::file_name(actor, &entity.state, animation_hash, START_PITCH),
             };
             self.far.want(key, request);
@@ -1186,6 +1213,96 @@ impl Field {
             self.far
                 .bake(&self.device, &self.queue, key, request, &capture);
         }
+    }
+
+    /// The bounds of every mesh in the model tree, props in their bind
+    /// pose, in the root's space; `None` while a piece is on its way. The
+    /// root mesh alone can be far off: a field's is a small plane buried
+    /// 27 m down that only carries the prop points of its crop.
+    fn tree_bounds(&mut self, key: ModelKey, model: &Model) -> Option<(Vec3, Vec3)> {
+        if let Some(bounds) = self.bounds.get(&key) {
+            return Some(*bounds);
+        }
+        let mut bounds = None;
+        if !self.add_bounds(model, &Mat4::identity(), 0, &mut bounds) {
+            return None;
+        }
+        let bounds = bounds?;
+        self.bounds.insert(key, bounds);
+        Some(bounds)
+    }
+
+    /// Joins `model`'s mesh, moved by `transform`, and its props' into
+    /// `bounds`, as `place_model` places them; false while a piece is on
+    /// its way.
+    fn add_bounds(
+        &mut self,
+        model: &Model,
+        transform: &Mat4,
+        depth: usize,
+        bounds: &mut Option<(Vec3, Vec3)>,
+    ) -> bool {
+        // Decals lie on the ground and are culled on their own.
+        let Shape::Mesh(file) = model.shape else {
+            return true;
+        };
+        let mesh = match self.store.borrow_mut().mesh(file, false) {
+            Get::Ready(mesh) => mesh,
+            Get::Pending => return false,
+            Get::Missing => return true,
+        };
+        let skeleton = match mesh.skeleton {
+            Some(file) => match self.store.borrow_mut().skeleton(file) {
+                Get::Ready(skeleton) => Some(skeleton),
+                Get::Pending => return false,
+                Get::Missing => None,
+            },
+            None => None,
+        };
+        let mut low = Vec3::new(f32::MAX, f32::MAX, f32::MAX);
+        let mut high = Vec3::new(f32::MIN, f32::MIN, f32::MIN);
+        for corner in 0..8 {
+            let pick = |axis: usize| {
+                if corner >> axis & 1 == 0 {
+                    mesh.min[axis]
+                } else {
+                    mesh.max[axis]
+                }
+            };
+            let moved = transform.transform(Vec3::new(pick(0), pick(1), pick(2)));
+            low = low.min(moved);
+            high = high.max(moved);
+        }
+        // Wholly underground it cannot be seen, and would drag the sphere
+        // down to it.
+        if high.y >= 0.0 {
+            *bounds = Some(match *bounds {
+                Some((min, max)) => (min.min(low), max.max(high)),
+                None => (low, high),
+            });
+        }
+        if depth >= 8 {
+            return true;
+        }
+        let mut complete = true;
+        for (point_name, prop) in &model.props {
+            let Some(point) = mesh
+                .prop_points
+                .iter()
+                .find(|point| point.name == *point_name)
+            else {
+                continue;
+            };
+            let mut placed = *transform;
+            if point.bone != NO_BONE
+                && let Some(skeleton) = &skeleton
+            {
+                placed = placed.mul(&pose::bone_matrix(None, skeleton, usize::from(point.bone)));
+            }
+            placed = placed.mul(&point_matrix(point));
+            complete &= self.add_bounds(prop, &placed, depth + 1, bounds);
+        }
+        complete
     }
 
     /// Draws `model` with `transform` into `groups` and places its props.
@@ -1620,7 +1737,8 @@ impl View for Field {
         self.device.limits().max_texture_dimension_2d
     }
 
-    fn resize(&mut self, width: u32, height: u32, _device_pixel_ratio: f32) {
+    fn resize(&mut self, width: u32, height: u32, device_pixel_ratio: f32) {
+        self.device_pixel_ratio = device_pixel_ratio;
         self.config.width = width.max(1);
         self.config.height = height.max(1);
         self.surface.configure(&self.device, &self.config);
@@ -1644,6 +1762,7 @@ impl View for Field {
         if scene.match_id != entities.match_id {
             // String and variant set indices belong to their match.
             self.models.clear();
+            self.bounds.clear();
             self.far.clear();
             entities.match_id = scene.match_id;
             entities.strings.clear();
@@ -1672,6 +1791,8 @@ impl View for Field {
             .dots
             .extend(scene.dots.iter().map(|(id, dot)| (*id, *dot)));
         self.palette = palette.to_vec();
+        self.borders
+            .set_territory(&scene.territory, scene.territory_generation, palette);
         let mut camera = self.camera.borrow_mut();
         if !camera.placed && scene.map_size > 0 {
             camera.placed = true;
@@ -1730,6 +1851,7 @@ impl View for Field {
             Some(image) if image.size > 0 => self.upload_ground(image),
             _ => self.ground = None,
         }
+        self.borders.ground_changed();
     }
 
     fn draw(&mut self, progress: f32) -> bool {
@@ -1884,6 +2006,14 @@ impl View for Field {
                 .write_buffer(&self.decal_indices, 0, &decal_index_bytes);
         }
 
+        self.borders.prepare(
+            &self.device,
+            &self.queue,
+            self.ground.as_ref().map(|ground| &ground.image),
+            2.0 * (FIELD_OF_VIEW / 2.0).tan() / self.config.height as f32,
+            self.device_pixel_ratio,
+            territory::blink_seconds(now()),
+        );
         let target = frame.texture.create_view(&Default::default());
         let mut encoder = self.device.create_command_encoder(&Default::default());
         {
@@ -1979,6 +2109,9 @@ impl View for Field {
             if self.ground.is_some() {
                 pass.set_pipeline(&self.water_pipeline);
                 pass.draw(0..4, 0..1);
+                // After the water, as the engine draws overlays, so a line
+                // floating on it shows.
+                self.borders.draw(&mut pass);
             }
         }
         self.queue.submit([encoder.finish()]);
@@ -2006,8 +2139,11 @@ impl Field {
         let seconds = span / 1000.0;
         let uploads = f64::from(std::mem::take(&mut self.far.uploads)) / seconds;
         let bakes = f64::from(std::mem::take(&mut self.far.bakes)) / seconds;
-        stats.element.set_text_content(Some(&format!(
-            "{rate:.0} FPS, {} in view: meshes {high}/{medium}/{low}, impostors {impostors}, {} models, {draws} draws\n\
+        stats
+            .element
+            .set_text_content(Some(&format!("{rate:.0} FPS")));
+        stats.detail.set_text_content(Some(&format!(
+            "{} in view: meshes {high}/{medium}/{low}, impostors {impostors}, {} models, {draws} draws\n\
              Impostor atlases: {held} held ({:.0}/{:.0} MB), {waiting} waiting for room; \
              {} from storage, {} drawn; {uploads:.1} uploads/s, {bakes:.1} bakes/s\n\
              Assets: {} files, {:.1} MB in memory; {:.1} MB downloaded, {:.1} MB from cache\n\

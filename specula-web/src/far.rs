@@ -52,7 +52,7 @@ const RETRY_FRAMES: u64 = 60;
 const CAPTURE_VIEW_SIZE: u64 = 112;
 const OPFS_DIR: &str = "impostors";
 /// Changes whenever what is saved, or how it is drawn, does.
-const FILE_VERSION: u32 = 5;
+const FILE_VERSION: u32 = 6;
 /// The mip level of the capture the normal plane is kept from: lighting
 /// at half the albedo's resolution does not show at this size, and it
 /// saves most of the plane.

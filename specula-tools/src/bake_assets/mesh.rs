@@ -20,6 +20,12 @@ const RATIOS: [f32; 2] = [0.4, 0.15];
 /// `Sparse`); it stops a level short of its ratio rather than wreck the
 /// silhouette of a small mesh.
 const MAX_ERROR: f32 = 0.08;
+/// Share of the full mesh's surface area a level must keep, else the finer
+/// level is used in its place. Foliage is cards, each its own island of
+/// one or two quads, and meshoptimizer meets its triangle target by
+/// collapsing whole cards, which thins a wheat field or a tree crown to a
+/// few stalks; a level that only drops small detail keeps most of its area.
+const MIN_AREA: f32 = 0.75;
 /// UV and normal error against position error for the coarsest level.
 const ATTRIBUTE_WEIGHTS: [f32; 5] = [1.0, 1.0, 0.5, 0.5, 0.5];
 
@@ -185,10 +191,11 @@ fn add_levels(model: &Model, indices: &mut Vec<u16>) -> Vec<(u32, u32)> {
         .collect();
     let locks = vec![false; model.vertices.len()];
     let mut lists = vec![full.clone()];
+    let full_area = area(&positions, &full);
     for (level, ratio) in RATIOS.into_iter().enumerate() {
         let target = ((full.len() / 3) as f32 * ratio) as usize * 3;
         let coarsest = level == RATIOS.len() - 1;
-        lists.push(if coarsest {
+        let list = if coarsest {
             meshopt::simplify_with_attributes_and_locks_decoder(
                 &full,
                 &positions,
@@ -210,7 +217,12 @@ fn add_levels(model: &Model, indices: &mut Vec<u16>) -> Vec<(u32, u32)> {
                 meshopt::SimplifyOptions::Sparse,
                 None,
             )
-        });
+        };
+        if area(&positions, &list) >= full_area * MIN_AREA {
+            lists.push(list);
+        } else {
+            lists.push(lists[lists.len() - 1].clone());
+        }
     }
     indices.clear();
     let mut levels = vec![(0, 0); lists.len()];
@@ -219,6 +231,22 @@ fn add_levels(model: &Model, indices: &mut Vec<u16>) -> Vec<(u32, u32)> {
         indices.extend(list.iter().map(|index| *index as u16));
     }
     levels
+}
+
+fn area(positions: &[[f32; 3]], list: &[u32]) -> f32 {
+    list.chunks_exact(3)
+        .map(|triangle| {
+            let [a, b, c] = [0, 1, 2].map(|corner| positions[triangle[corner] as usize]);
+            let u = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+            let v = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
+            let cross = [
+                u[1] * v[2] - u[2] * v[1],
+                u[2] * v[0] - u[0] * v[2],
+                u[0] * v[1] - u[1] * v[0],
+            ];
+            (cross[0] * cross[0] + cross[1] * cross[1] + cross[2] * cross[2]).sqrt() / 2.0
+        })
+        .sum()
 }
 
 /// Renumbers the vertices by first use, coarsest level first, so the

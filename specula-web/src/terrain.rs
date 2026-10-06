@@ -77,6 +77,40 @@ impl TerrainImage {
         };
         units / HEIGHT_UNITS_PER_METRE
     }
+
+    /// `CTerrain::CalcExactNormal`: the normal of the ground triangle under
+    /// `x`, `z`.
+    pub fn normal(&self, x: f32, z: f32) -> [f32; 3] {
+        if self.size < 2 {
+            return [0.0, 1.0, 0.0];
+        }
+        let last = self.size as isize - 2;
+        let xi = ((x / TILE_SIZE).floor() as isize).clamp(0, last) as usize;
+        let zi = ((z / TILE_SIZE).floor() as isize).clamp(0, last) as usize;
+        let xf = (x / TILE_SIZE - xi as f32).clamp(0.0, 1.0);
+        let zf = (z / TILE_SIZE - zi as f32).clamp(0.0, 1.0);
+        let h00 = self.height(xi, zi);
+        let h01 = self.height(xi, zi + 1);
+        let h10 = self.height(xi + 1, zi);
+        let h11 = self.height(xi + 1, zi + 1);
+        // The triangle's rises along x and along z, then the negated cross
+        // product of (TILE_SIZE, dx, 0) and (0, dz, TILE_SIZE).
+        let (dx, dz) = if self.triangulation_dir(xi, zi) {
+            if xf + zf <= 1.0 {
+                (h10 - h00, h01 - h00)
+            } else {
+                (h11 - h01, h11 - h10)
+            }
+        } else if xf <= zf {
+            (h11 - h01, h01 - h00)
+        } else {
+            (h10 - h00, h11 - h10)
+        };
+        let (dx, dz) = (dx / HEIGHT_UNITS_PER_METRE, dz / HEIGHT_UNITS_PER_METRE);
+        let normal = [-dx * TILE_SIZE, TILE_SIZE * TILE_SIZE, -dz * TILE_SIZE];
+        let length = normal.iter().map(|v| v * v).sum::<f32>().sqrt();
+        normal.map(|v| v / length)
+    }
 }
 
 /// Follows CMiniMapTexture::RebuildTerrainTexture, so the background looks

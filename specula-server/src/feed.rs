@@ -6,7 +6,7 @@ use std::io::ErrorKind;
 use std::io::Read;
 
 const MAGIC: [u8; 4] = *b"SPCF";
-const VERSION: u32 = 7;
+const VERSION: u32 = 8;
 const RECORD_TEMPLATE: u8 = 1;
 const RECORD_TURN: u8 = 2;
 const RECORD_MAP: u8 = 3;
@@ -14,6 +14,7 @@ const RECORD_TERRAIN: u8 = 4;
 const RECORD_PLAYERS: u8 = 5;
 const RECORD_STRING: u8 = 6;
 const RECORD_VARIANT_SET: u8 = 7;
+const RECORD_TERRITORY: u8 = 8;
 const ENTITY_SIZE: usize = 64;
 const COLOR_MINIMAP: u8 = 1;
 const HAS_VISUAL: u8 = 2;
@@ -104,6 +105,7 @@ pub enum Record {
     },
     Terrain(Terrain),
     Players(Vec<Player>),
+    Territory(Territory),
     String {
         index: u32,
         text: String,
@@ -113,6 +115,16 @@ pub enum Record {
         index: u32,
         pairs: Vec<(u32, u32)>,
     },
+}
+
+/// `ICmpTerritoryManager`'s grid, whenever it changes: row-major, x
+/// fastest, a tile per 8 navcells; owner in 0x1F, connected 0x20, blinking
+/// 0x40.
+#[derive(Clone, PartialEq, Eq)]
+pub struct Territory {
+    pub width: u32,
+    pub height: u32,
+    pub tiles: Vec<u8>,
 }
 
 /// Sent once per match; heights and tiles are row-major, x fastest.
@@ -179,6 +191,7 @@ pub fn read_record(reader: &mut impl Read) -> io::Result<Option<Record>> {
                 return Ok(Some(Record::String { index, text }));
             }
             RECORD_VARIANT_SET => return decode_variant_set(&payload).map(Some),
+            RECORD_TERRITORY => return decode_territory(&payload).map(Some),
             // Newer hooks may add kinds; the length prefix lets them be skipped.
             _ => continue,
         }
@@ -316,6 +329,21 @@ fn decode_players(payload: &[u8]) -> io::Result<Record> {
         return Err(invalid("players record longer than its contents"));
     }
     Ok(Record::Players(players))
+}
+
+fn decode_territory(payload: &[u8]) -> io::Result<Record> {
+    let mut cursor = Cursor(payload);
+    let width = cursor.u32()?;
+    let height = cursor.u32()?;
+    let tiles = cursor.bytes(width as usize * height as usize)?.to_vec();
+    if !cursor.0.is_empty() {
+        return Err(invalid("territory record longer than its contents"));
+    }
+    Ok(Record::Territory(Territory {
+        width,
+        height,
+        tiles,
+    }))
 }
 
 fn decode_variant_set(payload: &[u8]) -> io::Result<Record> {

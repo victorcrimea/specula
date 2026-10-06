@@ -1,5 +1,6 @@
-//! Draws the terrain picture, then every entity on top as a screen-space
-//! square, one instance per dot, then the minimap icons over the dots.
+//! Draws the terrain picture and the territory over it, then every entity
+//! on top as a screen-space square, one instance per dot, then the minimap
+//! icons over the dots.
 
 use std::collections::HashMap;
 
@@ -10,7 +11,9 @@ use crate::gpu::Gpu;
 use crate::icons::IconAtlas;
 use crate::stream::Dot;
 use crate::stream::Scene;
+use crate::stream::Territory;
 use crate::terrain::TerrainImage;
+use crate::territory;
 
 /// In CSS pixels; scaled by devicePixelRatio so dots look the same on any
 /// screen.
@@ -48,6 +51,11 @@ pub struct Renderer {
     terrain_layout: wgpu::BindGroupLayout,
     terrain_sampler: wgpu::Sampler,
     terrain: Option<wgpu::BindGroup>,
+    /// The terrain pipeline blending, for the territory over the terrain.
+    territory_pipeline: wgpu::RenderPipeline,
+    territory: Option<wgpu::BindGroup>,
+    /// The territory generation and palette `territory` was made from.
+    territory_made_from: Option<(u32, Vec<u32>)>,
     icon_pipeline: wgpu::RenderPipeline,
     icon_sampler: wgpu::Sampler,
     atlas: Option<wgpu::BindGroup>,
@@ -174,30 +182,41 @@ impl Renderer {
                 bind_group_layouts: &[Some(&bind_group_layout), Some(&terrain_layout)],
                 immediate_size: 0,
             });
-        let terrain_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("terrain"),
-            layout: Some(&terrain_pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &terrain_shader,
-                entry_point: Some("vs_main"),
-                compilation_options: Default::default(),
-                buffers: &[],
-            },
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleStrip,
-                ..Default::default()
-            },
-            depth_stencil: None,
-            multisample: Default::default(),
-            fragment: Some(wgpu::FragmentState {
-                module: &terrain_shader,
-                entry_point: Some("fs_main"),
-                compilation_options: Default::default(),
-                targets: &[Some(format.into())],
-            }),
-            multiview_mask: None,
-            cache: None,
-        });
+        let picture_pipeline = |label: &str, blend: Option<wgpu::BlendState>| {
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some(label),
+                layout: Some(&terrain_pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &terrain_shader,
+                    entry_point: Some("vs_main"),
+                    compilation_options: Default::default(),
+                    buffers: &[],
+                },
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleStrip,
+                    ..Default::default()
+                },
+                depth_stencil: None,
+                multisample: Default::default(),
+                fragment: Some(wgpu::FragmentState {
+                    module: &terrain_shader,
+                    entry_point: Some("fs_main"),
+                    compilation_options: Default::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format,
+                        blend,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                multiview_mask: None,
+                cache: None,
+            })
+        };
+        let terrain_pipeline = picture_pipeline("terrain", None);
+        // CMiniMapTexture::RenderFinalTexture: the territory goes over the
+        // terrain, under the entities.
+        let territory_pipeline =
+            picture_pipeline("territory", Some(wgpu::BlendState::ALPHA_BLENDING));
         // Linear, so a zoomed-out map does not shimmer and tile edges blend
         // like the in-game minimap's.
         let terrain_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
@@ -317,6 +336,9 @@ impl Renderer {
             terrain_layout,
             terrain_sampler,
             terrain: None,
+            territory_pipeline,
+            territory: None,
+            territory_made_from: None,
             icon_pipeline,
             icon_sampler,
             atlas: None,
@@ -392,6 +414,12 @@ impl Renderer {
                 pass.set_bind_group(1, terrain, &[]);
                 pass.draw(0..4, 0..1);
             }
+            if let Some(territory) = &self.territory {
+                pass.set_pipeline(&self.territory_pipeline);
+                pass.set_bind_group(0, &self.bind_group, &[]);
+                pass.set_bind_group(1, territory, &[]);
+                pass.draw(0..4, 0..1);
+            }
             if self.count > 0 {
                 pass.set_pipeline(&self.pipeline);
                 pass.set_bind_group(0, &self.bind_group, &[]);
@@ -426,14 +454,20 @@ impl Renderer {
             self.terrain = None;
             return;
         };
+        self.terrain = Some(self.picture("terrain", image.size, image.size, &image.pixels));
+        self.circular = image.circular;
+    }
+
+    /// A map-sized RGBA8 picture, row 0 at z = 0, bound for terrain.wgsl.
+    fn picture(&self, label: &str, width: u32, height: u32, pixels: &[u8]) -> wgpu::BindGroup {
         let size = wgpu::Extent3d {
-            width: image.size,
-            height: image.size,
+            width,
+            height,
             depth_or_array_layers: 1,
         };
         // Not sRGB: the colours are sRGB bytes already, like the dots'.
         let texture = self.device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("terrain"),
+            label: Some(label),
             size,
             mip_level_count: 1,
             sample_count: 1,
@@ -444,17 +478,17 @@ impl Renderer {
         });
         self.queue.write_texture(
             texture.as_image_copy(),
-            &image.pixels,
+            pixels,
             wgpu::TexelCopyBufferLayout {
                 offset: 0,
-                bytes_per_row: Some(image.size * 4),
+                bytes_per_row: Some(width * 4),
                 rows_per_image: None,
             },
             size,
         );
         let view = texture.create_view(&Default::default());
-        self.terrain = Some(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("terrain"),
+        self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some(label),
             layout: &self.terrain_layout,
             entries: &[
                 wgpu::BindGroupEntry {
@@ -466,8 +500,23 @@ impl Renderer {
                     resource: wgpu::BindingResource::Sampler(&self.terrain_sampler),
                 },
             ],
-        }));
-        self.circular = image.circular;
+        })
+    }
+
+    /// Paints the territory again if it or the colours changed.
+    fn set_territory(&mut self, territory: &Territory, generation: u32, palette: &[u32]) {
+        if self
+            .territory_made_from
+            .as_ref()
+            .is_some_and(|(made, colors)| *made == generation && colors == palette)
+        {
+            return;
+        }
+        self.territory_made_from = Some((generation, palette.to_vec()));
+        self.territory = (territory.width > 0 && territory.height > 0).then(|| {
+            let bitmap = territory::minimap_bitmap(territory, palette);
+            self.picture("territory", territory.width, territory.height, &bitmap)
+        });
     }
 
     /// The caller rebuilds the scene afterwards, so icons already in it
@@ -538,6 +587,7 @@ impl Renderer {
     /// with the progress uniform. `palette` is the colour of each player id.
     pub fn set_scene(&mut self, scene: &Scene, palette: &[u32]) {
         self.map_size = scene.map_size as f32;
+        self.set_territory(&scene.territory, scene.territory_generation, palette);
         // Nothing to place dots on before the first keyframe.
         if scene.map_size == 0 {
             self.count = 0;

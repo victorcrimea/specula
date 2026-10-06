@@ -247,6 +247,7 @@ fn serve(stream: UnixStream, hub: &Hub) -> io::Result<()> {
             }
             Record::Map { size, speed } => hub.set_map(size, speed),
             Record::Players(players) => hub.set_players(players),
+            Record::Territory(territory) => hub.set_territory(territory),
             Record::String { index, text } => hub.add_string(index, text)?,
             Record::VariantSet { index, pairs } => hub.add_variant_set(index, pairs)?,
             Record::Terrain(terrain) => {

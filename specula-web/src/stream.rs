@@ -1,5 +1,5 @@
 //! Decoder for specula-server's viewer stream and match segments, wire
-//! format v6; the layout is documented in `specula-server/src/view.rs`.
+//! format v7; the layout is documented in `specula-server/src/view.rs`.
 
 use std::collections::BTreeMap;
 use std::io::Read;
@@ -102,11 +102,25 @@ pub struct Scene {
     pub players: Vec<Player>,
     /// Set whenever a message replaces `players`; the reader clears it.
     pub players_changed: bool,
+    pub territory: Territory,
+    /// Goes up whenever `territory` changes, so each view can tell on its
+    /// own whether it has drawn the current one.
+    pub territory_generation: u32,
     pub templates: Vec<String>,
     /// Actor file names, animation names, variant keys and selections.
     pub strings: Vec<String>,
     pub variant_sets: Vec<VariantSet>,
     pub dots: BTreeMap<u32, Dot>,
+}
+
+/// `ICmpTerritoryManager`'s grid, a tile per `territory::TILE_SIZE`.
+#[derive(Default, PartialEq, Eq)]
+pub struct Territory {
+    pub width: u32,
+    pub height: u32,
+    /// Row-major, x fastest: owner in `territory::OWNER_MASK`, plus the
+    /// connected and blinking bits.
+    pub tiles: Vec<u8>,
 }
 
 pub struct Icon {
@@ -172,6 +186,7 @@ impl Scene {
         self.icons.clear();
         self.read_icons(cursor)?;
         self.read_players(cursor)?;
+        self.read_territory(cursor)?;
         self.templates.clear();
         self.strings.clear();
         self.variant_sets.clear();
@@ -203,6 +218,9 @@ impl Scene {
         self.read_icons(cursor)?;
         if cursor.u8()? != 0 {
             self.read_players(cursor)?;
+        }
+        if cursor.u8()? != 0 {
+            self.read_territory(cursor)?;
         }
         self.read_tables(cursor)?;
         let spawned = cursor.varint_u32()?;
@@ -357,6 +375,31 @@ impl Scene {
         Ok(())
     }
 
+    fn read_territory(&mut self, cursor: &mut Cursor) -> Result<(), &'static str> {
+        let width = cursor.varint_u32()?;
+        let height = cursor.varint_u32()?;
+        let count = width as usize * height as usize;
+        let mut tiles = Vec::with_capacity(count);
+        while tiles.len() < count {
+            let run = cursor.varint()? as usize;
+            let tile = cursor.u8()?;
+            if run == 0 || run > count - tiles.len() {
+                return Err("territory run out of bounds");
+            }
+            tiles.resize(tiles.len() + run, tile);
+        }
+        let territory = Territory {
+            width,
+            height,
+            tiles,
+        };
+        if territory != self.territory {
+            self.territory = territory;
+            self.territory_generation = self.territory_generation.wrapping_add(1);
+        }
+        Ok(())
+    }
+
     /// A keyframe of the current state, as the server would send it, so a
     /// scene rebuilt from a segment can be handed on as one message.
     pub fn encode_keyframe(&self) -> Vec<u8> {
@@ -393,6 +436,12 @@ impl Scene {
                     Stance::Neutral => 2,
                 });
             }
+        }
+        out.varint(u64::from(self.territory.width));
+        out.varint(u64::from(self.territory.height));
+        for run in self.territory.tiles.chunk_by(|a, b| a == b) {
+            out.varint(run.len() as u64);
+            out.u8(run[0]);
         }
         for table in [&self.templates, &self.strings] {
             out.varint(table.len() as u64);

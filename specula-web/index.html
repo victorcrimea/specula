@@ -37,11 +37,14 @@ html, body { margin: 0; height: 100%; background: #0f1214; }
   background: rgba(15, 18, 20, 0.9); border: 1px solid #6b3a34;
   border-radius: 4px; user-select: text; -webkit-user-select: text; }
 #errors:empty { display: none; }
-#fps { position: fixed; top: 44px; right: 8px; padding: 4px 8px;
-  white-space: pre-wrap; text-align: right; max-width: calc(100vw - 32px);
+#hud { position: fixed; top: 44px; right: 8px; display: flex;
+  flex-direction: column; align-items: flex-end; gap: 6px;
+  max-width: calc(100vw - 32px); }
+#fps, #stats { padding: 4px 8px; white-space: pre-wrap; text-align: right;
   font: 600 13px system-ui, sans-serif; font-variant-numeric: tabular-nums;
   color: #e6e9eb; background: rgba(15, 18, 20, 0.85);
   border: 1px solid #3a4248; border-radius: 4px; }
+body:not(.debug) #stats, body:not(.debug) #errors { display: none; }
 #clock { position: fixed; top: 8px; right: 8px; padding: 4px 8px;
   font: 600 15px system-ui, sans-serif; font-variant-numeric: tabular-nums;
   color: #e6e9eb; background: rgba(15, 18, 20, 0.85);
@@ -67,7 +70,10 @@ html, body { margin: 0; height: 100%; background: #0f1214; }
 </div>
 <div id="clock" aria-label="Match time">0:00</div>
 <canvas id="minimap" aria-label="Minimap"></canvas>
+<div id="hud">
 <div id="fps" aria-label="Frames per second">- FPS</div>
+<div id="stats" aria-label="Renderer statistics"></div>
+</div>
 <div id="loading" role="status">
 <span id="loading-text">Loading</span>
 <div id="loading-track"><div id="loading-fill"></div></div>
@@ -99,8 +105,24 @@ html, body { margin: 0; height: 100%; background: #0f1214; }
   window.addEventListener("unhandledrejection", (event) => show(String(event.reason)));
 })();
 </script>
+<script>
+// Debug info is for whoever works on the page, not for viewers. Phones
+// have no keyboard, so a four-finger tap stands in for I.
+(() => {
+  const toggle = () => document.body.classList.toggle("debug");
+  window.addEventListener("keydown", (event) => {
+    if (event.code !== "KeyI" || event.repeat
+        || event.ctrlKey || event.metaKey || event.altKey) return;
+    if (["INPUT", "SELECT", "TEXTAREA"].includes(event.target.tagName)) return;
+    toggle();
+  });
+  window.addEventListener("touchstart", (event) => {
+    if (event.touches.length === 4) toggle();
+  }, { passive: true });
+})();
+</script>
 <script type="module">
-const glue = "./pkg/specula_web.js?v=5958be043dbd";
+const glue = "./pkg/specula_web.js?v=588e2c29d504";
 const { default: init, observer_main } = await import(glue);
 await init();
 observer_main(glue);

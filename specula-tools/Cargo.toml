@@ -13,6 +13,10 @@ name = "minimap-icons"
 path = "src/minimap_icons.rs"
 
 [[bin]]
+name = "territory-border"
+path = "src/territory_border.rs"
+
+[[bin]]
 name = "bake-unit"
 path = "src/bake_unit/main.rs"
 

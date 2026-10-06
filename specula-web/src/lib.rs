@@ -13,6 +13,7 @@ mod pose;
 mod render;
 mod stream;
 mod terrain;
+mod territory;
 mod unit;
 mod variation;
 mod worker;

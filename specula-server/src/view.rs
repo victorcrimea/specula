@@ -1,4 +1,4 @@
-//! The viewer stream, wire format v6: one binary WebSocket message per
+//! The viewer stream, wire format v7: one binary WebSocket message per
 //! keyframe, turn or match end, varints and zigzag as in `wire.rs`, positions and
 //! heights in 1/16 m.
 //!
@@ -6,10 +6,11 @@
 //!   match's sim rate), varint first turn of the match's history, varint
 //!   turns per segment, varint map size in metres, u64 terrain id (0: none
 //!   yet, else fetch `/terrain/<id as 16 hex digits>`), icon table, player
-//!   table, template table, string table, variant set table, varint count,
-//!   then count x {varint id delta, entity}.
+//!   table, territory, template table, string table, variant set table,
+//!   varint count, then count x {varint id delta, entity}.
 //! - kind 2 delta: varint turn, icons added to the table, u8 1 if a new
-//!   player table follows (it replaces the old one) else 0, templates,
+//!   player table follows (it replaces the old one) else 0, u8 1 if a new
+//!   territory follows (likewise) else 0, templates,
 //!   strings and variant sets added to their tables, varint spawned,
 //!   destroyed and changed counts. Spawned entries are keyframe entries,
 //!   destroyed entries are id deltas, changed entries are {varint id delta,
@@ -57,6 +58,10 @@
 //! name, u32 colour, zigzag team (-1: none), u8 state (0 active, 1
 //! defeated, 2 won), n x u8 stance towards player j (0 enemy, 1 ally, 2
 //! neutral)}; index 0 is gaia.
+//! A territory is varint width, varint height (both 0: none yet), then
+//! runs of {varint length, u8 tile} covering width * height tiles,
+//! row-major, x fastest. A tile is 8 m square, as `ICmpTerritoryManager`'s
+//! grid: owner in 0x1F, connected 0x20, blinking 0x40.
 //! Template and string tables are varint count, count x {varint length,
 //! UTF-8 text}. Template names are as the simulation knows them, e.g.
 //! `units/athen/infantry_spearman_b` or `foundation|structures/athen/house`;
@@ -98,6 +103,7 @@ use rocket::tokio::sync::broadcast;
 use crate::feed::Entity;
 use crate::feed::Icon;
 use crate::feed::Player;
+use crate::feed::Territory;
 use crate::wire::Writer;
 use crate::wire::diff;
 use crate::wire::quantize_angle;
@@ -304,6 +310,9 @@ struct State {
     players: Vec<Player>,
     /// The next delta must carry the player table.
     players_changed: bool,
+    territory: Option<Territory>,
+    /// The next delta must carry the territory.
+    territory_changed: bool,
     has_turn: bool,
     /// Set when a new observer connects: its entity ids belong to another
     /// match, so its first turn must replace, not patch, what viewers have.
@@ -358,6 +367,8 @@ impl Hub {
                 player_color_templates: HashSet::new(),
                 players: Vec::new(),
                 players_changed: false,
+                territory: None,
+                territory_changed: false,
                 has_turn: false,
                 new_feed: true,
                 ended: None,
@@ -380,6 +391,7 @@ impl Hub {
         state.template_icons.clear();
         state.player_color_templates.clear();
         state.players.clear();
+        state.territory = None;
     }
 
     pub fn add_template(&self, index: u32, name: String) -> io::Result<()> {
@@ -419,6 +431,14 @@ impl Hub {
         if state.players != players {
             state.players = players;
             state.players_changed = true;
+        }
+    }
+
+    pub fn set_territory(&self, territory: Territory) {
+        let mut state = self.state.lock().unwrap();
+        if state.territory.as_ref() != Some(&territory) {
+            state.territory = Some(territory);
+            state.territory_changed = true;
         }
     }
 
@@ -546,6 +566,10 @@ impl Hub {
                     variant_sets: state.variant_sets.unsent(),
                 },
                 state.players_changed.then_some(&state.players[..]),
+                state
+                    .territory_changed
+                    .then_some(state.territory.as_ref())
+                    .flatten(),
                 &state.dots,
                 &dots,
             )
@@ -566,6 +590,7 @@ impl Hub {
         state.strings.sent = state.strings.items.len();
         state.variant_sets.sent = state.variant_sets.items.len();
         state.players_changed = false;
+        state.territory_changed = false;
         state.turn = turn;
         state.dots = dots;
         state.has_turn = true;
@@ -672,6 +697,7 @@ fn encode_keyframe(
     out.u64(terrain_id(state));
     write_icons(&mut out, tables.icons);
     write_players(&mut out, &state.players);
+    write_territory(&mut out, state.territory.as_ref());
     write_strings(&mut out, tables.templates);
     write_strings(&mut out, tables.strings);
     write_variant_sets(&mut out, tables.variant_sets);
@@ -689,6 +715,7 @@ fn encode_delta(
     turn: u32,
     new_tables: &Tables,
     new_players: Option<&[Player]>,
+    new_territory: Option<&Territory>,
     previous: &BTreeMap<u32, Dot>,
     current: &BTreeMap<u32, Dot>,
 ) -> Vec<u8> {
@@ -701,6 +728,13 @@ fn encode_delta(
         Some(players) => {
             out.u8(1);
             write_players(&mut out, players);
+        }
+        None => out.u8(0),
+    }
+    match new_territory {
+        Some(territory) => {
+            out.u8(1);
+            write_territory(&mut out, Some(territory));
         }
         None => out.u8(0),
     }
@@ -831,6 +865,21 @@ fn write_players(out: &mut Writer, players: &[Player]) {
         out.zigzag(i64::from(player.team));
         out.u8(player.state);
         out.0.extend_from_slice(&player.stances);
+    }
+}
+
+/// Run-length coded: a territory is a few large areas of one value.
+fn write_territory(out: &mut Writer, territory: Option<&Territory>) {
+    let Some(territory) = territory else {
+        out.varint(0);
+        out.varint(0);
+        return;
+    };
+    out.varint(u64::from(territory.width));
+    out.varint(u64::from(territory.height));
+    for run in territory.tiles.chunk_by(|a, b| a == b) {
+        out.varint(run.len() as u64);
+        out.u8(run[0]);
     }
 }
 

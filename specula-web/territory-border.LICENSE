@@ -1,0 +1,9 @@
+territory-border.bin packs the territory border textures of 0 A.D.
+(binaries/data/mods/mod/art/textures/misc/territory_border.png and
+territory_border_mask.png), made by Wildfire Games,
+http://www.wildfiregames.com/
+
+They are licensed under Creative Commons Attribution-Share Alike 3.0,
+http://creativecommons.org/licenses/by-sa/3.0/, and so is
+territory-border.bin.
+Rebuild it with: cargo run -p specula-tools --release --bin territory-border
