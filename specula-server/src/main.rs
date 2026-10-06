@@ -15,6 +15,7 @@ use std::os::unix::net::UnixStream;
 use std::sync::Arc;
 
 use rocket::State;
+use rocket::fairing::AdHoc;
 use rocket::fs::FileServer;
 use rocket::futures::SinkExt;
 use rocket::futures::StreamExt;
@@ -60,6 +61,25 @@ async fn main() {
         .manage(hub)
         .mount("/", rocket::routes![viewer, terrain_file, segment_file])
         .mount("/", FileServer::from(WEB_ROOT))
+        .attach(AdHoc::on_response("Cache-Control", |request, response| {
+            Box::pin(async move {
+                if response.headers().contains("Cache-Control") {
+                    return;
+                }
+                // Baked assets are named by their content, so a copy never
+                // goes stale. Pages, the wasm and its glue, and the pointers
+                // keep their names, and a browser left to guess may pair a
+                // new wasm with an old glue.
+                let hashed = request.uri().path().starts_with("/assets/")
+                    && request.uri().path().ends_with(".bin");
+                let value = if hashed {
+                    "public, max-age=31536000, immutable"
+                } else {
+                    "no-cache"
+                };
+                response.set_header(Header::new("Cache-Control", value));
+            })
+        }))
         .launch()
         .await;
     if let Err(error) = result {

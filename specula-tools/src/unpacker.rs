@@ -1,8 +1,8 @@
 //! The engine's packed file layout, `CFileUnpacker` in ps/FileIo.cpp: a
 //! 4-byte magic, u32 version, u32 payload size, then the payload.
 
-use crate::math::Quat;
-use crate::math::Vec3;
+use specula_assets::math::Quat;
+use specula_assets::math::Vec3;
 
 pub struct Unpacker<'a> {
     data: &'a [u8],

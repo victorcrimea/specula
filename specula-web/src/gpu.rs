@@ -30,9 +30,17 @@ pub async fn init(canvas: HtmlCanvasElement) -> Result<Gpu, String> {
         "graphics backend: {:?}",
         adapter.get_info().backend
     ));
+    // Lets the observer page upload the game's DXT textures as they are;
+    // without it they are decoded in WASM.
+    let features = adapter.features() & wgpu::Features::TEXTURE_COMPRESSION_BC;
+    crate::log(&format!(
+        "BC textures: {}",
+        if features.is_empty() { "no" } else { "yes" }
+    ));
     let (device, queue) = adapter
         .request_device(&wgpu::DeviceDescriptor {
             label: None,
+            required_features: features,
             // WebGL2 limits keep the fallback working; the resolution
             // limits come from the adapter so large canvases still fit.
             required_limits: wgpu::Limits::downlevel_webgl2_defaults()

@@ -35,13 +35,8 @@
 
 mod actor;
 mod bake;
-mod convert;
 mod lod;
-mod math;
-mod pmd;
-mod psa;
 mod texture;
-mod unpacker;
 
 use std::fs;
 use std::hash::DefaultHasher;
@@ -51,8 +46,11 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+use specula_assets::half::f16_bits;
+use specula_assets::math::Vec3;
+use specula_tools::convert;
+
 use crate::bake::Baked;
-use crate::math::Vec3;
 
 const DEFAULT_MOD: &str = "../0ad/binaries/data/mods/public";
 const DEFAULT_PYROGENESIS: &str = "../0ad-specula/binaries/system/pyrogenesis";
@@ -89,7 +87,11 @@ fn run() -> Result<(), String> {
     root.sources(&ANIMATIONS, &mut sources);
     sources.sort();
     sources.dedup();
-    let converted = convert::run(&mod_dir, &pyrogenesis, &PathBuf::from(WORK_DIR), &sources)?;
+    let (converted, missing) =
+        convert::run(&mod_dir, &pyrogenesis, &PathBuf::from(WORK_DIR), &sources)?;
+    if !missing.is_empty() {
+        return Err(format!("the engine did not convert: {missing:?}"));
+    }
     let mut baked = bake::bake(&root, &mod_dir, &converted, &ANIMATIONS)?;
     lod::add_levels(&mut baked);
 
@@ -239,38 +241,4 @@ fn put_vec3(out: &mut Vec<u8>, value: Vec3) {
     for component in [value.x, value.y, value.z] {
         out.extend_from_slice(&component.to_le_bytes());
     }
-}
-
-/// IEEE half precision, rounding to nearest even. Unit coordinates are a few
-/// metres, where a half keeps about a millimetre.
-fn f16_bits(value: f32) -> u16 {
-    let bits = value.to_bits();
-    let sign = ((bits >> 16) & 0x8000) as u16;
-    let exponent = ((bits >> 23) & 0xFF) as i32;
-    let mantissa = bits & 0x007F_FFFF;
-    if exponent == 0xFF {
-        let nan = if mantissa != 0 { 0x0200 } else { 0 };
-        return sign | 0x7C00 | nan;
-    }
-    let half_exponent = exponent - 127 + 15;
-    if half_exponent >= 0x1F {
-        return sign | 0x7C00;
-    }
-    if half_exponent <= 0 {
-        if half_exponent < -10 {
-            return sign;
-        }
-        let mantissa = mantissa | 0x0080_0000;
-        let shift = (14 - half_exponent) as u32;
-        let half = mantissa >> shift;
-        let remainder = mantissa & ((1 << shift) - 1);
-        let halfway = 1 << (shift - 1);
-        let round = remainder > halfway || (remainder == halfway && half & 1 == 1);
-        return sign | (half + u32::from(round)) as u16;
-    }
-    let half = ((half_exponent as u32) << 10) | (mantissa >> 13);
-    let remainder = mantissa & 0x1FFF;
-    let round = remainder > 0x1000 || (remainder == 0x1000 && half & 1 == 1);
-    // A carry out of the mantissa correctly bumps the exponent.
-    sign | (half + u32::from(round)) as u16
 }

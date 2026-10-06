@@ -6,7 +6,8 @@
 //! Page to worker: u8 command, f64 argument. Worker to page: u8 `POST_SCENE`,
 //! f64 real milliseconds per turn (0: live, measure the pace), then a wire
 //! message; or u8 `POST_STATUS`, u32 first turn, u32 newest turn, u32
-//! playhead turn, u8 `STATUS_*` flags, f32 speed.
+//! playhead turn, u8 `STATUS_*` flags, f32 speed, u64 bytes of live
+//! messages and u64 bytes of segments received since the worker started.
 
 use std::cell::RefCell;
 use std::collections::VecDeque;
@@ -94,6 +95,9 @@ struct Playback {
     /// A seek waiting for its segment: turn, exact.
     pending_seek: Option<(u32, bool)>,
     timer: Option<i32>,
+    /// Received since the worker started, for the page's statistics.
+    live_bytes: u64,
+    segment_bytes: u64,
 }
 
 impl Playback {
@@ -393,8 +397,9 @@ impl Playback {
         let url = format!("/match/{match_id:016x}/seg/{index}");
         let this = self.this.clone();
         wasm_bindgen_futures::spawn_local(async move {
-            let result = fetch_bytes(&url)
-                .await
+            let fetched = fetch_bytes(&url).await;
+            let size = fetched.as_ref().map_or(0, |bytes| bytes.len() as u64);
+            let result = fetched
                 .and_then(|bytes| stream::read_segment(&bytes).map_err(String::from))
                 .and_then(|messages| {
                     messages
@@ -404,9 +409,9 @@ impl Playback {
                         .map_err(String::from)
                 });
             if let Some(playback) = this.upgrade() {
-                playback
-                    .borrow_mut()
-                    .segment_arrived(match_id, index, result);
+                let mut playback = playback.borrow_mut();
+                playback.segment_bytes += size;
+                playback.segment_arrived(match_id, index, result);
             }
         });
     }
@@ -481,6 +486,8 @@ impl Playback {
         out.extend_from_slice(&playhead.to_le_bytes());
         out.push(flags);
         out.extend_from_slice(&self.speed.to_le_bytes());
+        out.extend_from_slice(&self.live_bytes.to_le_bytes());
+        out.extend_from_slice(&self.segment_bytes.to_le_bytes());
         self.post(&out);
     }
 
@@ -541,6 +548,8 @@ fn start() -> Result<(), String> {
             next_due: 0.0,
             pending_seek: None,
             timer: None,
+            live_bytes: 0,
+            segment_bytes: 0,
         })
     });
 
@@ -550,7 +559,9 @@ fn start() -> Result<(), String> {
             return;
         };
         let bytes = js_sys::Uint8Array::new(&buffer).to_vec();
-        receiver.borrow_mut().on_live(bytes);
+        let mut playback = receiver.borrow_mut();
+        playback.live_bytes += bytes.len() as u64;
+        playback.on_live(bytes);
     });
     socket.set_onmessage(Some(on_message.as_ref().unchecked_ref()));
     // The socket lives as long as the worker, so its handler does too.

@@ -13,11 +13,63 @@ const UNKNOWN_COLOR: u32 = 0xFF_FF_FF;
 const SHALLOW_WATER: [u8; 4] = [0x70, 0x98, 0xC0, 0xFF];
 const DEEP_WATER: [u8; 4] = [0x50, 0x78, 0xA0, 0xFF];
 
+#[derive(Clone)]
 pub struct TerrainImage {
     /// Tiles per side; the image is size x size RGBA8, row 0 at z = 0.
     pub size: u32,
     pub circular: bool,
     pub pixels: Vec<u8>,
+    /// (size + 1)^2 engine heights, row-major, x fastest, for the 3D view.
+    pub heights: Vec<u16>,
+    /// In metres.
+    pub water_level: f32,
+}
+
+/// `TERRAIN_TILE_SIZE`, in metres.
+pub const TILE_SIZE: f32 = 4.0;
+
+impl TerrainImage {
+    fn height(&self, i: usize, j: usize) -> f32 {
+        f32::from(self.heights[j * (self.size as usize + 1) + i])
+    }
+
+    /// `CTerrain::GetTriangulationDir`: the diagonal whose midpoint is
+    /// highest, so ridges stay straight.
+    pub fn triangulation_dir(&self, i: usize, j: usize) -> bool {
+        let last = self.size as usize - 1;
+        let (i, j) = (i.min(last), j.min(last));
+        let mid1 = self.height(i, j) + self.height(i + 1, j + 1);
+        let mid2 = self.height(i, j + 1) + self.height(i + 1, j);
+        mid1 < mid2
+    }
+
+    /// `CTerrain::GetExactGroundLevel`, in metres.
+    pub fn ground(&self, x: f32, z: f32) -> f32 {
+        if self.size == 0 {
+            return 0.0;
+        }
+        let last = self.size as isize - 1;
+        let xi = ((x / TILE_SIZE).floor() as isize).clamp(0, last) as usize;
+        let zi = ((z / TILE_SIZE).floor() as isize).clamp(0, last) as usize;
+        let xf = (x / TILE_SIZE - xi as f32).clamp(0.0, 1.0);
+        let zf = (z / TILE_SIZE - zi as f32).clamp(0.0, 1.0);
+        let h00 = self.height(xi, zi);
+        let h01 = self.height(xi, zi + 1);
+        let h10 = self.height(xi + 1, zi);
+        let h11 = self.height(xi + 1, zi + 1);
+        let units = if self.triangulation_dir(xi, zi) {
+            if xf + zf <= 1.0 {
+                h00 + (h10 - h00) * xf + (h01 - h00) * zf
+            } else {
+                h11 + (h01 - h11) * (1.0 - xf) + (h10 - h11) * (1.0 - zf)
+            }
+        } else if xf <= zf {
+            h00 + (h11 - h01) * xf + (h01 - h00) * zf
+        } else {
+            h00 + (h10 - h00) * xf + (h11 - h10) * zf
+        };
+        units / HEIGHT_UNITS_PER_METRE
+    }
 }
 
 /// Follows CMiniMapTexture::RebuildTerrainTexture, so the background looks
@@ -85,6 +137,11 @@ pub fn build(resource: &[u8]) -> Result<TerrainImage, &'static str> {
         size: tiles as u32,
         circular,
         pixels,
+        heights: heights
+            .chunks_exact(2)
+            .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+            .collect(),
+        water_level,
     })
 }
 

@@ -1698,6 +1698,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "specula-assets"
+version = "0.1.0"
+
+[[package]]
 name = "specula-server"
 version = "0.1.0"
 dependencies = [
@@ -1713,6 +1717,7 @@ dependencies = [
  "meshopt",
  "png",
  "roxmltree",
+ "specula-assets",
 ]
 
 [[package]]
@@ -1721,6 +1726,7 @@ version = "0.1.0"
 dependencies = [
  "js-sys",
  "ruzstd",
+ "specula-assets",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",

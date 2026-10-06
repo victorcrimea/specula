@@ -13,14 +13,23 @@ wasm-bindgen = "=0.2.129"
 wasm-bindgen-futures = "0.4"
 js-sys = "0.3"
 wgpu = { version = "30", default-features = false, features = ["std", "webgpu", "webgl", "wgsl"] }
+specula-assets = { path = "../specula-assets" }
 ruzstd = { version = "0.9", default-features = false, features = ["std"] }
 
 [dependencies.web-sys]
 version = "0.3"
 features = [
     "BinaryType",
+    "Blob",
     "DedicatedWorkerGlobalScope",
     "Document",
+    "File",
+    "FileSystemDirectoryHandle",
+    "FileSystemFileHandle",
+    "FileSystemGetDirectoryOptions",
+    "FileSystemGetFileOptions",
+    "FileSystemRemoveOptions",
+    "FileSystemWritableFileStream",
     "HtmlButtonElement",
     "HtmlCanvasElement",
     "HtmlElement",
@@ -30,8 +39,10 @@ features = [
     "Location",
     "MessageEvent",
     "MouseEvent",
+    "Navigator",
     "Performance",
     "Response",
+    "StorageManager",
     "WebSocket",
     "Window",
     "Worker",
@@ -40,5 +51,6 @@ features = [
     "WorkerOptions",
     "WheelEvent",
     "WorkerType",
+    "WritableStream",
     "console",
 ]

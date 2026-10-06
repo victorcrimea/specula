@@ -1,0 +1,89 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Specula observer</title>
+<style>
+html, body { margin: 0; height: 100%; background: #0f1214; }
+#view { display: block; width: 100vw; height: 100vh; }
+#controls { position: fixed; top: 8px; left: 8px; display: flex; gap: 6px;
+  font: 13px system-ui, sans-serif; }
+#playback { position: fixed; left: 8px; right: 8px; bottom: 8px;
+  display: flex; align-items: center; gap: 6px;
+  font: 13px system-ui, sans-serif; }
+#timeline { flex: 1; min-width: 0; accent-color: #8fa3b0; }
+#controls button, #controls select, #playback button, #playback select {
+  font: inherit; color: #e6e9eb; background: rgba(15, 18, 20, 0.85);
+  border: 1px solid #3a4248; border-radius: 4px; padding: 4px 8px; }
+#controls button[aria-pressed="true"], #playback button[aria-pressed="true"] {
+  border-color: #8fa3b0; }
+#controls select:disabled, #playback :disabled { opacity: 0.5; }
+#loading { position: fixed; left: 50%; bottom: 52px; width: min(420px, calc(100vw - 32px));
+  transform: translateX(-50%); padding: 6px 8px; border: 1px solid #3a4248;
+  border-radius: 4px; background: rgba(15, 18, 20, 0.85);
+  font: 13px system-ui, sans-serif; color: #e6e9eb; }
+#loading-track { height: 6px; margin-top: 4px; border-radius: 3px; background: #2a3035;
+  overflow: hidden; }
+#loading-fill { height: 100%; width: 0; background: #8fa3b0; transition: width 0.2s; }
+#view { cursor: grab; touch-action: none; }
+#errors { position: fixed; top: 120px; left: 8px; right: 8px; max-height: 40vh;
+  overflow: auto; margin: 0; padding: 6px 8px; white-space: pre-wrap;
+  font: 12px ui-monospace, monospace; color: #ffb4a8;
+  background: rgba(15, 18, 20, 0.9); border: 1px solid #6b3a34;
+  border-radius: 4px; user-select: text; -webkit-user-select: text; }
+#errors:empty { display: none; }
+#fps { position: fixed; top: 44px; right: 8px; padding: 4px 8px;
+  white-space: pre-wrap; text-align: right; max-width: calc(100vw - 32px);
+  font: 600 13px system-ui, sans-serif; font-variant-numeric: tabular-nums;
+  color: #e6e9eb; background: rgba(15, 18, 20, 0.85);
+  border: 1px solid #3a4248; border-radius: 4px; }
+#clock { position: fixed; top: 8px; right: 8px; padding: 4px 8px;
+  font: 600 15px system-ui, sans-serif; font-variant-numeric: tabular-nums;
+  color: #e6e9eb; background: rgba(15, 18, 20, 0.85);
+  border: 1px solid #3a4248; border-radius: 4px; }
+</style>
+</head>
+<body>
+<canvas id="view"></canvas>
+<div id="controls">
+<button id="diplomacy" type="button" aria-pressed="false">Diplomacy colours</button>
+<select id="perspective" aria-label="Perspective" disabled>
+<option value="0">Observer</option>
+</select>
+</div>
+<div id="clock" aria-label="Match time">0:00</div>
+<div id="fps" aria-label="Frames per second">- FPS</div>
+<div id="loading" role="status">
+<span id="loading-text">Loading</span>
+<div id="loading-track"><div id="loading-fill"></div></div>
+</div>
+<div id="playback">
+<button id="play" type="button" disabled>Pause</button>
+<select id="speed" aria-label="Playback speed" disabled></select>
+<input id="timeline" type="range" min="0" max="0" value="0" step="1" aria-label="Timeline" disabled>
+<button id="live" type="button" aria-pressed="true" disabled>Live</button>
+</div>
+<pre id="errors" aria-live="polite"></pre>
+<script>
+// Phones have no console to read, so errors and the console's lines are
+// shown on the page too.
+(() => {
+  const box = document.getElementById("errors");
+  const show = (text) => { box.textContent += text + "\n"; };
+  const error = console.error.bind(console);
+  const log = console.log.bind(console);
+  console.error = (...args) => { error(...args); show(args.join(" ")); };
+  console.log = (...args) => { log(...args); show(args.join(" ")); };
+  window.addEventListener("error", (event) => show(event.message));
+  window.addEventListener("unhandledrejection", (event) => show(String(event.reason)));
+})();
+</script>
+<script type="module">
+const glue = "./pkg/specula_web.js?v=83bcb764f38e";
+const { default: init, observer_main } = await import(glue);
+await init();
+observer_main(glue);
+</script>
+</body>
+</html>

@@ -1,9 +1,9 @@
 //! Loader for the engine's mesh format, ported from `CModelDef::Load`
 //! (graphics/ModelDef.cpp).
 
-use crate::math::Quat;
-use crate::math::Vec3;
 use crate::unpacker::Unpacker;
+use specula_assets::math::Quat;
+use specula_assets::math::Vec3;
 
 /// Versions before 3 keep vertices relative to the bind pose and need a
 /// fix-up the converter has not needed for years; it writes version 4.

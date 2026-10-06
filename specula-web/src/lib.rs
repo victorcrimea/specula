@@ -1,12 +1,18 @@
+mod assets;
 mod diplomacy;
+mod far;
+mod field;
 mod gpu;
 mod icons;
 mod impostor;
 mod march;
+mod opfs;
+mod pose;
 mod render;
 mod stream;
 mod terrain;
 mod unit;
+mod variation;
 mod worker;
 
 use std::cell::RefCell;
@@ -29,7 +35,10 @@ use web_sys::Worker;
 use web_sys::WorkerOptions;
 use web_sys::WorkerType;
 
+use crate::assets::Progress;
 use crate::diplomacy::Perspective;
+use crate::field::Field;
+use crate::icons::IconAtlas;
 use crate::render::Renderer;
 use crate::stream::Scene;
 use crate::terrain::TerrainImage;
@@ -56,9 +65,115 @@ const TURN_SMOOTHING: f64 = 0.1;
 /// Playback speeds in game time; the match's own speed is added if missing.
 const SPEEDS: [f32; 5] = [0.5, 1.0, 2.0, 4.0, 8.0];
 
+/// What draws the match: the minimap view of `/` or the 3D view of
+/// `/observer.html`. The stream, playback and controls are the same.
+trait View {
+    fn max_size(&self) -> u32;
+    fn resize(&mut self, width: u32, height: u32, device_pixel_ratio: f32);
+    /// Returns false when no frame could be drawn, so the caller retries.
+    fn draw(&mut self, progress: f32) -> bool;
+    /// `palette` is the displayed colour of each player id.
+    fn set_scene(&mut self, scene: &Scene, palette: &[u32]);
+    /// `None` for a new match whose terrain has not arrived yet.
+    fn set_terrain(&mut self, image: Option<&TerrainImage>);
+    fn set_icon_atlas(&mut self, _atlas: IconAtlas) {}
+    /// Whether it moves between turns on its own, and so needs every frame.
+    fn animating(&self) -> bool {
+        false
+    }
+    /// Downloads to show on the loading bar.
+    fn progress(&self) -> Progress {
+        Progress::Idle
+    }
+    /// What the stream has brought since the page loaded, for statistics.
+    fn set_stream_bytes(&mut self, _bytes: StreamBytes) {}
+}
+
+/// Bytes since the page loaded: live messages and history segments, as the
+/// worker counts them, and the terrain.
+#[derive(Clone, Copy, Default)]
+struct StreamBytes {
+    live: u64,
+    segments: u64,
+    terrain: u64,
+}
+
+impl View for Renderer {
+    fn max_size(&self) -> u32 {
+        Renderer::max_size(self)
+    }
+
+    fn resize(&mut self, width: u32, height: u32, device_pixel_ratio: f32) {
+        Renderer::resize(self, width, height, device_pixel_ratio);
+    }
+
+    fn draw(&mut self, progress: f32) -> bool {
+        Renderer::draw(self, progress)
+    }
+
+    fn set_scene(&mut self, scene: &Scene, palette: &[u32]) {
+        Renderer::set_scene(self, scene, palette);
+    }
+
+    fn set_terrain(&mut self, image: Option<&TerrainImage>) {
+        Renderer::set_terrain(self, image);
+    }
+
+    fn set_icon_atlas(&mut self, atlas: IconAtlas) {
+        Renderer::set_icon_atlas(self, atlas);
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Page {
+    Map,
+    Observer,
+}
+
+/// The observer page's download bar, `#loading` with `#loading-fill` and
+/// `#loading-text`.
+struct LoadingBar {
+    bar: HtmlElement,
+    fill: HtmlElement,
+    text: HtmlElement,
+    /// What is shown, so the DOM is touched only on change.
+    shown: String,
+}
+
+impl LoadingBar {
+    fn show(&mut self, progress: Progress) {
+        let (label, width, busy) = match progress {
+            Progress::Idle => (String::new(), 0.0, false),
+            Progress::Starting => ("Loading the model index".to_string(), 0.0, true),
+            Progress::Bytes { done, total } => (
+                format!(
+                    "Loading models {:.1} / {:.1} MB",
+                    done as f64 / 1e6,
+                    total as f64 / 1e6
+                ),
+                done as f64 / total.max(1) as f64 * 100.0,
+                true,
+            ),
+        };
+        let key = format!("{label}|{width:.0}");
+        if key == self.shown {
+            return;
+        }
+        self.shown = key;
+        let _ = self
+            .bar
+            .set_attribute("style", if busy { "" } else { "display: none" });
+        let _ = self
+            .fill
+            .set_attribute("style", &format!("width: {width:.0}%"));
+        self.text.set_text_content(Some(&label));
+    }
+}
+
 struct App {
     canvas: HtmlCanvasElement,
-    renderer: Renderer,
+    renderer: Box<dyn View>,
+    loading: Option<LoadingBar>,
     scene: Scene,
     /// How far the last drawn frame moved the dots towards the current turn.
     progress: f32,
@@ -95,6 +210,7 @@ struct App {
     live_button: HtmlButtonElement,
     live: bool,
     paused: bool,
+    stream_bytes: StreamBytes,
 }
 
 impl App {
@@ -122,8 +238,12 @@ impl App {
             self.renderer.set_scene(&self.scene, &self.palette);
             self.dirty = true;
         }
+        if let Some(loading) = &mut self.loading {
+            loading.show(self.renderer.progress());
+        }
+        self.renderer.set_stream_bytes(self.stream_bytes);
         let progress = ((now - self.turn_start) / self.turn_interval).clamp(0.0, 1.0) as f32;
-        if self.dirty || progress != self.progress {
+        if self.dirty || progress != self.progress || self.renderer.animating() {
             self.dirty = !self.renderer.draw(progress);
             if !self.dirty {
                 self.progress = progress;
@@ -247,7 +367,21 @@ fn set_panic_hook() {
 pub fn page_main() {
     set_panic_hook();
     wasm_bindgen_futures::spawn_local(async {
-        if let Err(error) = run().await {
+        if let Err(error) = run(Page::Map, None).await {
+            web_sys::console::error_1(&error.into());
+        }
+    });
+}
+
+/// Entry point of observer.html: the same stream and controls as the
+/// page's, drawn in 3D. `glue` is the URL the page imported this module's
+/// glue from; the stream worker imports the same one, so a cached older
+/// worker can never pair an old glue with this wasm.
+#[wasm_bindgen]
+pub fn observer_main(glue: String) {
+    set_panic_hook();
+    wasm_bindgen_futures::spawn_local(async move {
+        if let Err(error) = run(Page::Observer, Some(glue)).await {
             web_sys::console::error_1(&error.into());
         }
     });
@@ -264,7 +398,7 @@ pub fn unit_main() {
     });
 }
 
-async fn run() -> Result<(), String> {
+async fn run(page: Page, glue: Option<String>) -> Result<(), String> {
     let window = web_sys::window().ok_or("no window")?;
     let canvas: HtmlCanvasElement = window
         .document()
@@ -276,18 +410,35 @@ async fn run() -> Result<(), String> {
     let (width, height, ratio) = canvas_size(&canvas, 2048);
     canvas.set_width(width);
     canvas.set_height(height);
-    let renderer = Renderer::new(canvas.clone(), ratio).await?;
+    let renderer: Box<dyn View> = match page {
+        Page::Map => Box::new(Renderer::new(canvas.clone(), ratio).await?),
+        Page::Observer => Box::new(Field::new(canvas.clone()).await?),
+    };
     let document = window.document().ok_or("no document")?;
+    let loading = match page {
+        Page::Map => None,
+        Page::Observer => Some(LoadingBar {
+            bar: element(&document, "loading")?,
+            fill: element(&document, "loading-fill")?,
+            text: element(&document, "loading-text")?,
+            shown: String::new(),
+        }),
+    };
     let diplomacy_button = element(&document, "diplomacy")?;
     let perspective_select = element(&document, "perspective")?;
     let options = WorkerOptions::new();
     options.set_type(WorkerType::Module);
-    let worker = Worker::new_with_options("worker.js", &options)
+    let worker_url = match &glue {
+        Some(glue) => format!("worker.js?glue={}", js_sys::encode_uri_component(glue)),
+        None => "worker.js".to_string(),
+    };
+    let worker = Worker::new_with_options(&worker_url, &options)
         .map_err(|_| "cannot start the stream worker")?;
 
     let app = Rc::new(RefCell::new(App {
         canvas,
         renderer,
+        loading,
         scene: Scene::default(),
         progress: 1.0,
         turn_start: 0.0,
@@ -314,11 +465,15 @@ async fn run() -> Result<(), String> {
         live_button: element(&document, "live")?,
         live: true,
         paused: false,
+        stream_bytes: StreamBytes::default(),
     }));
     wire_controls(&app);
     wire_playback(&app);
     connect(&app);
-    wasm_bindgen_futures::spawn_local(load_icons(Rc::clone(&app)));
+    // The 3D view has no minimap icons.
+    if page == Page::Map {
+        wasm_bindgen_futures::spawn_local(load_icons(Rc::clone(&app)));
+    }
     animate(app);
     Ok(())
 }
@@ -451,6 +606,16 @@ fn connect(app: &Rc<RefCell<App>>) {
                 else {
                     return;
                 };
+                let u64_at = |at: usize| {
+                    rest.get(at..at + 8)
+                        .and_then(|bytes| bytes.try_into().ok())
+                        .map(u64::from_le_bytes)
+                };
+                if let (Some(live), Some(segments)) = (u64_at(17), u64_at(25)) {
+                    let mut app = receiver.borrow_mut();
+                    app.stream_bytes.live = live;
+                    app.stream_bytes.segments = segments;
+                }
                 receiver.borrow_mut().show_status(
                     first,
                     newest,
@@ -520,8 +685,9 @@ fn receive(app_rc: &Rc<RefCell<App>>, turn_ms: f64, message: &[u8]) {
 
 async fn load_terrain(app: Rc<RefCell<App>>, id: u64) {
     match fetch_terrain(id).await {
-        Ok(image) => {
+        Ok((image, size)) => {
             let mut app = app.borrow_mut();
+            app.stream_bytes.terrain += size;
             // Another match may have started during the download.
             if app.terrain_id == id {
                 app.renderer.set_terrain(Some(&image));
@@ -550,9 +716,26 @@ async fn load_icons(app: Rc<RefCell<App>>) {
     }
 }
 
-async fn fetch_terrain(id: u64) -> Result<TerrainImage, String> {
+async fn fetch_terrain(id: u64) -> Result<(TerrainImage, u64), String> {
     let bytes = fetch_bytes(&format!("/terrain/{id:016x}")).await?;
-    terrain::build(&bytes).map_err(String::from)
+    let image = terrain::build(&bytes).map_err(String::from)?;
+    Ok((image, bytes.len() as u64))
+}
+
+/// Bytes a finished fetch of `url`, a path on this origin, moved over the
+/// network and its body's size, from its Resource Timing entry; a body the
+/// HTTP cache served moves at most the headers of a revalidation.
+fn transfer_sizes(url: &str) -> Option<(u64, u64)> {
+    let window = web_sys::window()?;
+    let performance = window.performance()?;
+    let origin = window.location().origin().ok()?;
+    let entries = performance.get_entries_by_name(&format!("{origin}{url}"));
+    let entry = entries.get(entries.length().checked_sub(1)?);
+    let read = |name: &str| js_sys::Reflect::get(&entry, &name.into()).ok()?.as_f64();
+    Some((
+        read("transferSize")? as u64,
+        read("encodedBodySize")? as u64,
+    ))
 }
 
 async fn fetch_bytes(url: &str) -> Result<Vec<u8>, String> {

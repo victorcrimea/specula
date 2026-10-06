@@ -16,7 +16,12 @@ path = "src/minimap_icons.rs"
 name = "bake-unit"
 path = "src/bake_unit/main.rs"
 
+[[bin]]
+name = "bake-assets"
+path = "src/bake_assets/main.rs"
+
 [dependencies]
 meshopt = "0.6"
 png = "0.18"
 roxmltree = "0.21"
+specula-assets = { path = "../specula-assets" }

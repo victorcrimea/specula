@@ -1,6 +1,7 @@
 //! The few pieces of the engine's maths the skinning needs, ported from
 //! `maths/Matrix3D` and `maths/Quaternion` so the multiplication order is
-//! the engine's own.
+//! the engine's own. The bakes and the web client share them, so both
+//! place bones and props the same way.
 
 use std::ops::Add;
 use std::ops::Mul;
@@ -46,6 +47,11 @@ impl Vec3 {
             self.z.max(other.z),
         )
     }
+
+    /// `Interpolate` in maths/MathUtil.h.
+    pub fn lerp(self, to: Vec3, ratio: f32) -> Vec3 {
+        self + (to + -self) * ratio
+    }
 }
 
 impl Add for Vec3 {
@@ -81,6 +87,62 @@ pub struct Quat {
 }
 
 impl Quat {
+    pub const IDENTITY: Quat = Quat {
+        x: 0.0,
+        y: 0.0,
+        z: 0.0,
+        w: 1.0,
+    };
+
+    /// The Hamilton product: rotating by the result rotates by `other`
+    /// first, matching `from_quat(self).mul(&from_quat(other))`.
+    pub fn product(self, other: Quat) -> Quat {
+        Quat {
+            x: self.w * other.x + self.x * other.w + self.y * other.z - self.z * other.y,
+            y: self.w * other.y - self.x * other.z + self.y * other.w + self.z * other.x,
+            z: self.w * other.z + self.x * other.y - self.y * other.x + self.z * other.w,
+            w: self.w * other.w - self.x * other.x - self.y * other.y - self.z * other.z,
+        }
+    }
+
+    pub fn rotate(self, v: Vec3) -> Vec3 {
+        Mat4::from_quat(self).rotate(v)
+    }
+
+    /// `CQuaternion::Slerp`, which `CSkeletonAnimDef::BuildBoneMatrices`
+    /// uses between keys.
+    pub fn slerp(self, to: Quat, ratio: f32) -> Quat {
+        const EPSILON: f32 = 0.0001;
+        let mut cosom = self.x * to.x + self.y * to.y + self.z * to.z + self.w * to.w;
+        let to = if cosom < 0.0 {
+            cosom = -cosom;
+            Quat {
+                x: -to.x,
+                y: -to.y,
+                z: -to.z,
+                w: -to.w,
+            }
+        } else {
+            to
+        };
+        let (scale0, scale1) = if 1.0 - cosom > EPSILON {
+            let omega = cosom.acos();
+            let sinom = omega.sin();
+            (
+                ((1.0 - ratio) * omega).sin() / sinom,
+                (ratio * omega).sin() / sinom,
+            )
+        } else {
+            (1.0 - ratio, ratio)
+        };
+        Quat {
+            x: scale0 * self.x + scale1 * to.x,
+            y: scale0 * self.y + scale1 * to.y,
+            z: scale0 * self.z + scale1 * to.z,
+            w: scale0 * self.w + scale1 * to.w,
+        }
+    }
+
     /// `CQuaternion::GetInverse`: the conjugate, since rotations are unit
     /// length.
     pub fn inverse(self) -> Self {

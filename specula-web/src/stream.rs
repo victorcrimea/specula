@@ -46,6 +46,11 @@ pub struct Dot {
     pub y: i32,
     /// Heading in 1/256 turn, clockwise from +z.
     pub angle: u8,
+    /// Height and heading where they were drawn when the current turn
+    /// arrived, like `from_x`; the heading in 1/256 turn, within half a
+    /// turn of `angle` so it turns the short way.
+    pub from_y: f32,
+    pub from_angle: f32,
     /// Player index, -1 for none.
     pub owner: i32,
     /// Index into `Scene::templates`.
@@ -190,6 +195,8 @@ impl Scene {
         for dot in self.dots.values_mut() {
             dot.from_x += (dot.x as f32 - dot.from_x) * progress;
             dot.from_z += (dot.z as f32 - dot.from_z) * progress;
+            dot.from_y += (dot.y as f32 - dot.from_y) * progress;
+            dot.from_angle += turn_towards(dot.from_angle, dot.angle) * progress;
         }
         self.turn = cursor.varint_u32()?;
         self.read_icons(cursor)?;
@@ -227,6 +234,7 @@ impl Scene {
                 if distance > SNAP_UNITS {
                     dot.from_x = dot.x as f32;
                     dot.from_z = dot.z as f32;
+                    dot.from_y = dot.y as f32;
                 }
             }
             if mask & CHANGED_COLOR != 0 {
@@ -240,6 +248,9 @@ impl Scene {
             }
             if mask & CHANGED_ANGLE != 0 {
                 dot.angle = cursor.u8()?;
+                // Keep the start within half a turn, so the heading turns
+                // the short way.
+                dot.from_angle = f32::from(dot.angle) - turn_towards(dot.from_angle, dot.angle);
             }
             if mask & CHANGED_ANIMATION != 0 {
                 dot.animation = cursor.varint_u32()?;
@@ -427,6 +438,11 @@ impl Scene {
     }
 }
 
+/// The signed 1/256 turns from `from` to `to` the short way round.
+pub fn turn_towards(from: f32, to: u8) -> f32 {
+    (f32::from(to) - from + 128.0).rem_euclid(256.0) - 128.0
+}
+
 /// The turn a keyframe or delta is for, without decoding the rest.
 pub fn message_turn(message: &[u8]) -> Result<u32, &'static str> {
     let (_, body) = message.split_first().ok_or("empty message")?;
@@ -559,11 +575,15 @@ impl<'a> Cursor<'a> {
         };
         let x = self.zigzag()?;
         let z = self.zigzag()?;
+        let y = self.zigzag()?;
+        let angle = self.u8()?;
         Ok(Dot {
             x,
             z,
-            y: self.zigzag()?,
-            angle: self.u8()?,
+            y,
+            angle,
+            from_y: y as f32,
+            from_angle: f32::from(angle),
             color: self.u32()?,
             icon: self.varint_u32()?,
             player: self.varint_u32()?,

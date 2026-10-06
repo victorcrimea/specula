@@ -50,7 +50,7 @@ const BACKGROUND: wgpu::Color = wgpu::Color {
     b: 0.08,
     a: 1.0,
 };
-const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth24Plus;
+pub const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth24Plus;
 /// Player 1's colour, 21 55 149 in simulation/data/settings/player_defaults.json.
 const PLAYER_COLOR: [f32; 3] = [21.0 / 255.0, 55.0 / 255.0, 149.0 / 255.0];
 const GROUND_HALF_SIZE: f32 = 220.0;
@@ -922,7 +922,7 @@ fn timing(animations: &[Animation; 2]) -> march::Timing {
 /// The six planes of the view volume as (normal, distance), normals
 /// pointing inwards and of unit length, from a row-major view-projection
 /// matrix whose clip depth runs 0..1.
-fn frustum_planes(m: &[[f32; 4]; 4]) -> [[f32; 4]; 6] {
+pub fn frustum_planes(m: &[[f32; 4]; 4]) -> [[f32; 4]; 6] {
     let combine = |a: [f32; 4], b: [f32; 4], sign: f32| -> [f32; 4] {
         std::array::from_fn(|i| a[i] + sign * b[i])
     };
@@ -968,14 +968,22 @@ pub fn create_buffer(
     contents: &[u8],
     usage: wgpu::BufferUsages,
 ) -> wgpu::Buffer {
+    // write_buffer takes only whole multiples of 4 bytes, which 16-bit
+    // indices of an odd count are not, so the data is padded too.
+    let size = contents.len().next_multiple_of(4).max(4);
     let buffer = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some(label),
-        // Sizes must be multiples of 4 for write_buffer.
-        size: (contents.len() as u64).next_multiple_of(4).max(4),
+        size: size as u64,
         usage: usage | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
-    queue.write_buffer(&buffer, 0, contents);
+    if contents.len() == size {
+        queue.write_buffer(&buffer, 0, contents);
+    } else if !contents.is_empty() {
+        let mut padded = contents.to_vec();
+        padded.resize(size, 0);
+        queue.write_buffer(&buffer, 0, &padded);
+    }
     buffer
 }
 
