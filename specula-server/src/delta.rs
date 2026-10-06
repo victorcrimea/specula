@@ -16,6 +16,7 @@ use std::io::Write;
 use crate::feed::Entity;
 use crate::wire::Writer;
 use crate::wire::diff;
+use crate::wire::quantize_angle;
 use crate::wire::quantize_position;
 
 /// 25 turns of 200 ms, about 5 s per summary.
@@ -49,11 +50,6 @@ impl Quantized {
             owner: entity.owner,
         }
     }
-}
-
-fn quantize_angle(raw: i32) -> u8 {
-    let turns = f64::from(raw) / 65536.0 / std::f64::consts::TAU;
-    (turns * 256.0).round().rem_euclid(256.0) as u8
 }
 
 #[derive(Default, Clone, Copy)]

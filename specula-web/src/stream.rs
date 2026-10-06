@@ -1,5 +1,5 @@
 //! Decoder for specula-server's viewer stream and match segments, wire
-//! format v4; the layout is documented in `specula-server/src/view.rs`.
+//! format v5; the layout is documented in `specula-server/src/view.rs`.
 
 use std::collections::BTreeMap;
 use std::io::Read;
@@ -8,10 +8,19 @@ use ruzstd::decoding::StreamingDecoder;
 
 const MESSAGE_KEYFRAME: u8 = 1;
 const MESSAGE_DELTA: u8 = 2;
-const CHANGED_POSITION: u8 = 1;
-const CHANGED_COLOR: u8 = 2;
-const CHANGED_ICON: u8 = 4;
-const CHANGED_PLAYER: u8 = 8;
+const CHANGED_POSITION: u64 = 1;
+const CHANGED_COLOR: u64 = 2;
+const CHANGED_ICON: u64 = 4;
+const CHANGED_PLAYER: u64 = 8;
+const CHANGED_ANGLE: u64 = 16;
+const CHANGED_ANIMATION: u64 = 32;
+const CHANGED_ANIMATION_SPEED: u64 = 64;
+const CHANGED_SYNC: u64 = 128;
+const CHANGED_OWNER: u64 = 256;
+const CHANGED_MODEL: u64 = 512;
+const CHANGED_VARIANTS: u64 = 1024;
+const CHANGED_CONSTRUCTION: u64 = 2048;
+const ANIMATION_ONCE: u8 = 1;
 /// A move longer than this in one turn is a teleport (ungarrison, a
 /// scripted jump), not walking, so the dot does not slide there. It is well
 /// above cavalry at 2x game speed.
@@ -33,7 +42,40 @@ pub struct Dot {
     /// the renderer moves it from here to (x, z) over one turn.
     pub from_x: f32,
     pub from_z: f32,
+    /// Absolute height in 1/16 m.
+    pub y: i32,
+    /// Heading in 1/256 turn, clockwise from +z.
+    pub angle: u8,
+    /// Player index, -1 for none.
+    pub owner: i32,
+    /// Index into `Scene::templates`.
+    pub template: u32,
+    /// 1-based index into `Scene::strings`, or 0 for none.
+    pub actor: u32,
+    /// The actor's variation seed.
+    pub seed: u32,
+    /// 1-based index into `Scene::variant_sets`, or 0 for no selections.
+    pub variants: u32,
+    /// 1-based index into `Scene::strings`, or 0 for none.
+    pub animation: u32,
+    /// Plays once rather than loops.
+    pub once: bool,
+    /// In 1/256: m/s for walk and run, else a multiplier.
+    pub speed: u32,
+    /// The turn the animation was selected on.
+    pub animation_turn: u32,
+    /// In ms; 0 when not synced.
+    pub sync_repeat: u32,
+    pub sync_offset: i32,
+    /// The turn the sync was set on.
+    pub sync_turn: u32,
+    /// How far the model has risen out of the ground, in 1/255; 0 when it
+    /// is not offset at all.
+    pub construction: u8,
 }
+
+/// (key, selection) indices into `Scene::strings`, sorted by key.
+pub type VariantSet = Vec<(u32, u32)>;
 
 #[derive(Default)]
 pub struct Scene {
@@ -54,6 +96,10 @@ pub struct Scene {
     pub players: Vec<Player>,
     /// Set whenever a message replaces `players`; the reader clears it.
     pub players_changed: bool,
+    pub templates: Vec<String>,
+    /// Actor file names, animation names, variant keys and selections.
+    pub strings: Vec<String>,
+    pub variant_sets: Vec<VariantSet>,
     pub dots: BTreeMap<u32, Dot>,
 }
 
@@ -120,12 +166,16 @@ impl Scene {
         self.icons.clear();
         self.read_icons(cursor)?;
         self.read_players(cursor)?;
+        self.templates.clear();
+        self.strings.clear();
+        self.variant_sets.clear();
+        self.read_tables(cursor)?;
         self.dots.clear();
         let count = cursor.varint_u32()?;
         let mut id = 0;
         for _ in 0..count {
             id += cursor.varint_u32()?;
-            let dot = cursor.dot()?;
+            let dot = cursor.dot(id, self.turn)?;
             self.dots.insert(id, dot);
         }
         Ok(())
@@ -146,13 +196,14 @@ impl Scene {
         if cursor.u8()? != 0 {
             self.read_players(cursor)?;
         }
+        self.read_tables(cursor)?;
         let spawned = cursor.varint_u32()?;
         let destroyed = cursor.varint_u32()?;
         let changed = cursor.varint_u32()?;
         let mut id = 0;
         for _ in 0..spawned {
             id += cursor.varint_u32()?;
-            let dot = cursor.dot()?;
+            let dot = cursor.dot(id, self.turn)?;
             self.dots.insert(id, dot);
         }
         let mut id = 0;
@@ -163,7 +214,7 @@ impl Scene {
         let mut id = 0;
         for _ in 0..changed {
             id += cursor.varint_u32()?;
-            let mask = cursor.u8()?;
+            let mask = cursor.varint()?;
             let dot = self
                 .dots
                 .get_mut(&id)
@@ -171,6 +222,7 @@ impl Scene {
             if mask & CHANGED_POSITION != 0 {
                 dot.x += cursor.zigzag()?;
                 dot.z += cursor.zigzag()?;
+                dot.y += cursor.zigzag()?;
                 let distance = (dot.x as f32 - dot.from_x).hypot(dot.z as f32 - dot.from_z);
                 if distance > SNAP_UNITS {
                     dot.from_x = dot.x as f32;
@@ -186,6 +238,58 @@ impl Scene {
             if mask & CHANGED_PLAYER != 0 {
                 dot.player = cursor.varint_u32()?;
             }
+            if mask & CHANGED_ANGLE != 0 {
+                dot.angle = cursor.u8()?;
+            }
+            if mask & CHANGED_ANIMATION != 0 {
+                dot.animation = cursor.varint_u32()?;
+                dot.once = cursor.u8()? & ANIMATION_ONCE != 0;
+                dot.animation_turn = self.turn;
+            }
+            if mask & CHANGED_ANIMATION_SPEED != 0 {
+                dot.speed = cursor.varint_u32()?;
+            }
+            if mask & CHANGED_SYNC != 0 {
+                dot.sync_repeat = cursor.varint_u32()?;
+                dot.sync_offset = cursor.zigzag()?;
+                dot.sync_turn = self.turn;
+            }
+            if mask & CHANGED_OWNER != 0 {
+                dot.owner = cursor.zigzag()?;
+            }
+            if mask & CHANGED_MODEL != 0 {
+                dot.template = cursor.varint_u32()?;
+                dot.actor = cursor.varint_u32()?;
+                dot.seed = cursor.seed(id)?;
+            }
+            if mask & CHANGED_VARIANTS != 0 {
+                dot.variants = cursor.varint_u32()?;
+            }
+            if mask & CHANGED_CONSTRUCTION != 0 {
+                dot.construction = cursor.u8()?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Templates, strings and variant sets, appended to what the scene has.
+    fn read_tables(&mut self, cursor: &mut Cursor) -> Result<(), &'static str> {
+        for table in [&mut self.templates, &mut self.strings] {
+            let count = cursor.varint_u32()?;
+            for _ in 0..count {
+                let length = cursor.varint()? as usize;
+                let text =
+                    std::str::from_utf8(cursor.take(length)?).map_err(|_| "string not UTF-8")?;
+                table.push(text.to_string());
+            }
+        }
+        let count = cursor.varint_u32()?;
+        for _ in 0..count {
+            let pairs = cursor.varint_u32()?;
+            let set = (0..pairs)
+                .map(|_| Ok((cursor.varint_u32()?, cursor.varint_u32()?)))
+                .collect::<Result<_, &'static str>>()?;
+            self.variant_sets.push(set);
         }
         Ok(())
     }
@@ -278,6 +382,21 @@ impl Scene {
                 });
             }
         }
+        for table in [&self.templates, &self.strings] {
+            out.varint(table.len() as u64);
+            for text in table {
+                out.varint(text.len() as u64);
+                out.0.extend_from_slice(text.as_bytes());
+            }
+        }
+        out.varint(self.variant_sets.len() as u64);
+        for set in &self.variant_sets {
+            out.varint(set.len() as u64);
+            for (key, selection) in set {
+                out.varint(u64::from(*key));
+                out.varint(u64::from(*selection));
+            }
+        }
         out.varint(self.dots.len() as u64);
         let mut last_id = 0;
         for (id, dot) in &self.dots {
@@ -285,9 +404,24 @@ impl Scene {
             last_id = *id;
             out.zigzag(dot.x);
             out.zigzag(dot.z);
+            out.zigzag(dot.y);
+            out.u8(dot.angle);
             out.u32(dot.color);
             out.varint(u64::from(dot.icon));
             out.varint(u64::from(dot.player));
+            out.zigzag(dot.owner);
+            out.varint(u64::from(dot.template));
+            out.varint(u64::from(dot.actor));
+            out.zigzag_i64(i64::from(dot.seed) - i64::from(*id));
+            out.varint(u64::from(dot.variants));
+            out.varint(u64::from(dot.animation));
+            out.u8(if dot.once { ANIMATION_ONCE } else { 0 });
+            out.varint(u64::from(dot.speed));
+            out.varint(u64::from(self.turn - dot.animation_turn));
+            out.varint(u64::from(dot.sync_repeat));
+            out.zigzag(dot.sync_offset);
+            out.varint(u64::from(self.turn - dot.sync_turn));
+            out.u8(dot.construction);
         }
         out.0
     }
@@ -347,7 +481,10 @@ impl Writer {
     }
 
     fn zigzag(&mut self, value: i32) {
-        let value = i64::from(value);
+        self.zigzag_i64(i64::from(value));
+    }
+
+    fn zigzag_i64(&mut self, value: i64) {
         self.varint(((value << 1) ^ (value >> 63)) as u64);
     }
 }
@@ -398,22 +535,51 @@ impl<'a> Cursor<'a> {
         u32::try_from(self.varint()?).map_err(|_| "varint out of range")
     }
 
-    fn zigzag(&mut self) -> Result<i32, &'static str> {
+    fn zigzag_i64(&mut self) -> Result<i64, &'static str> {
         let raw = self.varint()?;
-        let value = (raw >> 1) as i64 ^ -((raw & 1) as i64);
-        i32::try_from(value).map_err(|_| "zigzag out of range")
+        Ok((raw >> 1) as i64 ^ -((raw & 1) as i64))
     }
 
-    /// A new dot appears in place rather than sliding in from anywhere.
-    fn dot(&mut self) -> Result<Dot, &'static str> {
+    fn zigzag(&mut self) -> Result<i32, &'static str> {
+        i32::try_from(self.zigzag_i64()?).map_err(|_| "zigzag out of range")
+    }
+
+    /// Sent as the difference from the entity id, which is the default.
+    fn seed(&mut self, id: u32) -> Result<u32, &'static str> {
+        u32::try_from(i64::from(id) + self.zigzag_i64()?).map_err(|_| "seed out of range")
+    }
+
+    /// The animation and sync turns are counted back from `turn`, the
+    /// message's. A new dot appears in place rather than sliding in from
+    /// anywhere.
+    fn dot(&mut self, id: u32, turn: u32) -> Result<Dot, &'static str> {
+        let back = |cursor: &mut Self| {
+            turn.checked_sub(cursor.varint_u32()?)
+                .ok_or("turn before the match")
+        };
         let x = self.zigzag()?;
         let z = self.zigzag()?;
         Ok(Dot {
             x,
             z,
+            y: self.zigzag()?,
+            angle: self.u8()?,
             color: self.u32()?,
             icon: self.varint_u32()?,
             player: self.varint_u32()?,
+            owner: self.zigzag()?,
+            template: self.varint_u32()?,
+            actor: self.varint_u32()?,
+            seed: self.seed(id)?,
+            variants: self.varint_u32()?,
+            animation: self.varint_u32()?,
+            once: self.u8()? & ANIMATION_ONCE != 0,
+            speed: self.varint_u32()?,
+            animation_turn: back(self)?,
+            sync_repeat: self.varint_u32()?,
+            sync_offset: self.zigzag()?,
+            sync_turn: back(self)?,
+            construction: self.u8()?,
             from_x: x as f32,
             from_z: z as f32,
         })

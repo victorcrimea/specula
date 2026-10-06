@@ -172,6 +172,7 @@ fn serve(stream: UnixStream, hub: &Hub) -> io::Result<()> {
                 icon,
                 player_color,
             } => {
+                hub.add_template(index, name.clone())?;
                 templates.insert(index, name);
                 if let Some(icon) = icon {
                     hub.set_template_icon(index, icon);
@@ -182,6 +183,8 @@ fn serve(stream: UnixStream, hub: &Hub) -> io::Result<()> {
             }
             Record::Map { size, speed } => hub.set_map(size, speed),
             Record::Players(players) => hub.set_players(players),
+            Record::String { index, text } => hub.add_string(index, text)?,
+            Record::VariantSet { index, pairs } => hub.add_variant_set(index, pairs)?,
             Record::Terrain(terrain) => {
                 let resource = terrain::encode(&terrain);
                 println!(

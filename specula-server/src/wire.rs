@@ -10,6 +10,12 @@ pub fn quantize_position(raw: i32) -> i32 {
     (raw + POSITION_STEP / 2).div_euclid(POSITION_STEP)
 }
 
+/// Raw 16.16 radians to 1/256 turn.
+pub fn quantize_angle(raw: i32) -> u8 {
+    let turns = f64::from(raw) / 65536.0 / std::f64::consts::TAU;
+    (turns * 256.0).round().rem_euclid(256.0) as u8
+}
+
 pub struct Diff<'a, T> {
     pub spawned: Vec<(u32, &'a T)>,
     pub destroyed: Vec<u32>,

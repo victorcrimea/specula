@@ -1,4 +1,4 @@
-//! Decoder for the observer hook's feed, format v5. The writer is
+//! Decoder for the observer hook's feed, format v6. The writer is
 //! `source/network/SpeculaFeed.cpp` in the `specula` branch of 0ad-specula.
 
 use std::io;
@@ -6,14 +6,19 @@ use std::io::ErrorKind;
 use std::io::Read;
 
 const MAGIC: [u8; 4] = *b"SPCF";
-const VERSION: u32 = 5;
+const VERSION: u32 = 6;
 const RECORD_TEMPLATE: u8 = 1;
 const RECORD_TURN: u8 = 2;
 const RECORD_MAP: u8 = 3;
 const RECORD_TERRAIN: u8 = 4;
 const RECORD_PLAYERS: u8 = 5;
-const ENTITY_SIZE: usize = 28;
+const RECORD_STRING: u8 = 6;
+const RECORD_VARIANT_SET: u8 = 7;
+const ENTITY_SIZE: usize = 64;
 const COLOR_MINIMAP: u8 = 1;
+const HAS_VISUAL: u8 = 2;
+const ANIMATION_ONCE: u8 = 4;
+const NONE: u32 = 0xFFFF_FFFF;
 const TEMPLATE_PLAYER_COLOR: u8 = 1;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -28,6 +33,32 @@ pub struct Entity {
     pub owner: i32,
     /// 0xRRGGBB, or `None` when the entity is not on the minimap.
     pub color: Option<u32>,
+    /// Raw 16.16 fixed point, in metres above the map's zero height.
+    pub y: i32,
+    /// `None` for an entity without a VisualActor.
+    pub visual: Option<Visual>,
+    /// Raw 16.16 fixed point, 0..=1 of the model risen out of the ground;
+    /// 0 means not offset at all.
+    pub construction: i32,
+}
+
+/// What the entity's VisualActor shows.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct Visual {
+    /// Index of a string record.
+    pub actor: Option<u32>,
+    pub seed: u32,
+    /// Index of a variant set record; `None` for no selections.
+    pub variants: Option<u32>,
+    /// Index of a string record.
+    pub animation: Option<u32>,
+    /// Plays once rather than loops.
+    pub once: bool,
+    /// Raw 16.16 fixed point; m/s for walk and run, else a multiplier.
+    pub speed: i32,
+    /// Raw 16.16 fixed point, in milliseconds; 0 when not synced.
+    pub sync_repeat: i32,
+    pub sync_offset: i32,
 }
 
 /// A template's minimap icon, as the in-game minimap draws it.
@@ -73,6 +104,15 @@ pub enum Record {
     },
     Terrain(Terrain),
     Players(Vec<Player>),
+    String {
+        index: u32,
+        text: String,
+    },
+    /// (key, value) string indices, sorted by key.
+    VariantSet {
+        index: u32,
+        pairs: Vec<(u32, u32)>,
+    },
 }
 
 /// Sent once per match; heights and tiles are row-major, x fastest.
@@ -128,6 +168,14 @@ pub fn read_record(reader: &mut impl Read) -> io::Result<Option<Record>> {
             }
             RECORD_TERRAIN => return decode_terrain(&payload).map(Some),
             RECORD_PLAYERS => return decode_players(&payload).map(Some),
+            RECORD_STRING => {
+                let mut cursor = Cursor(&payload);
+                let index = cursor.u32()?;
+                let text = String::from_utf8(cursor.0.to_vec())
+                    .map_err(|_| invalid("string not UTF-8"))?;
+                return Ok(Some(Record::String { index, text }));
+            }
+            RECORD_VARIANT_SET => return decode_variant_set(&payload).map(Some),
             // Newer hooks may add kinds; the length prefix lets them be skipped.
             _ => continue,
         }
@@ -167,14 +215,36 @@ fn decode_turn(payload: &[u8]) -> io::Result<Record> {
     }
     let mut entities = Vec::with_capacity(count);
     for _ in 0..count {
+        let id = cursor.u32()?;
+        let template = cursor.u32()?;
+        let x = cursor.i32()?;
+        let z = cursor.i32()?;
+        let angle = cursor.i32()?;
+        let owner = cursor.i32()?;
+        let color = cursor.u32()?;
+        let flags = (color >> 24) as u8;
+        let y = cursor.i32()?;
+        let visual = Visual {
+            actor: optional(cursor.u32()?),
+            seed: cursor.u32()?,
+            variants: optional(cursor.u32()?),
+            animation: optional(cursor.u32()?),
+            once: flags & ANIMATION_ONCE != 0,
+            speed: cursor.i32()?,
+            sync_repeat: cursor.i32()?,
+            sync_offset: cursor.i32()?,
+        };
         entities.push(Entity {
-            id: cursor.u32()?,
-            template: cursor.u32()?,
-            x: cursor.i32()?,
-            z: cursor.i32()?,
-            angle: cursor.i32()?,
-            owner: cursor.i32()?,
-            color: decode_color(cursor.u32()?),
+            id,
+            template,
+            x,
+            z,
+            angle,
+            owner,
+            color: decode_color(color),
+            y,
+            visual: (flags & HAS_VISUAL != 0).then_some(visual),
+            construction: cursor.i32()?,
         });
     }
     Ok(Record::Turn { turn, entities })
@@ -239,6 +309,25 @@ fn decode_players(payload: &[u8]) -> io::Result<Record> {
         return Err(invalid("players record longer than its contents"));
     }
     Ok(Record::Players(players))
+}
+
+fn decode_variant_set(payload: &[u8]) -> io::Result<Record> {
+    let mut cursor = Cursor(payload);
+    let index = cursor.u32()?;
+    let count = cursor.u32()? as usize;
+    if cursor.0.len() != count * 8 {
+        return Err(invalid(
+            "variant set record length does not match its count",
+        ));
+    }
+    let pairs = (0..count)
+        .map(|_| Ok((cursor.u32()?, cursor.u32()?)))
+        .collect::<io::Result<_>>()?;
+    Ok(Record::VariantSet { index, pairs })
+}
+
+fn optional(index: u32) -> Option<u32> {
+    (index != NONE).then_some(index)
 }
 
 /// The hook writes r, g, b, flags as bytes, so the flags are the top byte.
