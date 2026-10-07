@@ -77,6 +77,7 @@ impl Renderer {
             device,
             queue,
             config,
+            ..
         } = gpu::init(canvas).await?;
         let format = config.format;
 

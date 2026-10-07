@@ -369,6 +369,7 @@ struct Stats {
     models: u32,
     levels: [u32; LEVELS],
     stream: StreamBytes,
+    backend: &'static str,
 }
 
 impl Field {
@@ -378,6 +379,7 @@ impl Field {
             device,
             queue,
             config,
+            backend,
         } = gpu::init(canvas.clone()).await?;
         let bc = device
             .features()
@@ -787,6 +789,7 @@ impl Field {
             models: 0,
             levels: [0; LEVELS],
             stream: StreamBytes::default(),
+            backend,
         };
         Ok(Field {
             surface,
@@ -2711,7 +2714,7 @@ impl Field {
         let bakes = f64::from(std::mem::take(&mut self.far.bakes)) / seconds;
         stats
             .element
-            .set_text_content(Some(&format!("{rate:.0} FPS")));
+            .set_text_content(Some(&format!("{rate:.0} FPS, {}", stats.backend)));
         stats.detail.set_text_content(Some(&format!(
             "{} in view: meshes {high}/{medium}/{low}, impostors {impostors}, {} models, {draws} draws\n\
              Impostor atlases: {held} held ({:.0}/{:.0} MB), {waiting} waiting for room; \
