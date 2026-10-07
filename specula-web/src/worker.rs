@@ -18,9 +18,10 @@
 //! message; or u8 `POST_TERRAIN`, u64 terrain id, then the terrain
 //! resource; or u8 `POST_STATUS`, u32 first turn, u32 newest turn, u32
 //! playhead turn, u8 `STATUS_*` flags, f32 speed, u64 bytes of live
-//! messages and u64 bytes of segments received since the worker started,
-//! u32 ms until the move to the next match (0 once due; meaningful with
-//! `STATUS_ENDED`).
+//! messages and u64 bytes of segments received for the shown match, u32 ms
+//! until the move to the next match (0 once due; meaningful with
+//! `STATUS_ENDED`), u64 bytes of terrain, f64 ms since the counts began and
+//! u64 most live bytes in `PEAK_WINDOW_S` seconds.
 
 use std::cell::Cell;
 use std::cell::RefCell;
@@ -82,6 +83,9 @@ const RECONNECT_MIN_MS: f64 = 1000.0;
 const RECONNECT_MAX_MS: f64 = 10_000.0;
 /// The live match's, the next one's and one spare.
 const KEPT_TERRAINS: usize = 3;
+/// Seconds of live bytes the peak rate is taken over, in 1 s steps, so a
+/// burst across a window edge still counts whole.
+pub const PEAK_WINDOW_S: u64 = 5;
 
 struct Segment {
     index: u32,
@@ -149,9 +153,17 @@ struct Playback {
     /// A seek waiting for its segment: turn, exact.
     pending_seek: Option<(u32, bool)>,
     timer: Option<i32>,
-    /// Received since the worker started, for the page's statistics.
+    /// Received for the shown match, for the page's statistics; the next
+    /// match's live bytes before the switch are not counted.
     live_bytes: u64,
     segment_bytes: u64,
+    terrain_bytes: u64,
+    /// When the counts began, on the performance clock.
+    counted_since: f64,
+    /// Live bytes per whole second since `counted_since`, the last
+    /// `PEAK_WINDOW_S` seconds only.
+    live_window: VecDeque<(u64, u64)>,
+    peak_window_bytes: u64,
     /// Fetched terrains, oldest first: the heightmap and the resource.
     terrains: Vec<(Rc<Ground>, Rc<[u8]>)>,
     /// Live messages waiting, by WebSocket message, from the first
@@ -206,7 +218,48 @@ impl Playback {
     }
 
     fn on_socket(&mut self, bytes: Vec<u8>) {
-        self.live_bytes += bytes.len() as u64;
+        let size = bytes.len() as u64;
+        self.read_socket(bytes);
+        // After the message, so a keyframe that moves to a new match is
+        // counted for that match.
+        self.count_live(size);
+    }
+
+    fn count_live(&mut self, size: u64) {
+        self.live_bytes += size;
+        let second = ((self.now() - self.counted_since) / 1000.0).max(0.0) as u64;
+        match self.live_window.back_mut() {
+            Some((at, bytes)) if *at == second => *bytes += size,
+            _ => self.live_window.push_back((second, size)),
+        }
+        while self
+            .live_window
+            .front()
+            .is_some_and(|(at, _)| at + PEAK_WINDOW_S <= second)
+        {
+            self.live_window.pop_front();
+        }
+        let window: u64 = self.live_window.iter().map(|(_, bytes)| bytes).sum();
+        self.peak_window_bytes = self.peak_window_bytes.max(window);
+    }
+
+    /// The statistics are per match.
+    fn reset_counts(&mut self) {
+        self.live_bytes = 0;
+        self.segment_bytes = 0;
+        // Fetched before the switch, but for this match.
+        self.terrain_bytes = self
+            .live_scene
+            .ground
+            .as_ref()
+            .and_then(|ground| self.terrains.iter().find(|(kept, _)| kept.id == ground.id))
+            .map_or(0, |(_, bytes)| bytes.len() as u64);
+        self.counted_since = self.now();
+        self.live_window.clear();
+        self.peak_window_bytes = 0;
+    }
+
+    fn read_socket(&mut self, bytes: Vec<u8>) {
         let Some((&envelope, body)) = bytes.split_first() else {
             self.drop_stream("empty message");
             return;
@@ -284,6 +337,7 @@ impl Playback {
                 if self.terrains.len() == KEPT_TERRAINS {
                     self.terrains.remove(0);
                 }
+                self.terrain_bytes += terrain.1.len() as u64;
                 self.terrains.push(terrain);
                 for messages in held {
                     self.on_live(messages);
@@ -383,6 +437,11 @@ impl Playback {
             if self.live_scene.match_id != previous_match {
                 // Nothing cached or shown belongs to the new match.
                 self.segments.clear();
+                // The first join has nothing to reset, and its bytes are
+                // only counted after it.
+                if previous_match != 0 {
+                    self.reset_counts();
+                }
                 self.go_live(false);
             }
         } else {
@@ -454,6 +513,7 @@ impl Playback {
         // is dropped on arrival.
         self.recent.clear();
         self.segments.clear();
+        self.reset_counts();
         self.live = false;
         self.go_live(true);
         self.schedule_switch();
@@ -824,6 +884,9 @@ impl Playback {
         out.extend_from_slice(&self.live_bytes.to_le_bytes());
         out.extend_from_slice(&self.segment_bytes.to_le_bytes());
         out.extend_from_slice(&(switch_in.ceil() as u32).to_le_bytes());
+        out.extend_from_slice(&self.terrain_bytes.to_le_bytes());
+        out.extend_from_slice(&(self.now() - self.counted_since).to_le_bytes());
+        out.extend_from_slice(&self.peak_window_bytes.to_le_bytes());
         self.post(&out);
     }
 
@@ -899,6 +962,12 @@ fn start() -> Result<(), String> {
             timer: None,
             live_bytes: 0,
             segment_bytes: 0,
+            terrain_bytes: 0,
+            counted_since: scope
+                .performance()
+                .map_or_else(js_sys::Date::now, |performance| performance.now()),
+            live_window: VecDeque::new(),
+            peak_window_bytes: 0,
             terrains: Vec::new(),
             held: Vec::new(),
             page_terrain: Cell::new(0),

@@ -135,7 +135,7 @@ trait View {
     fn progress(&self) -> Progress {
         Progress::Idle
     }
-    /// What the stream has brought since the page loaded, for statistics.
+    /// What the stream has brought for the shown match, for statistics.
     fn set_stream_bytes(&mut self, _bytes: StreamBytes) {}
     /// The ground the camera sees, x and z in metres, for the minimap.
     fn view_outline(&self) -> Option<[[f32; 2]; 4]> {
@@ -156,13 +156,19 @@ trait View {
     }
 }
 
-/// Bytes since the page loaded: live messages and history segments, as the
-/// worker counts them, and the terrain.
+/// Bytes for the shown match, as the worker counts them: live messages,
+/// history segments and the terrain.
 #[derive(Clone, Copy, Default)]
 struct StreamBytes {
     live: u64,
     segments: u64,
     terrain: u64,
+    /// Since the counts began, as of `received_at` on the page's clock; the
+    /// worker's clock has another origin.
+    live_ms: f64,
+    received_at: f64,
+    /// The most live bytes in `worker::PEAK_WINDOW_S` seconds.
+    peak_window: u64,
 }
 
 impl View for Renderer {
@@ -1176,15 +1182,27 @@ fn connect(app: &Rc<RefCell<App>>) {
                         .and_then(|bytes| bytes.try_into().ok())
                         .map(u64::from_le_bytes)
                 };
-                if let (Some(live), Some(segments)) = (u64_at(17), u64_at(25)) {
-                    let mut app = receiver.borrow_mut();
-                    app.stream_bytes.live = live;
-                    app.stream_bytes.segments = segments;
-                }
                 // The frame clock, which the popup's countdown runs on.
                 let now = web_sys::window()
                     .and_then(|window| window.performance())
                     .map_or(0.0, |performance| performance.now());
+                if let (
+                    Some(live),
+                    Some(segments),
+                    Some(terrain),
+                    Some(live_ms),
+                    Some(peak_window),
+                ) = (u64_at(17), u64_at(25), u64_at(37), u64_at(45), u64_at(53))
+                {
+                    receiver.borrow_mut().stream_bytes = StreamBytes {
+                        live,
+                        segments,
+                        terrain,
+                        live_ms: f64::from_bits(live_ms),
+                        received_at: now,
+                        peak_window,
+                    };
+                }
                 receiver
                     .borrow_mut()
                     .match_over
@@ -1280,7 +1298,6 @@ fn receive(app_rc: &Rc<RefCell<App>>, turn_ms: f64, message: &[u8]) {
 /// names it; the scene needs its heightmap to apply that keyframe.
 fn receive_terrain(app_rc: &Rc<RefCell<App>>, id: u64, resource: &[u8]) {
     let app = &mut *app_rc.borrow_mut();
-    app.stream_bytes.terrain += resource.len() as u64;
     let built = terrain::build(resource).and_then(|image| {
         let ground = Ground::new(id, image.size, image.heights.clone())?;
         Ok((image, ground))

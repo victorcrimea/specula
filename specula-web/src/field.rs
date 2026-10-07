@@ -84,6 +84,7 @@ use crate::variation;
 use crate::variation::Model;
 use crate::variation::ModelAnimation;
 use crate::variation::Shape;
+use crate::worker::PEAK_WINDOW_S;
 
 /// The stream's positions are in 1/16 m.
 const POSITION_UNITS_PER_METRE: f32 = 16.0;
@@ -2696,6 +2697,14 @@ impl Field {
         let assets = self.store.borrow().stats();
         let stream = stats.stream;
         let mb = |bytes: u64| bytes as f64 / 1e6;
+        let live_ms = stream.live_ms + (now - stream.received_at);
+        // Bytes per millisecond times 8 is kbit/s.
+        let average_kbps = if live_ms > 0.0 {
+            stream.live as f64 * 8.0 / live_ms
+        } else {
+            0.0
+        };
+        let peak_kbps = stream.peak_window as f64 * 8.0 / (PEAK_WINDOW_S as f64 * 1000.0);
         let (held, held_bytes, waiting) = self.far.held();
         let seconds = span / 1000.0;
         let uploads = f64::from(std::mem::take(&mut self.far.uploads)) / seconds;
@@ -2708,7 +2717,8 @@ impl Field {
              Impostor atlases: {held} held ({:.0}/{:.0} MB), {waiting} waiting for room; \
              {} from storage, {} drawn; {uploads:.1} uploads/s, {bakes:.1} bakes/s\n\
              Assets: {} files, {:.1} MB in memory; {:.1} MB downloaded, {:.1} MB from cache\n\
-             Stream: {:.2} MB (live {:.2}, history {:.2}, terrain {:.2})",
+             Stream: {:.2} MB (live {:.2}, history {:.2}, terrain {:.2}); \
+             live {average_kbps:.0} kbit/s average, {peak_kbps:.0} kbit/s peak ({} s)",
             high + medium + low + impostors,
             stats.models,
             mb(held_bytes),
@@ -2723,6 +2733,7 @@ impl Field {
             mb(stream.live),
             mb(stream.segments),
             mb(stream.terrain),
+            PEAK_WINDOW_S,
         )));
         stats.frames = 0;
         stats.since = now;
