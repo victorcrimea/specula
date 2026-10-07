@@ -8,3 +8,4 @@ license.workspace = true
 zstd = "0.14.0"
 rocket = "0.5.1"
 rocket_ws = "0.1.1"
+brotli = "9"

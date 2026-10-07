@@ -55,7 +55,7 @@ pub struct Stats {
     pub bytes: u64,
     /// Over the network, headers included.
     pub downloaded: u64,
-    /// Bodies the browser's HTTP cache served.
+    /// Bodies the browser's caches served.
     pub cached: u64,
 }
 
@@ -136,6 +136,12 @@ pub struct Store {
 impl Store {
     pub fn stats(&self) -> Stats {
         self.stats
+    }
+
+    /// A file the Cache API served; no request went out.
+    fn count_stored(&mut self, size: u64) {
+        self.stats.cached += size;
+        self.from_cache = true;
     }
 
     /// Splits a finished fetch between network and cache.
@@ -257,12 +263,23 @@ impl Store {
 
     /// Names the asset bake, so what is derived from its files can be
     /// told from what an earlier bake's gave.
-    /// What a warm-up of these civs and terrains starts from: actor
-    /// manifests, sound groups and terrain textures, the alpha maps last.
-    /// `None` before the index arrives.
-    pub fn warmup_roots(&self, civs: &[&str], terrains: &[String]) -> Option<Vec<(Kind, FileRef)>> {
+    /// What a warm-up of these civs, actors and terrains starts from:
+    /// actor manifests, sound groups and terrain textures, the alpha maps
+    /// last. `None` before the index arrives.
+    pub fn warmup_roots(
+        &self,
+        civs: &[&str],
+        extra_actors: &[&str],
+        terrains: &[String],
+    ) -> Option<Vec<(Kind, FileRef)>> {
         let actors = self.index.as_ref()?;
         let mut roots = Vec::new();
+        roots.extend(
+            extra_actors
+                .iter()
+                .filter_map(|name| actors.get(*name))
+                .map(|file| (Kind::Actor, *file)),
+        );
         for assets in civs.iter().filter_map(|civ| self.civs.get(*civ)) {
             roots.extend(
                 assets
@@ -511,12 +528,17 @@ pub fn pump(store: &Rc<RefCell<Store>>) {
 
 async fn fetch(store: Rc<RefCell<Store>>, job: Job) {
     let url = format!("/assets/{}", job.kind.file_name(job.file.hash));
-    let bytes = crate::fetch_bytes(&url).await;
-    if bytes.is_ok() {
-        store
-            .borrow_mut()
-            .count_transfer(&url, u64::from(job.file.size));
-    }
+    let bytes = crate::stored::fetch(&url).await;
+    let bytes = bytes.map(|(bytes, stored)| {
+        let size = u64::from(job.file.size);
+        let mut state = store.borrow_mut();
+        if stored {
+            state.count_stored(size);
+        } else {
+            state.count_transfer(&url, size);
+        }
+        bytes
+    });
     let decoded = bytes.and_then(|bytes| decode(job.kind, &bytes).map_err(String::from));
     store.borrow_mut().arrive(job, decoded);
     pump(&store);
@@ -546,15 +568,18 @@ async fn load_index(store: Rc<RefCell<Store>>) {
                 index.terrains.len(),
                 index.sound_groups.len()
             ));
-            let mut store = store.borrow_mut();
-            store.index = Some(index.actors.into_iter().collect());
-            store.terrains = index.terrains.into_iter().collect();
-            store.alpha_maps = index.alpha_maps;
-            store.sound_groups = index.sound_groups.into_iter().collect();
-            store.music = index.music.into_iter().collect();
-            store.ambient = index.ambient;
-            store.civs = index.civs.into_iter().collect();
-            store.index_name = Some(name);
+            {
+                let mut store = store.borrow_mut();
+                store.index = Some(index.actors.into_iter().collect());
+                store.terrains = index.terrains.into_iter().collect();
+                store.alpha_maps = index.alpha_maps;
+                store.sound_groups = index.sound_groups.into_iter().collect();
+                store.music = index.music.into_iter().collect();
+                store.ambient = index.ambient;
+                store.civs = index.civs.into_iter().collect();
+                store.index_name = Some(name.clone());
+            }
+            crate::stored::prune(&name).await;
         }
         // Not fatal: the map and the minimap colours still show.
         Err(error) => {
@@ -581,10 +606,14 @@ async fn fetch_index(store: &Rc<RefCell<Store>>) -> Result<(Index, String), Stri
         return Err(format!("{POINTER} names {name:?}, not an index"));
     }
     let url = format!("/{name}");
-    let bytes = crate::fetch_bytes(&url)
+    let (bytes, stored) = crate::stored::fetch(&url)
         .await
         .map_err(|error| format!("{url}: {error}"))?;
-    store.borrow_mut().count_transfer(&url, bytes.len() as u64);
+    if stored {
+        store.borrow_mut().count_stored(bytes.len() as u64);
+    } else {
+        store.borrow_mut().count_transfer(&url, bytes.len() as u64);
+    }
     let index = Index::decode(&bytes).map_err(|error| format!("/{name}: {error}"))?;
     Ok((index, name.to_string()))
 }

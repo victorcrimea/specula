@@ -25,6 +25,7 @@ name = "bake-assets"
 path = "src/bake_assets/main.rs"
 
 [dependencies]
+brotli = "9"
 lewton = "0.10"
 meshopt = "0.6"
 ogg = "0.9"

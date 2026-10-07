@@ -141,6 +141,19 @@ impl Kind {
     }
 }
 
+/// The name inside `assets/` of the list of every file in the bake whose
+/// index has this hash: the hashes in their names, as little-endian u64s.
+/// A client keeping files from earlier bakes drops what is not in it.
+pub fn file_list_name(index: u64) -> String {
+    format!("files-{index:016x}.bin")
+}
+
+/// The hash in the name of a file `Kind::file_name` made.
+pub fn hash_of_name(name: &str) -> Option<u64> {
+    let (_, hash) = name.strip_suffix(".bin")?.rsplit_once('-')?;
+    u64::from_str_radix(hash, 16).ok()
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct FileRef {
     pub hash: u64,

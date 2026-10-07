@@ -1,6 +1,8 @@
 //! The "Warm up" button: fetches every asset file the match's civs and
-//! map can need, so the asset store finds them in the browser's HTTP
-//! cache when they first come on screen. Bodies are dropped once read;
+//! map can need, and those of the entities on the map when it is
+//! pressed (trees, rocks, animals and other gaia objects, which belong
+//! to no civ), so the asset store finds them stored in the browser when
+//! they first come on screen, and asks the browser to keep them. Bodies are dropped once read;
 //! only the files that name others are decoded, to follow those names.
 
 use std::cell::RefCell;
@@ -83,13 +85,14 @@ impl Warmup {
         self.terrains = terrains;
     }
 
-    /// From a click on the button.
-    pub fn start(&mut self, store: &Store) {
+    /// From a click on the button; `actors` are those of the entities
+    /// on the map now.
+    pub fn start(&mut self, store: &Store, actors: &[&str]) {
         if self.running() || self.civs.is_empty() {
             return;
         }
         let civs: Vec<&str> = self.civs.iter().map(String::as_str).collect();
-        let Some(roots) = store.warmup_roots(&civs, &self.terrains) else {
+        let Some(roots) = store.warmup_roots(&civs, actors, &self.terrains) else {
             return;
         };
         let mut run = Run::default();
@@ -166,9 +169,9 @@ fn pump(run: &Rc<RefCell<Run>>) {
 /// The same URL the store fetches, so its request hits the cache.
 async fn fetch(run: Rc<RefCell<Run>>, kind: Kind, file: FileRef) {
     let url = format!("/assets/{}", kind.file_name(file.hash));
-    let named = crate::fetch_bytes(&url)
+    let named = crate::stored::fetch(&url)
         .await
-        .and_then(|bytes| names(kind, &bytes).map_err(String::from));
+        .and_then(|(bytes, _)| names(kind, &bytes).map_err(String::from));
     {
         let mut state = run.borrow_mut();
         state.in_flight -= 1;

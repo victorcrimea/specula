@@ -12,6 +12,7 @@ mod minimap;
 mod opfs;
 mod pose;
 mod render;
+mod stored;
 mod stream;
 mod terrain;
 mod territory;
@@ -21,6 +22,7 @@ mod warmup;
 mod worker;
 
 use std::cell::RefCell;
+use std::collections::BTreeSet;
 use std::rc::Rc;
 
 use specula_assets::files::MusicKind;
@@ -592,25 +594,26 @@ fn set_panic_hook() {
 }
 
 /// Entry point of map.html; the stream worker's is `worker::worker_main`.
+/// `glue_url` and `wasm_url` as for `observer_main`.
 #[wasm_bindgen]
-pub fn page_main() {
+pub fn page_main(glue_url: String, wasm_url: String) {
     set_panic_hook();
-    wasm_bindgen_futures::spawn_local(async {
-        if let Err(error) = run(Page::Map, None).await {
+    wasm_bindgen_futures::spawn_local(async move {
+        if let Err(error) = run(Page::Map, glue_url, wasm_url).await {
             web_sys::console::error_1(&error.into());
         }
     });
 }
 
 /// Entry point of index.html: the same stream and controls as the
-/// page's, drawn in 3D. `glue` is the URL the page imported this module's
-/// glue from; the stream worker imports the same one, so a cached older
-/// worker can never pair an old glue with this wasm.
+/// page's, drawn in 3D. `glue_url` and `wasm_url` are the URLs the page loaded
+/// this module from; the stream worker loads the same ones, so a cached
+/// older worker can never pair an old glue with this wasm.
 #[wasm_bindgen]
-pub fn observer_main(glue: String) {
+pub fn observer_main(glue_url: String, wasm_url: String) {
     set_panic_hook();
     wasm_bindgen_futures::spawn_local(async move {
-        if let Err(error) = run(Page::Observer, Some(glue)).await {
+        if let Err(error) = run(Page::Observer, glue_url, wasm_url).await {
             web_sys::console::error_1(&error.into());
         }
     });
@@ -627,7 +630,7 @@ pub fn unit_main() {
     });
 }
 
-async fn run(page: Page, glue: Option<String>) -> Result<(), String> {
+async fn run(page: Page, glue_url: String, wasm_url: String) -> Result<(), String> {
     let window = web_sys::window().ok_or("no window")?;
     let canvas: HtmlCanvasElement = window
         .document()
@@ -676,10 +679,11 @@ async fn run(page: Page, glue: Option<String>) -> Result<(), String> {
     };
     let options = WorkerOptions::new();
     options.set_type(WorkerType::Module);
-    let worker_url = match &glue {
-        Some(glue) => format!("worker.js?glue={}", js_sys::encode_uri_component(glue)),
-        None => "worker.js".to_string(),
-    };
+    let worker_url = format!(
+        "worker.js?glue={}&wasm={}",
+        js_sys::encode_uri_component(&glue_url),
+        js_sys::encode_uri_component(&wasm_url)
+    );
     let worker = Worker::new_with_options(&worker_url, &options)
         .map_err(|_| "cannot start the stream worker")?;
 
@@ -792,7 +796,18 @@ fn wire_warmup(app: &Rc<RefCell<App>>) {
     let on_click = Closure::<dyn FnMut()>::new(move || {
         let app = &mut *target.borrow_mut();
         if let (Some(store), Some(warmup)) = (app.renderer.asset_store(), &mut app.warmup) {
-            warmup.start(&store.borrow());
+            let actors: BTreeSet<&str> = app
+                .scene
+                .dots
+                .values()
+                .filter_map(|dot| {
+                    let index = dot.actor.checked_sub(1)?;
+                    app.scene.strings.get(index as usize).map(String::as_str)
+                })
+                .collect();
+            let actors: Vec<&str> = actors.into_iter().collect();
+            warmup.start(&store.borrow(), &actors);
+            stored::persist();
         }
     });
     button.set_onclick(Some(on_click.as_ref().unchecked_ref()));

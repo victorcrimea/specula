@@ -15,8 +15,12 @@
 //! target/bake-assets/sounds by their source's content.
 //!
 //! The files go to `<output dir>/assets/`; `<output dir>/assets.txt`
-//! names the index and is written last. Files of earlier bakes that this
-//! one did not write are removed.
+//! names the index and is written last. Next to the index goes the list
+//! of every file in the bake, and next to each file but the sounds (Opus
+//! does not shrink) its brotli copy `<name>.br`, which the server sends to
+//! browsers that take it. A brotli copy left by an earlier bake is kept, as
+//! the name says its content. Files of earlier bakes that this one did not
+//! write are removed.
 
 mod actor;
 mod mesh;
@@ -34,6 +38,7 @@ use std::hash::DefaultHasher;
 use std::hash::Hash;
 use std::hash::Hasher;
 use std::io::Read;
+use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -70,6 +75,11 @@ const DEFAULT_OUTPUT: &str = "specula-web";
 const ASSET_DIR: &str = "assets";
 const POINTER: &str = "assets.txt";
 const WORK_DIR: &str = "target/bake-assets";
+/// Highest quality: each file is compressed once, by the first bake that
+/// writes it, and sent many times.
+const BROTLI_QUALITY: u32 = 11;
+const BROTLI_WINDOW_BITS: u32 = 22;
+const PARTIAL_SUFFIX: &str = ".partial";
 const SOUND_CACHE_DIR: &str = "sounds";
 /// Opus bits per second per channel: speech and effects are short and
 /// mostly mono, the music is listened to.
@@ -106,6 +116,9 @@ struct Output {
     dir: PathBuf,
     written: HashSet<String>,
     bytes: u64,
+    hashes: BTreeSet<u64>,
+    /// Names to write a brotli copy of.
+    compress: Vec<String>,
 }
 
 impl Output {
@@ -121,6 +134,10 @@ impl Output {
             fs::write(&path, bytes)
                 .map_err(|error| format!("cannot write {}: {error}", path.display()))?;
             self.bytes += bytes.len() as u64;
+            self.hashes.insert(hash);
+            if kind != Kind::Sound {
+                self.compress.push(name);
+            }
         }
         Ok(FileRef {
             hash,
@@ -200,6 +217,8 @@ fn run() -> Result<(), String> {
         dir: asset_dir.clone(),
         written: HashSet::new(),
         bytes: 0,
+        hashes: BTreeSet::new(),
+        compress: Vec::new(),
     };
     let missing: HashSet<String> = missing.into_iter().collect();
     let pieces = write_pieces(&converted, &sources, &missing, &mut output)?;
@@ -262,6 +281,9 @@ fn run() -> Result<(), String> {
     add_civs(&mod_dir, &mut index);
     let index_file = output.write(Kind::Index, &index.encode())?;
     print_sample(&index, &asset_dir);
+    write_file_list(&mut output, index_file.hash)?;
+    let compressed = compress_all(&asset_dir, &output.compress)?;
+    output.written.extend(compressed);
     remove_stale(&asset_dir, &output.written)?;
 
     let pointer = output_dir.join(POINTER);
@@ -888,12 +910,128 @@ fn print_sample(index: &Index, asset_dir: &Path) {
     );
 }
 
+/// The list `files::file_list_name` names, itself listed for compression
+/// but not in the list.
+fn write_file_list(output: &mut Output, index: u64) -> Result<(), String> {
+    let name = files::file_list_name(index);
+    let bytes: Vec<u8> = output
+        .hashes
+        .iter()
+        .flat_map(|hash| hash.to_le_bytes())
+        .collect();
+    let path = output.dir.join(&name);
+    fs::write(&path, &bytes)
+        .map_err(|error| format!("cannot write {}: {error}", path.display()))?;
+    output.bytes += bytes.len() as u64;
+    output.written.insert(name.clone());
+    output.compress.push(name);
+    Ok(())
+}
+
+/// A brotli copy of each of `names` that would be smaller, on every core;
+/// returns the names of the copies there now.
+fn compress_all(dir: &Path, names: &[String]) -> Result<Vec<String>, String> {
+    let start = Instant::now();
+    let next = AtomicUsize::new(0);
+    let results: Mutex<Vec<Result<Compressed, String>>> = Mutex::new(Vec::new());
+    let workers = thread::available_parallelism().map_or(1, |count| count.get());
+    thread::scope(|scope| {
+        for _ in 0..workers {
+            scope.spawn(|| {
+                loop {
+                    let at = next.fetch_add(1, Ordering::Relaxed);
+                    let Some(name) = names.get(at) else {
+                        break;
+                    };
+                    let result = compress_file(dir, name);
+                    results.lock().unwrap().push(result);
+                }
+            });
+        }
+    });
+    let mut copies = Vec::new();
+    let (mut kept, mut made, mut raw, mut packed) = (0, 0, 0, 0);
+    for result in results.into_inner().unwrap() {
+        match result? {
+            Compressed::Kept(name) => {
+                kept += 1;
+                copies.push(name);
+            }
+            Compressed::Made {
+                name,
+                raw: from,
+                packed: to,
+            } => {
+                made += 1;
+                raw += from;
+                packed += to;
+                copies.push(name);
+            }
+            Compressed::Larger => {}
+        }
+    }
+    println!(
+        "brotli: {made} copies made ({:.1} MB to {:.1} MB), {kept} kept from earlier bakes, \
+         {} left raw, in {:.0} s",
+        raw as f64 / 1e6,
+        packed as f64 / 1e6,
+        names.len() - made - kept,
+        start.elapsed().as_secs_f32()
+    );
+    Ok(copies)
+}
+
+enum Compressed {
+    Kept(String),
+    Made {
+        name: String,
+        raw: u64,
+        packed: u64,
+    },
+    /// Not smaller; the server sends the file as it is.
+    Larger,
+}
+
+fn compress_file(dir: &Path, name: &str) -> Result<Compressed, String> {
+    let copy = format!("{name}.br");
+    let path = dir.join(&copy);
+    if path.exists() {
+        return Ok(Compressed::Kept(copy));
+    }
+    let source = dir.join(name);
+    let bytes =
+        fs::read(&source).map_err(|error| format!("cannot read {}: {error}", source.display()))?;
+    let mut writer =
+        brotli::CompressorWriter::new(Vec::new(), 4096, BROTLI_QUALITY, BROTLI_WINDOW_BITS);
+    writer
+        .write_all(&bytes)
+        .map_err(|error| format!("cannot compress {name}: {error}"))?;
+    let packed = writer.into_inner();
+    if packed.len() >= bytes.len() {
+        return Ok(Compressed::Larger);
+    }
+    // Renamed into place, so an interrupted bake does not leave a cut copy
+    // that the next one would keep.
+    let partial = dir.join(format!("{copy}{PARTIAL_SUFFIX}"));
+    fs::write(&partial, &packed)
+        .map_err(|error| format!("cannot write {}: {error}", partial.display()))?;
+    fs::rename(&partial, &path)
+        .map_err(|error| format!("cannot rename to {}: {error}", path.display()))?;
+    Ok(Compressed::Made {
+        name: copy,
+        raw: bytes.len() as u64,
+        packed: packed.len() as u64,
+    })
+}
+
 fn remove_stale(dir: &Path, written: &HashSet<String>) -> Result<(), String> {
     let entries = fs::read_dir(dir).map_err(|error| format!("{}: {error}", dir.display()))?;
     for entry in entries {
         let entry = entry.map_err(|error| error.to_string())?;
         let name = entry.file_name().to_string_lossy().into_owned();
-        if name.ends_with(".bin") && !written.contains(&name) {
+        let ours =
+            name.ends_with(".bin") || name.ends_with(".bin.br") || name.ends_with(PARTIAL_SUFFIX);
+        if ours && !written.contains(&name) {
             fs::remove_file(entry.path())
                 .map_err(|error| format!("cannot remove {name}: {error}"))?;
         }

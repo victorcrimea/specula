@@ -22,8 +22,8 @@ html, body { margin: 0; height: 100%; background: #0f1214; overflow: hidden; }
 </div>
 <div id="fps" aria-label="Frames per second">- FPS</div>
 <script type="module">
-import init, { unit_main } from "./pkg/specula_web.js?v=2480b8de6b5d";
-await init();
+import init, { unit_main } from "./pkg/specula_web.js?v=GLUE";
+await init({ module_or_path: "./pkg/specula_web_bg.wasm?v=WASM" });
 unit_main();
 </script>
 </body>

@@ -4,6 +4,7 @@ mod feed;
 mod observer;
 mod terrain;
 mod view;
+mod web;
 mod wire;
 
 use std::collections::HashMap;
@@ -32,7 +33,7 @@ use crate::view::Hub;
 
 const DEFAULT_SOCKET: &str = "/tmp/specula-feed.sock";
 /// Relative to the working directory, so the server runs from the repo root.
-const WEB_ROOT: &str = "specula-web";
+pub const WEB_ROOT: &str = "specula-web";
 
 #[rocket::main]
 async fn main() {
@@ -71,25 +72,28 @@ async fn main() {
 
     let result = rocket::build()
         .manage(hub)
-        .mount("/", rocket::routes![viewer, terrain_file, segment_file])
+        .manage(web::Pkg::default())
+        .mount(
+            "/",
+            rocket::routes![
+                viewer,
+                terrain_file,
+                segment_file,
+                web::index,
+                web::page,
+                web::pkg_file,
+                web::asset
+            ],
+        )
         .mount("/", FileServer::from(WEB_ROOT))
-        .attach(AdHoc::on_response("Cache-Control", |request, response| {
+        .attach(AdHoc::on_response("Cache-Control", |_, response| {
             Box::pin(async move {
-                if response.headers().contains("Cache-Control") {
-                    return;
+                // What is not named by its content (pages, the worker, the
+                // pointers) keeps its name across builds, and a browser
+                // left to guess may pair a new page with an old worker.
+                if !response.headers().contains("Cache-Control") {
+                    response.set_header(Header::new("Cache-Control", "no-cache"));
                 }
-                // Baked assets are named by their content, so a copy never
-                // goes stale. Pages, the wasm and its glue, and the pointers
-                // keep their names, and a browser left to guess may pair a
-                // new wasm with an old glue.
-                let hashed = request.uri().path().starts_with("/assets/")
-                    && request.uri().path().ends_with(".bin");
-                let value = if hashed {
-                    "public, max-age=31536000, immutable"
-                } else {
-                    "no-cache"
-                };
-                response.set_header(Header::new("Cache-Control", value));
             })
         }))
         .launch()
