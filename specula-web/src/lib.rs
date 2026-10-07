@@ -56,6 +56,7 @@ use crate::field::Field;
 use crate::icons::IconAtlas;
 use crate::minimap::Minimap;
 use crate::render::Renderer;
+use crate::stream::Ground;
 use crate::stream::PlayerState;
 use crate::stream::Scene;
 use crate::stream::Sound;
@@ -71,6 +72,7 @@ use crate::worker::COMMAND_SEEK;
 use crate::worker::COMMAND_SPEED;
 use crate::worker::POST_SCENE;
 use crate::worker::POST_STATUS;
+use crate::worker::POST_TERRAIN;
 use crate::worker::STATUS_ENDED;
 use crate::worker::STATUS_LIVE;
 use crate::worker::STATUS_NEXT_READY;
@@ -252,8 +254,10 @@ struct App {
     turn_arrived: bool,
     scene_changed: bool,
     dirty: bool,
-    /// The terrain shown or being fetched; 0 for none.
+    /// The terrain shown; 0 for none.
     terrain_id: u64,
+    /// The terrain the worker handed over, until a keyframe shows it.
+    terrain_image: Option<(u64, TerrainImage)>,
     diplomacy_colors: bool,
     perspective: Perspective,
     /// The displayed colour of each player id.
@@ -729,6 +733,7 @@ async fn run(page: Page, glue_url: String, wasm_url: String) -> Result<(), Strin
         scene_changed: false,
         dirty: true,
         terrain_id: 0,
+        terrain_image: None,
         diplomacy_colors: false,
         perspective: Perspective::Observer,
         palette: Vec::new(),
@@ -1150,6 +1155,11 @@ fn connect(app: &Rc<RefCell<App>>) {
                     receive(&receiver, f64::from_le_bytes(*turn_ms), message);
                 }
             }
+            Some((&POST_TERRAIN, rest)) => {
+                if let Some((id, resource)) = rest.split_first_chunk::<8>() {
+                    receive_terrain(&receiver, u64::from_le_bytes(*id), resource);
+                }
+            }
             Some((&POST_STATUS, rest)) => {
                 let u32_at = |at: usize| {
                     rest.get(at..at + 4)
@@ -1238,9 +1248,22 @@ fn receive(app_rc: &Rc<RefCell<App>>, turn_ms: f64, message: &[u8]) {
                 if let Some(warmup) = &mut app.warmup {
                     warmup.set_terrains(Vec::new());
                 }
-                if terrain_id != 0 {
-                    let app = Rc::clone(app_rc);
-                    wasm_bindgen_futures::spawn_local(load_terrain(app, terrain_id));
+                match app.terrain_image.take() {
+                    Some((id, image)) if id == terrain_id => {
+                        app.renderer.set_terrain(Some(&image));
+                        if let Some(minimap) = &mut app.minimap {
+                            minimap.set_terrain(Some(&image));
+                        }
+                        if let Some(warmup) = &mut app.warmup {
+                            warmup.set_terrains(image.names.clone());
+                        }
+                        app.dirty = true;
+                    }
+                    // Not fatal: the dots still work on a plain background.
+                    _ if terrain_id != 0 => web_sys::console::error_1(
+                        &format!("terrain {terrain_id:016x} was not handed over").into(),
+                    ),
+                    _ => {}
                 }
             }
         }
@@ -1253,24 +1276,21 @@ fn receive(app_rc: &Rc<RefCell<App>>, turn_ms: f64, message: &[u8]) {
     }
 }
 
-async fn load_terrain(app: Rc<RefCell<App>>, id: u64) {
-    match fetch_terrain(id).await {
-        Ok((image, size)) => {
-            let mut app = app.borrow_mut();
-            app.stream_bytes.terrain += size;
-            // Another match may have started during the download.
-            if app.terrain_id == id {
-                app.renderer.set_terrain(Some(&image));
-                if let Some(minimap) = &mut app.minimap {
-                    minimap.set_terrain(Some(&image));
-                }
-                if let Some(warmup) = &mut app.warmup {
-                    warmup.set_terrains(image.names.clone());
-                }
-                app.dirty = true;
-            }
+/// The worker hands over a match's terrain before the first keyframe that
+/// names it; the scene needs its heightmap to apply that keyframe.
+fn receive_terrain(app_rc: &Rc<RefCell<App>>, id: u64, resource: &[u8]) {
+    let app = &mut *app_rc.borrow_mut();
+    app.stream_bytes.terrain += resource.len() as u64;
+    let built = terrain::build(resource).and_then(|image| {
+        let ground = Ground::new(id, image.size, image.heights.clone())?;
+        Ok((image, ground))
+    });
+    match built {
+        Ok((image, ground)) => {
+            app.scene.ground = Some(Rc::new(ground));
+            app.terrain_image = Some((id, image));
         }
-        // Not fatal: the dots still work on a plain background.
+        // The keyframe fails without it, and that stops the stream.
         Err(error) => {
             web_sys::console::error_1(&format!("terrain {id:016x}: {error}").into());
         }
@@ -1293,12 +1313,6 @@ async fn load_icons(app: Rc<RefCell<App>>) {
         // Not fatal: every entity still has its dot.
         Err(error) => web_sys::console::error_1(&format!("icons: {error}").into()),
     }
-}
-
-async fn fetch_terrain(id: u64) -> Result<(TerrainImage, u64), String> {
-    let bytes = fetch_bytes(&format!("/terrain/{id:016x}")).await?;
-    let image = terrain::build(&bytes).map_err(String::from)?;
-    Ok((image, bytes.len() as u64))
 }
 
 /// Bytes a finished fetch of `url`, a path on this origin, moved over the

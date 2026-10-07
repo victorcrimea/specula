@@ -38,7 +38,7 @@ html, body { margin: 0; height: 100%; background: #0f1214; }
   width: min(220px, 40vw); height: min(220px, 40vw);
   border: 1px solid #3a4248; border-radius: 4px; background: #0f1214;
   cursor: pointer; touch-action: none; }
-#errors { position: fixed; top: 120px; left: 8px; max-width: calc(100vw - 16px);
+#errors { max-width: 100%;
   box-sizing: border-box; max-height: 40vh;
   overflow: auto; margin: 0; padding: 6px 8px; white-space: pre-wrap;
   font: 12px ui-monospace, monospace; color: #ffb4a8;
@@ -89,6 +89,7 @@ body:not(.debug) #stats, body:not(.debug) #errors { display: none; }
 <div id="hud">
 <div id="fps" aria-label="Frames per second">- FPS</div>
 <div id="stats" aria-label="Renderer statistics"></div>
+<pre id="errors" aria-live="polite"></pre>
 </div>
 <div id="loading" role="status">
 <span id="loading-text">Loading</span>
@@ -106,7 +107,6 @@ body:not(.debug) #stats, body:not(.debug) #errors { display: none; }
 <button id="match-over-current" type="button" disabled>Current match</button>
 <button id="match-over-close" type="button" aria-label="Close">x</button>
 </div>
-<pre id="errors" aria-live="polite"></pre>
 <script>
 // Phones have no console to read, so errors and the console's lines are
 // shown on the page too.

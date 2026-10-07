@@ -96,3 +96,52 @@ pub fn encode(terrain: &Terrain) -> Resource {
         unknown,
     }
 }
+
+/// The heightmap, for the viewer stream's ground-following heights.
+pub struct Ground {
+    /// Vertices per side.
+    vertices: i64,
+    /// In 1/92 m, row-major, x fastest.
+    heights: Vec<u16>,
+}
+
+impl Ground {
+    pub fn new(terrain: &Terrain) -> Self {
+        Ground {
+            vertices: i64::from(terrain.tiles_per_side) + 1,
+            heights: terrain.heights.clone(),
+        }
+    }
+
+    /// `CTerrain::GetExactGroundLevelFixed` at a position in 1/16 m, in
+    /// 1/16 m. Integer only, so a viewer gets exactly the same.
+    pub fn at(&self, x: i32, z: i32) -> i32 {
+        const ONE: i64 = 1 << 16;
+        // 16.16 metres over `TERRAIN_TILE_SIZE`, which truncates as C++ does.
+        let x = i64::from(x) * 4096 / 4;
+        let z = i64::from(z) * 4096 / 4;
+        let round_to_zero = |value: i64| {
+            if value > 0 {
+                value >> 16
+            } else {
+                (value + ONE - 1) >> 16
+            }
+        };
+        let last = self.vertices - 2;
+        let xi = round_to_zero(x).clamp(0, last);
+        let zi = round_to_zero(z).clamp(0, last);
+        let xf = (x - xi * ONE).clamp(0, ONE);
+        let zf = (z - zi * ONE).clamp(0, ONE);
+        let height = |i: i64, j: i64| i64::from(self.heights[(j * self.vertices + i) as usize]);
+        // Halved, as the engine does to stay within its fixed-point range;
+        // the division below makes up for it.
+        let xf0 = xf / 2;
+        let xf1 = (ONE - xf) / 2;
+        let near = xf1 * height(xi, zi) + xf0 * height(xi + 1, zi);
+        let far = xf1 * height(xi, zi + 1) + xf0 * height(xi + 1, zi + 1);
+        // `HEIGHT_UNITS_PER_METRE / 2`.
+        let raw = (((ONE - zf) * near) >> 16) + ((zf * far) >> 16);
+        let raw = raw / 46;
+        (raw + 2048).div_euclid(4096) as i32
+    }
+}

@@ -1,8 +1,9 @@
 //! Decoder for specula-server's viewer stream and match segments, wire
-//! format v9; the layout is documented in `specula-server/src/view.rs`.
+//! format v10; the layout is documented in `specula-server/src/view.rs`.
 
 use std::collections::BTreeMap;
 use std::io::Read;
+use std::rc::Rc;
 
 use ruzstd::decoding::StreamingDecoder;
 
@@ -22,6 +23,9 @@ const CHANGED_MODEL: u64 = 512;
 const CHANGED_VARIANTS: u64 = 1024;
 const CHANGED_CONSTRUCTION: u64 = 2048;
 const CHANGED_VISIBILITY: u64 = 4096;
+const CHANGED_GROUNDED: u64 = 8192;
+const CHANGED_HEIGHT: u64 = 16384;
+const MOTION_GROUNDED: u8 = 1;
 const SOUND_ENTITY: u8 = 0;
 const SOUND_POSITION: u8 = 1;
 const SOUND_PLAYER: u8 = 2;
@@ -92,6 +96,100 @@ pub struct Dot {
     pub sound_group: u32,
     /// Bit p is set when player p sees the entity.
     pub visibility: u16,
+    /// What it moves by each turn until a delta changes it, in 1/16 m.
+    pub step: [i32; 2],
+    /// Its height is the ground's.
+    pub grounded: bool,
+}
+
+/// The match's heightmap, which grounded entities take their height from.
+pub struct Ground {
+    /// The terrain resource it is from.
+    pub id: u64,
+    /// Vertices per side.
+    vertices: i64,
+    /// In 1/92 m, row-major, x fastest.
+    heights: Vec<u16>,
+}
+
+impl Ground {
+    pub fn new(id: u64, tiles: u32, heights: Vec<u16>) -> Result<Self, &'static str> {
+        let vertices = i64::from(tiles) + 1;
+        if tiles == 0 || heights.len() as i64 != vertices * vertices {
+            return Err("heightmap of the wrong size");
+        }
+        Ok(Ground {
+            id,
+            vertices,
+            heights,
+        })
+    }
+
+    /// From a `/terrain/<id>` resource, read up to its heights.
+    pub fn from_resource(id: u64, resource: &[u8]) -> Result<Self, &'static str> {
+        let mut cursor = Cursor(resource);
+        if cursor.u8()? != 1 {
+            return Err("unknown terrain version");
+        }
+        let tiles = cursor.u32()?;
+        // Water level, shallow depth and circular.
+        cursor.take(9)?;
+        for _ in 0..cursor.u32()? {
+            cursor.take(4)?;
+            let length = cursor.take(2)?;
+            cursor.take(usize::from(u16::from_le_bytes([length[0], length[1]])))?;
+        }
+        let vertices = tiles as usize + 1;
+        let heights = cursor
+            .take(vertices * vertices * 2)?
+            .chunks_exact(2)
+            .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+            .collect();
+        Ground::new(id, tiles, heights)
+    }
+
+    /// `CTerrain::GetExactGroundLevelFixed` at a position in 1/16 m, in
+    /// 1/16 m, exactly as specula-server reckons it.
+    pub fn at(&self, x: i32, z: i32) -> i32 {
+        const ONE: i64 = 1 << 16;
+        // 16.16 metres over `TERRAIN_TILE_SIZE`, which truncates as C++ does.
+        let x = i64::from(x) * 4096 / 4;
+        let z = i64::from(z) * 4096 / 4;
+        let round_to_zero = |value: i64| {
+            if value > 0 {
+                value >> 16
+            } else {
+                (value + ONE - 1) >> 16
+            }
+        };
+        let last = self.vertices - 2;
+        let xi = round_to_zero(x).clamp(0, last);
+        let zi = round_to_zero(z).clamp(0, last);
+        let xf = (x - xi * ONE).clamp(0, ONE);
+        let zf = (z - zi * ONE).clamp(0, ONE);
+        let height = |i: i64, j: i64| i64::from(self.heights[(j * self.vertices + i) as usize]);
+        // Halved, as the engine does to stay within its fixed-point range;
+        // the division below makes up for it.
+        let xf0 = xf / 2;
+        let xf1 = (ONE - xf) / 2;
+        let near = xf1 * height(xi, zi) + xf0 * height(xi + 1, zi);
+        let far = xf1 * height(xi, zi + 1) + xf0 * height(xi + 1, zi + 1);
+        // `HEIGHT_UNITS_PER_METRE / 2`.
+        let raw = (((ONE - zf) * near) >> 16) + ((zf * far) >> 16);
+        let raw = raw / 46;
+        (raw + 2048).div_euclid(4096) as i32
+    }
+}
+
+/// What a delta sends for one entity.
+struct Change {
+    mask: u64,
+    /// The change of the step.
+    step: [i32; 2],
+    /// Added to the height, with `CHANGED_HEIGHT`.
+    dy: i32,
+    /// The entity with the fields the mask sends replaced.
+    values: Dot,
 }
 
 /// A sound group the simulation played during a turn.
@@ -120,7 +218,7 @@ pub enum SoundTarget {
 }
 
 /// A projectile, as `CCmpProjectileManager::LaunchProjectile` was given it.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Default)]
 pub struct Shot {
     pub launch_turn: u32,
     /// The entity that shot it, 0 for none; it may be gone.
@@ -197,6 +295,9 @@ pub struct Scene {
     pub sounds: Vec<Sound>,
     /// By id: in flight, or lying on the ground.
     pub shots: BTreeMap<u32, Shot>,
+    /// The heightmap of `terrain_id`, which must be set before a keyframe
+    /// naming it is applied.
+    pub ground: Option<Rc<Ground>>,
 }
 
 /// `ICmpTerritoryManager`'s grid, a tile per `territory::TILE_SIZE`.
@@ -274,6 +375,14 @@ impl Scene {
         }
         self.map_size = cursor.varint_u32()?;
         self.terrain_id = cursor.u64()?;
+        if self.terrain_id != 0
+            && self
+                .ground
+                .as_ref()
+                .is_none_or(|ground| ground.id != self.terrain_id)
+        {
+            return Err("keyframe before its terrain");
+        }
         self.icons.clear();
         self.read_icons(cursor)?;
         self.read_players(cursor)?;
@@ -330,82 +439,35 @@ impl Scene {
         let destroyed = cursor.varint_u32()?;
         let changed = cursor.varint_u32()?;
         let mut id = 0;
+        let mut arrived = Vec::new();
         for _ in 0..spawned {
             id += cursor.varint_u32()?;
-            let dot = cursor.dot(id, self.turn)?;
-            self.dots.insert(id, dot);
+            arrived.push((id, cursor.dot(id, self.turn)?));
         }
         let mut id = 0;
+        let mut gone = BTreeMap::new();
         for _ in 0..destroyed {
             id += cursor.varint_u32()?;
-            self.dots.remove(&id);
+            if let Some(dot) = self.dots.remove(&id) {
+                gone.insert(id, dot);
+            }
         }
         let mut id = 0;
+        let mut changes = BTreeMap::new();
         for _ in 0..changed {
             id += cursor.varint_u32()?;
-            let mask = cursor.varint()?;
-            let dot = self
-                .dots
-                .get_mut(&id)
-                .ok_or("change to an unknown entity")?;
-            if mask & CHANGED_POSITION != 0 {
-                dot.x += cursor.zigzag()?;
-                dot.z += cursor.zigzag()?;
-                dot.y += cursor.zigzag()?;
-                let distance = (dot.x as f32 - dot.from_x).hypot(dot.z as f32 - dot.from_z);
-                if distance > SNAP_UNITS {
-                    dot.from_x = dot.x as f32;
-                    dot.from_z = dot.z as f32;
-                    dot.from_y = dot.y as f32;
-                }
-            }
-            if mask & CHANGED_COLOR != 0 {
-                dot.color = cursor.u32()?;
-            }
-            if mask & CHANGED_ICON != 0 {
-                dot.icon = cursor.varint_u32()?;
-            }
-            if mask & CHANGED_PLAYER != 0 {
-                dot.player = cursor.varint_u32()?;
-            }
-            if mask & CHANGED_ANGLE != 0 {
-                dot.angle = cursor.u8()?;
-                // Keep the start within half a turn, so the heading turns
-                // the short way.
-                dot.from_angle = f32::from(dot.angle) - turn_towards(dot.from_angle, dot.angle);
-            }
-            if mask & CHANGED_ANIMATION != 0 {
-                dot.animation = cursor.varint_u32()?;
-                dot.once = cursor.u8()? & ANIMATION_ONCE != 0;
-                dot.sound_group = cursor.varint_u32()?;
-                dot.animation_turn = self.turn;
-            }
-            if mask & CHANGED_ANIMATION_SPEED != 0 {
-                dot.speed = cursor.varint_u32()?;
-            }
-            if mask & CHANGED_SYNC != 0 {
-                dot.sync_repeat = cursor.varint_u32()?;
-                dot.sync_offset = cursor.zigzag()?;
-                dot.sync_turn = self.turn;
-            }
-            if mask & CHANGED_OWNER != 0 {
-                dot.owner = cursor.zigzag()?;
-            }
-            if mask & CHANGED_MODEL != 0 {
-                dot.template = cursor.varint_u32()?;
-                dot.actor = cursor.varint_u32()?;
-                dot.seed = cursor.seed(id)?;
-            }
-            if mask & CHANGED_VARIANTS != 0 {
-                dot.variants = cursor.varint_u32()?;
-            }
-            if mask & CHANGED_CONSTRUCTION != 0 {
-                dot.construction = cursor.u8()?;
-            }
-            if mask & CHANGED_VISIBILITY != 0 {
-                dot.visibility = cursor.varint_u32()? as u16;
+            let dot = self.dots.get(&id).ok_or("change to an unknown entity")?;
+            changes.insert(id, cursor.change(id, dot)?);
+        }
+        let ground = self.ground.as_deref();
+        for (id, dot) in &mut self.dots {
+            let change = changes.get(id);
+            if change.is_some() || dot.step != [0, 0] {
+                advance(dot, change, ground, self.turn);
             }
         }
+        self.dots.extend(arrived);
+        let known = |id: u32| self.dots.get(&id).or_else(|| gone.get(&id));
         let count = cursor.varint_u32()?;
         for _ in 0..count {
             let group = cursor.varint_u32()?;
@@ -413,13 +475,16 @@ impl Scene {
                 SOUND_ENTITY => {
                     // The id seeds the engine's random gain and pitch; any
                     // random does here.
-                    cursor.varint_u32()?;
+                    let (owner, x, z, y, visibility) = known(cursor.varint_u32()?)
+                        .map_or((0, 0, 0, 0, 0), |dot| {
+                            (dot.owner, dot.x, dot.z, dot.y, dot.visibility)
+                        });
                     SoundTarget::Entity {
-                        owner: cursor.zigzag()?,
-                        x: cursor.zigzag()?,
-                        z: cursor.zigzag()?,
-                        y: cursor.zigzag()?,
-                        visibility: cursor.varint_u32()? as u16,
+                        owner: owner + cursor.zigzag()?,
+                        x: x + cursor.zigzag()?,
+                        z: z + cursor.zigzag()?,
+                        y: y + cursor.zigzag()?,
+                        visibility: visibility ^ cursor.varint_u32()? as u16,
                     }
                 }
                 SOUND_POSITION => SoundTarget::Position {
@@ -433,14 +498,15 @@ impl Scene {
             self.sounds.push(Sound { group, target });
         }
         let turn = self.turn;
-        self.shots.retain(|_, shot| shot.last_turn() >= turn);
         let count = cursor.varint_u32()?;
         let mut id = 0;
+        let mut launches = Vec::new();
         for _ in 0..count {
             id += cursor.varint_u32()?;
-            let shot = cursor.shot(turn)?;
-            self.shots.insert(id, shot);
+            launches.push((id, cursor.launch(turn, known)?));
         }
+        self.shots.retain(|_, shot| shot.last_turn() >= turn);
+        self.shots.extend(launches);
         let count = cursor.varint_u32()?;
         let mut id = 0;
         for _ in 0..count {
@@ -643,6 +709,9 @@ impl Scene {
             out.varint(u64::from(self.turn - dot.sync_turn));
             out.u8(dot.construction);
             out.varint(u64::from(dot.visibility));
+            out.zigzag(dot.step[0]);
+            out.zigzag(dot.step[1]);
+            out.u8(if dot.grounded { MOTION_GROUNDED } else { 0 });
         }
         out.varint(self.shots.len() as u64);
         let mut last_id = 0;
@@ -670,6 +739,106 @@ impl Scene {
     }
 }
 
+/// A delta's update of one entity, as specula-server reckons it.
+fn advance(dot: &mut Dot, change: Option<&Change>, ground: Option<&Ground>, turn: u32) {
+    let mask = change.map_or(0, |change| change.mask);
+    if let Some(change) = change.filter(|_| mask & CHANGED_POSITION != 0) {
+        dot.step[0] += change.step[0];
+        dot.step[1] += change.step[1];
+    }
+    let step = dot.step;
+    dot.x += step[0];
+    dot.z += step[1];
+    if mask & CHANGED_GROUNDED != 0 {
+        dot.grounded = true;
+    }
+    if let Some(change) = change.filter(|_| mask & CHANGED_HEIGHT != 0) {
+        dot.grounded = false;
+        dot.y += change.dy;
+    }
+    if dot.grounded
+        && let Some(ground) = ground
+    {
+        dot.y = ground.at(dot.x, dot.z);
+    }
+    let moved = step != [0, 0];
+    let angle = dot.angle;
+    if moved {
+        dot.angle = step_angle(step);
+        dot.speed = step_speed(step);
+        let distance = (dot.x as f32 - dot.from_x).hypot(dot.z as f32 - dot.from_z);
+        if distance > SNAP_UNITS {
+            dot.from_x = dot.x as f32;
+            dot.from_z = dot.z as f32;
+            dot.from_y = dot.y as f32;
+        }
+    }
+    if let Some(change) = change {
+        let values = &change.values;
+        if mask & CHANGED_ANGLE != 0 {
+            dot.angle = values.angle;
+        }
+        if mask & CHANGED_ANIMATION_SPEED != 0 {
+            dot.speed = values.speed;
+        }
+        if mask & CHANGED_COLOR != 0 {
+            dot.color = values.color;
+        }
+        if mask & CHANGED_ICON != 0 {
+            dot.icon = values.icon;
+        }
+        if mask & CHANGED_PLAYER != 0 {
+            dot.player = values.player;
+        }
+        if mask & CHANGED_ANIMATION != 0 {
+            dot.animation = values.animation;
+            dot.once = values.once;
+            dot.sound_group = values.sound_group;
+            dot.animation_turn = turn;
+        }
+        if mask & CHANGED_SYNC != 0 {
+            dot.sync_repeat = values.sync_repeat;
+            dot.sync_offset = values.sync_offset;
+            dot.sync_turn = turn;
+        }
+        if mask & CHANGED_OWNER != 0 {
+            dot.owner = values.owner;
+        }
+        if mask & CHANGED_MODEL != 0 {
+            dot.template = values.template;
+            dot.actor = values.actor;
+            dot.seed = values.seed;
+        }
+        if mask & CHANGED_VARIANTS != 0 {
+            dot.variants = values.variants;
+        }
+        if mask & CHANGED_CONSTRUCTION != 0 {
+            dot.construction = values.construction;
+        }
+        if mask & CHANGED_VISIBILITY != 0 {
+            dot.visibility = values.visibility;
+        }
+    }
+    if dot.angle != angle {
+        // Keep the start within half a turn, so the heading turns the short
+        // way.
+        dot.from_angle = f32::from(dot.angle) - turn_towards(dot.from_angle, dot.angle);
+    }
+}
+
+/// In 1/256 m/s, from 1/16 m per 0.2 s turn. `sqrt` is correctly rounded
+/// everywhere, so this is exactly the server's.
+fn step_speed(step: [i32; 2]) -> u32 {
+    let squared = i64::from(step[0]).pow(2) + i64::from(step[1]).pow(2);
+    ((squared as f64).sqrt() * 80.0).round() as u32
+}
+
+/// In 1/256 turn, clockwise from +z.
+fn step_angle(step: [i32; 2]) -> u8 {
+    let turns = f64::from(step[0]).atan2(f64::from(step[1])) / std::f64::consts::TAU;
+    (turns * 256.0).round().rem_euclid(256.0) as u8
+}
+
 /// The signed 1/256 turns from `from` to `to` the short way round.
 pub fn turn_towards(from: f32, to: u8) -> f32 {
     (f32::from(to) - from + 128.0).rem_euclid(256.0) - 128.0
@@ -679,6 +848,20 @@ pub fn turn_towards(from: f32, to: u8) -> f32 {
 pub fn message_turn(message: &[u8]) -> Result<u32, &'static str> {
     let (_, body) = message.split_first().ok_or("empty message")?;
     Cursor(body).varint_u32()
+}
+
+/// The terrain a keyframe names, 0 for none, without decoding the rest.
+pub fn keyframe_terrain(message: &[u8]) -> Result<u64, &'static str> {
+    let (_, body) = message.split_first().ok_or("empty message")?;
+    let mut cursor = Cursor(body);
+    // Turn, match id, game speed, first turn, turns per segment, map size.
+    cursor.varint()?;
+    cursor.u64()?;
+    cursor.u32()?;
+    cursor.varint()?;
+    cursor.varint()?;
+    cursor.varint()?;
+    cursor.u64()
 }
 
 pub fn is_keyframe(message: &[u8]) -> bool {
@@ -850,40 +1033,144 @@ impl<'a> Cursor<'a> {
             sync_turn: back(self)?,
             construction: self.u8()?,
             visibility: self.varint_u32()? as u16,
+            step: [self.zigzag()?, self.zigzag()?],
+            grounded: self.u8()? & MOTION_GROUNDED != 0,
             from_x: x as f32,
             from_z: z as f32,
         })
     }
 
-    /// A projectile launched on `turn`.
+    /// A changed entry after its id, for `dot` as the scene has it.
+    fn change(&mut self, id: u32, dot: &Dot) -> Result<Change, &'static str> {
+        let mask = self.varint()?;
+        let mut change = Change {
+            mask,
+            step: [0, 0],
+            dy: 0,
+            values: *dot,
+        };
+        if mask & CHANGED_POSITION != 0 {
+            change.step = [self.zigzag()?, self.zigzag()?];
+        }
+        if mask & CHANGED_HEIGHT != 0 {
+            change.dy = self.zigzag()?;
+        }
+        let values = &mut change.values;
+        if mask & CHANGED_COLOR != 0 {
+            values.color = self.u32()?;
+        }
+        if mask & CHANGED_ICON != 0 {
+            values.icon = self.varint_u32()?;
+        }
+        if mask & CHANGED_PLAYER != 0 {
+            values.player = self.varint_u32()?;
+        }
+        if mask & CHANGED_ANGLE != 0 {
+            values.angle = self.u8()?;
+        }
+        if mask & CHANGED_ANIMATION != 0 {
+            values.animation = self.varint_u32()?;
+            values.once = self.u8()? & ANIMATION_ONCE != 0;
+            values.sound_group = self.varint_u32()?;
+        }
+        if mask & CHANGED_ANIMATION_SPEED != 0 {
+            values.speed = self.varint_u32()?;
+        }
+        if mask & CHANGED_SYNC != 0 {
+            values.sync_repeat = self.varint_u32()?;
+            values.sync_offset = self.zigzag()?;
+        }
+        if mask & CHANGED_OWNER != 0 {
+            values.owner = self.zigzag()?;
+        }
+        if mask & CHANGED_MODEL != 0 {
+            values.template = self.varint_u32()?;
+            values.actor = self.varint_u32()?;
+            values.seed = self.seed(id)?;
+        }
+        if mask & CHANGED_VARIANTS != 0 {
+            values.variants = self.varint_u32()?;
+        }
+        if mask & CHANGED_CONSTRUCTION != 0 {
+            values.construction = self.u8()?;
+        }
+        if mask & CHANGED_VISIBILITY != 0 {
+            values.visibility = self.varint_u32()? as u16;
+        }
+        Ok(change)
+    }
+
+    /// A projectile launched on `turn`, as a keyframe has it.
     fn shot(&mut self, turn: u32) -> Result<Shot, &'static str> {
         let shooter = self.varint_u32()?;
-        let owner = self.zigzag()?;
-        let actor = self.varint_u32()?;
-        let seed = self.seed(shooter)?;
-        let variants = self.varint_u32()?;
-        let mut point = || -> Result<[i32; 3], &'static str> {
-            let x = self.zigzag()?;
-            let z = self.zigzag()?;
-            let y = self.zigzag()?;
-            Ok([x, y, z])
+        let mut shot = self.shot_origin(shooter, turn)?;
+        shot.launch = self.point()?;
+        shot.target = self.point()?;
+        self.shot_flight(&mut shot)?;
+        Ok(shot)
+    }
+
+    /// A projectile launched on `turn`, as a delta has it: relative to its
+    /// shooter if `known` has it.
+    fn launch<'b>(
+        &mut self,
+        turn: u32,
+        known: impl Fn(u32) -> Option<&'b Dot>,
+    ) -> Result<Shot, &'static str> {
+        let shooter_id = self.varint_u32()?;
+        let shooter = known(shooter_id).filter(|_| shooter_id != 0);
+        let (mut shot, origin) = match shooter {
+            Some(dot) => (
+                Shot {
+                    launch_turn: turn,
+                    shooter: shooter_id,
+                    owner: dot.owner,
+                    actor: dot.actor,
+                    seed: dot.seed,
+                    variants: dot.variants,
+                    ..Shot::default()
+                },
+                [dot.x, dot.y, dot.z],
+            ),
+            None => (self.shot_origin(shooter_id, turn)?, [0; 3]),
         };
-        let launch = point()?;
-        let target = point()?;
+        let launch = self.point()?;
+        let target = self.point()?;
+        for axis in 0..3 {
+            shot.launch[axis] = origin[axis] + launch[axis];
+            shot.target[axis] = shot.launch[axis] + target[axis];
+        }
+        self.shot_flight(&mut shot)?;
+        Ok(shot)
+    }
+
+    /// The shooter's fields as sent, the rest left to fill in.
+    fn shot_origin(&mut self, shooter: u32, turn: u32) -> Result<Shot, &'static str> {
         Ok(Shot {
             launch_turn: turn,
             shooter,
-            owner,
-            actor,
-            seed,
-            variants,
-            launch,
-            target,
-            speed: self.varint_u32()?,
-            gravity: self.zigzag()?,
-            projectile_actor: self.varint_u32()?,
-            impact_actor: self.varint_u32()?,
-            impact_lifetime: self.varint_u32()?,
+            owner: self.zigzag()?,
+            actor: self.varint_u32()?,
+            seed: self.seed(shooter)?,
+            variants: self.varint_u32()?,
+            ..Shot::default()
         })
+    }
+
+    fn shot_flight(&mut self, shot: &mut Shot) -> Result<(), &'static str> {
+        shot.speed = self.varint_u32()?;
+        shot.gravity = self.zigzag()?;
+        shot.projectile_actor = self.varint_u32()?;
+        shot.impact_actor = self.varint_u32()?;
+        shot.impact_lifetime = self.varint_u32()?;
+        Ok(())
+    }
+
+    /// Sent as x, z, y; returned as x, y, z.
+    fn point(&mut self) -> Result<[i32; 3], &'static str> {
+        let x = self.zigzag()?;
+        let z = self.zigzag()?;
+        let y = self.zigzag()?;
+        Ok([x, y, z])
     }
 }

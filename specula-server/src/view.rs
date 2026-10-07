@@ -1,4 +1,4 @@
-//! The viewer stream, wire format v9: one binary WebSocket message per
+//! The viewer stream, wire format v10: one binary WebSocket message per
 //! keyframe, turn or match end, varints and zigzag as in `wire.rs`, positions and
 //! heights in 1/16 m.
 //!
@@ -16,17 +16,17 @@
 //!   strings and variant sets added to their tables, varint spawned,
 //!   destroyed and changed counts. Spawned entries are keyframe entries,
 //!   destroyed entries are id deltas, changed entries are {varint id delta,
-//!   varint mask, then for each bit set, in this order: 1 zigzag dx, dz, dy;
-//!   2 u32 colour; 4 varint icon; 8 varint player; 16 u8 angle; 32 varint
-//!   animation, u8 animation flags, varint sound group; 64 varint
-//!   animation speed; 128 varint sync repeat, zigzag sync offset; 256
-//!   zigzag owner; 512 varint template, varint actor, zigzag seed - id;
-//!   1024 varint variant set; 2048 u8
-//!   construction; 4096 varint visibility}, then the sounds of the turn:
-//!   varint count, count x sound, in the order the simulation played
-//!   them, then the projectiles launched in the turn: varint count, count
-//!   x {varint id delta, projectile}, then the ids of the projectiles that
-//!   hit something and are gone: varint count, count x id delta. An
+//!   varint mask, then for each bit set, in this order: 1 zigzag x, z
+//!   change of the step; 16384 zigzag dy; 2 u32 colour; 4 varint icon; 8
+//!   varint player; 16 u8 angle; 32 varint animation, u8 animation flags,
+//!   varint sound group; 64 varint animation speed; 128 varint sync
+//!   repeat, zigzag sync offset; 256 zigzag owner; 512 varint template,
+//!   varint actor, zigzag seed - id; 1024 varint variant set; 2048 u8
+//!   construction; 4096 varint visibility; 8192 nothing}, then the sounds
+//!   of the turn: varint count, count x sound, in the order the simulation
+//!   played them, then the projectiles launched in the turn: varint count,
+//!   count x {varint id delta, launch}, then the ids of the projectiles
+//!   that hit something and are gone: varint count, count x id delta. An
 //!   animation (32) starts, and a sync (128) is set, at the delta's turn;
 //!   it is also sent when only its sound group changed.
 //! - kind 3 ended: u64 match id, varint ms since the match ended. No more
@@ -34,12 +34,34 @@
 //!   next match. A viewer joining between matches gets the final keyframe
 //!   and then this message.
 //!
+//! A delta moves the entities as a viewer would, and lists only the
+//! entities whose result would be wrong. A delta applies in this order:
+//! remove the destroyed entities; update every entity that is either
+//! listed or has a step that is not zero, as below; add the spawned ones.
+//! Updating an entity:
+//! - its step, in 1/16 m per turn, changes by the change sent (1); it
+//!   moves by the step in x and z;
+//! - 8192 makes it follow the ground, 16384 makes it stop following it
+//!   and adds dy to its height; while it follows the ground, its height is
+//!   the ground's at its position, `CTerrain::GetExactGroundLevelFixed` at
+//!   the wire position rounded to 1/16 m (the terrain resource's
+//!   heightmap; nothing follows the ground without a terrain);
+//! - if its step is not zero, the animation speed is |step| / 16 / 0.2 *
+//!   256, rounded, unless 64 is sent, and the angle is atan2(step x, step
+//!   z) in 1/256 turn, rounded, unless 16 is sent;
+//! - every other field set in the mask is replaced.
+//!
+//! The server sends a speed or angle only when this reckoning is more than
+//! 5% or 1/256 turn off, and a height when it is more than 1/16 m off, so
+//! these three are near the simulation's, not equal to it.
+//!
 //! An entity is {zigzag x, zigzag z, zigzag y, u8 angle, u32 colour, varint
 //! icon, varint player, zigzag owner, varint template, varint actor, zigzag
 //! seed - id, varint variant set, varint animation, u8 animation flags,
 //! varint sound group, varint animation speed, varint turns since the
 //! animation started, varint sync repeat, zigzag sync offset, varint turns
-//! since the sync was set, u8 construction, varint visibility}:
+//! since the sync was set, u8 construction, varint visibility, zigzag step
+//! x, zigzag step z, u8 motion flags}:
 //! - y is the absolute height, not the height above the ground;
 //! - angle is the heading in 1/256 turn, clockwise from +z;
 //! - colour is 0xFFRRGGBB, or 0 for an entity that is not on the minimap;
@@ -62,7 +84,10 @@
 //! - construction is how far the model has risen out of the ground in
 //!   1/255, 0 when it is not offset at all;
 //! - visibility has bit p set when player p sees the entity (LOS visible),
-//!   for p below 16.
+//!   for p below 16;
+//! - step is how far it moves each turn until a delta changes it, in 1/16
+//!   m;
+//! - motion flags: 1 follows the ground.
 //!
 //! A sound is {varint group, u8 target, then by target: 0 (an entity's)
 //! varint entity id, zigzag owner, zigzag x, zigzag z, zigzag y, varint
@@ -70,7 +95,10 @@
 //! z, zigzag y; 2 (only for one player, not positioned) zigzag player}.
 //! The group is a 0-based index into the string table, a sound group path
 //! relative to audio/. An entity's position, owner and visibility are as of
-//! the call, since it may be gone by the end of the turn. Keyframes carry
+//! the call, since it may be gone by the end of the turn. They are sent
+//! relative to the entity's as the delta leaves it, or as it was before when
+//! the delta destroyed it: owner and position minus its, visibility XOR its
+//! (unchanged when the viewer does not know the entity). Keyframes carry
 //! no sounds.
 //!
 //! A projectile is {varint shooter id (0: none), zigzag owner, varint
@@ -89,6 +117,14 @@
 //!   table, 0 for none: without a projectile actor the shooter's actor's
 //!   `projectile` prop is drawn;
 //! - impact lifetime is in ms.
+//!
+//! A launch, in a delta, is a projectile sent relative to its shooter as
+//! sounds are: {varint shooter id, then only when the viewer does not know
+//! the shooter (or it is 0): zigzag owner, varint actor, zigzag seed -
+//! shooter id, varint variant set; then the launch point minus the
+//! shooter's position (nothing subtracted without a known shooter), the
+//! target minus the launch point, and the rest as in a projectile}; with a
+//! known shooter, owner, actor, seed and variant set are the shooter's.
 //!
 //! A projectile is kept from its launch until it hits something or until
 //! it would have lain on the ground for 30 s.
@@ -151,8 +187,8 @@ use crate::feed::Player;
 use crate::feed::Sound;
 use crate::feed::SoundTarget;
 use crate::feed::Territory;
+use crate::terrain::Ground;
 use crate::wire::Writer;
-use crate::wire::diff;
 use crate::wire::quantize_angle;
 use crate::wire::quantize_position;
 
@@ -172,6 +208,16 @@ const CHANGED_MODEL: u64 = 512;
 const CHANGED_VARIANTS: u64 = 1024;
 const CHANGED_CONSTRUCTION: u64 = 2048;
 const CHANGED_VISIBILITY: u64 = 4096;
+const CHANGED_GROUNDED: u64 = 8192;
+const CHANGED_HEIGHT: u64 = 16384;
+const MOTION_GROUNDED: u8 = 1;
+/// How far a reckoned animation speed may be off, in 1/256 of the
+/// simulation's: 5%, as `DATA_OPTIMIZATION.md` measured.
+const SPEED_TOLERANCE_256: u32 = 13;
+/// How far a reckoned heading may be off, in 1/256 turn.
+const ANGLE_TOLERANCE: u8 = 1;
+/// A height within this of the ground, in 1/16 m, follows the ground.
+const GROUND_TOLERANCE: i32 = 1;
 const SOUND_ENTITY: u8 = 0;
 const SOUND_POSITION: u8 = 1;
 const SOUND_PLAYER: u8 = 2;
@@ -218,6 +264,11 @@ struct Dot {
     construction: u8,
     sound_group: u32,
     visibility: u16,
+    /// What a viewer moves it by each turn; only in what viewers hold,
+    /// zero in the simulation's state.
+    step: [i32; 2],
+    /// Its height is the ground's, likewise.
+    grounded: bool,
 }
 
 impl Dot {
@@ -254,6 +305,8 @@ impl Dot {
             construction: quantize_construction(entity.construction),
             sound_group: one_based(visual.and_then(|visual| visual.sound_group)),
             visibility: entity.visibility,
+            step: [0, 0],
+            grounded: false,
         }
     }
 }
@@ -414,6 +467,9 @@ struct State {
     /// The open segment, index `segments.len()`, uncompressed.
     open: Vec<u8>,
     terrain: Option<(u64, Message)>,
+    ground: Option<Ground>,
+    /// What viewers hold after the last turn, which the next delta builds
+    /// on; near the simulation's state, not equal to it.
     dots: BTreeMap<u32, Dot>,
     icons: Table<Icon>,
     templates: Table<String>,
@@ -481,6 +537,7 @@ impl Hub {
                 segments: Vec::new(),
                 open: Vec::new(),
                 terrain: None,
+                ground: None,
                 dots: BTreeMap::new(),
                 icons: Table::new(),
                 templates: Table::new(),
@@ -511,6 +568,7 @@ impl Hub {
         state.new_feed = true;
         state.feed_activity = Some(Instant::now());
         state.terrain = None;
+        state.ground = None;
         state.icons.clear();
         state.templates.clear();
         state.strings.clear();
@@ -598,8 +656,15 @@ impl Hub {
         state.template_icons.insert(template, index as u32 + 1);
     }
 
-    pub fn set_terrain(&self, id: u64, bytes: Vec<u8>) {
-        self.state.lock().unwrap().terrain = Some((id, bytes.into()));
+    pub fn set_terrain(&self, id: u64, bytes: Vec<u8>, ground: Ground) {
+        let mut state = self.state.lock().unwrap();
+        // Viewers hold heights reckoned from the match's first terrain.
+        if state.has_turn && !state.new_feed {
+            eprintln!("terrain {id:016x} arrived during a match, ignored");
+            return;
+        }
+        state.terrain = Some((id, bytes.into()));
+        state.ground = Some(ground);
     }
 
     /// Only the current and the previous match's terrain are kept; an
@@ -720,7 +785,7 @@ impl Hub {
             launches.push((launch.id, shot));
         }
         launches.sort_unstable_by_key(|(id, _)| *id);
-        let message: Message = if state.new_feed {
+        let (message, shown): (Message, BTreeMap<u32, Dot>) = if state.new_feed {
             // The history restarts only now, so until the new match's first
             // turn, viewers and segment requests still get the old one.
             state.match_id = new_match_id(state.match_id);
@@ -728,12 +793,17 @@ impl Hub {
             state.first_turn = turn;
             state.segments.clear();
             state.open.clear();
+            let ground = state.ground.as_ref();
+            let shown = dots
+                .iter()
+                .map(|(id, dot)| (*id, arrive(ground, dot)))
+                .collect();
             let keyframe: Message =
-                encode_keyframe(state, turn, &state.tables(true), &dots, &shots).into();
+                encode_keyframe(state, turn, &state.tables(true), &shown, &shots).into();
             append_framed(&mut state.open, &keyframe);
-            keyframe
+            (keyframe, shown)
         } else {
-            let delta: Message = encode_delta(
+            let (delta, shown) = encode_delta(
                 turn,
                 &Tables {
                     icons: state.icons.unsent(),
@@ -746,23 +816,24 @@ impl Hub {
                     .territory_changed
                     .then_some(state.territory.as_ref())
                     .flatten(),
+                state.ground.as_ref(),
                 &state.dots,
                 &dots,
                 &state.sounds,
                 &launches,
                 &removals,
-            )
-            .into();
+            );
+            let delta: Message = delta.into();
             let next_start = state.first_turn + SEGMENT_TURNS * (state.segments.len() as u32 + 1);
             if turn >= next_start {
                 let closed = zstd::bulk::compress(&state.open, SEGMENT_ZSTD_LEVEL)?;
                 state.segments.push(closed.into());
                 state.open.clear();
-                let keyframe = encode_keyframe(state, turn, &state.tables(true), &dots, &shots);
+                let keyframe = encode_keyframe(state, turn, &state.tables(true), &shown, &shots);
                 append_framed(&mut state.open, &keyframe);
             }
             append_framed(&mut state.open, &delta);
-            delta
+            (delta, shown)
         };
         state.icons.sent = state.icons.items.len();
         state.templates.sent = state.templates.items.len();
@@ -777,7 +848,7 @@ impl Hub {
         state.removals.clear();
         state.shots = shots;
         state.turn = turn;
-        state.dots = dots;
+        state.dots = shown;
         state.has_turn = true;
         state.new_feed = false;
         state.feed_activity = Some(Instant::now());
@@ -920,13 +991,38 @@ fn encode_delta(
     new_tables: &Tables,
     new_players: Option<&[Player]>,
     new_territory: Option<&Territory>,
+    ground: Option<&Ground>,
     previous: &BTreeMap<u32, Dot>,
     current: &BTreeMap<u32, Dot>,
     sounds: &[Sound],
     launches: &[(u32, Shot)],
     removals: &[u32],
-) -> Vec<u8> {
-    let diff = diff(previous, current);
+) -> (Vec<u8>, BTreeMap<u32, Dot>) {
+    let mut shown = BTreeMap::new();
+    let mut spawned = Vec::new();
+    let mut changed = Vec::new();
+    for (id, now) in current {
+        match previous.get(id) {
+            None => {
+                let dot = arrive(ground, now);
+                spawned.push((*id, dot));
+                shown.insert(*id, dot);
+            }
+            Some(before) => {
+                let (change, dot) = reckon(ground, before, now);
+                if change.mask != 0 {
+                    changed.push((*id, change, now));
+                }
+                shown.insert(*id, dot);
+            }
+        }
+    }
+    let destroyed: BTreeMap<u32, Dot> = previous
+        .iter()
+        .filter(|(id, _)| !current.contains_key(id))
+        .map(|(id, dot)| (*id, *dot))
+        .collect();
+    let known = |id: u32| shown.get(&id).or_else(|| destroyed.get(&id));
     let mut out = Writer::default();
     out.u8(MESSAGE_DELTA);
     out.varint(u64::from(turn));
@@ -948,36 +1044,41 @@ fn encode_delta(
     write_strings(&mut out, new_tables.templates);
     write_strings(&mut out, new_tables.strings);
     write_variant_sets(&mut out, new_tables.variant_sets);
-    out.varint(diff.spawned.len() as u64);
-    out.varint(diff.destroyed.len() as u64);
-    out.varint(diff.changed.len() as u64);
+    out.varint(spawned.len() as u64);
+    out.varint(destroyed.len() as u64);
+    out.varint(changed.len() as u64);
     let mut last_id = 0;
-    for (id, dot) in &diff.spawned {
+    for (id, dot) in &spawned {
         out.varint(u64::from(id - last_id));
         last_id = *id;
         write_dot(&mut out, *id, turn, dot);
     }
     let mut last_id = 0;
-    for id in &diff.destroyed {
+    for id in destroyed.keys() {
         out.varint(u64::from(id - last_id));
         last_id = *id;
     }
     let mut last_id = 0;
-    for (id, before, now) in &diff.changed {
+    for (id, change, now) in &changed {
         out.varint(u64::from(id - last_id));
         last_id = *id;
-        write_change(&mut out, *id, before, now);
+        write_change(&mut out, *id, change, now);
     }
     out.varint(sounds.len() as u64);
     for sound in sounds {
-        write_sound(&mut out, sound);
+        let entity = match sound.target {
+            SoundTarget::Entity { id, .. } => known(id),
+            _ => None,
+        };
+        write_sound(&mut out, sound, entity);
     }
     out.varint(launches.len() as u64);
     let mut last_id = 0;
     for (id, shot) in launches {
         out.varint(u64::from(id - last_id));
         last_id = *id;
-        write_shot(&mut out, shot);
+        let shooter = known(shot.shooter).filter(|_| shot.shooter != 0);
+        write_launch(&mut out, shot, shooter);
     }
     out.varint(removals.len() as u64);
     let mut last_id = 0;
@@ -985,70 +1086,163 @@ fn encode_delta(
         out.varint(u64::from(id - last_id));
         last_id = *id;
     }
-    out.0
+    (out.0, shown)
 }
 
-fn write_shot(out: &mut Writer, shot: &Shot) {
-    out.varint(u64::from(shot.shooter));
-    out.zigzag(i64::from(shot.owner));
-    out.varint(u64::from(shot.actor));
-    out.zigzag(i64::from(shot.seed) - i64::from(shot.shooter));
-    out.varint(u64::from(shot.variants));
-    for point in [shot.launch, shot.target] {
-        out.zigzag(i64::from(point[0]));
-        out.zigzag(i64::from(point[2]));
-        out.zigzag(i64::from(point[1]));
+/// What a delta sends for one entity besides the fields it copies from
+/// the simulation's state.
+#[derive(Clone, Copy)]
+struct Change {
+    mask: u64,
+    /// The change of the step.
+    step: [i32; 2],
+    /// Added to the height, with `CHANGED_HEIGHT`.
+    dy: i32,
+}
+
+/// A new entity as viewers take it.
+fn arrive(ground: Option<&Ground>, now: &Dot) -> Dot {
+    let mut dot = *now;
+    if let Some(ground) = ground {
+        let height = ground.at(dot.x, dot.z);
+        if (dot.y - height).abs() <= GROUND_TOLERANCE {
+            dot.grounded = true;
+            dot.y = height;
+        }
     }
-    out.varint(u64::from(shot.speed));
-    out.zigzag(i64::from(shot.gravity));
-    out.varint(u64::from(shot.projectile_actor));
-    out.varint(u64::from(shot.impact_actor));
-    out.varint(u64::from(shot.impact_lifetime));
+    dot
 }
 
-fn write_sound(out: &mut Writer, sound: &Sound) {
-    out.varint(u64::from(sound.group));
-    let position = |out: &mut Writer| {
-        out.zigzag(i64::from(quantize_position(sound.x)));
-        out.zigzag(i64::from(quantize_position(sound.z)));
-        out.zigzag(i64::from(quantize_position(sound.y)));
+/// The update a viewer makes to `before` for `change`, the values sent
+/// taken from `now`.
+fn advance(ground: Option<&Ground>, before: &Dot, change: &Change, now: &Dot) -> Dot {
+    let mut step = before.step;
+    if change.mask & CHANGED_POSITION != 0 {
+        step[0] += change.step[0];
+        step[1] += change.step[1];
+    }
+    // The mask carries every exact field that differs, so those are now's.
+    let mut dot = Dot {
+        x: before.x + step[0],
+        z: before.z + step[1],
+        y: before.y,
+        angle: before.angle,
+        speed: before.speed,
+        step,
+        grounded: before.grounded,
+        ..*now
     };
-    match sound.target {
-        SoundTarget::Entity { id, owner } => {
-            out.u8(SOUND_ENTITY);
-            out.varint(u64::from(id));
-            out.zigzag(i64::from(owner));
-            position(out);
-            out.varint(u64::from(sound.visibility));
-        }
-        SoundTarget::Position => {
-            out.u8(SOUND_POSITION);
-            position(out);
-        }
-        SoundTarget::Player(player) => {
-            out.u8(SOUND_PLAYER);
-            out.zigzag(i64::from(player));
-        }
+    if change.mask & CHANGED_GROUNDED != 0 {
+        dot.grounded = true;
     }
+    if change.mask & CHANGED_HEIGHT != 0 {
+        dot.grounded = false;
+        dot.y += change.dy;
+    }
+    if dot.grounded
+        && let Some(ground) = ground
+    {
+        dot.y = ground.at(dot.x, dot.z);
+    }
+    let moved = step != [0, 0];
+    if change.mask & CHANGED_ANGLE != 0 {
+        dot.angle = now.angle;
+    } else if moved {
+        dot.angle = step_angle(step);
+    }
+    if change.mask & CHANGED_ANIMATION_SPEED != 0 {
+        dot.speed = now.speed;
+    } else if moved {
+        dot.speed = step_speed(step);
+    }
+    dot
 }
 
-fn write_change(out: &mut Writer, id: u32, before: &Dot, now: &Dot) {
+/// What to send so that a viewer's update of `before` comes near enough
+/// to `now`, and the viewer's result.
+fn reckon(ground: Option<&Ground>, before: &Dot, now: &Dot) -> (Change, Dot) {
+    let mut change = Change {
+        mask: exact_changes(before, now),
+        step: [
+            now.x - before.x - before.step[0],
+            now.z - before.z - before.step[1],
+        ],
+        dy: 0,
+    };
+    if change.step != [0, 0] {
+        change.mask |= CHANGED_POSITION;
+    }
+    // Each round adds what the viewer would still get wrong; height, speed
+    // and angle do not depend on one another, so this settles in a few.
+    for _ in 0..3 {
+        let dot = advance(ground, before, &change, now);
+        let mut more = 0;
+        if dot.grounded {
+            if (now.y - dot.y).abs() > GROUND_TOLERANCE {
+                more |= CHANGED_HEIGHT;
+            }
+        } else if ground
+            .is_some_and(|ground| (now.y - ground.at(dot.x, dot.z)).abs() <= GROUND_TOLERANCE)
+        {
+            more |= CHANGED_GROUNDED;
+        } else if dot.y != now.y {
+            more |= CHANGED_HEIGHT;
+        }
+        if u64::from(now.speed.abs_diff(dot.speed)) * 256
+            > u64::from(now.speed) * u64::from(SPEED_TOLERANCE_256)
+        {
+            more |= CHANGED_ANIMATION_SPEED;
+        }
+        let angle_off = now
+            .angle
+            .wrapping_sub(dot.angle)
+            .min(dot.angle.wrapping_sub(now.angle));
+        if angle_off > ANGLE_TOLERANCE {
+            more |= CHANGED_ANGLE;
+        }
+        if more & CHANGED_HEIGHT != 0 {
+            // dy is from the height the viewer has before adding it.
+            let probe = Change {
+                mask: (change.mask | CHANGED_HEIGHT) & !CHANGED_GROUNDED,
+                dy: 0,
+                ..change
+            };
+            change.dy = now.y - advance(ground, before, &probe, now).y;
+            change.mask &= !CHANGED_GROUNDED;
+        }
+        if more & !change.mask == 0 {
+            break;
+        }
+        change.mask |= more;
+    }
+    (change, advance(ground, before, &change, now))
+}
+
+/// In 1/256 m/s, from 1/16 m per 0.2 s turn. `sqrt` is correctly rounded
+/// everywhere, so viewers get exactly the same.
+fn step_speed(step: [i32; 2]) -> u32 {
+    let squared = i64::from(step[0]).pow(2) + i64::from(step[1]).pow(2);
+    ((squared as f64).sqrt() * 80.0).round() as u32
+}
+
+/// In 1/256 turn, clockwise from +z.
+fn step_angle(step: [i32; 2]) -> u8 {
+    let turns = f64::from(step[0]).atan2(f64::from(step[1])) / std::f64::consts::TAU;
+    (turns * 256.0).round().rem_euclid(256.0) as u8
+}
+
+/// The mask bits of the fields a viewer cannot reckon.
+fn exact_changes(before: &Dot, now: &Dot) -> u64 {
     let changes = [
-        (
-            CHANGED_POSITION,
-            before.x != now.x || before.z != now.z || before.y != now.y,
-        ),
         (CHANGED_COLOR, before.color != now.color),
         (CHANGED_ICON, before.icon != now.icon),
         (CHANGED_PLAYER, before.player != now.player),
-        (CHANGED_ANGLE, before.angle != now.angle),
         (
             CHANGED_ANIMATION,
             before.animation != now.animation
                 || before.once != now.once
                 || before.sound_group != now.sound_group,
         ),
-        (CHANGED_ANIMATION_SPEED, before.speed != now.speed),
         (
             CHANGED_SYNC,
             before.sync_repeat != now.sync_repeat || before.sync_offset != now.sync_offset,
@@ -1065,15 +1259,96 @@ fn write_change(out: &mut Writer, id: u32, before: &Dot, now: &Dot) {
         ),
         (CHANGED_VISIBILITY, before.visibility != now.visibility),
     ];
-    let mask = changes
+    changes
         .iter()
         .filter(|(_, changed)| *changed)
-        .fold(0, |mask, (bit, _)| mask | bit);
+        .fold(0, |mask, (bit, _)| mask | bit)
+}
+
+fn write_shot(out: &mut Writer, shot: &Shot) {
+    out.varint(u64::from(shot.shooter));
+    write_shot_origin(out, shot);
+    for point in [shot.launch, shot.target] {
+        out.zigzag(i64::from(point[0]));
+        out.zigzag(i64::from(point[2]));
+        out.zigzag(i64::from(point[1]));
+    }
+    write_shot_flight(out, shot);
+}
+
+fn write_shot_origin(out: &mut Writer, shot: &Shot) {
+    out.zigzag(i64::from(shot.owner));
+    out.varint(u64::from(shot.actor));
+    out.zigzag(i64::from(shot.seed) - i64::from(shot.shooter));
+    out.varint(u64::from(shot.variants));
+}
+
+fn write_shot_flight(out: &mut Writer, shot: &Shot) {
+    out.varint(u64::from(shot.speed));
+    out.zigzag(i64::from(shot.gravity));
+    out.varint(u64::from(shot.projectile_actor));
+    out.varint(u64::from(shot.impact_actor));
+    out.varint(u64::from(shot.impact_lifetime));
+}
+
+/// `shooter` is the shooter as viewers know it, if they do.
+fn write_launch(out: &mut Writer, shot: &Shot, shooter: Option<&Dot>) {
+    out.varint(u64::from(shot.shooter));
+    let origin = match shooter {
+        Some(dot) => [dot.x, dot.y, dot.z],
+        None => {
+            write_shot_origin(out, shot);
+            [0; 3]
+        }
+    };
+    for axis in [0, 2, 1] {
+        out.zigzag(i64::from(shot.launch[axis]) - i64::from(origin[axis]));
+    }
+    for axis in [0, 2, 1] {
+        out.zigzag(i64::from(shot.target[axis]) - i64::from(shot.launch[axis]));
+    }
+    write_shot_flight(out, shot);
+}
+
+/// `entity` is the sound's entity as viewers know it, if they do.
+fn write_sound(out: &mut Writer, sound: &Sound, entity: Option<&Dot>) {
+    out.varint(u64::from(sound.group));
+    let position = |out: &mut Writer, base: [i32; 3]| {
+        out.zigzag(i64::from(quantize_position(sound.x)) - i64::from(base[0]));
+        out.zigzag(i64::from(quantize_position(sound.z)) - i64::from(base[1]));
+        out.zigzag(i64::from(quantize_position(sound.y)) - i64::from(base[2]));
+    };
+    match sound.target {
+        SoundTarget::Entity { id, owner } => {
+            let (base_owner, base, base_visibility) = entity.map_or((0, [0; 3], 0), |dot| {
+                (dot.owner, [dot.x, dot.z, dot.y], dot.visibility)
+            });
+            out.u8(SOUND_ENTITY);
+            out.varint(u64::from(id));
+            out.zigzag(i64::from(owner) - i64::from(base_owner));
+            position(out, base);
+            out.varint(u64::from(sound.visibility ^ base_visibility));
+        }
+        SoundTarget::Position => {
+            out.u8(SOUND_POSITION);
+            position(out, [0; 3]);
+        }
+        SoundTarget::Player(player) => {
+            out.u8(SOUND_PLAYER);
+            out.zigzag(i64::from(player));
+        }
+    }
+}
+
+fn write_change(out: &mut Writer, id: u32, change: &Change, now: &Dot) {
+    let mask = change.mask;
     out.varint(mask);
     if mask & CHANGED_POSITION != 0 {
-        out.zigzag(i64::from(now.x) - i64::from(before.x));
-        out.zigzag(i64::from(now.z) - i64::from(before.z));
-        out.zigzag(i64::from(now.y) - i64::from(before.y));
+        out.zigzag(i64::from(change.step[0]));
+        out.zigzag(i64::from(change.step[1]));
+    }
+    if mask & CHANGED_HEIGHT != 0 {
+        out.zigzag(i64::from(change.dy));
     }
     if mask & CHANGED_COLOR != 0 {
         out.u32(now.color);
@@ -1205,4 +1480,7 @@ fn write_dot(out: &mut Writer, id: u32, turn: u32, dot: &Dot) {
     out.varint(u64::from(turn - dot.sync_turn));
     out.u8(dot.construction);
     out.varint(u64::from(dot.visibility));
+    out.zigzag(i64::from(dot.step[0]));
+    out.zigzag(i64::from(dot.step[1]));
+    out.u8(if dot.grounded { MOTION_GROUNDED } else { 0 });
 }

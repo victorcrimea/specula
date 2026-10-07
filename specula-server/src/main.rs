@@ -29,6 +29,7 @@ use rocket_ws::WebSocket;
 use crate::classify::Classifier;
 use crate::delta::DeltaMeter;
 use crate::feed::Record;
+use crate::terrain::Ground;
 use crate::view::Hub;
 
 const DEFAULT_SOCKET: &str = "/tmp/specula-feed.sock";
@@ -266,7 +267,7 @@ fn serve(stream: UnixStream, hub: &Hub) -> io::Result<()> {
                     resource.unknown,
                     resource.bytes.len()
                 );
-                hub.set_terrain(resource.id, resource.bytes);
+                hub.set_terrain(resource.id, resource.bytes, Ground::new(&terrain));
             }
             Record::Turn { turn, entities } => {
                 hub.publish(turn, &entities)?;

@@ -8,14 +8,21 @@
 //! or `SWITCH_DELAY_MS` after the end, whichever is first, or on its first
 //! turn if that comes later.
 //!
+//! The worker alone fetches a match's terrain, since a scene cannot apply
+//! the match's messages without its heightmap: live messages wait while it
+//! is fetched, and the page is handed it before the first keyframe that
+//! names it.
+//!
 //! Page to worker: u8 command, f64 argument. Worker to page: u8 `POST_SCENE`,
 //! f64 real milliseconds per turn (0: live, measure the pace), then a wire
-//! message; or u8 `POST_STATUS`, u32 first turn, u32 newest turn, u32
+//! message; or u8 `POST_TERRAIN`, u64 terrain id, then the terrain
+//! resource; or u8 `POST_STATUS`, u32 first turn, u32 newest turn, u32
 //! playhead turn, u8 `STATUS_*` flags, f32 speed, u64 bytes of live
 //! messages and u64 bytes of segments received since the worker started,
 //! u32 ms until the move to the next match (0 once due; meaningful with
 //! `STATUS_ENDED`).
 
+use std::cell::Cell;
 use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::rc::Rc;
@@ -34,10 +41,12 @@ use web_sys::WorkerGlobalScope;
 
 use crate::TURN_MS;
 use crate::stream;
+use crate::stream::Ground;
 use crate::stream::Scene;
 
 pub const POST_SCENE: u8 = 1;
 pub const POST_STATUS: u8 = 2;
+pub const POST_TERRAIN: u8 = 3;
 pub const STATUS_LIVE: u8 = 1;
 pub const STATUS_PAUSED: u8 = 2;
 /// The shown match has ended.
@@ -70,6 +79,8 @@ const RETRY_MS: f64 = 1000.0;
 const SWITCH_DELAY_MS: f64 = 5.0 * 60.0 * 1000.0;
 const RECONNECT_MIN_MS: f64 = 1000.0;
 const RECONNECT_MAX_MS: f64 = 10_000.0;
+/// The live match's, the next one's and one spare.
+const KEPT_TERRAINS: usize = 3;
 
 struct Segment {
     index: u32,
@@ -127,6 +138,13 @@ struct Playback {
     /// Received since the worker started, for the page's statistics.
     live_bytes: u64,
     segment_bytes: u64,
+    /// Fetched terrains, oldest first: the heightmap and the resource.
+    terrains: Vec<(Rc<Ground>, Rc<[u8]>)>,
+    /// Live messages waiting, from the first keyframe whose terrain is
+    /// being fetched on.
+    held: Vec<Vec<u8>>,
+    /// The terrain the page was last handed.
+    page_terrain: Cell<u64>,
 }
 
 impl Playback {
@@ -157,8 +175,81 @@ impl Playback {
         }
     }
 
+    fn ground(&self, id: u64) -> Option<Rc<Ground>> {
+        self.terrains
+            .iter()
+            .find(|(ground, _)| ground.id == id)
+            .map(|(ground, _)| Rc::clone(ground))
+    }
+
+    /// Gives `scene` the heightmap a keyframe names before it is applied.
+    fn prepare(&self, scene: &mut Scene, message: &[u8]) -> Result<(), &'static str> {
+        if stream::is_keyframe(message) {
+            let id = stream::keyframe_terrain(message)?;
+            scene.ground = self.ground(id);
+        }
+        Ok(())
+    }
+
     fn on_live(&mut self, message: Vec<u8>) {
         self.reconnect_ms = RECONNECT_MIN_MS;
+        if !self.held.is_empty() {
+            self.held.push(message);
+            return;
+        }
+        if stream::is_keyframe(&message) {
+            match stream::keyframe_terrain(&message) {
+                Ok(id) if id != 0 && self.ground(id).is_none() => {
+                    self.held.push(message);
+                    self.request_terrain(id);
+                    return;
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    self.drop_stream(error);
+                    return;
+                }
+            }
+        }
+        self.apply_live(message);
+    }
+
+    fn request_terrain(&mut self, id: u64) {
+        let url = format!("/terrain/{id:016x}");
+        let this = self.this.clone();
+        wasm_bindgen_futures::spawn_local(async move {
+            let result = fetch_bytes(&url).await.and_then(|bytes| {
+                let ground = Ground::from_resource(id, &bytes)?;
+                Ok((Rc::new(ground), Rc::from(bytes)))
+            });
+            if let Some(playback) = this.upgrade() {
+                playback.borrow_mut().terrain_arrived(id, result);
+            }
+        });
+    }
+
+    fn terrain_arrived(&mut self, id: u64, result: Result<(Rc<Ground>, Rc<[u8]>), String>) {
+        let held = std::mem::take(&mut self.held);
+        match result {
+            Ok(terrain) => {
+                if self.terrains.len() == KEPT_TERRAINS {
+                    self.terrains.remove(0);
+                }
+                self.terrains.push(terrain);
+                for message in held {
+                    self.on_live(message);
+                }
+            }
+            // The reconnect's keyframe asks for it again, after the
+            // reconnect's growing pause.
+            Err(error) => {
+                web_sys::console::error_1(&format!("terrain {id:016x}: {error}").into());
+                self.drop_stream("no terrain");
+            }
+        }
+    }
+
+    fn apply_live(&mut self, message: Vec<u8>) {
         if stream::is_ended(&message) {
             match stream::read_ended(&message) {
                 Ok((match_id, since_ms)) => self.on_ended(match_id, since_ms),
@@ -167,8 +258,12 @@ impl Playback {
             return;
         }
         if self.ended_at.is_some() {
-            if let Some(next) = &mut self.next_scene {
-                if let Err(error) = next.apply(&message, 1.0) {
+            if let Some(mut next) = self.next_scene.take() {
+                let applied = self
+                    .prepare(&mut next, &message)
+                    .and_then(|()| next.apply(&message, 1.0));
+                self.next_scene = Some(next);
+                if let Err(error) = applied {
                     self.next_scene = None;
                     self.drop_stream(error);
                 }
@@ -176,7 +271,10 @@ impl Playback {
             }
             if stream::is_keyframe(&message) {
                 let mut scene = Scene::default();
-                if let Err(error) = scene.apply(&message, 1.0) {
+                if let Err(error) = self
+                    .prepare(&mut scene, &message)
+                    .and_then(|()| scene.apply(&message, 1.0))
+                {
                     self.drop_stream(error);
                     return;
                 }
@@ -190,7 +288,12 @@ impl Playback {
             }
         }
         let previous_match = self.live_scene.match_id;
-        if let Err(error) = self.live_scene.apply(&message, 1.0) {
+        let mut scene = std::mem::take(&mut self.live_scene);
+        let applied = self
+            .prepare(&mut scene, &message)
+            .and_then(|()| scene.apply(&message, 1.0));
+        self.live_scene = scene;
+        if let Err(error) = applied {
             self.drop_stream(error);
             return;
         }
@@ -395,6 +498,7 @@ impl Playback {
     fn rebuild(&self, scene: &mut Scene, position: usize, turn: u32) -> Result<(), &'static str> {
         let messages = &self.segments[position].messages;
         let keyframe_turn = messages[0].0;
+        scene.ground = self.live_scene.ground.clone();
         scene.apply(&messages[0].1, 1.0)?;
         for (message_turn, message) in &messages[1..] {
             // The delta into the keyframe's turn is for playback crossing
@@ -593,6 +697,19 @@ impl Playback {
     }
 
     fn post_scene(&self, turn_ms: f64, message: &[u8]) {
+        if stream::is_keyframe(message)
+            && let Ok(id) = stream::keyframe_terrain(message)
+            && id != 0
+            && id != self.page_terrain.get()
+            && let Some((_, bytes)) = self.terrains.iter().find(|(ground, _)| ground.id == id)
+        {
+            let mut out = Vec::with_capacity(9 + bytes.len());
+            out.push(POST_TERRAIN);
+            out.extend_from_slice(&id.to_le_bytes());
+            out.extend_from_slice(bytes);
+            self.post(&out);
+            self.page_terrain.set(id);
+        }
         let mut out = Vec::with_capacity(9 + message.len());
         out.push(POST_SCENE);
         out.extend_from_slice(&turn_ms.to_le_bytes());
@@ -705,6 +822,9 @@ fn start() -> Result<(), String> {
             timer: None,
             live_bytes: 0,
             segment_bytes: 0,
+            terrains: Vec::new(),
+            held: Vec::new(),
+            page_terrain: Cell::new(0),
         })
     });
     connect(&Rc::downgrade(&playback))?;
