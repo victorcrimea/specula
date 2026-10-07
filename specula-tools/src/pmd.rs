@@ -14,6 +14,9 @@ pub struct Vertex {
     pub position: Vec3,
     pub normal: Vec3,
     pub uv: [f32; 2],
+    /// The second UV set, which ambient occlusion maps use; the first
+    /// again when the mesh has only one.
+    pub uv2: [f32; 2],
     /// `NO_BONE` ends the list early.
     pub bones: [u8; 4],
     pub weights: [f32; 4],
@@ -52,18 +55,23 @@ pub fn load(data: &[u8]) -> Result<Model, String> {
         let position = file.vec3()?;
         let normal = file.vec3()?;
         let mut uv = [0.0; 2];
+        let mut uv2 = None;
         for set in 0..uv_sets {
             let pair = [file.f32()?, file.f32()?];
-            if set == 0 {
-                uv = pair;
+            match set {
+                0 => uv = pair,
+                1 => uv2 = Some(pair),
+                _ => {}
             }
         }
+        let uv2 = uv2.unwrap_or(uv);
         let bones = file.bytes(4)?.try_into().unwrap();
         let weights = [file.f32()?, file.f32()?, file.f32()?, file.f32()?];
         vertices.push(Vertex {
             position,
             normal,
             uv,
+            uv2,
             bones,
             weights,
         });

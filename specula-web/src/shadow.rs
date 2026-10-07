@@ -74,7 +74,7 @@ impl Shadow {
         view_layout: &wgpu::BindGroupLayout,
         view_size: u64,
         pose_layout: &wgpu::BindGroupLayout,
-        texture_layout: &wgpu::BindGroupLayout,
+        material_layout: &wgpu::BindGroupLayout,
         model_shader: &wgpu::ShaderModule,
         model_buffers: &[Option<wgpu::VertexBufferLayout>],
         field_shader: &wgpu::ShaderModule,
@@ -177,7 +177,7 @@ impl Shadow {
         });
         let model_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("model shadow"),
-            bind_group_layouts: &[Some(view_layout), Some(pose_layout), Some(texture_layout)],
+            bind_group_layouts: &[Some(view_layout), Some(pose_layout), Some(material_layout)],
             immediate_size: 0,
         });
         let model_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {

@@ -29,13 +29,22 @@ struct TerrainVaryings {
 struct Terrain {
     // CTerrainTextureEntry's matrix as terrain_common.vs takes it,
     // (_11, _13), then 1 when the texture is in and 0 while the minimap
-    // picture stands in for it.
+    // picture stands in for it, then 1 when it has a normal map.
     transform: vec4<f32>,
+    // The material's normal strength and specular power, unused, unused.
+    effect: vec4<f32>,
 }
 
 @group(1) @binding(0) var terrain_texture: texture_2d<f32>;
 @group(1) @binding(1) var terrain_sampler: sampler;
 @group(1) @binding(2) var<uniform> terrain: Terrain;
+// Flat and black where the terrain has none.
+@group(1) @binding(3) var terrain_normal: texture_2d<f32>;
+@group(1) @binding(4) var terrain_specular: texture_2d<f32>;
+
+// The viewer's material maps setting: off leaves the normal and specular
+// maps unsampled, for the cost of the plain shading.
+override MAPS: bool = true;
 
 @group(2) @binding(0) var alpha_maps: texture_2d<f32>;
 @group(2) @binding(1) var alpha_sampler: sampler;
@@ -84,12 +93,6 @@ fn shadow_at(world: vec3<f32>, bias: f32) -> f32 {
     return mix(1.0, shadow, fade);
 }
 
-// shading.h calculateShading, without specular and ambient occlusion.
-fn lit(albedo: vec3<f32>, normal: vec3<f32>, shadow: f32) -> vec3<f32> {
-    let sun = max(dot(normalize(normal), view.sun.xyz), 0.0);
-    return albedo * (light.sun_color.rgb * sun * shadow + light.ambient.rgb);
-}
-
 @vertex
 fn vs_terrain(
     @location(0) position: vec3<f32>,
@@ -107,7 +110,8 @@ fn vs_terrain(
 
 // The terrain's texture, planar as terrain_common.vs maps it, or the
 // minimap picture's one texel per tile until it arrives; lit by the
-// heightmap's normals and shadowed.
+// heightmap's normals bent by the normal map, with the specular map's
+// highlight, and shadowed (terrain_common.fs).
 fn shade(in: TerrainVaryings) -> vec3<f32> {
     let size = view.misc.z;
     let c = terrain.transform.x;
@@ -119,7 +123,35 @@ fn shade(in: TerrainVaryings) -> vec3<f32> {
     let uv = select(in.ground / size, planar, terrain.transform.z > 0.5);
     let color = textureSample(terrain_texture, terrain_sampler, uv).rgb;
     let world = vec3<f32>(in.ground.x, in.height, in.ground.y);
-    return lit(color, in.normal, shadow_at(world, light.shadow.y));
+    var normal = normalize(in.normal);
+    let shadow = shadow_at(world, light.shadow.y);
+    if !MAPS {
+        let sun = max(dot(normal, view.sun.xyz), 0.0) * light.sun_color.rgb;
+        return color * (sun * shadow + light.ambient.rgb);
+    }
+    let packed_normal = textureSample(terrain_normal, terrain_sampler, uv).rgb;
+    let specular_color = textureSample(terrain_specular, terrain_sampler, uv).rgb;
+    if terrain.transform.w > 0.5 {
+        // terrain_common.vs' tangent along the mapping, then
+        // calculateNormal.
+        let tangent = normalize(vec3<f32>(c, 0.0, -s));
+        let bitangent = cross(in.normal, tangent);
+        var local = packed_normal * 2.0 - 1.0;
+        local.y = -local.y;
+        var mapped = normalize(mat3x3<f32>(tangent, bitangent, in.normal) * local);
+        let strength = terrain.effect.x;
+        if strength <= 1.0 {
+            mapped = normalize(mix(normal, mapped, strength));
+        } else {
+            mapped = normalize(mapped - normal * min(1.0, strength - 1.0));
+        }
+        normal = mapped;
+    }
+    let sun_diffuse = max(dot(normal, view.sun.xyz), 0.0) * light.sun_color.rgb;
+    let half_vector = normalize(view.sun.xyz + normalize(light.eye.xyz - world));
+    let specular = light.sun_color.rgb * specular_color
+        * pow(max(0.001, dot(normal, half_vector)), terrain.effect.y);
+    return (color * sun_diffuse + specular) * shadow + color * light.ambient.rgb;
 }
 
 fn outside(in: TerrainVaryings) -> bool {

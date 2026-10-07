@@ -128,6 +128,9 @@ pub struct Store {
     detail_asked: HashSet<u64>,
     /// How many of `TEXTURE_TIER_SIDES` a texture's detail is fetched for.
     texture_tiers: usize,
+    /// Whether a warm-up fetches the normal, specular and ambient occlusion
+    /// maps, the viewer's material maps setting.
+    material_maps: bool,
     in_flight: usize,
     detail_in_flight: usize,
     /// Whether the last file came from the cache.
@@ -305,7 +308,17 @@ impl Store {
             terrains
                 .iter()
                 .filter_map(|name| self.terrains.get(name))
-                .map(|terrain| (Kind::Texture, terrain.texture)),
+                .flat_map(|terrain| {
+                    let maps = if self.material_maps {
+                        [terrain.normal, terrain.specular]
+                    } else {
+                        [None; 2]
+                    };
+                    [Some(terrain.texture), maps[0], maps[1]]
+                        .into_iter()
+                        .flatten()
+                        .map(|file| (Kind::Texture, file))
+                }),
         );
         roots.extend(self.alpha_maps.map(|file| (Kind::Texture, file)));
         Some(roots)
@@ -362,6 +375,14 @@ impl Store {
     /// asked for with its detail; lowering it keeps what has arrived.
     pub fn set_texture_tiers(&mut self, tiers: usize) {
         self.texture_tiers = tiers.min(TEXTURE_TIER_SIDES.len());
+    }
+
+    pub fn material_maps(&self) -> bool {
+        self.material_maps
+    }
+
+    pub fn set_material_maps(&mut self, on: bool) {
+        self.material_maps = on;
     }
 
     /// The smallest mips until the rest has arrived, which is fetched,
@@ -512,6 +533,7 @@ pub fn new() -> Rc<RefCell<Store>> {
     }
     let store = Rc::new(RefCell::new(Store {
         texture_tiers: TEXTURE_TIER_SIDES.len(),
+        material_maps: false,
         ..Store::default()
     }));
     wasm_bindgen_futures::spawn_local(load_index(Rc::clone(&store)));

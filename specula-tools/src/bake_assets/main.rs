@@ -3,7 +3,7 @@
 //! actor holding all of its variants and quality levels, and meshes,
 //! skeletons, animations and textures as separate files named by their
 //! content, so pieces shared by many actors are fetched once. Also every
-//! terrain's diffuse texture and the blend mask atlas for the ground, and
+//! terrain's textures and the blend mask atlas for the ground, and
 //! every sound group, the session music and the ambient loop, their Ogg
 //! Vorbis files transcoded to Ogg Opus.
 //!
@@ -23,6 +23,7 @@
 //! write are removed.
 
 mod actor;
+mod material;
 mod mesh;
 mod sound;
 mod templates;
@@ -67,7 +68,10 @@ use specula_tools::pmd;
 use specula_tools::psa;
 
 use crate::actor::ActorDef;
+use crate::actor::Definition;
 use crate::actor::Loader;
+use crate::actor::Variant;
+use crate::terrain::TerrainDef;
 
 const DEFAULT_MOD: &str = "../0ad/binaries/data/mods/public";
 const DEFAULT_PYROGENESIS: &str = "../0ad-specula/binaries/system/pyrogenesis";
@@ -189,7 +193,12 @@ fn run() -> Result<(), String> {
 
     let terrain_textures: Vec<String> = terrains
         .iter()
-        .map(|terrain| terrain.base_texture.clone())
+        .flat_map(|terrain| {
+            let [_, normal, specular] = terrain_maps(terrain);
+            std::iter::once(terrain.base_texture.clone())
+                .chain(normal.cloned())
+                .chain(specular.cloned())
+        })
         .collect();
     let (sources, rejected) = collect_sources(&mod_dir, loader.actors(), &terrain_textures);
     println!("{} sources left out", rejected.len());
@@ -258,12 +267,18 @@ fn run() -> Result<(), String> {
             .copied()
             .flatten()
         {
+            let [_, normal, specular] = terrain_maps(terrain)
+                .map(|path| path.and_then(|path| pieces.textures.get(path).copied().flatten()));
             index.terrains.push((
                 terrain.tag.clone(),
                 TerrainTexture {
                     texture,
                     angle: terrain.angle,
                     size: terrain.size,
+                    normal,
+                    specular,
+                    normal_strength: terrain.material.effect[0],
+                    specular_power: terrain.material.effect[1],
                 },
             ));
         }
@@ -517,8 +532,8 @@ fn list_actors(dir: &Path, prefix: &str, out: &mut Vec<String>) -> Result<(), St
     Ok(())
 }
 
-/// Every mesh, animation and colour map the actors name, the terrain
-/// textures, and the textures.xml files whose settings the converter
+/// Every mesh, animation and texture the actors' materials use, the
+/// terrain textures, and the textures.xml files whose settings the converter
 /// applies to them.
 /// Also returns the sources left out, with why: the archive builder fails
 /// an `ENSURE` on a texture it cannot convert, so those must not reach it.
@@ -529,13 +544,20 @@ fn collect_sources(
 ) -> (Vec<String>, Vec<String>) {
     let mut sources: BTreeSet<String> = terrain_textures.iter().cloned().collect();
     for actor in actors.values().flatten() {
-        for variant in actor
-            .definitions
-            .iter()
-            .flat_map(|definition| definition.groups.iter().flatten())
-        {
+        for (definition, variant) in actor.definitions.iter().flat_map(|definition| {
+            definition
+                .groups
+                .iter()
+                .flatten()
+                .map(move |variant| (definition, variant))
+        }) {
             sources.extend(variant.mesh.iter().cloned());
-            sources.extend(variant.base_texture.iter().cloned());
+            sources.extend(
+                variant_maps(definition, variant)
+                    .into_iter()
+                    .flatten()
+                    .cloned(),
+            );
             sources.extend(
                 variant
                     .animations
@@ -769,10 +791,10 @@ fn manifest(
                         .mesh
                         .as_ref()
                         .and_then(|path| pieces.meshes.get(path).copied().flatten());
-                    let texture = variant
-                        .base_texture
-                        .as_ref()
-                        .and_then(|path| pieces.textures.get(path).copied().flatten());
+                    let [texture, normal_texture, specular_texture, ao_texture] =
+                        variant_maps(definition, variant).map(|path| {
+                            path.and_then(|path| pieces.textures.get(path).copied().flatten())
+                        });
                     let props = variant
                         .props
                         .iter()
@@ -805,6 +827,9 @@ fn manifest(
                         frequency: variant.frequency,
                         mesh,
                         texture,
+                        normal_texture,
+                        specular_texture,
+                        ao_texture,
                         decal: variant.decal,
                         props,
                         animations,
@@ -812,8 +837,19 @@ fn manifest(
                 }
                 groups.push(variants);
             }
+            let material = &definition.material;
+            let flags = [
+                (material.player_color, files::FLAG_PLAYER_COLOR),
+                (material.normal_map, files::FLAG_NORMAL_MAP),
+                (material.specular_map, files::FLAG_SPECULAR_MAP),
+                (material.ao_map, files::FLAG_AO_MAP),
+            ]
+            .iter()
+            .filter(|(set, _)| *set)
+            .fold(0, |flags, (_, flag)| flags | flag);
             definitions.push(files::Definition {
-                player_color: definition.material.player_color,
+                flags,
+                effect: material.effect,
                 alpha_ref: if definition.material.transparent {
                     // `REQUIRE_ALPHA_GEQUAL` of the opaque pass in
                     // shaders/effects/model_transparent.xml.
@@ -835,6 +871,41 @@ fn manifest(
         });
     }
     Ok(Manifest { objects })
+}
+
+/// The variant's baseTex, normTex, specTex and aoTex, each only where the
+/// material samples it.
+fn variant_maps<'a>(definition: &Definition, variant: &'a Variant) -> [Option<&'a String>; 4] {
+    let material = &definition.material;
+    [
+        variant.base_texture.as_ref(),
+        variant
+            .normal_texture
+            .as_ref()
+            .filter(|_| material.normal_map),
+        variant
+            .specular_texture
+            .as_ref()
+            .filter(|_| material.specular_map),
+        variant.ao_texture.as_ref().filter(|_| material.ao_map),
+    ]
+}
+
+/// The terrain's baseTex, normTex and specTex, each only where its
+/// material samples it.
+fn terrain_maps(terrain: &TerrainDef) -> [Option<&String>; 3] {
+    let material = &terrain.material;
+    [
+        Some(&terrain.base_texture),
+        terrain
+            .normal_texture
+            .as_ref()
+            .filter(|_| material.normal_map),
+        terrain
+            .specular_texture
+            .as_ref()
+            .filter(|_| material.specular_map),
+    ]
 }
 
 /// A mesh of the actor the engine could not convert, if any.
@@ -877,7 +948,17 @@ fn print_sample(index: &Index, asset_dir: &Path) {
             .mesh
             .map(|file| (0, file))
             .into_iter()
-            .chain(variant.texture.map(|file| (1, file)))
+            .chain(
+                [
+                    variant.texture,
+                    variant.normal_texture,
+                    variant.specular_texture,
+                    variant.ao_texture,
+                ]
+                .into_iter()
+                .flatten()
+                .map(|file| (1, file)),
+            )
             .chain(animations.map(|file| (2, file)))
         {
             if !seen.insert(file.hash) {

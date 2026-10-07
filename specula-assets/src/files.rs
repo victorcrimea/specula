@@ -1,4 +1,4 @@
-//! The split asset files, format v5. Little-endian; every file starts with
+//! The split asset files, format v6. Little-endian; every file starts with
 //! a 4-byte magic and a u8 version. Strings are u16 length and UTF-8,
 //! counts are u32. A file is served as `assets/<kind>-<16 hex>.bin`, the
 //! hex being a hash of its content, so a cached copy is never stale and
@@ -12,7 +12,9 @@
 //! - index "SPCI": count x {actor path under art/actors, as the stream
 //!   names actors, file ref of its manifest}, count x {terrain name, as
 //!   the terrain resource names it, file ref of its baseTex texture, f32
-//!   angle in radians, f32 size in metres}, optional alpha map atlas.
+//!   angle in radians, f32 size in metres, optional normTex texture,
+//!   optional specTex texture, f32 normal strength and f32 specular power
+//!   (its material's `effectSettings` x and y)}, optional alpha map atlas.
 //!   The atlas is an RGBA8 texture, one mip, holding the engine's 14
 //!   standard blend masks in its alpha, side by side in
 //!   `CTerrainTextureManager::LoadAlphaMap`'s order and layout. Then
@@ -28,19 +30,24 @@
 //!   every actor it can prop, transitively, so one fetch resolves an
 //!   entity. An object is {name, count x definition, count x {u8 quality,
 //!   u32 definition}}, its bases in rising quality as `CActorDef` keeps
-//!   them, the last at 255. A definition is {u8 flags (1: player colour),
-//!   f32 alpha reference (0: none), count x group}; a group is count x
-//!   variant; a variant is {name (lower case), i32 frequency, optional
-//!   mesh, optional baseTex texture, optional decal {f32 width, f32 depth,
+//!   them, the last at 255. A definition is {u8 flags (1: player colour,
+//!   2: normal map, 4: specular map, 8: ambient occlusion map, as its
+//!   material's required textures define them), f32 alpha reference (0:
+//!   none), f32x4 the material's `effectSettings` (0 where it names none),
+//!   count x group}; a group is count x variant; a variant is {name (lower
+//!   case), i32 frequency, optional mesh, optional baseTex, normTex,
+//!   specTex and aoTex textures, optional decal {f32 width, f32 depth,
 //!   f32 angle in radians, f32 offset x, f32 offset z}, count x {prop
 //!   point, u32 object (NONE: removes the point's props)}, count x {animation name, id, i32
 //!   frequency, f32 speed, f32 event, f32 load and f32 sound (fractions,
 //!   -1: none), optional animation file}}. Mesh and texture refs name
 //!   coarse files.
 //! - mesh "SPCM", the coarsest level of detail: u32 vertex count, vertices
-//!   of `VERTEX_SIZE` bytes (f32x3 position, f32x3 normal, f32x2 uv, u8x4
-//!   bones, unorm8x4 weights; a bone equal to the bone count is the
-//!   model's own transform), u32 index count, u16 indices, u8 level count,
+//!   of `VERTEX_SIZE` bytes (f32x3 position, f32x3 normal, f32x2 uv, f32x2
+//!   second uv (the first again where the PMD has one set), snorm8x4
+//!   MikkTSpace tangent with the bitangent's sign in w, u8x4 bones,
+//!   unorm8x4 weights; a bone equal to the bone count is the model's own
+//!   transform), u32 index count, u16 indices, u8 level count,
 //!   levels x {u32 first index, u32 count}, the finest first; optional
 //!   skeleton, u32 bone count, prop point count x {name, f32x3 position,
 //!   f32x4 rotation, u8 bone (0xFF: the model's origin)}, f32x3 bounds min
@@ -77,18 +84,21 @@
 use crate::half::f16_bits;
 use crate::half::f16_to_f32;
 
-pub const VERSION: u8 = 5;
+pub const VERSION: u8 = 6;
 /// The largest side of each texture detail tier, which a viewer's
 /// texture quality picks from: low, medium and the whole chain as the
 /// engine uploads it at its default quality.
 pub const TEXTURE_TIER_SIDES: [u32; 3] = [256, 1024, u32::MAX];
 /// Bytes per mesh vertex.
-pub const VERTEX_SIZE: usize = 40;
+pub const VERTEX_SIZE: usize = 52;
 /// A prop that names no object only removes what was on its point.
 pub const NONE: u32 = u32::MAX;
 /// A prop point fixed to the model's origin rather than to a bone.
 pub const NO_BONE: u8 = 0xFF;
 pub const FLAG_PLAYER_COLOR: u8 = 1;
+pub const FLAG_NORMAL_MAP: u8 = 2;
+pub const FLAG_SPECULAR_MAP: u8 = 4;
+pub const FLAG_AO_MAP: u8 = 8;
 pub const SOUND_OMNIPRESENT: u8 = 1;
 pub const SOUND_DISTANCELESS: u8 = 2;
 pub const SOUND_OWNER_ONLY: u8 = 4;
@@ -227,7 +237,7 @@ pub struct SoundGroup {
     pub sounds: Vec<FileRef>,
 }
 
-/// `CTerrainTextureEntry`'s diffuse texture and its planar mapping.
+/// `CTerrainTextureEntry`'s textures and its planar mapping.
 #[derive(Clone, Copy, Debug)]
 pub struct TerrainTexture {
     pub texture: FileRef,
@@ -235,6 +245,11 @@ pub struct TerrainTexture {
     pub angle: f32,
     /// Metres the texture spans.
     pub size: f32,
+    /// Only where the material requires it.
+    pub normal: Option<FileRef>,
+    pub specular: Option<FileRef>,
+    pub normal_strength: f32,
+    pub specular_power: f32,
 }
 
 pub struct Manifest {
@@ -249,8 +264,12 @@ pub struct Object {
 }
 
 pub struct Definition {
-    pub player_color: bool,
+    /// `FLAG_*` bits.
+    pub flags: u8,
     pub alpha_ref: f32,
+    /// `effectSettings`: normal strength, specular power, parallax scale,
+    /// and how much of the vertex lighting replaces the per-pixel one.
+    pub effect: [f32; 4],
     pub groups: Vec<Vec<Variant>>,
 }
 
@@ -259,6 +278,9 @@ pub struct Variant {
     pub frequency: i32,
     pub mesh: Option<FileRef>,
     pub texture: Option<FileRef>,
+    pub normal_texture: Option<FileRef>,
+    pub specular_texture: Option<FileRef>,
+    pub ao_texture: Option<FileRef>,
     pub decal: Option<Decal>,
     pub props: Vec<Prop>,
     pub animations: Vec<Animation>,
@@ -390,6 +412,10 @@ impl Index {
             out.file(terrain.texture);
             out.f32(terrain.angle);
             out.f32(terrain.size);
+            out.optional_file(terrain.normal);
+            out.optional_file(terrain.specular);
+            out.f32(terrain.normal_strength);
+            out.f32(terrain.specular_power);
         }
         out.optional_file(self.alpha_maps);
         out.count(self.sound_groups.len());
@@ -433,12 +459,20 @@ impl Index {
                 let texture = input.file()?;
                 let angle = input.f32()?;
                 let size = input.f32()?;
+                let normal = input.optional_file()?;
+                let specular = input.optional_file()?;
+                let normal_strength = input.f32()?;
+                let specular_power = input.f32()?;
                 Ok((
                     name,
                     TerrainTexture {
                         texture,
                         angle,
                         size,
+                        normal,
+                        specular,
+                        normal_strength,
+                        specular_power,
                     },
                 ))
             })
@@ -543,12 +577,9 @@ impl Manifest {
             out.string(&object.name);
             out.count(object.definitions.len());
             for definition in &object.definitions {
-                out.u8(if definition.player_color {
-                    FLAG_PLAYER_COLOR
-                } else {
-                    0
-                });
+                out.u8(definition.flags);
                 out.f32(definition.alpha_ref);
+                out.f32s(&definition.effect);
                 out.count(definition.groups.len());
                 for group in &definition.groups {
                     out.count(group.len());
@@ -575,6 +606,7 @@ impl Manifest {
             for _ in 0..input.count()? {
                 let flags = input.u8()?;
                 let alpha_ref = input.f32()?;
+                let effect = input.f32s()?;
                 let mut groups = Vec::new();
                 for _ in 0..input.count()? {
                     let group = (0..input.count()?)
@@ -583,8 +615,9 @@ impl Manifest {
                     groups.push(group);
                 }
                 definitions.push(Definition {
-                    player_color: flags & FLAG_PLAYER_COLOR != 0,
+                    flags,
                     alpha_ref,
+                    effect,
                     groups,
                 });
             }
@@ -1115,6 +1148,9 @@ impl Writer {
         self.i32(variant.frequency);
         self.optional_file(variant.mesh);
         self.optional_file(variant.texture);
+        self.optional_file(variant.normal_texture);
+        self.optional_file(variant.specular_texture);
+        self.optional_file(variant.ao_texture);
         match variant.decal {
             Some(decal) => {
                 self.u8(1);
@@ -1295,6 +1331,9 @@ impl<'a> Reader<'a> {
         let frequency = self.i32()?;
         let mesh = self.optional_file()?;
         let texture = self.optional_file()?;
+        let normal_texture = self.optional_file()?;
+        let specular_texture = self.optional_file()?;
+        let ao_texture = self.optional_file()?;
         let decal = match self.u8()? {
             0 => None,
             1 => {
@@ -1336,6 +1375,9 @@ impl<'a> Reader<'a> {
             frequency,
             mesh,
             texture,
+            normal_texture,
+            specular_texture,
+            ao_texture,
             decal,
             props,
             animations,

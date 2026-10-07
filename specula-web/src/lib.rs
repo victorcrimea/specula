@@ -98,6 +98,8 @@ const SOUND_SETTINGS_KEY: &str = "specula.sound";
 const SHADOW_SETTINGS_KEY: &str = "specula.shadows";
 /// localStorage key of the texture quality: 1 low, 2 medium, 3 high.
 const TEXTURE_SETTINGS_KEY: &str = "specula.textures";
+/// localStorage key of the material maps setting: 0 off, 1 on.
+const MAP_SETTINGS_KEY: &str = "specula.maps";
 /// localStorage key of when the storage notice was last shown, in ms since
 /// the epoch.
 const STORAGE_NOTICE_KEY: &str = "specula.storage-notice";
@@ -146,6 +148,9 @@ trait View {
     /// The texture quality, as a count of `TEXTURE_TIER_SIDES`, where it
     /// draws textures.
     fn set_texture_tiers(&mut self, _tiers: usize) {}
+    /// Whether normal, specular and ambient occlusion maps are fetched and
+    /// drawn, where it draws them.
+    fn set_material_maps(&mut self, _on: bool) {}
     /// The highest texture quality the device is given.
     fn max_texture_tiers(&self) -> usize {
         TEXTURE_TIER_SIDES.len()
@@ -820,6 +825,7 @@ async fn run(page: Page, glue_url: String, wasm_url: String) -> Result<(), Strin
     if page == Page::Observer {
         wire_shadows(&app, element(&document, "shadows")?);
         wire_textures(&app, element(&document, "textures")?);
+        wire_maps(&app, element(&document, "maps")?);
     }
     wire_sound(&app, &window);
     wire_warmup(&app);
@@ -955,6 +961,35 @@ fn wire_textures(app: &Rc<RefCell<App>>, select: HtmlSelectElement) {
         }
         let app = &mut *target.borrow_mut();
         app.renderer.set_texture_tiers(tiers);
+        app.dirty = true;
+    });
+    select.set_onchange(Some(on_change.as_ref().unchecked_ref()));
+    // The controls live as long as the page, so their handlers do too.
+    on_change.forget();
+}
+
+/// The material maps list, kept across visits; off unless chosen, as
+/// the maps cost frame time and download.
+fn wire_maps(app: &Rc<RefCell<App>>, select: HtmlSelectElement) {
+    let saved = web_sys::window()
+        .and_then(|window| window.local_storage().ok().flatten())
+        .and_then(|storage| storage.get_item(MAP_SETTINGS_KEY).ok().flatten())
+        .is_some_and(|text| text == "1");
+    select.set_value(if saved { "1" } else { "0" });
+    app.borrow_mut().renderer.set_material_maps(saved);
+
+    let target = Rc::clone(app);
+    let list = select.clone();
+    let on_change = Closure::<dyn FnMut()>::new(move || {
+        let on = list.value() == "1";
+        // Best effort: without storage the choice lasts only this visit.
+        if let Some(storage) =
+            web_sys::window().and_then(|window| window.local_storage().ok().flatten())
+        {
+            let _ = storage.set_item(MAP_SETTINGS_KEY, if on { "1" } else { "0" });
+        }
+        let app = &mut *target.borrow_mut();
+        app.renderer.set_material_maps(on);
         app.dirty = true;
     });
     select.set_onchange(Some(on_change.as_ref().unchecked_ref()));

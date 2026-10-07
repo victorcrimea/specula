@@ -17,6 +17,23 @@ struct View {
 @group(1) @binding(0) var poses: texture_2d<f32>;
 @group(2) @binding(0) var skin: texture_2d<f32>;
 @group(2) @binding(1) var skin_sampler: sampler;
+@group(2) @binding(2) var normal_map: texture_2d<f32>;
+@group(2) @binding(3) var specular_map: texture_2d<f32>;
+@group(2) @binding(4) var ao_map: texture_2d<f32>;
+
+struct Material {
+    // effectSettings: normal strength, specular power, parallax scale,
+    // the vertex lighting's share of the sun.
+    effect: vec4<f32>,
+    // 1 when the material has a normal map.
+    flags: vec4<f32>,
+}
+
+@group(2) @binding(5) var<uniform> material: Material;
+
+// The viewer's material maps setting: off leaves the normal, specular and
+// ambient occlusion maps unsampled, for the cost of the plain shading.
+override MAPS: bool = true;
 
 struct Light {
     sun_color: vec4<f32>,
@@ -62,11 +79,6 @@ fn shadow_at(world: vec3<f32>, bias: f32) -> f32 {
     return mix(1.0, shadow, fade);
 }
 
-// shading.h calculateShading, without specular and ambient occlusion.
-fn lit(albedo: vec3<f32>, normal: vec3<f32>, shadow: f32) -> vec3<f32> {
-    let sun = max(dot(normalize(normal), view.sun.xyz), 0.0);
-    return albedo * (light.sun_color.rgb * sun * shadow + light.ambient.rgb);
-}
 
 // Texels per pose atlas row, pose.rs WIDTH.
 const POSE_WIDTH: u32 = 2048u;
@@ -79,6 +91,9 @@ struct ModelVaryings {
     @location(2) @interpolate(flat) color: vec4<f32>,
     @location(3) @interpolate(flat) alpha_ref: f32,
     @location(4) world: vec3<f32>,
+    @location(5) uv2: vec2<f32>,
+    @location(6) tangent: vec3<f32>,
+    @location(7) bitangent: vec3<f32>,
 }
 
 fn pose_texel(index: u32) -> vec4<f32> {
@@ -120,6 +135,9 @@ fn vs_model(
     @location(2) uv: vec2<f32>,
     @location(3) bones: vec4<u32>,
     @location(4) weights: vec4<f32>,
+    @location(10) uv2: vec2<f32>,
+    // The bitangent's sign in w.
+    @location(11) tangent: vec4<f32>,
     // The model's world transform, rows of a 3x4 matrix.
     @location(5) row0: vec4<f32>,
     @location(6) row1: vec4<f32>,
@@ -132,10 +150,12 @@ fn vs_model(
 ) -> ModelVaryings {
     var local = position;
     var local_normal = normal;
+    var local_tangent = tangent.xyz;
     let bone_count = pose.z;
     if bone_count > 0u {
         local = vec3<f32>(0.0);
         local_normal = vec3<f32>(0.0);
+        local_tangent = vec3<f32>(0.0);
         for (var i = 0u; i < 4u; i++) {
             let weight = weights[i];
             if weight <= 0.0 {
@@ -145,11 +165,13 @@ fn vs_model(
             if bones[i] >= bone_count {
                 local += position * weight;
                 local_normal += normal * weight;
+                local_tangent += tangent.xyz * weight;
                 continue;
             }
             let m = bone_pose(pose.x, pose.y, params.x, bones[i]);
             local += (m * vec4<f32>(position, 1.0)) * weight;
             local_normal += (m * vec4<f32>(normal, 0.0)) * weight;
+            local_tangent += (m * vec4<f32>(tangent.xyz, 0.0)) * weight;
         }
     }
     let world = vec3<f32>(
@@ -162,11 +184,21 @@ fn vs_model(
         dot(row1.xyz, local_normal),
         dot(row2.xyz, local_normal),
     );
+    let world_tangent = vec3<f32>(
+        dot(row0.xyz, local_tangent),
+        dot(row1.xyz, local_tangent),
+        dot(row2.xyz, local_tangent),
+    );
     var out: ModelVaryings;
     out.position = view.view_proj * vec4<f32>(world, 1.0);
     out.uv = uv;
     out.normal = world_normal;
     out.world = world;
+    out.uv2 = uv2;
+    // model_common.vs: the bitangent from the transformed normal and
+    // tangent, flipped where the UVs are mirrored.
+    out.tangent = world_tangent;
+    out.bitangent = cross(world_normal, world_tangent) * tangent.w;
     // Unpacked by hand: WebGL2's GLSL ES 3.0 has no unpackUnorm4x8.
     let rgb = vec3<f32>(f32(pose.w & 255u), f32((pose.w >> 8u) & 255u), f32((pose.w >> 16u) & 255u));
     out.color = vec4<f32>(rgb / 255.0, params.y);
@@ -186,16 +218,57 @@ fn tested_alpha(alpha: f32, uv: vec2<f32>) -> f32 {
     return alpha * (1.0 + level * 0.25);
 }
 
-// model_common.fs: the alpha of a player-coloured skin masks the tint.
+// model_common.fs with shading.h: the alpha of a player-coloured skin
+// masks the tint; the normal map bends the normal, the specular map adds
+// the sun's highlight and the ambient occlusion map darkens only the
+// ambient light. A missing specular or occlusion map is black or white.
 @fragment
 fn fs_model(in: ModelVaryings) -> @location(0) vec4<f32> {
+    // Sampled before the discard: WGSL wants textureSample in uniform
+    // control flow.
     let tex = textureSample(skin, skin_sampler, in.uv);
+    var packed_normal = vec3<f32>(0.5, 0.5, 1.0);
+    var specular_color = vec3<f32>(0.0);
+    var ao = 1.0;
+    if MAPS {
+        packed_normal = textureSample(normal_map, skin_sampler, in.uv).rgb;
+        specular_color = textureSample(specular_map, skin_sampler, in.uv).rgb;
+        ao = textureSample(ao_map, skin_sampler, in.uv2).r;
+    }
     if tested_alpha(tex.a, in.uv) < in.alpha_ref {
         discard;
     }
     let tint = mix(in.color.rgb, vec3<f32>(1.0), tex.a);
     let diffuse = tex.rgb * mix(vec3<f32>(1.0), tint, in.color.a);
-    return vec4<f32>(lit(diffuse, in.normal, shadow_at(in.world, light.shadow.x)), 1.0);
+
+    var normal = normalize(in.normal);
+    var sun_diffuse = max(dot(normal, view.sun.xyz), 0.0) * light.sun_color.rgb;
+    if MAPS && material.flags.x > 0.5 {
+        // calculateNormal.
+        var local = packed_normal * 2.0 - 1.0;
+        local.y = -local.y;
+        var mapped = normalize(mat3x3<f32>(in.tangent, in.bitangent, in.normal) * local);
+        let strength = material.effect.x;
+        if strength <= 1.0 {
+            mapped = normalize(mix(normal, mapped, strength));
+        } else {
+            mapped = normalize(mapped - normal * min(1.0, strength - 1.0));
+        }
+        let mapped_sun = max(dot(mapped, view.sun.xyz), 0.0) * light.sun_color.rgb;
+        sun_diffuse = mix(mapped_sun, sun_diffuse, material.effect.w);
+        normal = mapped;
+    }
+    var specular = vec3<f32>(0.0);
+    if MAPS {
+        // calculateSpecular, with model_common.vs' half vector.
+        let half_vector = normalize(view.sun.xyz + normalize(light.eye.xyz - in.world));
+        specular = light.sun_color.rgb * specular_color
+            * pow(max(0.001, dot(normal, half_vector)), material.effect.y);
+    }
+    // calculateShading.
+    let shadow = shadow_at(in.world, light.shadow.x);
+    let color = (diffuse * sun_diffuse + specular) * shadow + diffuse * light.ambient.rgb * ao;
+    return vec4<f32>(color, 1.0);
 }
 
 // The shadow map's depth pass: only the alpha test, so leaves cast

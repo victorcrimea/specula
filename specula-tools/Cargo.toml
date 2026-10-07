@@ -28,6 +28,7 @@ path = "src/bake_assets/main.rs"
 brotli = "9"
 lewton = "0.10"
 meshopt = "0.6"
+mikktspace = { version = "0.3", default-features = false, features = ["glam"] }
 ogg = "0.9"
 opus = "0.4"
 png = "0.18"

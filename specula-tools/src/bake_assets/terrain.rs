@@ -1,4 +1,4 @@
-//! The terrain textures and their planar mappings, as
+//! The terrain textures, materials and planar mappings, as
 //! `CTerrainTextureManager` loads them, and its composite of the blend
 //! masks.
 
@@ -9,6 +9,9 @@ use std::path::Path;
 
 use specula_assets::files::Texture;
 use specula_assets::files::TextureFormat;
+
+use crate::material;
+use crate::material::Material;
 
 const TERRAIN_DIR: &str = "art/terrains";
 const ALPHA_MAP_DIR: &str = "art/textures/terrain/alphamaps/standard";
@@ -38,6 +41,9 @@ pub struct TerrainDef {
     pub tag: String,
     /// Under the mod, `art/textures/terrain/...`.
     pub base_texture: String,
+    pub normal_texture: Option<String>,
+    pub specular_texture: Option<String>,
+    pub material: Material,
     pub angle: f32,
     pub size: f32,
 }
@@ -82,6 +88,7 @@ pub fn load(mod_dir: &Path) -> (Vec<TerrainDef>, Vec<String>) {
     let mut terrains = Vec::new();
     let mut failed = Vec::new();
     walk(
+        mod_dir,
         &mod_dir.join(TERRAIN_DIR),
         Mapping::default(),
         &mut terrains,
@@ -92,7 +99,13 @@ pub fn load(mod_dir: &Path) -> (Vec<TerrainDef>, Vec<String>) {
     (terrains, failed)
 }
 
-fn walk(dir: &Path, inherited: Mapping, out: &mut Vec<TerrainDef>, failed: &mut Vec<String>) {
+fn walk(
+    mod_dir: &Path,
+    dir: &Path,
+    inherited: Mapping,
+    out: &mut Vec<TerrainDef>,
+    failed: &mut Vec<String>,
+) {
     let Ok(entries) = fs::read_dir(dir) else {
         failed.push(format!("{}: cannot list", dir.display()));
         return;
@@ -115,11 +128,11 @@ fn walk(dir: &Path, inherited: Mapping, out: &mut Vec<TerrainDef>, failed: &mut 
     };
     for path in &paths {
         if path.is_dir() {
-            walk(path, mapping, out, failed);
+            walk(mod_dir, path, mapping, out, failed);
         } else if path.extension().is_some_and(|extension| extension == "xml")
             && path.file_stem().is_some_and(|stem| stem != "terrains")
         {
-            match terrain(path, mapping) {
+            match terrain(mod_dir, path, mapping) {
                 Ok(terrain) => out.push(terrain),
                 Err(error) => failed.push(format!("{}: {error}", path.display())),
             }
@@ -138,15 +151,25 @@ fn directory_mapping(path: &Path) -> Result<Mapping, String> {
         .unwrap_or_default())
 }
 
-fn terrain(path: &Path, directory: Mapping) -> Result<TerrainDef, String> {
+fn terrain(mod_dir: &Path, path: &Path, directory: Mapping) -> Result<TerrainDef, String> {
     let xml = fs::read_to_string(path).map_err(|error| error.to_string())?;
     let document = parse(&xml)?;
     let root = document.root_element();
-    let file = root
-        .descendants()
-        .find(|node| node.has_tag_name("texture") && node.attribute("name") == Some("baseTex"))
-        .and_then(|node| node.attribute("file"))
-        .ok_or("no baseTex")?;
+    let texture = |name: &str| {
+        root.descendants()
+            .find(|node| node.has_tag_name("texture") && node.attribute("name") == Some(name))
+            .and_then(|node| node.attribute("file"))
+            .map(|file| format!("art/textures/terrain/{file}"))
+    };
+    let base_texture = texture("baseTex").ok_or("no baseTex")?;
+    // Without a <material> the entry keeps an empty one, which names no
+    // effect.
+    let material = root
+        .children()
+        .find(|node| node.has_tag_name("material"))
+        .and_then(|node| node.text())
+        .map(|name| material::load(mod_dir, name.trim()))
+        .unwrap_or_default();
     let mapping = root
         .children()
         .find(|node| node.has_tag_name("props"))
@@ -157,7 +180,10 @@ fn terrain(path: &Path, directory: Mapping) -> Result<TerrainDef, String> {
             .unwrap_or_default()
             .to_string_lossy()
             .into_owned(),
-        base_texture: format!("art/textures/terrain/{file}"),
+        base_texture,
+        normal_texture: texture("normTex"),
+        specular_texture: texture("specTex"),
+        material,
         angle: mapping.angle,
         size: mapping.size,
     })

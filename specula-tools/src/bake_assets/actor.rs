@@ -12,6 +12,9 @@ use std::rc::Rc;
 use roxmltree::Node;
 use specula_assets::files::Decal;
 
+use crate::material;
+use crate::material::Material;
+
 const MAX_QUALITY: u8 = 255;
 /// `MAX_LEVELS_PER_ACTOR_DEF`.
 const MAX_LEVELS: usize = 5;
@@ -32,12 +35,6 @@ pub struct Definition {
     pub groups: Vec<Vec<Variant>>,
 }
 
-#[derive(Clone, Copy, Default)]
-pub struct Material {
-    pub player_color: bool,
-    pub transparent: bool,
-}
-
 #[derive(Default)]
 pub struct Variant {
     /// Lower case, as the engine compares selections.
@@ -46,6 +43,9 @@ pub struct Variant {
     /// Paths under the mod.
     pub mesh: Option<String>,
     pub base_texture: Option<String>,
+    pub normal_texture: Option<String>,
+    pub specular_texture: Option<String>,
+    pub ao_texture: Option<String>,
     pub decal: Option<Decal>,
     /// (attach point, actor); an empty actor only removes.
     pub props: Vec<(String, String)>,
@@ -316,13 +316,19 @@ impl<'a> Loader<'a> {
                         if !texture.has_tag_name("texture") {
                             return Err("<textures> holds something else".into());
                         }
-                        // Only the colour map is drawn. The last one wins,
-                        // as ModelRenderer binds the samplers in order.
-                        if texture.attribute("name") == Some("baseTex")
-                            && let Some(file) = texture.attribute("file")
-                        {
-                            variant.base_texture = Some(format!("art/textures/skins/{file}"));
-                        }
+                        // The last one of a name wins, as ModelRenderer
+                        // binds the samplers in order.
+                        let Some(file) = texture.attribute("file") else {
+                            continue;
+                        };
+                        let slot = match texture.attribute("name") {
+                            Some("baseTex") => &mut variant.base_texture,
+                            Some("normTex") => &mut variant.normal_texture,
+                            Some("specTex") => &mut variant.specular_texture,
+                            Some("aoTex") => &mut variant.ao_texture,
+                            _ => continue,
+                        };
+                        *slot = Some(format!("art/textures/skins/{file}"));
                     }
                 }
                 "animations" => {
@@ -346,39 +352,11 @@ impl<'a> Loader<'a> {
         Ok(())
     }
 
-    /// The shader defines the client follows; a missing material falls
-    /// back to the defaults, as `CMaterialManager::LoadMaterial` does.
     fn material(&mut self, name: &str) -> Material {
-        if let Some(material) = self.materials.get(name) {
-            return *material;
-        }
-        let material = match read(self.mod_dir, &format!("art/materials/{name}")) {
-            Ok(xml) => match roxmltree::Document::parse(&xml) {
-                Ok(document) => {
-                    let defined = |define: &str| {
-                        document.root_element().children().any(|node| {
-                            node.has_tag_name("define")
-                                && node.attribute("name") == Some(define)
-                                && node.attribute("value") != Some("0")
-                        })
-                    };
-                    Material {
-                        player_color: defined("USE_PLAYERCOLOR"),
-                        transparent: defined("USE_TRANSPARENT"),
-                    }
-                }
-                Err(error) => {
-                    eprintln!("material {name}: {error}");
-                    Material::default()
-                }
-            },
-            Err(error) => {
-                eprintln!("material {error}");
-                Material::default()
-            }
-        };
-        self.materials.insert(name.to_string(), material);
-        material
+        *self
+            .materials
+            .entry(name.to_string())
+            .or_insert_with(|| material::load(self.mod_dir, name))
     }
 }
 

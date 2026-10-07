@@ -122,14 +122,14 @@ enum Storage {
     Unavailable,
 }
 
-/// One instanced draw of the capture: a mesh level with its texture, for
+/// One instanced draw of the capture: a mesh level with its material, for
 /// every direction of frame `slot`.
 pub struct CaptureDraw<'a> {
     pub slot: u32,
     pub vertices: &'a wgpu::Buffer,
     pub indices: &'a wgpu::Buffer,
     pub index_range: (u32, u32),
-    pub texture: &'a wgpu::BindGroup,
+    pub material: &'a wgpu::BindGroup,
     /// Byte range of its instances.
     pub instances: (u64, u64),
     pub count: u32,
@@ -180,7 +180,7 @@ impl Far {
         model_buffers: &[Option<wgpu::VertexBufferLayout>],
         view_layout: &wgpu::BindGroupLayout,
         pose_layout: &wgpu::BindGroupLayout,
-        texture_layout: &wgpu::BindGroupLayout,
+        material_layout: &wgpu::BindGroupLayout,
         light_layout: &wgpu::BindGroupLayout,
         elevation: f32,
     ) -> Self {
@@ -212,7 +212,7 @@ impl Far {
                 bind_group_layouts: &[
                     Some(&capture_layout),
                     Some(pose_layout),
-                    Some(texture_layout),
+                    Some(material_layout),
                 ],
                 immediate_size: 0,
             });
@@ -669,7 +669,7 @@ impl Far {
                 let slot = cell / DIRECTIONS;
                 for draw in capture.draws.iter().filter(|draw| draw.slot == slot) {
                     let (first, count) = draw.index_range;
-                    pass.set_bind_group(2, draw.texture, &[]);
+                    pass.set_bind_group(2, draw.material, &[]);
                     pass.set_vertex_buffer(0, draw.vertices.slice(..));
                     pass.set_vertex_buffer(
                         1,

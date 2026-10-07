@@ -12,6 +12,7 @@ use std::collections::BTreeSet;
 
 use specula_assets::files::Decal;
 use specula_assets::files::Definition;
+use specula_assets::files::FLAG_PLAYER_COLOR;
 use specula_assets::files::FileRef;
 use specula_assets::files::Manifest;
 use specula_assets::files::NONE;
@@ -35,6 +36,10 @@ type Selections = BTreeSet<String>;
 pub struct Model {
     pub shape: Shape,
     pub texture: Option<FileRef>,
+    /// normTex, specTex and aoTex, where the material samples them.
+    pub maps: [Option<FileRef>; 3],
+    /// The material's `effectSettings`.
+    pub effect: [f32; 4],
     pub player_color: bool,
     pub alpha_ref: f32,
     /// By lower-case name, as `CObjectEntry::m_Animations`.
@@ -234,6 +239,7 @@ fn build(
     let mut mesh = None;
     let mut decal = None;
     let mut texture = None;
+    let mut maps = [None; 3];
     let mut props: BTreeMap<String, Vec<u32>> = BTreeMap::new();
     let mut animations: BTreeMap<String, Vec<&specula_assets::files::Animation>> = BTreeMap::new();
     for (group, choice) in definition
@@ -255,6 +261,16 @@ fn build(
         }
         if variant.texture.is_some() {
             texture = variant.texture;
+        }
+        let found = [
+            variant.normal_texture,
+            variant.specular_texture,
+            variant.ao_texture,
+        ];
+        for (map, found) in maps.iter_mut().zip(found) {
+            if found.is_some() {
+                *map = found;
+            }
         }
         for prop in &variant.props {
             props.remove(&prop.point);
@@ -282,7 +298,9 @@ fn build(
         return Some(Model {
             shape: Shape::Decal(decal),
             texture,
-            player_color: definition.player_color,
+            maps,
+            effect: definition.effect,
+            player_color: definition.flags & FLAG_PLAYER_COLOR != 0,
             alpha_ref: definition.alpha_ref,
             animations: Vec::new(),
             props: Vec::new(),
@@ -336,7 +354,9 @@ fn build(
     Some(Model {
         shape: Shape::Mesh(mesh),
         texture,
-        player_color: definition.player_color,
+        maps,
+        effect: definition.effect,
+        player_color: definition.flags & FLAG_PLAYER_COLOR != 0,
         alpha_ref: definition.alpha_ref,
         animations: model_animations,
         props: model_props,

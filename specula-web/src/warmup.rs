@@ -49,6 +49,8 @@ struct Run {
     failed: u32,
     /// The store's texture tiers when the run started.
     texture_tiers: usize,
+    /// The store's material maps setting when the run started.
+    material_maps: bool,
 }
 
 impl Run {
@@ -103,6 +105,7 @@ impl Warmup {
         };
         let mut run = Run {
             texture_tiers: store.texture_tiers(),
+            material_maps: store.material_maps(),
             ..Run::default()
         };
         for (kind, file) in roots {
@@ -193,7 +196,8 @@ fn pump(run: &Rc<RefCell<Run>>) {
 async fn fetch(run: Rc<RefCell<Run>>, kind: Kind, file: FileRef) {
     let url = format!("/assets/{}", kind.file_name(file.hash));
     let named = crate::stored::fetch(&url).await.and_then(|(bytes, _)| {
-        names(kind, &bytes, run.borrow().texture_tiers).map_err(String::from)
+        let run = run.borrow();
+        names(kind, &bytes, run.texture_tiers, run.material_maps).map_err(String::from)
     });
     {
         let mut state = run.borrow_mut();
@@ -214,11 +218,13 @@ async fn fetch(run: Rc<RefCell<Run>>, kind: Kind, file: FileRef) {
     pump(&run);
 }
 
-/// The files this one names, a texture's detail up to `texture_tiers`.
+/// The files this one names, a texture's detail up to `texture_tiers`,
+/// and an actor's material maps only with `material_maps`.
 fn names(
     kind: Kind,
     bytes: &[u8],
     texture_tiers: usize,
+    material_maps: bool,
 ) -> Result<Vec<(Kind, FileRef)>, &'static str> {
     let mut out = Vec::new();
     match kind {
@@ -233,6 +239,18 @@ fn names(
             for variant in variants {
                 out.extend(variant.mesh.map(|file| (Kind::Mesh, file)));
                 out.extend(variant.texture.map(|file| (Kind::Texture, file)));
+                if material_maps {
+                    out.extend(
+                        [
+                            variant.normal_texture,
+                            variant.specular_texture,
+                            variant.ao_texture,
+                        ]
+                        .into_iter()
+                        .flatten()
+                        .map(|file| (Kind::Texture, file)),
+                    );
+                }
                 out.extend(
                     variant
                         .animations

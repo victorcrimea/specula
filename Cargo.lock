@@ -630,6 +630,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "glam"
+version = "0.15.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3abb554f8ee44336b72d522e0a7fe86a29e09f839a36022fa869a7dfe941a54b"
+
+[[package]]
 name = "glob"
 version = "0.3.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1077,6 +1083,15 @@ dependencies = [
  "cc",
  "float-cmp",
  "thiserror 2.0.21",
+]
+
+[[package]]
+name = "mikktspace"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7d0b56b403871a8f992ca626d52cc0a690d4841baea8955dc4af6304ac62f8b0"
+dependencies = [
+ "glam",
 ]
 
 [[package]]
@@ -1890,6 +1905,7 @@ dependencies = [
  "brotli",
  "lewton",
  "meshopt",
+ "mikktspace",
  "ogg 0.9.2",
  "opus",
  "png",

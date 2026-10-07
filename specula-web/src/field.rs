@@ -28,6 +28,7 @@ use specula_assets::files::Mesh;
 use specula_assets::files::NO_BONE;
 use specula_assets::files::PropPoint;
 use specula_assets::files::TEXTURE_TIER_SIDES;
+use specula_assets::files::TerrainTexture;
 use specula_assets::files::Texture;
 use specula_assets::files::TextureFormat;
 use specula_assets::files::VERTEX_SIZE;
@@ -144,13 +145,20 @@ const BACKGROUND: wgpu::Color = wgpu::Color {
     b: 0.08,
     a: 1.0,
 };
-const MESH_ATTRIBUTES: [wgpu::VertexAttribute; 5] = wgpu::vertex_attr_array![
+const MESH_ATTRIBUTES: [wgpu::VertexAttribute; 7] = wgpu::vertex_attr_array![
     0 => Float32x3,
     1 => Float32x3,
     2 => Float32x2,
+    10 => Float32x2,
+    11 => Snorm8x4,
     3 => Uint8x4,
     4 => Unorm8x4,
 ];
+/// The shaders' `MAPS` override, by the material maps setting.
+const MAPS_CONSTANTS: [[(&str, f64); 1]; 2] = [[("MAPS", 0.0)], [("MAPS", 1.0)]];
+/// A model material's uniform: `effectSettings`, then 1 when it has a
+/// normal map; model.wgsl `Material`.
+const MATERIAL_SIZE: usize = 32;
 const INSTANCE_ATTRIBUTES: [wgpu::VertexAttribute; 5] = wgpu::vertex_attr_array![
     5 => Float32x4,
     6 => Float32x4,
@@ -178,7 +186,7 @@ type ModelKey = (u32, u32, u32, u32);
 /// tier of detail adds levels, the texture quality moves the first.
 type Uploaded = (usize, usize);
 
-/// (mesh, level of detail, texture) of one instanced draw.
+/// (mesh, level of detail, material) of one instanced draw.
 type GroupKey = (u64, usize, u64);
 const SHOOTING_ANIMATION: &str = "attack_ranged";
 /// What a shot's model resolves from: its projectile actor, else the
@@ -202,6 +210,16 @@ struct PlacedDecal {
     /// `CModelDecal`'s transform (cos and sin of its Y rotation, x, z),
     /// then the decal's offset x and z and size x and z.
     place: [f32; 8],
+}
+
+/// A texture on the GPU: its view, its bind group for the decal and blend
+/// passes, what it was uploaded from, and which upload it was, which the
+/// materials made from it compare.
+struct GpuTexture {
+    view: wgpu::TextureView,
+    group: wgpu::BindGroup,
+    uploaded: Uploaded,
+    upload: u64,
 }
 
 struct GpuMesh {
@@ -229,10 +247,11 @@ struct Ground {
     blends: Vec<Splat>,
     /// The minimap picture, for a terrain whose texture is not in (yet).
     minimap: wgpu::BindGroup,
-    /// Per palette entry, its texture's bind group and what it was
-    /// uploaded from (`Uploaded`); `None` while it is on its way or
-    /// missing.
-    textures: Vec<Option<(wgpu::BindGroup, Uploaded)>>,
+    /// Per palette entry, its textures' bind group and what its colour,
+    /// normal and specular maps were uploaded from (`Uploaded`, `None`
+    /// for a map it is drawn without); `None` while the colour map is on
+    /// its way or missing.
+    textures: Vec<Option<(wgpu::BindGroup, [Option<Uploaded>; 3])>>,
     /// Palette entries whose texture will not come.
     missing: Vec<bool>,
     alpha_maps: Option<wgpu::BindGroup>,
@@ -306,9 +325,13 @@ pub struct Field {
     config: wgpu::SurfaceConfiguration,
     depth: wgpu::TextureView,
     bc: bool,
-    model_pipeline: wgpu::RenderPipeline,
-    terrain_pipeline: wgpu::RenderPipeline,
-    blend_pipeline: wgpu::RenderPipeline,
+    /// Without and with the material maps.
+    model_pipelines: [wgpu::RenderPipeline; 2],
+    terrain_pipelines: [wgpu::RenderPipeline; 2],
+    blend_pipelines: [wgpu::RenderPipeline; 2],
+    /// The viewer's material maps setting: normal, specular and ambient
+    /// occlusion maps fetched and drawn.
+    material_maps: bool,
     water_pipeline: wgpu::RenderPipeline,
     decal_pipeline: wgpu::RenderPipeline,
     shadow: Shadow,
@@ -323,13 +346,23 @@ pub struct Field {
     pose_bind_group: wgpu::BindGroup,
     pose_generation: u32,
     texture_layout: wgpu::BindGroupLayout,
+    material_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
-    white: wgpu::BindGroup,
+    /// What stands in for a material's missing colour, normal, specular
+    /// and ambient occlusion maps: white, flat, black and white.
+    default_maps: [wgpu::TextureView; 4],
+    /// For a material not made yet.
+    default_material: wgpu::BindGroup,
     ground: Option<Ground>,
     store: Rc<RefCell<Store>>,
     meshes: HashMap<u64, GpuMesh>,
-    /// By coarse file hash, with what it was uploaded from.
-    textures: HashMap<u64, (wgpu::BindGroup, Uploaded)>,
+    /// By coarse file hash.
+    textures: HashMap<u64, GpuTexture>,
+    /// Textures uploaded so far.
+    uploads: u64,
+    /// By `material`'s key, with the uploads of its textures it was made
+    /// from.
+    materials: HashMap<u64, (wgpu::BindGroup, [u64; 4])>,
     /// How many of `TEXTURE_TIER_SIDES` textures are fetched and drawn
     /// with: the viewer's texture quality, at most medium without BC.
     texture_tiers: usize,
@@ -488,19 +521,46 @@ impl Field {
             ..Default::default()
         });
 
-        let ground_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("ground texture"),
+        let material_texture = |binding: u32| wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                view_dimension: wgpu::TextureViewDimension::D2,
+                multisampled: false,
+            },
+            count: None,
+        };
+        let material_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("model material"),
             entries: &[
+                material_texture(0),
                 wgpu::BindGroupLayoutEntry {
-                    binding: 0,
+                    binding: 1,
                     visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                material_texture(2),
+                material_texture(3),
+                material_texture(4),
+                wgpu::BindGroupLayoutEntry {
+                    binding: 5,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
                     },
                     count: None,
                 },
+            ],
+        });
+
+        let ground_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("ground texture"),
+            entries: &[
+                material_texture(0),
                 wgpu::BindGroupLayoutEntry {
                     binding: 1,
                     visibility: wgpu::ShaderStages::FRAGMENT,
@@ -517,6 +577,8 @@ impl Field {
                     },
                     count: None,
                 },
+                material_texture(3),
+                material_texture(4),
             ],
         });
         let terrain_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
@@ -559,7 +621,7 @@ impl Field {
             &view_layout,
             VIEW_SIZE,
             &pose_layout,
-            &texture_layout,
+            &material_layout,
             &model_shader,
             &model_buffers,
             &field_shader,
@@ -571,33 +633,38 @@ impl Field {
             bind_group_layouts: &[
                 Some(&view_layout),
                 Some(&pose_layout),
-                Some(&texture_layout),
+                Some(&material_layout),
                 Some(light_layout),
             ],
             immediate_size: 0,
         });
-        let model_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("model"),
-            layout: Some(&model_layout),
-            vertex: wgpu::VertexState {
-                module: &model_shader,
-                entry_point: Some("vs_model"),
-                compilation_options: Default::default(),
-                buffers: &model_buffers,
-            },
-            // The engine draws models double-sided where the material asks;
-            // without culling every model looks right.
-            primitive: wgpu::PrimitiveState::default(),
-            depth_stencil: Some(depth_stencil(true)),
-            multisample: Default::default(),
-            fragment: Some(wgpu::FragmentState {
-                module: &model_shader,
-                entry_point: Some("fs_model"),
-                compilation_options: Default::default(),
-                targets: &[Some(config.format.into())],
-            }),
-            multiview_mask: None,
-            cache: None,
+        let model_pipelines = [false, true].map(|maps| {
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("model"),
+                layout: Some(&model_layout),
+                vertex: wgpu::VertexState {
+                    module: &model_shader,
+                    entry_point: Some("vs_model"),
+                    compilation_options: Default::default(),
+                    buffers: &model_buffers,
+                },
+                // The engine draws models double-sided where the material asks;
+                // without culling every model looks right.
+                primitive: wgpu::PrimitiveState::default(),
+                depth_stencil: Some(depth_stencil(true)),
+                multisample: Default::default(),
+                fragment: Some(wgpu::FragmentState {
+                    module: &model_shader,
+                    entry_point: Some("fs_model"),
+                    compilation_options: wgpu::PipelineCompilationOptions {
+                        constants: &MAPS_CONSTANTS[usize::from(maps)],
+                        ..Default::default()
+                    },
+                    targets: &[Some(config.format.into())],
+                }),
+                multiview_mask: None,
+                cache: None,
+            })
         });
         let terrain_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("terrain"),
@@ -610,26 +677,31 @@ impl Field {
             ],
             immediate_size: 0,
         });
-        let terrain_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("terrain"),
-            layout: Some(&terrain_layout),
-            vertex: wgpu::VertexState {
-                module: &field_shader,
-                entry_point: Some("vs_terrain"),
-                compilation_options: Default::default(),
-                buffers: &terrain_buffers,
-            },
-            primitive: wgpu::PrimitiveState::default(),
-            depth_stencil: Some(depth_stencil(true)),
-            multisample: Default::default(),
-            fragment: Some(wgpu::FragmentState {
-                module: &field_shader,
-                entry_point: Some("fs_terrain"),
-                compilation_options: Default::default(),
-                targets: &[Some(config.format.into())],
-            }),
-            multiview_mask: None,
-            cache: None,
+        let terrain_pipelines = [false, true].map(|maps| {
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("terrain"),
+                layout: Some(&terrain_layout),
+                vertex: wgpu::VertexState {
+                    module: &field_shader,
+                    entry_point: Some("vs_terrain"),
+                    compilation_options: Default::default(),
+                    buffers: &terrain_buffers,
+                },
+                primitive: wgpu::PrimitiveState::default(),
+                depth_stencil: Some(depth_stencil(true)),
+                multisample: Default::default(),
+                fragment: Some(wgpu::FragmentState {
+                    module: &field_shader,
+                    entry_point: Some("fs_terrain"),
+                    compilation_options: wgpu::PipelineCompilationOptions {
+                        constants: &MAPS_CONSTANTS[usize::from(maps)],
+                        ..Default::default()
+                    },
+                    targets: &[Some(config.format.into())],
+                }),
+                multiview_mask: None,
+                cache: None,
+            })
         });
         let blend_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("terrain blend"),
@@ -641,34 +713,39 @@ impl Field {
             ],
             immediate_size: 0,
         });
-        let blend_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("terrain blend"),
-            layout: Some(&blend_layout),
-            vertex: wgpu::VertexState {
-                module: &field_shader,
-                entry_point: Some("vs_terrain"),
-                compilation_options: Default::default(),
-                buffers: &terrain_buffers,
-            },
-            primitive: wgpu::PrimitiveState::default(),
-            // Over the base pass's surface, at the very same depth.
-            depth_stencil: Some(wgpu::DepthStencilState {
-                depth_compare: Some(wgpu::CompareFunction::LessEqual),
-                ..depth_stencil(false)
-            }),
-            multisample: Default::default(),
-            fragment: Some(wgpu::FragmentState {
-                module: &field_shader,
-                entry_point: Some("fs_blend"),
-                compilation_options: Default::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: config.format,
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            multiview_mask: None,
-            cache: None,
+        let blend_pipelines = [false, true].map(|maps| {
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("terrain blend"),
+                layout: Some(&blend_layout),
+                vertex: wgpu::VertexState {
+                    module: &field_shader,
+                    entry_point: Some("vs_terrain"),
+                    compilation_options: Default::default(),
+                    buffers: &terrain_buffers,
+                },
+                primitive: wgpu::PrimitiveState::default(),
+                // Over the base pass's surface, at the very same depth.
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    depth_compare: Some(wgpu::CompareFunction::LessEqual),
+                    ..depth_stencil(false)
+                }),
+                multisample: Default::default(),
+                fragment: Some(wgpu::FragmentState {
+                    module: &field_shader,
+                    entry_point: Some("fs_blend"),
+                    compilation_options: wgpu::PipelineCompilationOptions {
+                        constants: &MAPS_CONSTANTS[usize::from(maps)],
+                        ..Default::default()
+                    },
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: config.format,
+                        blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                multiview_mask: None,
+                cache: None,
+            })
         });
         let water_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("water"),
@@ -767,24 +844,38 @@ impl Field {
             &model_buffers,
             &view_layout,
             &pose_layout,
-            &texture_layout,
+            &material_layout,
             light_layout,
             START_PITCH,
         );
         let poses = pose::Atlas::new(&device);
         let pose_bind_group = pose_bind_group(&device, &pose_layout, &poses.view);
         let pose_generation = poses.generation;
-        let white = {
+        let default_maps = [
+            [0xFF, 0xFF, 0xFF, 0xFF],
+            [0x80, 0x80, 0xFF, 0xFF],
+            [0, 0, 0, 0],
+            [0xFF, 0xFF, 0xFF, 0xFF],
+        ]
+        .map(|texel| {
             let texture = Texture {
                 format: TextureFormat::Rgba8,
                 width: 1,
                 height: 1,
-                levels: vec![vec![0xFF; 4]],
+                levels: vec![texel.to_vec()],
                 details: [None; 3],
             };
-            let view = upload_texture(&device, &queue, &texture, 0, false);
-            texture_bind_group(&device, &texture_layout, &view, &sampler)
-        };
+            upload_texture(&device, &queue, &texture, 0, false)
+        });
+        let default_material = material_bind_group(
+            &device,
+            &queue,
+            &material_layout,
+            [0, 1, 2, 3].map(|slot| &default_maps[slot]),
+            &sampler,
+            [0.0; 4],
+            false,
+        );
         let depth = create_depth(&device, config.width, config.height);
         let instances = create_buffer(
             &device,
@@ -853,9 +944,10 @@ impl Field {
             depth,
             bc,
             texture_tiers: max_texture_tiers(bc),
-            model_pipeline,
-            terrain_pipeline,
-            blend_pipeline,
+            model_pipelines,
+            terrain_pipelines,
+            blend_pipelines,
+            material_maps: false,
             water_pipeline,
             decal_pipeline,
             shadow,
@@ -869,8 +961,10 @@ impl Field {
             pose_bind_group,
             pose_generation,
             texture_layout,
+            material_layout,
             sampler,
-            white,
+            default_maps,
+            default_material,
             ground: None,
             store: {
                 let store = assets::new();
@@ -879,6 +973,8 @@ impl Field {
             },
             meshes: HashMap::new(),
             textures: HashMap::new(),
+            uploads: 0,
+            materials: HashMap::new(),
             entities: Entities::default(),
             palette: Vec::new(),
             models: HashMap::new(),
@@ -1472,17 +1568,17 @@ impl Field {
             let draws: Vec<CaptureDraw> = prepared
                 .draws
                 .iter()
-                .filter_map(|(slot, (mesh, level, texture), start, end, count)| {
+                .filter_map(|(slot, (mesh, level, material), start, end, count)| {
                     let gpu = self.meshes.get(mesh)?;
                     Some(CaptureDraw {
                         slot: *slot,
                         vertices: &gpu.vertices,
                         indices: &gpu.indices,
                         index_range: gpu.levels[*level],
-                        texture: self
-                            .textures
-                            .get(texture)
-                            .map_or(&self.white, |(group, _)| group),
+                        material: self
+                            .materials
+                            .get(material)
+                            .map_or(&self.default_material, |(group, _)| group),
                         instances: (*start, *end),
                         count: *count,
                     })
@@ -1630,13 +1726,8 @@ impl Field {
             },
             _ => None,
         };
-        let texture = match model.texture {
-            Some(file) => match self.texture(file, detail) {
-                Some(Some(hash)) => hash,
-                Some(None) => 0,
-                None => return false,
-            },
-            None => 0,
+        let Some(material) = self.material(model, detail) else {
+            return false;
         };
 
         let timing = animation.as_ref().map(|(chosen, data)| {
@@ -1656,7 +1747,7 @@ impl Field {
             }
         }
         self.add_instance(
-            file.hash, &mesh, model, transform, entity, pose, blend, texture, groups,
+            file.hash, &mesh, model, transform, entity, pose, blend, material, groups,
         );
 
         if depth >= 8 {
@@ -1701,7 +1792,7 @@ impl Field {
         entity: &EntityState,
         pose: [u32; 3],
         blend: f32,
-        texture: u64,
+        material: u64,
         groups: &mut HashMap<GroupKey, Vec<u8>>,
     ) {
         let complete = mesh.detail.is_none();
@@ -1736,7 +1827,7 @@ impl Field {
         }
         self.placed += 1;
         let level = entity.level.min(mesh.levels.len() - 1);
-        let bytes = groups.entry((mesh_hash, level, texture)).or_default();
+        let bytes = groups.entry((mesh_hash, level, material)).or_default();
         for row in &transform.m[..3] {
             for value in row {
                 bytes.extend_from_slice(&value.to_le_bytes());
@@ -1842,14 +1933,69 @@ impl Field {
         let current = self
             .textures
             .get(&file.hash)
-            .is_some_and(|(_, held)| *held == uploaded);
+            .is_some_and(|held| held.uploaded == uploaded);
         if !current {
             let view = upload_texture(&self.device, &self.queue, &texture, uploaded.1, self.bc);
             let group =
                 texture_bind_group(&self.device, &self.texture_layout, &view, &self.sampler);
-            self.textures.insert(file.hash, (group, uploaded));
+            self.uploads += 1;
+            self.textures.insert(
+                file.hash,
+                GpuTexture {
+                    view,
+                    group,
+                    uploaded,
+                    upload: self.uploads,
+                },
+            );
         }
         Some(Some(file.hash))
+    }
+
+    /// The key of `model`'s material bind group: its colour, normal,
+    /// specular and ambient occlusion maps and `effectSettings`, made again
+    /// once one of them has been uploaded again. `None` while the colour
+    /// map is on its way; a map still on its way is left out until it
+    /// arrives, so the model shows meanwhile. With the material maps off
+    /// the maps are not even fetched.
+    fn material(&mut self, model: &Model, detail: bool) -> Option<u64> {
+        let base = match model.texture {
+            Some(file) => self.texture(file, detail)?,
+            None => None,
+        };
+        let wanted = if self.material_maps {
+            model.maps
+        } else {
+            [None; 3]
+        };
+        let maps = wanted.map(|file| file.and_then(|file| self.texture(file, detail).flatten()));
+        let hashes = [base, maps[0], maps[1], maps[2]];
+        let mut hasher = DefaultHasher::new();
+        hashes.hash(&mut hasher);
+        model.effect.map(f32::to_bits).hash(&mut hasher);
+        let key = hasher.finish();
+        let textures = hashes.map(|hash| hash.and_then(|hash| self.textures.get(&hash)));
+        let uploads = textures.map(|texture| texture.map_or(0, |texture| texture.upload));
+        if self
+            .materials
+            .get(&key)
+            .is_none_or(|(_, held)| *held != uploads)
+        {
+            let views = [0, 1, 2, 3].map(|slot| {
+                textures[slot].map_or(&self.default_maps[slot], |texture| &texture.view)
+            });
+            let group = material_bind_group(
+                &self.device,
+                &self.queue,
+                &self.material_layout,
+                views,
+                &self.sampler,
+                model.effect,
+                maps[0].is_some(),
+            );
+            self.materials.insert(key, (group, uploads));
+        }
+        Some(key)
     }
 
     /// What `texture` is uploaded from at the current texture quality.
@@ -2269,20 +2415,37 @@ impl Field {
         });
     }
 
-    /// A terrain texture's bind group: its view, sampler and mapping;
-    /// `None` maps the minimap picture over the map instead.
+    /// A terrain texture's bind group: its view, sampler, mapping and
+    /// normal and specular maps; `None` maps the minimap picture over the
+    /// map instead.
     fn ground_bind_group(
         &self,
         view: &wgpu::TextureView,
         sampler: &wgpu::Sampler,
-        mapping: Option<(f32, f32)>,
+        terrain: Option<(&TerrainTexture, [Option<&wgpu::TextureView>; 2])>,
     ) -> wgpu::BindGroup {
         // CTerrainTextureEntry::GenerateTextureMatrix's _11 and _13.
-        let transform = match mapping {
-            Some((angle, size)) => [angle.cos() / size, -angle.sin() / size, 1.0, 0.0],
-            None => [0.0; 4],
+        let (uniform, [normal, specular]) = match terrain {
+            Some((terrain, maps)) => {
+                let (sin, cos) = terrain.angle.sin_cos();
+                let normal_map = if maps[0].is_some() { 1.0 } else { 0.0 };
+                let uniform = [
+                    cos / terrain.size,
+                    -sin / terrain.size,
+                    1.0,
+                    normal_map,
+                    terrain.normal_strength,
+                    terrain.specular_power,
+                    0.0,
+                    0.0,
+                ];
+                (uniform, maps)
+            }
+            None => ([0.0; 8], [None; 2]),
         };
-        let bytes: Vec<u8> = transform
+        let normal = normal.unwrap_or(&self.default_maps[1]);
+        let specular = specular.unwrap_or(&self.default_maps[2]);
+        let bytes: Vec<u8> = uniform
             .iter()
             .flat_map(|value| value.to_le_bytes())
             .collect();
@@ -2308,6 +2471,14 @@ impl Field {
                 wgpu::BindGroupEntry {
                     binding: 2,
                     resource: buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::TextureView(normal),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::TextureView(specular),
                 },
             ],
         })
@@ -2341,18 +2512,37 @@ impl Field {
                     continue;
                 }
             };
-            let uploaded = self.uploaded(&texture);
+            // A map on its way is left out until it arrives, and with the
+            // material maps off is not fetched.
+            let wanted = if self.material_maps {
+                [terrain.normal, terrain.specular]
+            } else {
+                [None; 2]
+            };
+            let maps = wanted.map(|file| {
+                match file.map(|file| self.store.borrow_mut().texture(file, true)) {
+                    Some(Get::Ready(texture)) => Some(texture),
+                    _ => None,
+                }
+            });
+            let uploaded = [Some(&texture), maps[0].as_ref(), maps[1].as_ref()]
+                .map(|texture| texture.map(|texture| self.uploaded(texture)));
             if ground.textures[at]
                 .as_ref()
                 .is_some_and(|(_, held)| *held == uploaded)
             {
                 continue;
             }
-            let view = upload_texture(&self.device, &self.queue, &texture, uploaded.1, self.bc);
+            let upload = |texture: &Texture| {
+                let first = self.uploaded(texture).1;
+                upload_texture(&self.device, &self.queue, texture, first, self.bc)
+            };
+            let view = upload(&texture);
+            let map_views = maps.map(|texture| texture.map(|texture| upload(&texture)));
             let group = self.ground_bind_group(
                 &view,
                 &self.terrain_sampler,
-                Some((terrain.angle, terrain.size)),
+                Some((&terrain, [map_views[0].as_ref(), map_views[1].as_ref()])),
             );
             ground.textures[at] = Some((group, uploaded));
         }
@@ -2409,6 +2599,11 @@ impl View for Field {
         self.store
             .borrow_mut()
             .set_texture_tiers(self.texture_tiers);
+    }
+
+    fn set_material_maps(&mut self, on: bool) {
+        self.material_maps = on;
+        self.store.borrow_mut().set_material_maps(on);
     }
 
     fn progress(&self) -> Progress {
@@ -2769,7 +2964,7 @@ impl View for Field {
                         .and_then(Option::as_ref)
                         .map_or(&ground.minimap, |(group, _)| group)
                 };
-                pass.set_pipeline(&self.terrain_pipeline);
+                pass.set_pipeline(&self.terrain_pipelines[usize::from(self.material_maps)]);
                 pass.set_bind_group(3, &self.shadow.bind_group, &[]);
                 pass.set_vertex_buffer(0, ground.vertices.slice(..));
                 pass.set_index_buffer(ground.indices.slice(..), wgpu::IndexFormat::Uint32);
@@ -2778,7 +2973,7 @@ impl View for Field {
                     pass.draw_indexed(splat.first..splat.first + splat.count, 0, 0..1);
                 }
                 if let Some(alpha_maps) = &ground.alpha_maps {
-                    pass.set_pipeline(&self.blend_pipeline);
+                    pass.set_pipeline(&self.blend_pipelines[usize::from(self.material_maps)]);
                     pass.set_bind_group(2, alpha_maps, &[]);
                     for splat in &ground.blends {
                         pass.set_bind_group(1, group(splat.texture), &[]);
@@ -2790,7 +2985,7 @@ impl View for Field {
                     pass.set_bind_group(2, &self.shadow.bind_group, &[]);
                     pass.set_index_buffer(self.decal_indices.slice(..), wgpu::IndexFormat::Uint32);
                     for (texture, start, first, count) in &decal_draws {
-                        let Some((group, _)) = self.textures.get(texture) else {
+                        let Some(GpuTexture { group, .. }) = self.textures.get(texture) else {
                             continue;
                         };
                         let end = start + DECAL_INSTANCE_SIZE as u64;
@@ -2801,7 +2996,7 @@ impl View for Field {
                 }
             }
             if !draws.is_empty() {
-                pass.set_pipeline(&self.model_pipeline);
+                pass.set_pipeline(&self.model_pipelines[usize::from(self.material_maps)]);
                 pass.set_bind_group(1, &self.pose_bind_group, &[]);
                 pass.set_bind_group(3, &self.shadow.bind_group, &[]);
                 self.draw_models(&mut pass, &draws, &self.instances);
@@ -2841,14 +3036,14 @@ impl Field {
         draws: &[(GroupKey, u64, u64, u32)],
         instances: &wgpu::Buffer,
     ) {
-        for ((mesh, level, texture), start, end, count) in draws {
+        for ((mesh, level, material), start, end, count) in draws {
             let Some(gpu) = self.meshes.get(mesh) else {
                 continue;
             };
             let group = self
-                .textures
-                .get(texture)
-                .map_or(&self.white, |(group, _)| group);
+                .materials
+                .get(material)
+                .map_or(&self.default_material, |(group, _)| group);
             let (first, index_count) = gpu.levels[*level];
             pass.set_bind_group(2, group, &[]);
             pass.set_vertex_buffer(0, gpu.vertices.slice(..));
@@ -3173,6 +3368,60 @@ fn pose_bind_group(
             binding: 0,
             resource: wgpu::BindingResource::TextureView(view),
         }],
+    })
+}
+
+fn material_bind_group(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    layout: &wgpu::BindGroupLayout,
+    views: [&wgpu::TextureView; 4],
+    sampler: &wgpu::Sampler,
+    effect: [f32; 4],
+    normal_map: bool,
+) -> wgpu::BindGroup {
+    let mut bytes = Vec::with_capacity(MATERIAL_SIZE);
+    let flags = [if normal_map { 1.0f32 } else { 0.0 }, 0.0, 0.0, 0.0];
+    for value in effect.iter().chain(&flags) {
+        bytes.extend_from_slice(&value.to_le_bytes());
+    }
+    let buffer = create_buffer(
+        device,
+        queue,
+        "model material",
+        &bytes,
+        wgpu::BufferUsages::UNIFORM,
+    );
+    let [base, normal, specular, ao] = views;
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("model material"),
+        layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(base),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::Sampler(sampler),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: wgpu::BindingResource::TextureView(normal),
+            },
+            wgpu::BindGroupEntry {
+                binding: 3,
+                resource: wgpu::BindingResource::TextureView(specular),
+            },
+            wgpu::BindGroupEntry {
+                binding: 4,
+                resource: wgpu::BindingResource::TextureView(ao),
+            },
+            wgpu::BindGroupEntry {
+                binding: 5,
+                resource: buffer.as_entire_binding(),
+            },
+        ],
     })
 }
 
