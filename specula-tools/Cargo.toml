@@ -25,7 +25,11 @@ name = "bake-assets"
 path = "src/bake_assets/main.rs"
 
 [dependencies]
+lewton = "0.10"
 meshopt = "0.6"
+ogg = "0.9"
+opus = "0.4"
 png = "0.18"
 roxmltree = "0.21"
+rubato = "5"
 specula-assets = { path = "../specula-assets" }

@@ -15,13 +15,16 @@ use std::collections::VecDeque;
 use std::rc::Rc;
 
 use specula_assets::files::AnimationData;
+use specula_assets::files::CivAssets;
 use specula_assets::files::FileRef;
 use specula_assets::files::Index;
 use specula_assets::files::Kind;
 use specula_assets::files::Manifest;
 use specula_assets::files::Mesh;
 use specula_assets::files::MeshDetail;
+use specula_assets::files::MusicKind;
 use specula_assets::files::Skeleton;
+use specula_assets::files::SoundGroup;
 use specula_assets::files::TerrainTexture;
 use specula_assets::files::Texture;
 use specula_assets::files::TextureDetail;
@@ -79,6 +82,7 @@ enum Decoded {
     Skeleton(Rc<Skeleton>),
     Animation(Rc<AnimationData>),
     Texture(Rc<Texture>),
+    SoundGroup(Rc<SoundGroup>),
     MeshDetail(MeshDetail),
     TextureDetail(TextureDetail),
 }
@@ -99,6 +103,13 @@ pub struct Store {
     /// Terrain name -> its texture, from the same index.
     terrains: HashMap<String, TerrainTexture>,
     alpha_maps: Option<FileRef>,
+    /// Sound group path relative to audio/ -> its manifest.
+    sound_groups: HashMap<String, FileRef>,
+    /// Civ code -> its tracks; the empty code holds the defaults.
+    music: HashMap<String, Vec<(MusicKind, FileRef)>>,
+    ambient: Option<FileRef>,
+    /// Civ code -> what its templates can show and play.
+    civs: HashMap<String, CivAssets>,
     index_failed: bool,
     /// The index's path, `assets/index-<hash>.bin`, once loaded.
     index_name: Option<String>,
@@ -107,6 +118,7 @@ pub struct Store {
     skeletons: HashMap<u64, Slot<Rc<Skeleton>>>,
     animations: HashMap<u64, Slot<Rc<AnimationData>>>,
     textures: HashMap<u64, Slot<Rc<Texture>>>,
+    sound_group_files: HashMap<u64, Slot<Rc<SoundGroup>>>,
     queue: VecDeque<Job>,
     detail_queue: VecDeque<Job>,
     /// Coarse hashes whose detail was asked for, so it is fetched once.
@@ -210,8 +222,73 @@ impl Store {
         }
     }
 
+    /// A sound group as the stream names it, relative to audio/.
+    pub fn sound_group(&mut self, name: &str) -> Get<Rc<SoundGroup>> {
+        if self.index.is_none() {
+            return if self.index_failed {
+                Get::Missing
+            } else {
+                Get::Pending
+            };
+        }
+        let Some(file) = self.sound_groups.get(name).copied() else {
+            return Get::Missing;
+        };
+        get(
+            &mut self.sound_group_files,
+            &mut self.queue,
+            &mut self.queued_bytes,
+            Kind::SoundGroup,
+            file,
+        )
+    }
+
+    /// A civ's tracks, `None` before the index arrives; the empty code
+    /// gives the defaults.
+    pub fn music(&self, civ: &str) -> Option<&[(MusicKind, FileRef)]> {
+        self.index.as_ref()?;
+        Some(self.music.get(civ).map_or(&[], Vec::as_slice))
+    }
+
+    /// The session's ambient loop, `None` before the index or without one.
+    pub fn ambient(&self) -> Option<FileRef> {
+        self.ambient
+    }
+
     /// Names the asset bake, so what is derived from its files can be
     /// told from what an earlier bake's gave.
+    /// What a warm-up of these civs and terrains starts from: actor
+    /// manifests, sound groups and terrain textures, the alpha maps last.
+    /// `None` before the index arrives.
+    pub fn warmup_roots(&self, civs: &[&str], terrains: &[String]) -> Option<Vec<(Kind, FileRef)>> {
+        let actors = self.index.as_ref()?;
+        let mut roots = Vec::new();
+        for assets in civs.iter().filter_map(|civ| self.civs.get(*civ)) {
+            roots.extend(
+                assets
+                    .actors
+                    .iter()
+                    .filter_map(|name| actors.get(name))
+                    .map(|file| (Kind::Actor, *file)),
+            );
+            roots.extend(
+                assets
+                    .sound_groups
+                    .iter()
+                    .filter_map(|name| self.sound_groups.get(name))
+                    .map(|file| (Kind::SoundGroup, *file)),
+            );
+        }
+        roots.extend(
+            terrains
+                .iter()
+                .filter_map(|name| self.terrains.get(name))
+                .map(|terrain| (Kind::Texture, terrain.texture)),
+        );
+        roots.extend(self.alpha_maps.map(|file| (Kind::Texture, file)));
+        Some(roots)
+    }
+
     pub fn index_name(&self) -> Option<&str> {
         self.index_name.as_deref()
     }
@@ -310,6 +387,9 @@ impl Store {
             Ok(Decoded::Texture(value)) => {
                 self.textures.insert(hash, Slot::Ready(value));
             }
+            Ok(Decoded::SoundGroup(value)) => {
+                self.sound_group_files.insert(hash, Slot::Ready(value));
+            }
             // Merged by `refine`.
             Ok(Decoded::MeshDetail(_) | Decoded::TextureDetail(_)) => {}
             Err(error) => {
@@ -320,8 +400,10 @@ impl Store {
                     Kind::Skeleton => fail(&mut self.skeletons, hash),
                     Kind::Animation => fail(&mut self.animations, hash),
                     Kind::Texture => fail(&mut self.textures, hash),
-                    // The coarse value stays, and is not asked again.
-                    Kind::MeshDetail | Kind::TextureDetail | Kind::Index => {}
+                    Kind::SoundGroup => fail(&mut self.sound_group_files, hash),
+                    // The coarse value stays, and is not asked again; sounds
+                    // are fetched by the audio, not here.
+                    Kind::MeshDetail | Kind::TextureDetail | Kind::Index | Kind::Sound => {}
                 }
             }
         }
@@ -449,7 +531,9 @@ fn decode(kind: Kind, bytes: &[u8]) -> Result<Decoded, &'static str> {
         Kind::Texture => Decoded::Texture(Rc::new(Texture::decode(bytes)?)),
         Kind::MeshDetail => Decoded::MeshDetail(MeshDetail::decode(bytes)?),
         Kind::TextureDetail => Decoded::TextureDetail(TextureDetail::decode(bytes)?),
+        Kind::SoundGroup => Decoded::SoundGroup(Rc::new(SoundGroup::decode(bytes)?)),
         Kind::Index => return Err("the index is not fetched by hash"),
+        Kind::Sound => return Err("sounds are decoded by the browser"),
     })
 }
 
@@ -457,14 +541,19 @@ async fn load_index(store: Rc<RefCell<Store>>) {
     match fetch_index(&store).await {
         Ok((index, name)) => {
             crate::log(&format!(
-                "assets: {} actors, {} terrains",
+                "assets: {} actors, {} terrains, {} sound groups",
                 index.actors.len(),
-                index.terrains.len()
+                index.terrains.len(),
+                index.sound_groups.len()
             ));
             let mut store = store.borrow_mut();
             store.index = Some(index.actors.into_iter().collect());
             store.terrains = index.terrains.into_iter().collect();
             store.alpha_maps = index.alpha_maps;
+            store.sound_groups = index.sound_groups.into_iter().collect();
+            store.music = index.music.into_iter().collect();
+            store.ambient = index.ambient;
+            store.civs = index.civs.into_iter().collect();
             store.index_name = Some(name);
         }
         // Not fatal: the map and the minimap colours still show.

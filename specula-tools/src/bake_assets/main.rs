@@ -3,13 +3,16 @@
 //! actor holding all of its variants and quality levels, and meshes,
 //! skeletons, animations and textures as separate files named by their
 //! content, so pieces shared by many actors are fetched once. Also every
-//! terrain's diffuse texture and the blend mask atlas for the ground.
+//! terrain's diffuse texture and the blend mask atlas for the ground, and
+//! every sound group, the session music and the ambient loop, their Ogg
+//! Vorbis files transcoded to Ogg Opus.
 //!
 //! Usage: bake-assets [output dir]
 //! Default: specula-web. MOD_DIR overrides the mod,
 //! ../0ad/binaries/data/mods/public; PYROGENESIS overrides the engine,
 //! ../0ad-specula/binaries/system/pyrogenesis, which converts the meshes,
-//! animations and textures.
+//! animations and textures. Transcoded sounds are cached in
+//! target/bake-assets/sounds by their source's content.
 //!
 //! The files go to `<output dir>/assets/`; `<output dir>/assets.txt`
 //! names the index and is written last. Files of earlier bakes that this
@@ -17,6 +20,8 @@
 
 mod actor;
 mod mesh;
+mod sound;
+mod templates;
 mod terrain;
 mod texture;
 
@@ -33,16 +38,23 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::rc::Rc;
+use std::sync::Mutex;
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
+use std::thread;
 use std::time::Instant;
 
 use specula_assets::files;
 use specula_assets::files::AnimationData;
 use specula_assets::files::Bone;
+use specula_assets::files::CivAssets;
 use specula_assets::files::FileRef;
 use specula_assets::files::Index;
 use specula_assets::files::Kind;
 use specula_assets::files::Manifest;
+use specula_assets::files::MusicKind;
 use specula_assets::files::Object;
+use specula_assets::files::SoundGroup;
 use specula_assets::files::TerrainTexture;
 use specula_tools::convert;
 use specula_tools::convert::cached_path;
@@ -58,6 +70,12 @@ const DEFAULT_OUTPUT: &str = "specula-web";
 const ASSET_DIR: &str = "assets";
 const POINTER: &str = "assets.txt";
 const WORK_DIR: &str = "target/bake-assets";
+const SOUND_CACHE_DIR: &str = "sounds";
+/// Opus bits per second per channel: speech and effects are short and
+/// mostly mono, the music is listened to.
+const EFFECT_BITRATE: i32 = 32_000;
+const MUSIC_BITRATE: i32 = 48_000;
+const MUSIC_PREFIX: &str = "audio/music/";
 /// The engine draws `projectile` props only when something is shot.
 const PROJECTILE_POINT: &str = "projectile";
 /// For the summary: how the split compares with bake-unit's 4.4 MB VAT
@@ -190,6 +208,10 @@ fn run() -> Result<(), String> {
         actors: Vec::new(),
         terrains: Vec::new(),
         alpha_maps: None,
+        sound_groups: Vec::new(),
+        music: Vec::new(),
+        ambient: None,
+        civs: Vec::new(),
     };
     let mut skipped = Vec::new();
     for name in &names {
@@ -236,6 +258,8 @@ fn run() -> Result<(), String> {
     );
     let alpha_maps = terrain::alpha_maps(&mod_dir)?;
     index.alpha_maps = Some(output.write(Kind::Texture, &alpha_maps.encode())?);
+    write_sounds(&mod_dir, &mut index, &mut output)?;
+    add_civs(&mod_dir, &mut index);
     let index_file = output.write(Kind::Index, &index.encode())?;
     print_sample(&index, &asset_dir);
     remove_stale(&asset_dir, &output.written)?;
@@ -251,6 +275,209 @@ fn run() -> Result<(), String> {
         start.elapsed().as_secs_f32()
     );
     Ok(())
+}
+
+/// The sound groups, music and ambient loop into `index`. A sound that is
+/// missing or cannot be decoded is left out of its group, as
+/// `CSoundGroup::Reload` skips a file it cannot load.
+fn write_sounds(mod_dir: &Path, index: &mut Index, output: &mut Output) -> Result<(), String> {
+    let start = Instant::now();
+    let (groups, errors) = sound::load_groups(mod_dir);
+    println!(
+        "{} sound groups, {} could not be read",
+        groups.len(),
+        errors.len()
+    );
+    for error in &errors {
+        println!("  {error}");
+    }
+    let (civ_music, errors) = sound::load_music(mod_dir);
+    for error in &errors {
+        println!("  {error}");
+    }
+    let default_music: Vec<(MusicKind, String)> = sound::DEFAULT_TRACKS
+        .iter()
+        .map(|(kind, file)| (*kind, format!("{MUSIC_PREFIX}{file}")))
+        .collect();
+    let mut sources: BTreeSet<String> = groups
+        .iter()
+        .flat_map(|(_, group)| group.files.iter().cloned())
+        .collect();
+    sources.extend(
+        civ_music
+            .iter()
+            .flat_map(|(_, tracks)| tracks.iter())
+            .chain(&default_music)
+            .map(|(_, path)| path.clone()),
+    );
+    sources.insert(sound::AMBIENT.to_string());
+    let sources: Vec<String> = sources.into_iter().collect();
+    let encoded = transcode_all(mod_dir, &sources)?;
+    let mut files: HashMap<String, FileRef> = HashMap::new();
+    let mut failures = Vec::new();
+    for (source, result) in sources.iter().zip(encoded) {
+        match result {
+            Ok(bytes) => {
+                files.insert(source.clone(), output.write(Kind::Sound, &bytes)?);
+            }
+            Err(error) => failures.push(format!("{source}: {error}")),
+        }
+    }
+    println!(
+        "{} sounds transcoded in {:.0} s, {} could not be",
+        files.len(),
+        start.elapsed().as_secs_f32(),
+        failures.len()
+    );
+    for failure in &failures {
+        println!("  {failure}");
+    }
+
+    for (name, group) in &groups {
+        let sounds: Vec<FileRef> = group
+            .files
+            .iter()
+            .filter_map(|path| files.get(path).copied())
+            .collect();
+        if sounds.is_empty() {
+            continue;
+        }
+        let manifest = SoundGroup {
+            flags: group.flags,
+            gain: group.gain,
+            pitch: group.pitch,
+            gain_lower: group.gain_lower,
+            gain_upper: group.gain_upper,
+            pitch_lower: group.pitch_lower,
+            pitch_upper: group.pitch_upper,
+            sounds,
+        };
+        index.sound_groups.push((
+            name.clone(),
+            output.write(Kind::SoundGroup, &manifest.encode())?,
+        ));
+    }
+    let playlist = |tracks: &[(MusicKind, String)]| -> Vec<(MusicKind, FileRef)> {
+        tracks
+            .iter()
+            .filter_map(|(kind, path)| files.get(path).map(|file| (*kind, *file)))
+            .collect()
+    };
+    index.music.push((String::new(), playlist(&default_music)));
+    for (civ, tracks) in &civ_music {
+        index.music.push((civ.clone(), playlist(tracks)));
+    }
+    index.ambient = files.get(sound::AMBIENT).copied();
+    println!(
+        "{} sound groups baked, music for {} civs",
+        index.sound_groups.len(),
+        civ_music.len()
+    );
+    Ok(())
+}
+
+/// Each civ's actors and sound groups into `index`, those that were baked.
+fn add_civs(mod_dir: &Path, index: &mut Index) {
+    let (civs, errors) = templates::load(mod_dir);
+    println!("{} civs, {} templates unresolved", civs.len(), errors.len());
+    for error in &errors {
+        println!("  {error}");
+    }
+    let actors: HashSet<&str> = index.actors.iter().map(|(name, _)| name.as_str()).collect();
+    let groups: HashSet<&str> = index
+        .sound_groups
+        .iter()
+        .map(|(name, _)| name.as_str())
+        .collect();
+    let mut missing = BTreeSet::new();
+    let mut baked = Vec::new();
+    for (civ, refs) in civs {
+        let (kept_actors, lost): (Vec<String>, Vec<String>) = refs
+            .actors
+            .into_iter()
+            .partition(|actor| actors.contains(actor.as_str()));
+        missing.extend(lost.into_iter().map(|actor| format!("actor {actor}")));
+        let (kept_groups, lost): (Vec<String>, Vec<String>) = refs
+            .sound_groups
+            .into_iter()
+            .partition(|group| groups.contains(group.as_str()));
+        missing.extend(lost.into_iter().map(|group| format!("sound group {group}")));
+        println!(
+            "  {civ}: {} actors, {} sound groups",
+            kept_actors.len(),
+            kept_groups.len()
+        );
+        baked.push((
+            civ,
+            CivAssets {
+                actors: kept_actors,
+                sound_groups: kept_groups,
+            },
+        ));
+    }
+    index.civs = baked;
+    println!("{} civ references not in the bake", missing.len());
+    for name in &missing {
+        println!("  {name}");
+    }
+}
+
+/// A sound as Ogg Opus, or why it could not be.
+type Transcoded = Result<Vec<u8>, String>;
+
+/// Each source as Ogg Opus, in order, on every core; a source transcoded
+/// before at the same bitrate comes from the cache.
+fn transcode_all(mod_dir: &Path, sources: &[String]) -> Result<Vec<Transcoded>, String> {
+    let cache = PathBuf::from(WORK_DIR).join(SOUND_CACHE_DIR);
+    fs::create_dir_all(&cache)
+        .map_err(|error| format!("cannot create {}: {error}", cache.display()))?;
+    let next = AtomicUsize::new(0);
+    let results: Mutex<Vec<Option<Transcoded>>> =
+        Mutex::new((0..sources.len()).map(|_| None).collect());
+    let workers = thread::available_parallelism().map_or(1, |count| count.get());
+    thread::scope(|scope| {
+        for _ in 0..workers {
+            scope.spawn(|| {
+                loop {
+                    let at = next.fetch_add(1, Ordering::Relaxed);
+                    let Some(source) = sources.get(at) else {
+                        break;
+                    };
+                    let result = transcode_cached(mod_dir, &cache, source);
+                    results.lock().unwrap()[at] = Some(result);
+                }
+            });
+        }
+    });
+    Ok(results
+        .into_inner()
+        .unwrap()
+        .into_iter()
+        .map(|result| result.unwrap_or_else(|| Err("not transcoded".into())))
+        .collect())
+}
+
+fn transcode_cached(mod_dir: &Path, cache: &Path, source: &str) -> Result<Vec<u8>, String> {
+    let bytes = fs::read(mod_dir.join(source)).map_err(|error| error.to_string())?;
+    if bytes.starts_with(b"version https://git-lfs") {
+        return Err("a Git LFS pointer, the file was not fetched".into());
+    }
+    let bitrate = if source.starts_with(MUSIC_PREFIX) {
+        MUSIC_BITRATE
+    } else {
+        EFFECT_BITRATE
+    };
+    let mut hasher = DefaultHasher::new();
+    bytes.hash(&mut hasher);
+    bitrate.hash(&mut hasher);
+    let cached = cache.join(format!("{:016x}.opus", hasher.finish()));
+    if let Ok(encoded) = fs::read(&cached) {
+        return Ok(encoded);
+    }
+    let encoded = sound::transcode(&bytes, bitrate)?;
+    // A failed cache write only costs the next bake the transcode.
+    let _ = fs::write(&cached, &encoded);
+    Ok(encoded)
 }
 
 /// Actor files under `dir`, relative to art/actors as the stream names
@@ -545,6 +772,7 @@ fn manifest(
                             speed: animation.speed,
                             event: animation.event,
                             load: animation.load,
+                            sound: animation.sound,
                             file: animation
                                 .file
                                 .as_ref()

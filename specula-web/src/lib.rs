@@ -1,4 +1,5 @@
 mod assets;
+mod audio;
 mod blend;
 mod diplomacy;
 mod far;
@@ -16,11 +17,13 @@ mod terrain;
 mod territory;
 mod unit;
 mod variation;
+mod warmup;
 mod worker;
 
 use std::cell::RefCell;
 use std::rc::Rc;
 
+use specula_assets::files::MusicKind;
 use wasm_bindgen::JsCast;
 use wasm_bindgen::closure::Closure;
 use wasm_bindgen::prelude::wasm_bindgen;
@@ -39,13 +42,21 @@ use web_sys::WorkerOptions;
 use web_sys::WorkerType;
 
 use crate::assets::Progress;
+use crate::assets::Store;
+use crate::audio::Audio;
+use crate::audio::DEFAULT_VOLUME;
+use crate::audio::Settings;
 use crate::diplomacy::Perspective;
 use crate::field::Field;
 use crate::icons::IconAtlas;
 use crate::minimap::Minimap;
 use crate::render::Renderer;
+use crate::stream::PlayerState;
 use crate::stream::Scene;
+use crate::stream::Sound;
+use crate::stream::SoundTarget;
 use crate::terrain::TerrainImage;
+use crate::warmup::Warmup;
 use crate::worker::COMMAND_CURRENT_MATCH;
 use crate::worker::COMMAND_LIVE;
 use crate::worker::COMMAND_PAUSE;
@@ -71,6 +82,29 @@ const TURN_MS_MAX: f64 = 1000.0;
 const TURN_SMOOTHING: f64 = 0.1;
 /// Playback speeds in game time; the match's own speed is added if missing.
 const SPEEDS: [f32; 5] = [0.5, 1.0, 2.0, 4.0, 8.0];
+const POSITION_UNITS_PER_METRE: f32 = 16.0;
+/// localStorage key of the sound settings: "on,master,effects,music".
+const SOUND_SETTINGS_KEY: &str = "specula.sound";
+
+/// The camera a sound is placed against, as the engine's listener sits at
+/// it: the view-projection matrix (row-major), the eye in metres and the
+/// viewport in CSS pixels.
+pub struct Listener {
+    pub view_projection: [[f32; 4]; 4],
+    pub eye: [f32; 3],
+    pub width: f32,
+    pub height: f32,
+}
+
+/// A sound group an entity's animation reached this frame.
+pub struct AnimationSound {
+    /// Index into `Scene::strings`.
+    pub group: u32,
+    pub owner: i32,
+    pub visibility: u16,
+    /// In metres.
+    pub position: [f32; 3],
+}
 
 /// What draws the match: the minimap view of `/map.html` or the 3D view
 /// of `/`. The stream, playback and controls are the same.
@@ -100,6 +134,17 @@ trait View {
     }
     /// Looks at the ground point `x`, `z` in metres.
     fn move_to(&mut self, _x: f32, _z: f32) {}
+    /// The asset bake it draws from, which also holds the sounds.
+    fn asset_store(&self) -> Option<Rc<RefCell<Store>>> {
+        None
+    }
+    fn listener(&self) -> Option<Listener> {
+        None
+    }
+    /// The animation sounds due since the last call.
+    fn take_animation_sounds(&mut self, _progress: f32) -> Vec<AnimationSound> {
+        Vec::new()
+    }
 }
 
 /// Bytes since the page loaded: live messages and history segments, as the
@@ -226,6 +271,54 @@ struct App {
     paused: bool,
     stream_bytes: StreamBytes,
     match_over: MatchOver,
+    /// Only the 3D page plays sound.
+    sound: Option<SoundControls>,
+    /// Only the 3D page has assets to warm up.
+    warmup: Option<Warmup>,
+}
+
+/// The sound toggle and volumes, and what they play.
+struct SoundControls {
+    audio: Audio,
+    button: HtmlButtonElement,
+    volumes: HtmlElement,
+    master: HtmlInputElement,
+    effects: HtmlInputElement,
+    music: HtmlInputElement,
+}
+
+impl SoundControls {
+    fn show(&self) {
+        let settings = self.audio.settings();
+        let _ = self
+            .button
+            .set_attribute("aria-pressed", if settings.on { "true" } else { "false" });
+        self.button
+            .set_text_content(Some(if settings.on { "Sound on" } else { "Sound off" }));
+        self.volumes.set_hidden(!settings.on);
+        self.master.set_value(&settings.master.to_string());
+        self.effects.set_value(&settings.effects.to_string());
+        self.music.set_value(&settings.music.to_string());
+    }
+
+    /// From a user gesture on the controls.
+    fn changed(&mut self, on: bool) {
+        let volume = |input: &HtmlInputElement| {
+            input
+                .value()
+                .parse::<f32>()
+                .map_or(DEFAULT_VOLUME, |value| value.clamp(0.0, 1.0))
+        };
+        let settings = Settings {
+            on,
+            master: volume(&self.master),
+            effects: volume(&self.effects),
+            music: volume(&self.music),
+        };
+        self.audio.set_settings(settings);
+        save_sound_settings(settings);
+        self.show();
+    }
 }
 
 /// The popup and button shown while the match on screen has ended.
@@ -332,6 +425,52 @@ impl App {
             minimap.frame(progress, self.renderer.view_outline());
         }
         self.match_over.frame(now);
+        if let Some(warmup) = &mut self.warmup {
+            let index_loaded = self
+                .renderer
+                .asset_store()
+                .is_some_and(|store| store.borrow().index_name().is_some());
+            warmup.frame(index_loaded);
+        }
+        self.play_sounds(now, progress);
+    }
+
+    fn play_sounds(&mut self, now: f64, progress: f32) {
+        let Some(sound) = &mut self.sound else {
+            return;
+        };
+        if sound.audio.settings().on {
+            for animation in self.renderer.take_animation_sounds(progress) {
+                let Some(group) = self.scene.strings.get(animation.group as usize) else {
+                    continue;
+                };
+                if let Some(owned) = hears(self.perspective, animation.owner, animation.visibility)
+                {
+                    sound
+                        .audio
+                        .play_group(group, animation.position, owned, now);
+                }
+            }
+        }
+        let (civ, kind) = music_for(&self.scene, self.perspective);
+        sound.audio.set_music(civ, kind);
+        sound.audio.frame(now, self.renderer.listener().as_ref());
+    }
+
+    /// The sounds of the delta just applied.
+    fn play_turn_sounds(&mut self) {
+        let Some(sound) = &mut self.sound else {
+            return;
+        };
+        let now = page_now();
+        for event in &self.scene.sounds {
+            let Some(group) = self.scene.strings.get(event.group as usize) else {
+                continue;
+            };
+            if let Some((position, owned)) = heard_event(self.perspective, event) {
+                sound.audio.play_group(group, position, owned, now);
+            }
+        }
     }
 
     /// A message replaced the player table.
@@ -363,6 +502,15 @@ impl App {
             self.perspective = Perspective::Observer;
             self.perspective_select.set_value("0");
         }
+        if let Some(warmup) = &mut self.warmup {
+            warmup.set_civs(
+                players
+                    .iter()
+                    .skip(1)
+                    .map(|player| player.civ.clone())
+                    .collect(),
+            );
+        }
         self.update_palette();
     }
 
@@ -373,8 +521,6 @@ impl App {
             "false"
         };
         let _ = self.diplomacy_button.set_attribute("aria-pressed", pressed);
-        // Without diplomacy colours every perspective looks the same.
-        self.perspective_select.set_disabled(!self.diplomacy_colors);
     }
 
     fn command(&self, command: u8, value: f64) {
@@ -513,6 +659,21 @@ async fn run(page: Page, glue: Option<String>) -> Result<(), String> {
     };
     let diplomacy_button = element(&document, "diplomacy")?;
     let perspective_select = element(&document, "perspective")?;
+    let sound = match (page, renderer.asset_store()) {
+        (Page::Observer, Some(store)) => Some(SoundControls {
+            audio: Audio::new(store, load_sound_settings()),
+            button: element(&document, "sound")?,
+            volumes: element(&document, "volumes")?,
+            master: element(&document, "volume-master")?,
+            effects: element(&document, "volume-effects")?,
+            music: element(&document, "volume-music")?,
+        }),
+        _ => None,
+    };
+    let warmup = match page {
+        Page::Map => None,
+        Page::Observer => Some(Warmup::new(element(&document, "warmup")?)),
+    };
     let options = WorkerOptions::new();
     options.set_type(WorkerType::Module);
     let worker_url = match &glue {
@@ -566,8 +727,12 @@ async fn run(page: Page, glue: Option<String>) -> Result<(), String> {
             closed: false,
             shown: String::new(),
         },
+        sound,
+        warmup,
     }));
     wire_controls(&app);
+    wire_sound(&app, &window);
+    wire_warmup(&app);
     wire_playback(&app);
     connect(&app);
     wasm_bindgen_futures::spawn_local(load_icons(Rc::clone(&app)));
@@ -612,6 +777,185 @@ fn wire_controls(app: &Rc<RefCell<App>>) {
     on_change.forget();
 
     app.borrow().show_controls();
+}
+
+fn wire_warmup(app: &Rc<RefCell<App>>) {
+    let Some(button) = app
+        .borrow()
+        .warmup
+        .as_ref()
+        .map(|warmup| warmup.button().clone())
+    else {
+        return;
+    };
+    let target = Rc::clone(app);
+    let on_click = Closure::<dyn FnMut()>::new(move || {
+        let app = &mut *target.borrow_mut();
+        if let (Some(store), Some(warmup)) = (app.renderer.asset_store(), &mut app.warmup) {
+            warmup.start(&store.borrow());
+        }
+    });
+    button.set_onclick(Some(on_click.as_ref().unchecked_ref()));
+    on_click.forget();
+}
+
+fn wire_sound(app: &Rc<RefCell<App>>, window: &web_sys::Window) {
+    let controls = {
+        let app = app.borrow();
+        let Some(sound) = &app.sound else {
+            return;
+        };
+        sound.show();
+        (
+            sound.button.clone(),
+            [
+                sound.master.clone(),
+                sound.effects.clone(),
+                sound.music.clone(),
+            ],
+        )
+    };
+    let (button, sliders) = controls;
+
+    let target = Rc::clone(app);
+    let on_click = Closure::<dyn FnMut()>::new(move || {
+        if let Some(sound) = &mut target.borrow_mut().sound {
+            let on = !sound.audio.settings().on;
+            sound.changed(on);
+        }
+    });
+    button.set_onclick(Some(on_click.as_ref().unchecked_ref()));
+    // The controls live as long as the page, so their handlers do too.
+    on_click.forget();
+
+    let target = Rc::clone(app);
+    let on_input = Closure::<dyn FnMut()>::new(move || {
+        if let Some(sound) = &mut target.borrow_mut().sound {
+            let on = sound.audio.settings().on;
+            sound.changed(on);
+        }
+    });
+    for slider in &sliders {
+        slider.set_oninput(Some(on_input.as_ref().unchecked_ref()));
+    }
+    on_input.forget();
+
+    // Sound left on at the last visit can start only in a gesture.
+    let target = Rc::clone(app);
+    let on_gesture = Closure::<dyn FnMut()>::new(move || {
+        if let Some(sound) = &mut target.borrow_mut().sound {
+            sound.audio.gesture();
+        }
+    });
+    for event in ["pointerdown", "keydown"] {
+        let _ = window.add_event_listener_with_callback(event, on_gesture.as_ref().unchecked_ref());
+    }
+    on_gesture.forget();
+}
+
+fn load_sound_settings() -> Settings {
+    let saved = web_sys::window()
+        .and_then(|window| window.local_storage().ok().flatten())
+        .and_then(|storage| storage.get_item(SOUND_SETTINGS_KEY).ok().flatten());
+    let mut settings = Settings {
+        on: false,
+        master: DEFAULT_VOLUME,
+        effects: DEFAULT_VOLUME,
+        music: DEFAULT_VOLUME,
+    };
+    if let Some(saved) = saved {
+        let fields: Vec<&str> = saved.split(',').collect();
+        if let [on, master, effects, music] = fields[..] {
+            let volume = |text: &str| {
+                text.parse::<f32>()
+                    .map_or(DEFAULT_VOLUME, |value| value.clamp(0.0, 1.0))
+            };
+            settings = Settings {
+                on: on == "1",
+                master: volume(master),
+                effects: volume(effects),
+                music: volume(music),
+            };
+        }
+    }
+    settings
+}
+
+/// Best effort: without storage the settings last only this visit.
+fn save_sound_settings(settings: Settings) {
+    if let Some(storage) =
+        web_sys::window().and_then(|window| window.local_storage().ok().flatten())
+    {
+        let text = format!(
+            "{},{},{},{}",
+            u8::from(settings.on),
+            settings.master,
+            settings.effects,
+            settings.music
+        );
+        let _ = storage.set_item(SOUND_SETTINGS_KEY, &text);
+    }
+}
+
+/// `CCmpSoundManager::PlaySoundGroup`'s test for the displayed player:
+/// `Some(owned)` when it hears the entity's sound. An observer sees all and
+/// owns nothing.
+fn hears(perspective: Perspective, owner: i32, visibility: u16) -> Option<bool> {
+    match perspective {
+        Perspective::Observer => Some(false),
+        Perspective::Player(player) => {
+            let sees = player < 16 && visibility & (1 << player) != 0;
+            sees.then_some(usize::try_from(owner) == Ok(player))
+        }
+    }
+}
+
+/// Where a simulation sound is heard from, in metres, and whether the
+/// displayed player owns it; `None` when that player does not hear it.
+/// `PlaySoundGroupAtPosition` tests nothing, `PlaySoundGroupForPlayer`
+/// plays at the origin and is owned only by its player.
+fn heard_event(perspective: Perspective, sound: &Sound) -> Option<([f32; 3], bool)> {
+    let metres =
+        |x: i32, y: i32, z: i32| [x, y, z].map(|value| value as f32 / POSITION_UNITS_PER_METRE);
+    match sound.target {
+        SoundTarget::Entity {
+            owner,
+            x,
+            z,
+            y,
+            visibility,
+        } => hears(perspective, owner, visibility).map(|owned| (metres(x, y, z), owned)),
+        SoundTarget::Position { x, z, y } => Some((metres(x, y, z), false)),
+        SoundTarget::Player(player) => {
+            let owned = matches!(perspective, Perspective::Player(shown) if usize::try_from(player) == Ok(shown));
+            Some(([0.0; 3], owned))
+        }
+    }
+}
+
+/// What music.js would play: the shown player's civ, victory or defeat
+/// once decided, battle while `BattleDetection` says so. The session skips
+/// the battle poll for observers, who stay at peace on the defaults.
+fn music_for(scene: &Scene, perspective: Perspective) -> (&str, MusicKind) {
+    let Perspective::Player(id) = perspective else {
+        return ("", MusicKind::Peace);
+    };
+    let Some(player) = scene.players.get(id) else {
+        return ("", MusicKind::Peace);
+    };
+    let kind = match player.state {
+        PlayerState::Won => MusicKind::Victory,
+        PlayerState::Defeated => MusicKind::Defeat,
+        PlayerState::Active if player.battle => MusicKind::Battle,
+        PlayerState::Active => MusicKind::Peace,
+    };
+    (&player.civ, kind)
+}
+
+fn page_now() -> f64 {
+    web_sys::window()
+        .and_then(|window| window.performance())
+        .map_or(0.0, |performance| performance.now())
 }
 
 fn wire_playback(app: &Rc<RefCell<App>>) {
@@ -787,6 +1131,7 @@ fn receive(app_rc: &Rc<RefCell<App>>, turn_ms: f64, message: &[u8]) {
                     (TURN_MS / f64::from(app.scene.game_speed)).clamp(TURN_MS_MIN, TURN_MS_MAX);
             }
             app.show_clock();
+            app.play_turn_sounds();
             if app.scene.players_changed {
                 app.scene.players_changed = false;
                 app.players_changed();
@@ -798,6 +1143,9 @@ fn receive(app_rc: &Rc<RefCell<App>>, turn_ms: f64, message: &[u8]) {
                 app.renderer.set_terrain(None);
                 if let Some(minimap) = &mut app.minimap {
                     minimap.set_terrain(None);
+                }
+                if let Some(warmup) = &mut app.warmup {
+                    warmup.set_terrains(Vec::new());
                 }
                 if terrain_id != 0 {
                     let app = Rc::clone(app_rc);
@@ -824,6 +1172,9 @@ async fn load_terrain(app: Rc<RefCell<App>>, id: u64) {
                 app.renderer.set_terrain(Some(&image));
                 if let Some(minimap) = &mut app.minimap {
                     minimap.set_terrain(Some(&image));
+                }
+                if let Some(warmup) = &mut app.warmup {
+                    warmup.set_terrains(image.names.clone());
                 }
                 app.dirty = true;
             }

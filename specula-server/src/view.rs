@@ -1,4 +1,4 @@
-//! The viewer stream, wire format v7: one binary WebSocket message per
+//! The viewer stream, wire format v8: one binary WebSocket message per
 //! keyframe, turn or match end, varints and zigzag as in `wire.rs`, positions and
 //! heights in 1/16 m.
 //!
@@ -16,11 +16,14 @@
 //!   destroyed entries are id deltas, changed entries are {varint id delta,
 //!   varint mask, then for each bit set, in this order: 1 zigzag dx, dz, dy;
 //!   2 u32 colour; 4 varint icon; 8 varint player; 16 u8 angle; 32 varint
-//!   animation, u8 animation flags; 64 varint animation speed; 128 varint
-//!   sync repeat, zigzag sync offset; 256 zigzag owner; 512 varint template,
-//!   varint actor, zigzag seed - id; 1024 varint variant set; 2048 u8
-//!   construction}. An animation (32) starts, and a sync (128) is set, at
-//!   the delta's turn.
+//!   animation, u8 animation flags, varint sound group; 64 varint
+//!   animation speed; 128 varint sync repeat, zigzag sync offset; 256
+//!   zigzag owner; 512 varint template, varint actor, zigzag seed - id;
+//!   1024 varint variant set; 2048 u8
+//!   construction; 4096 varint visibility}, then the sounds of the turn:
+//!   varint count, count x sound, in the order the simulation played
+//!   them. An animation (32) starts, and a sync (128) is set, at the
+//!   delta's turn; it is also sent when only its sound group changed.
 //! - kind 3 ended: u64 match id, varint ms since the match ended. No more
 //!   turns of that match follow; the next keyframe with another id is the
 //!   next match. A viewer joining between matches gets the final keyframe
@@ -29,9 +32,9 @@
 //! An entity is {zigzag x, zigzag z, zigzag y, u8 angle, u32 colour, varint
 //! icon, varint player, zigzag owner, varint template, varint actor, zigzag
 //! seed - id, varint variant set, varint animation, u8 animation flags,
-//! varint animation speed, varint turns since the animation started, varint
-//! sync repeat, zigzag sync offset, varint turns since the sync was set, u8
-//! construction}:
+//! varint sound group, varint animation speed, varint turns since the
+//! animation started, varint sync repeat, zigzag sync offset, varint turns
+//! since the sync was set, u8 construction, varint visibility}:
 //! - y is the absolute height, not the height above the ground;
 //! - angle is the heading in 1/256 turn, clockwise from +z;
 //! - colour is 0xFFRRGGBB, or 0 for an entity that is not on the minimap;
@@ -45,11 +48,25 @@
 //! - variant set is a 1-based index into the variant set table, 0 for no
 //!   selections;
 //! - animation flags: 1 plays once rather than loops;
+//! - sound group is a 1-based index into the string table, 0 for none: the
+//!   group, relative to audio/, the animation plays at its sound or event
+//!   point (the actor's `sound`, else `event`), once per loop;
 //! - animation speed is in 1/256: m/s for walk and run, else a multiplier;
 //! - sync repeat and offset are in ms, as the simulation gave them to
 //!   `SetAnimationSyncRepeat`/`SetAnimationSyncOffset` (0: not synced);
 //! - construction is how far the model has risen out of the ground in
-//!   1/255, 0 when it is not offset at all.
+//!   1/255, 0 when it is not offset at all;
+//! - visibility has bit p set when player p sees the entity (LOS visible),
+//!   for p below 16.
+//!
+//! A sound is {varint group, u8 target, then by target: 0 (an entity's)
+//! varint entity id, zigzag owner, zigzag x, zigzag z, zigzag y, varint
+//! visibility; 1 (at a position, heard regardless of LOS) zigzag x, zigzag
+//! z, zigzag y; 2 (only for one player, not positioned) zigzag player}.
+//! The group is a 0-based index into the string table, a sound group path
+//! relative to audio/. An entity's position, owner and visibility are as of
+//! the call, since it may be gone by the end of the turn. Keyframes carry
+//! no sounds.
 //!
 //! An icon table is varint count, count x {varint name length, UTF-8 name,
 //! f32 size in CSS pixels}; the name is an entry of `/icons.bin`. An
@@ -57,7 +74,9 @@
 //! A player table is varint count n, then n x {varint name length, UTF-8
 //! name, u32 colour, zigzag team (-1: none), u8 state (0 active, 1
 //! defeated, 2 won), n x u8 stance towards player j (0 enemy, 1 ally, 2
-//! neutral)}; index 0 is gaia.
+//! neutral), varint civ length, UTF-8 civ code (as in
+//! simulation/data/civs/), u8 battle (1 when `BattleDetection` reports
+//! one)}; index 0 is gaia.
 //! A territory is varint width, varint height (both 0: none yet), then
 //! runs of {varint length, u8 tile} covering width * height tiles,
 //! row-major, x fastest. A tile is 8 m square, as `ICmpTerritoryManager`'s
@@ -66,8 +85,8 @@
 //! UTF-8 text}. Template names are as the simulation knows them, e.g.
 //! `units/athen/infantry_spearman_b` or `foundation|structures/athen/house`;
 //! a foundation's rising building is an entity of its own with a
-//! `construction|` template. Strings are actor file names, animation names
-//! and variant keys and selections.
+//! `construction|` template. Strings are actor file names, animation names,
+//! variant keys and selections and sound group paths.
 //! A variant set table is varint count, count x {varint n, n x {varint key,
 //! varint selection}}, 0-based string indices, sorted by key. The set holds
 //! the VisualActor's variant selections except the `animation` key, which
@@ -103,6 +122,8 @@ use rocket::tokio::sync::broadcast;
 use crate::feed::Entity;
 use crate::feed::Icon;
 use crate::feed::Player;
+use crate::feed::Sound;
+use crate::feed::SoundTarget;
 use crate::feed::Territory;
 use crate::wire::Writer;
 use crate::wire::diff;
@@ -124,6 +145,10 @@ const CHANGED_OWNER: u64 = 256;
 const CHANGED_MODEL: u64 = 512;
 const CHANGED_VARIANTS: u64 = 1024;
 const CHANGED_CONSTRUCTION: u64 = 2048;
+const CHANGED_VISIBILITY: u64 = 4096;
+const SOUND_ENTITY: u8 = 0;
+const SOUND_POSITION: u8 = 1;
+const SOUND_PLAYER: u8 = 2;
 const ANIMATION_ONCE: u8 = 1;
 /// About 50 s of turns; a viewer further behind is resent a keyframe.
 const BACKLOG_MESSAGES: usize = 256;
@@ -160,6 +185,8 @@ struct Dot {
     /// The turn the sync was set on.
     sync_turn: u32,
     construction: u8,
+    sound_group: u32,
+    visibility: u16,
 }
 
 impl Dot {
@@ -194,6 +221,8 @@ impl Dot {
             sync_offset: visual.map_or(0, |visual| quantize_millis(visual.sync_offset)),
             sync_turn: turn,
             construction: quantize_construction(entity.construction),
+            sound_group: one_based(visual.and_then(|visual| visual.sound_group)),
+            visibility: entity.visibility,
         }
     }
 }
@@ -313,6 +342,8 @@ struct State {
     territory: Option<Territory>,
     /// The next delta must carry the territory.
     territory_changed: bool,
+    /// The sounds of the next turn.
+    sounds: Vec<Sound>,
     has_turn: bool,
     /// Set when a new observer connects: its entity ids belong to another
     /// match, so its first turn must replace, not patch, what viewers have.
@@ -369,6 +400,7 @@ impl Hub {
                 players_changed: false,
                 territory: None,
                 territory_changed: false,
+                sounds: Vec::new(),
                 has_turn: false,
                 new_feed: true,
                 ended: None,
@@ -392,6 +424,7 @@ impl Hub {
         state.player_color_templates.clear();
         state.players.clear();
         state.territory = None;
+        state.sounds.clear();
     }
 
     pub fn add_template(&self, index: u32, name: String) -> io::Result<()> {
@@ -440,6 +473,10 @@ impl Hub {
             state.territory = Some(territory);
             state.territory_changed = true;
         }
+    }
+
+    pub fn set_sounds(&self, sounds: Vec<Sound>) {
+        self.state.lock().unwrap().sounds = sounds;
     }
 
     pub fn set_template_icon(&self, template: u32, icon: Icon) {
@@ -572,6 +609,7 @@ impl Hub {
                     .flatten(),
                 &state.dots,
                 &dots,
+                &state.sounds,
             )
             .into();
             let next_start = state.first_turn + SEGMENT_TURNS * (state.segments.len() as u32 + 1);
@@ -591,6 +629,9 @@ impl Hub {
         state.variant_sets.sent = state.variant_sets.items.len();
         state.players_changed = false;
         state.territory_changed = false;
+        // A keyframe carries no sounds, so a new match's first turn drops
+        // its own.
+        state.sounds.clear();
         state.turn = turn;
         state.dots = dots;
         state.has_turn = true;
@@ -718,6 +759,7 @@ fn encode_delta(
     new_territory: Option<&Territory>,
     previous: &BTreeMap<u32, Dot>,
     current: &BTreeMap<u32, Dot>,
+    sounds: &[Sound],
 ) -> Vec<u8> {
     let diff = diff(previous, current);
     let mut out = Writer::default();
@@ -761,7 +803,37 @@ fn encode_delta(
         last_id = *id;
         write_change(&mut out, *id, before, now);
     }
+    out.varint(sounds.len() as u64);
+    for sound in sounds {
+        write_sound(&mut out, sound);
+    }
     out.0
+}
+
+fn write_sound(out: &mut Writer, sound: &Sound) {
+    out.varint(u64::from(sound.group));
+    let position = |out: &mut Writer| {
+        out.zigzag(i64::from(quantize_position(sound.x)));
+        out.zigzag(i64::from(quantize_position(sound.z)));
+        out.zigzag(i64::from(quantize_position(sound.y)));
+    };
+    match sound.target {
+        SoundTarget::Entity { id, owner } => {
+            out.u8(SOUND_ENTITY);
+            out.varint(u64::from(id));
+            out.zigzag(i64::from(owner));
+            position(out);
+            out.varint(u64::from(sound.visibility));
+        }
+        SoundTarget::Position => {
+            out.u8(SOUND_POSITION);
+            position(out);
+        }
+        SoundTarget::Player(player) => {
+            out.u8(SOUND_PLAYER);
+            out.zigzag(i64::from(player));
+        }
+    }
 }
 
 fn write_change(out: &mut Writer, id: u32, before: &Dot, now: &Dot) {
@@ -776,7 +848,9 @@ fn write_change(out: &mut Writer, id: u32, before: &Dot, now: &Dot) {
         (CHANGED_ANGLE, before.angle != now.angle),
         (
             CHANGED_ANIMATION,
-            before.animation != now.animation || before.once != now.once,
+            before.animation != now.animation
+                || before.once != now.once
+                || before.sound_group != now.sound_group,
         ),
         (CHANGED_ANIMATION_SPEED, before.speed != now.speed),
         (
@@ -793,6 +867,7 @@ fn write_change(out: &mut Writer, id: u32, before: &Dot, now: &Dot) {
             CHANGED_CONSTRUCTION,
             before.construction != now.construction,
         ),
+        (CHANGED_VISIBILITY, before.visibility != now.visibility),
     ];
     let mask = changes
         .iter()
@@ -819,6 +894,7 @@ fn write_change(out: &mut Writer, id: u32, before: &Dot, now: &Dot) {
     if mask & CHANGED_ANIMATION != 0 {
         out.varint(u64::from(now.animation));
         out.u8(animation_flags(now));
+        out.varint(u64::from(now.sound_group));
     }
     if mask & CHANGED_ANIMATION_SPEED != 0 {
         out.varint(u64::from(now.speed));
@@ -840,6 +916,9 @@ fn write_change(out: &mut Writer, id: u32, before: &Dot, now: &Dot) {
     }
     if mask & CHANGED_CONSTRUCTION != 0 {
         out.u8(now.construction);
+    }
+    if mask & CHANGED_VISIBILITY != 0 {
+        out.varint(u64::from(now.visibility));
     }
 }
 
@@ -865,6 +944,9 @@ fn write_players(out: &mut Writer, players: &[Player]) {
         out.zigzag(i64::from(player.team));
         out.u8(player.state);
         out.0.extend_from_slice(&player.stances);
+        out.varint(player.civ.len() as u64);
+        out.0.extend_from_slice(player.civ.as_bytes());
+        out.u8(u8::from(player.battle));
     }
 }
 
@@ -919,10 +1001,12 @@ fn write_dot(out: &mut Writer, id: u32, turn: u32, dot: &Dot) {
     out.varint(u64::from(dot.variants));
     out.varint(u64::from(dot.animation));
     out.u8(animation_flags(dot));
+    out.varint(u64::from(dot.sound_group));
     out.varint(u64::from(dot.speed));
     out.varint(u64::from(turn - dot.animation_turn));
     out.varint(u64::from(dot.sync_repeat));
     out.zigzag(i64::from(dot.sync_offset));
     out.varint(u64::from(turn - dot.sync_turn));
     out.u8(dot.construction);
+    out.varint(u64::from(dot.visibility));
 }

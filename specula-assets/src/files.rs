@@ -1,4 +1,4 @@
-//! The split asset files, format v4. Little-endian; every file starts with
+//! The split asset files, format v5. Little-endian; every file starts with
 //! a 4-byte magic and a u8 version. Strings are u16 length and UTF-8,
 //! counts are u32. A file is served as `assets/<kind>-<16 hex>.bin`, the
 //! hex being a hash of its content, so a cached copy is never stale and
@@ -15,7 +15,15 @@
 //!   angle in radians, f32 size in metres}, optional alpha map atlas.
 //!   The atlas is an RGBA8 texture, one mip, holding the engine's 14
 //!   standard blend masks in its alpha, side by side in
-//!   `CTerrainTextureManager::LoadAlphaMap`'s order and layout.
+//!   `CTerrainTextureManager::LoadAlphaMap`'s order and layout. Then
+//!   count x {sound group path relative to audio/, as the stream names
+//!   groups, file ref of its sound group}, count x {civ code (empty: the
+//!   default playlists of gui/common/music.js), count x {u8 kind (0 peace,
+//!   1 battle, 2 victory, 3 defeat), file ref of a sound}}, optional sound,
+//!   the session's ambient loop. Then count x {civ code, count x actor
+//!   path, count x sound group path}: the actors and sound groups the
+//!   civ's templates can show or play, keys of the lists above, so a
+//!   viewer can fetch a match's assets ahead of time.
 //! - actor manifest "SPCA": count x object. Object 0 is the actor, the rest
 //!   every actor it can prop, transitively, so one fetch resolves an
 //!   entity. An object is {name, count x definition, count x {u8 quality,
@@ -26,8 +34,9 @@
 //!   mesh, optional baseTex texture, optional decal {f32 width, f32 depth,
 //!   f32 angle in radians, f32 offset x, f32 offset z}, count x {prop
 //!   point, u32 object (NONE: removes the point's props)}, count x {animation name, id, i32
-//!   frequency, f32 speed, f32 event and f32 load (fractions, -1: none),
-//!   optional animation file}}. Mesh and texture refs name coarse files.
+//!   frequency, f32 speed, f32 event, f32 load and f32 sound (fractions,
+//!   -1: none), optional animation file}}. Mesh and texture refs name
+//!   coarse files.
 //! - mesh "SPCM", the coarsest level of detail: u32 vertex count, vertices
 //!   of `VERTEX_SIZE` bytes (f32x3 position, f32x3 normal, f32x2 uv, u8x4
 //!   bones, unorm8x4 weights; a bone equal to the bone count is the
@@ -51,6 +60,14 @@
 //!   detail.
 //! - texture detail "SPTD": the same up to the levels, for the larger mips
 //!   down to the one before the coarse file's first.
+//! - sound group "SPCG", `CSoundGroup` as loaded: u8 flags (1 omnipresent,
+//!   2 distanceless, 4 heard by the owner only, 8 random gain, 16 random
+//!   pitch), f32 gain, f32 pitch, f32 gain lower, f32 gain upper, f32
+//!   pitch lower, f32 pitch upper, count x file ref of a sound (the files
+//!   that could be read, in the group's order).
+//! - sound: an Ogg Opus stream as is (RFC 7845), so a browser decodes it
+//!   directly; it starts with Ogg's own "OggS" and version 0, not this
+//!   format's version.
 //!
 //! A file ref is {u64 hash, u32 byte size}; the size lets a viewer show
 //! download progress before it has the files. An optional file ref is a
@@ -67,6 +84,11 @@ pub const NONE: u32 = u32::MAX;
 /// A prop point fixed to the model's origin rather than to a bone.
 pub const NO_BONE: u8 = 0xFF;
 pub const FLAG_PLAYER_COLOR: u8 = 1;
+pub const SOUND_OMNIPRESENT: u8 = 1;
+pub const SOUND_DISTANCELESS: u8 = 2;
+pub const SOUND_OWNER_ONLY: u8 = 4;
+pub const SOUND_RANDOM_GAIN: u8 = 8;
+pub const SOUND_RANDOM_PITCH: u8 = 16;
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum Kind {
@@ -78,6 +100,8 @@ pub enum Kind {
     Animation,
     Texture,
     TextureDetail,
+    SoundGroup,
+    Sound,
 }
 
 impl Kind {
@@ -91,6 +115,8 @@ impl Kind {
             Kind::Animation => b"SPCN",
             Kind::Texture => b"SPCT",
             Kind::TextureDetail => b"SPTD",
+            Kind::SoundGroup => b"SPCG",
+            Kind::Sound => b"OggS",
         }
     }
 
@@ -104,6 +130,8 @@ impl Kind {
             Kind::Animation => "anim",
             Kind::Texture => "texture",
             Kind::TextureDetail => "texturedetail",
+            Kind::SoundGroup => "soundgroup",
+            Kind::Sound => "sound",
         }
     }
 
@@ -123,6 +151,62 @@ pub struct Index {
     pub actors: Vec<(String, FileRef)>,
     pub terrains: Vec<(String, TerrainTexture)>,
     pub alpha_maps: Option<FileRef>,
+    pub sound_groups: Vec<(String, FileRef)>,
+    /// By civ code; the empty code holds the defaults.
+    pub music: Vec<(String, Vec<(MusicKind, FileRef)>)>,
+    pub ambient: Option<FileRef>,
+    pub civs: Vec<(String, CivAssets)>,
+}
+
+/// What a civ's templates can show and play, as keys of the index's
+/// actors and sound groups.
+#[derive(Default)]
+pub struct CivAssets {
+    pub actors: Vec<String>,
+    pub sound_groups: Vec<String>,
+}
+
+/// The music.js states a session plays.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum MusicKind {
+    Peace,
+    Battle,
+    Victory,
+    Defeat,
+}
+
+impl MusicKind {
+    fn code(self) -> u8 {
+        match self {
+            MusicKind::Peace => 0,
+            MusicKind::Battle => 1,
+            MusicKind::Victory => 2,
+            MusicKind::Defeat => 3,
+        }
+    }
+
+    fn from_code(code: u8) -> Result<Self, &'static str> {
+        match code {
+            0 => Ok(MusicKind::Peace),
+            1 => Ok(MusicKind::Battle),
+            2 => Ok(MusicKind::Victory),
+            3 => Ok(MusicKind::Defeat),
+            _ => Err("unknown music kind"),
+        }
+    }
+}
+
+/// `CSoundGroup`'s settings, with its sounds.
+pub struct SoundGroup {
+    /// `SOUND_*` bits.
+    pub flags: u8,
+    pub gain: f32,
+    pub pitch: f32,
+    pub gain_lower: f32,
+    pub gain_upper: f32,
+    pub pitch_lower: f32,
+    pub pitch_upper: f32,
+    pub sounds: Vec<FileRef>,
 }
 
 /// `CTerrainTextureEntry`'s diffuse texture and its planar mapping.
@@ -190,6 +274,7 @@ pub struct Animation {
     /// Fractions of the duration, -1 for none.
     pub event: f32,
     pub load: f32,
+    pub sound: f32,
     pub file: Option<FileRef>,
 }
 
@@ -289,6 +374,33 @@ impl Index {
             out.f32(terrain.size);
         }
         out.optional_file(self.alpha_maps);
+        out.count(self.sound_groups.len());
+        for (name, group) in &self.sound_groups {
+            out.string(name);
+            out.file(*group);
+        }
+        out.count(self.music.len());
+        for (civ, tracks) in &self.music {
+            out.string(civ);
+            out.count(tracks.len());
+            for (kind, track) in tracks {
+                out.u8(kind.code());
+                out.file(*track);
+            }
+        }
+        out.optional_file(self.ambient);
+        out.count(self.civs.len());
+        for (civ, assets) in &self.civs {
+            out.string(civ);
+            out.count(assets.actors.len());
+            for actor in &assets.actors {
+                out.string(actor);
+            }
+            out.count(assets.sound_groups.len());
+            for group in &assets.sound_groups {
+                out.string(group);
+            }
+        }
         out.0
     }
 
@@ -314,11 +426,93 @@ impl Index {
             })
             .collect::<Result<_, &'static str>>()?;
         let alpha_maps = input.optional_file()?;
+        let sound_groups = (0..input.count()?)
+            .map(|_| Ok((input.string()?, input.file()?)))
+            .collect::<Result<_, &'static str>>()?;
+        let music = (0..input.count()?)
+            .map(|_| {
+                let civ = input.string()?;
+                let tracks = (0..input.count()?)
+                    .map(|_| Ok((MusicKind::from_code(input.u8()?)?, input.file()?)))
+                    .collect::<Result<_, &'static str>>()?;
+                Ok((civ, tracks))
+            })
+            .collect::<Result<_, &'static str>>()?;
+        let ambient = input.optional_file()?;
+        let civs = (0..input.count()?)
+            .map(|_| {
+                let civ = input.string()?;
+                let actors = (0..input.count()?)
+                    .map(|_| input.string())
+                    .collect::<Result<_, &'static str>>()?;
+                let sound_groups = (0..input.count()?)
+                    .map(|_| input.string())
+                    .collect::<Result<_, &'static str>>()?;
+                Ok((
+                    civ,
+                    CivAssets {
+                        actors,
+                        sound_groups,
+                    },
+                ))
+            })
+            .collect::<Result<_, &'static str>>()?;
         input.finish()?;
         Ok(Index {
             actors,
             terrains,
             alpha_maps,
+            sound_groups,
+            music,
+            ambient,
+            civs,
+        })
+    }
+}
+
+impl SoundGroup {
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = Writer::new(Kind::SoundGroup);
+        out.u8(self.flags);
+        out.f32s(&[
+            self.gain,
+            self.pitch,
+            self.gain_lower,
+            self.gain_upper,
+            self.pitch_lower,
+            self.pitch_upper,
+        ]);
+        out.count(self.sounds.len());
+        for sound in &self.sounds {
+            out.file(*sound);
+        }
+        out.0
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<Self, &'static str> {
+        let mut input = Reader::new(bytes, Kind::SoundGroup)?;
+        let flags = input.u8()?;
+        let [
+            gain,
+            pitch,
+            gain_lower,
+            gain_upper,
+            pitch_lower,
+            pitch_upper,
+        ] = input.f32s()?;
+        let sounds = (0..input.count()?)
+            .map(|_| input.file())
+            .collect::<Result<_, &'static str>>()?;
+        input.finish()?;
+        Ok(SoundGroup {
+            flags,
+            gain,
+            pitch,
+            gain_lower,
+            gain_upper,
+            pitch_lower,
+            pitch_upper,
+            sounds,
         })
     }
 }
@@ -886,6 +1080,7 @@ impl Writer {
             self.f32(animation.speed);
             self.f32(animation.event);
             self.f32(animation.load);
+            self.f32(animation.sound);
             self.optional_file(animation.file);
         }
     }
@@ -1070,6 +1265,7 @@ impl<'a> Reader<'a> {
                     speed: self.f32()?,
                     event: self.f32()?,
                     load: self.f32()?,
+                    sound: self.f32()?,
                     file: self.optional_file()?,
                 })
             })

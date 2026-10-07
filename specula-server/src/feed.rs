@@ -1,4 +1,4 @@
-//! Decoder for the observer hook's feed, format v6. The writer is
+//! Decoder for the observer hook's feed, format v9. The writer is
 //! `source/network/SpeculaFeed.cpp` in the `specula` branch of 0ad-specula.
 
 use std::io;
@@ -6,7 +6,7 @@ use std::io::ErrorKind;
 use std::io::Read;
 
 const MAGIC: [u8; 4] = *b"SPCF";
-const VERSION: u32 = 8;
+const VERSION: u32 = 9;
 const RECORD_TEMPLATE: u8 = 1;
 const RECORD_TURN: u8 = 2;
 const RECORD_MAP: u8 = 3;
@@ -15,12 +15,17 @@ const RECORD_PLAYERS: u8 = 5;
 const RECORD_STRING: u8 = 6;
 const RECORD_VARIANT_SET: u8 = 7;
 const RECORD_TERRITORY: u8 = 8;
-const ENTITY_SIZE: usize = 64;
+const RECORD_SOUNDS: u8 = 9;
+const ENTITY_SIZE: usize = 70;
+const SOUND_SIZE: usize = 27;
 const COLOR_MINIMAP: u8 = 1;
 const HAS_VISUAL: u8 = 2;
 const ANIMATION_ONCE: u8 = 4;
 const NONE: u32 = 0xFFFF_FFFF;
 const TEMPLATE_PLAYER_COLOR: u8 = 1;
+const SOUND_ENTITY: u8 = 0;
+const SOUND_POSITION: u8 = 1;
+const SOUND_PLAYER: u8 = 2;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct Entity {
@@ -41,6 +46,8 @@ pub struct Entity {
     /// Raw 16.16 fixed point, 0..=1 of the model risen out of the ground;
     /// 0 means not offset at all.
     pub construction: i32,
+    /// Bit p is set when player p sees the entity, for p below 16.
+    pub visibility: u16,
 }
 
 /// What the entity's VisualActor shows.
@@ -60,6 +67,36 @@ pub struct Visual {
     /// Raw 16.16 fixed point, in milliseconds; 0 when not synced.
     pub sync_repeat: i32,
     pub sync_offset: i32,
+    /// Index of a string record: the sound group the animation plays at its
+    /// sound or event point, relative to audio/.
+    pub sound_group: Option<u32>,
+}
+
+/// A sound group the simulation played during a turn.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct Sound {
+    /// Index of a string record, relative to audio/.
+    pub group: u32,
+    pub target: SoundTarget,
+    /// Raw 16.16 fixed point, in metres; zero for a player's sound.
+    pub x: i32,
+    pub y: i32,
+    pub z: i32,
+    /// Bit p is set when player p hears it; all bits unless it is an
+    /// entity's.
+    pub visibility: u16,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum SoundTarget {
+    /// Played on an entity, with its owner as of the call.
+    Entity {
+        id: u32,
+        owner: i32,
+    },
+    Position,
+    /// Only for this player.
+    Player(i32),
 }
 
 /// A template's minimap icon, as the in-game minimap draws it.
@@ -83,6 +120,10 @@ pub struct Player {
     pub state: u8,
     /// Towards each player by index: 0 enemy, 1 ally, 2 neutral.
     pub stances: Vec<u8>,
+    /// Civ code, as in simulation/data/civs/<civ>.json.
+    pub civ: String,
+    /// `BattleDetection` reports a battle.
+    pub battle: bool,
 }
 
 pub enum Record {
@@ -106,6 +147,8 @@ pub enum Record {
     Terrain(Terrain),
     Players(Vec<Player>),
     Territory(Territory),
+    /// The sounds of the next turn record, in the order they were played.
+    Sounds(Vec<Sound>),
     String {
         index: u32,
         text: String,
@@ -192,6 +235,7 @@ pub fn read_record(reader: &mut impl Read) -> io::Result<Option<Record>> {
             }
             RECORD_VARIANT_SET => return decode_variant_set(&payload).map(Some),
             RECORD_TERRITORY => return decode_territory(&payload).map(Some),
+            RECORD_SOUNDS => return decode_sounds(&payload).map(Some),
             // Newer hooks may add kinds; the length prefix lets them be skipped.
             _ => continue,
         }
@@ -249,6 +293,12 @@ fn decode_turn(payload: &[u8]) -> io::Result<Record> {
             speed: cursor.i32()?,
             sync_repeat: cursor.i32()?,
             sync_offset: cursor.i32()?,
+            sound_group: None,
+        };
+        let construction = cursor.i32()?;
+        let visual = Visual {
+            sound_group: optional(cursor.u32()?),
+            ..visual
         };
         entities.push(Entity {
             id,
@@ -260,7 +310,8 @@ fn decode_turn(payload: &[u8]) -> io::Result<Record> {
             color: decode_color(color),
             y,
             visual: (flags & HAS_VISUAL != 0).then_some(visual),
-            construction: cursor.i32()?,
+            construction,
+            visibility: cursor.u16()?,
         });
     }
     Ok(Record::Turn { turn, entities })
@@ -317,12 +368,18 @@ fn decode_players(payload: &[u8]) -> io::Result<Record> {
         let team = cursor.i32()?;
         let state = cursor.u8()?;
         let stances = cursor.bytes(count)?.to_vec();
+        let length = cursor.u16()? as usize;
+        let civ = String::from_utf8(cursor.bytes(length)?.to_vec())
+            .map_err(|_| invalid("civ not UTF-8"))?;
+        let battle = cursor.u8()? != 0;
         players.push(Player {
             name,
             color: u32::from_be_bytes([0, r, g, b]),
             team,
             state,
             stances,
+            civ,
+            battle,
         });
     }
     if !cursor.0.is_empty() {
@@ -344,6 +401,36 @@ fn decode_territory(payload: &[u8]) -> io::Result<Record> {
         height,
         tiles,
     }))
+}
+
+fn decode_sounds(payload: &[u8]) -> io::Result<Record> {
+    let mut cursor = Cursor(payload);
+    let count = cursor.u32()? as usize;
+    if cursor.0.len() != count * SOUND_SIZE {
+        return Err(invalid("sounds record length does not match its count"));
+    }
+    let mut sounds = Vec::with_capacity(count);
+    for _ in 0..count {
+        let group = cursor.u32()?;
+        let target = cursor.u8()?;
+        let id = cursor.u32()?;
+        let player = cursor.i32()?;
+        let target = match target {
+            SOUND_ENTITY => SoundTarget::Entity { id, owner: player },
+            SOUND_POSITION => SoundTarget::Position,
+            SOUND_PLAYER => SoundTarget::Player(player),
+            _ => return Err(invalid("unknown sound target")),
+        };
+        sounds.push(Sound {
+            group,
+            target,
+            x: cursor.i32()?,
+            y: cursor.i32()?,
+            z: cursor.i32()?,
+            visibility: cursor.u16()?,
+        });
+    }
+    Ok(Record::Sounds(sounds))
 }
 
 fn decode_variant_set(payload: &[u8]) -> io::Result<Record> {

@@ -62,6 +62,7 @@ pub struct Animation {
     /// Fractions of the duration, -1 for none.
     pub event: f32,
     pub load: f32,
+    pub sound: f32,
 }
 
 /// `CObjectManager::FindActorDef`: each actor is loaded once, and a failed
@@ -390,6 +391,7 @@ fn load_animation(node: Node) -> Animation {
         speed: 1.0,
         event: -1.0,
         load: -1.0,
+        sound: -1.0,
     };
     for attribute in node.attributes() {
         let value = attribute.value();
@@ -404,6 +406,7 @@ fn load_animation(node: Node) -> Animation {
             }
             "event" => animation.event = to_float(value).clamp(0.0, 1.0),
             "load" => animation.load = to_float(value).clamp(0.0, 1.0),
+            "sound" => animation.sound = to_float(value).clamp(0.0, 1.0),
             _ => {}
         }
     }

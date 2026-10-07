@@ -7,8 +7,14 @@
 <style>
 html, body { margin: 0; height: 100%; background: #0f1214; }
 #view { display: block; width: 100vw; height: 100vh; }
-#controls { position: fixed; top: 8px; left: 8px; display: flex; gap: 6px;
-  font: 13px system-ui, sans-serif; }
+#controls { position: fixed; top: 8px; left: 8px; right: 96px; display: flex;
+  flex-wrap: wrap; align-items: center; gap: 6px; font: 13px system-ui, sans-serif; }
+#volumes { display: flex; flex-wrap: wrap; align-items: center; gap: 6px;
+  padding: 2px 8px; color: #e6e9eb; background: rgba(15, 18, 20, 0.85);
+  border: 1px solid #3a4248; border-radius: 4px; }
+#volumes[hidden] { display: none; }
+#volumes label { display: flex; align-items: center; gap: 4px; }
+#volumes input { width: 72px; accent-color: #8fa3b0; }
 #playback { position: fixed; left: 8px; right: 8px; bottom: 8px;
   display: flex; align-items: center; gap: 6px;
   font: 13px system-ui, sans-serif; }
@@ -31,7 +37,8 @@ html, body { margin: 0; height: 100%; background: #0f1214; }
   width: min(220px, 40vw); height: min(220px, 40vw);
   border: 1px solid #3a4248; border-radius: 4px; background: #0f1214;
   cursor: pointer; touch-action: none; }
-#errors { position: fixed; top: 120px; left: 8px; right: 8px; max-height: 40vh;
+#errors { position: fixed; top: 120px; left: 8px; max-width: calc(100vw - 16px);
+  box-sizing: border-box; max-height: 40vh;
   overflow: auto; margin: 0; padding: 6px 8px; white-space: pre-wrap;
   font: 12px ui-monospace, monospace; color: #ffb4a8;
   background: rgba(15, 18, 20, 0.9); border: 1px solid #6b3a34;
@@ -64,9 +71,16 @@ body:not(.debug) #stats, body:not(.debug) #errors { display: none; }
 <canvas id="view"></canvas>
 <div id="controls">
 <button id="diplomacy" type="button" aria-pressed="false">Diplomacy colours</button>
-<select id="perspective" aria-label="Perspective" disabled>
+<select id="perspective" aria-label="Perspective">
 <option value="0">Observer</option>
 </select>
+<button id="sound" type="button" aria-pressed="false">Sound off</button>
+<button id="warmup" type="button" disabled>Warm up</button>
+<div id="volumes" hidden>
+<label>Master <input id="volume-master" type="range" min="0" max="1" step="0.05" value="0.5"></label>
+<label>Effects <input id="volume-effects" type="range" min="0" max="1" step="0.05" value="0.5"></label>
+<label>Music <input id="volume-music" type="range" min="0" max="1" step="0.05" value="0.5"></label>
+</div>
 </div>
 <div id="clock" aria-label="Match time">0:00</div>
 <canvas id="minimap" aria-label="Minimap"></canvas>
@@ -122,7 +136,7 @@ body:not(.debug) #stats, body:not(.debug) #errors { display: none; }
 })();
 </script>
 <script type="module">
-const glue = "./pkg/specula_web.js?v=588e2c29d504";
+const glue = "./pkg/specula_web.js?v=2480b8de6b5d";
 const { default: init, observer_main } = await import(glue);
 await init();
 observer_main(glue);

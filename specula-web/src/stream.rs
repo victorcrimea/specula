@@ -1,5 +1,5 @@
 //! Decoder for specula-server's viewer stream and match segments, wire
-//! format v7; the layout is documented in `specula-server/src/view.rs`.
+//! format v8; the layout is documented in `specula-server/src/view.rs`.
 
 use std::collections::BTreeMap;
 use std::io::Read;
@@ -21,6 +21,10 @@ const CHANGED_OWNER: u64 = 256;
 const CHANGED_MODEL: u64 = 512;
 const CHANGED_VARIANTS: u64 = 1024;
 const CHANGED_CONSTRUCTION: u64 = 2048;
+const CHANGED_VISIBILITY: u64 = 4096;
+const SOUND_ENTITY: u8 = 0;
+const SOUND_POSITION: u8 = 1;
+const SOUND_PLAYER: u8 = 2;
 const ANIMATION_ONCE: u8 = 1;
 /// A move longer than this in one turn is a teleport (ungarrison, a
 /// scripted jump), not walking, so the dot does not slide there. It is well
@@ -78,6 +82,36 @@ pub struct Dot {
     /// How far the model has risen out of the ground, in 1/255; 0 when it
     /// is not offset at all.
     pub construction: u8,
+    /// 1-based index into `Scene::strings`, or 0 for none: the sound group
+    /// the animation plays at its sound or event point.
+    pub sound_group: u32,
+    /// Bit p is set when player p sees the entity.
+    pub visibility: u16,
+}
+
+/// A sound group the simulation played during a turn.
+#[derive(Clone, Copy)]
+pub struct Sound {
+    /// Index into `Scene::strings`, a path relative to audio/.
+    pub group: u32,
+    pub target: SoundTarget,
+}
+
+#[derive(Clone, Copy)]
+pub enum SoundTarget {
+    /// Played on an entity; owner, position (1/16 m) and visibility as of
+    /// the call.
+    Entity {
+        owner: i32,
+        x: i32,
+        z: i32,
+        y: i32,
+        visibility: u16,
+    },
+    /// Heard regardless of LOS.
+    Position { x: i32, z: i32, y: i32 },
+    /// Only for this player, not positioned.
+    Player(i32),
 }
 
 /// (key, selection) indices into `Scene::strings`, sorted by key.
@@ -111,6 +145,8 @@ pub struct Scene {
     pub strings: Vec<String>,
     pub variant_sets: Vec<VariantSet>,
     pub dots: BTreeMap<u32, Dot>,
+    /// The sounds of the last delta applied; a keyframe has none.
+    pub sounds: Vec<Sound>,
 }
 
 /// `ICmpTerritoryManager`'s grid, a tile per `territory::TILE_SIZE`.
@@ -139,6 +175,10 @@ pub struct Player {
     pub state: PlayerState,
     /// Towards each player by index.
     pub stances: Vec<Stance>,
+    /// Civ code, as in simulation/data/civs/.
+    pub civ: String,
+    /// `BattleDetection` reports a battle.
+    pub battle: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -161,6 +201,7 @@ impl Scene {
     pub fn apply(&mut self, message: &[u8], progress: f32) -> Result<(), &'static str> {
         let (&kind, body) = message.split_first().ok_or("empty message")?;
         let mut cursor = Cursor(body);
+        self.sounds.clear();
         match kind {
             MESSAGE_KEYFRAME => self.apply_keyframe(&mut cursor)?,
             MESSAGE_DELTA => self.apply_delta(&mut cursor, progress)?,
@@ -274,6 +315,7 @@ impl Scene {
             if mask & CHANGED_ANIMATION != 0 {
                 dot.animation = cursor.varint_u32()?;
                 dot.once = cursor.u8()? & ANIMATION_ONCE != 0;
+                dot.sound_group = cursor.varint_u32()?;
                 dot.animation_turn = self.turn;
             }
             if mask & CHANGED_ANIMATION_SPEED != 0 {
@@ -298,6 +340,35 @@ impl Scene {
             if mask & CHANGED_CONSTRUCTION != 0 {
                 dot.construction = cursor.u8()?;
             }
+            if mask & CHANGED_VISIBILITY != 0 {
+                dot.visibility = cursor.varint_u32()? as u16;
+            }
+        }
+        let count = cursor.varint_u32()?;
+        for _ in 0..count {
+            let group = cursor.varint_u32()?;
+            let target = match cursor.u8()? {
+                SOUND_ENTITY => {
+                    // The id seeds the engine's random gain and pitch; any
+                    // random does here.
+                    cursor.varint_u32()?;
+                    SoundTarget::Entity {
+                        owner: cursor.zigzag()?,
+                        x: cursor.zigzag()?,
+                        z: cursor.zigzag()?,
+                        y: cursor.zigzag()?,
+                        visibility: cursor.varint_u32()? as u16,
+                    }
+                }
+                SOUND_POSITION => SoundTarget::Position {
+                    x: cursor.zigzag()?,
+                    z: cursor.zigzag()?,
+                    y: cursor.zigzag()?,
+                },
+                SOUND_PLAYER => SoundTarget::Player(cursor.zigzag()?),
+                _ => return Err("unknown sound target"),
+            };
+            self.sounds.push(Sound { group, target });
         }
         Ok(())
     }
@@ -363,12 +434,19 @@ impl Scene {
                     _ => Err("unknown stance"),
                 })
                 .collect::<Result<_, _>>()?;
+            let length = cursor.varint()? as usize;
+            let civ = std::str::from_utf8(cursor.take(length)?)
+                .map_err(|_| "civ not UTF-8")?
+                .to_string();
+            let battle = cursor.u8()? != 0;
             self.players.push(Player {
                 name,
                 color,
                 team,
                 state,
                 stances,
+                civ,
+                battle,
             });
         }
         self.players_changed = true;
@@ -436,6 +514,9 @@ impl Scene {
                     Stance::Neutral => 2,
                 });
             }
+            out.varint(player.civ.len() as u64);
+            out.0.extend_from_slice(player.civ.as_bytes());
+            out.u8(u8::from(player.battle));
         }
         out.varint(u64::from(self.territory.width));
         out.varint(u64::from(self.territory.height));
@@ -477,12 +558,14 @@ impl Scene {
             out.varint(u64::from(dot.variants));
             out.varint(u64::from(dot.animation));
             out.u8(if dot.once { ANIMATION_ONCE } else { 0 });
+            out.varint(u64::from(dot.sound_group));
             out.varint(u64::from(dot.speed));
             out.varint(u64::from(self.turn - dot.animation_turn));
             out.varint(u64::from(dot.sync_repeat));
             out.zigzag(dot.sync_offset);
             out.varint(u64::from(self.turn - dot.sync_turn));
             out.u8(dot.construction);
+            out.varint(u64::from(dot.visibility));
         }
         out.0
     }
@@ -660,12 +743,14 @@ impl<'a> Cursor<'a> {
             variants: self.varint_u32()?,
             animation: self.varint_u32()?,
             once: self.u8()? & ANIMATION_ONCE != 0,
+            sound_group: self.varint_u32()?,
             speed: self.varint_u32()?,
             animation_turn: back(self)?,
             sync_repeat: self.varint_u32()?,
             sync_offset: self.zigzag()?,
             sync_turn: back(self)?,
             construction: self.u8()?,
+            visibility: self.varint_u32()? as u16,
             from_x: x as f32,
             from_z: z as f32,
         })

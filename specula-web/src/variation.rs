@@ -54,8 +54,9 @@ pub struct ModelAnimation {
     pub id: String,
     pub frequency: i32,
     pub speed: f32,
-    /// A fraction of the duration, -1 for none.
+    /// Fractions of the duration, -1 for none.
     pub event: f32,
+    pub sound: f32,
     pub file: FileRef,
 }
 
@@ -276,6 +277,7 @@ fn build(
                 frequency: animation.frequency,
                 speed: animation.speed,
                 event: animation.event,
+                sound: animation.sound,
                 file: animation.file?,
             })
         })

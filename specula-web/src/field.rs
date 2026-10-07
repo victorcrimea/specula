@@ -43,6 +43,8 @@ use web_sys::HtmlElement;
 use web_sys::MouseEvent;
 use web_sys::WheelEvent;
 
+use crate::AnimationSound;
+use crate::Listener;
 use crate::StreamBytes;
 use crate::TURN_MS;
 use crate::View;
@@ -314,8 +316,20 @@ pub struct Field {
     decal_indices: wgpu::Buffer,
     /// Where the camera is this frame, which impostor cells depend on.
     eye: [f32; 3],
+    /// The animation time each entity's sound was last checked at.
+    sound_clocks: HashMap<u32, SoundClock>,
     device_pixel_ratio: f32,
     stats: Stats,
+}
+
+/// Where an entity's animation was when its sound point was last looked
+/// for, as `CUnitAnimation` keeps `pastSoundPos` per animation.
+struct SoundClock {
+    /// (animation, animation turn, sync turn, animation file): another
+    /// value is another animation, whose sound point is due again.
+    key: (u32, u32, u32, u64),
+    /// Its time in ms, not wrapped at the end of a loop.
+    time: f32,
 }
 
 /// What the `#fps` box shows, as on the unit page, and the `#stats` box
@@ -793,6 +807,7 @@ impl Field {
             decal_instances,
             decal_indices,
             eye: [0.0; 3],
+            sound_clocks: HashMap::new(),
             device_pixel_ratio: 1.0,
             stats,
         })
@@ -894,46 +909,12 @@ impl Field {
         pixel_scale: f32,
         groups: &mut HashMap<GroupKey, Vec<u8>>,
     ) {
-        let Some(actor) = string(&self.entities.strings, dot.actor) else {
-            return;
-        };
-        let manifest = match self.store.borrow_mut().actor(actor) {
-            Get::Ready(manifest) => manifest,
-            Get::Pending | Get::Missing => return,
-        };
         let key = (dot.actor, dot.variants, dot.animation, dot.seed);
-        let model = match self.models.get(&key) {
-            Some(model) => model.clone(),
-            None => {
-                let selections = self.selections(dot);
-                let model = variation::resolve(&manifest, &selections, dot.seed).map(Rc::new);
-                self.models.insert(key, model.clone());
-                model
-            }
-        };
-        let Some(model) = model else {
+        let Some(model) = self.entity_model(dot) else {
             return;
         };
 
-        let lerp = |from: f32, to: i32| from + (to as f32 - from) * progress;
-        let x = lerp(dot.from_x, dot.x) / POSITION_UNITS_PER_METRE;
-        let z = lerp(dot.from_z, dot.z) / POSITION_UNITS_PER_METRE;
-        // Over ground, follow the terrain between turns rather than cut
-        // across it, as the engine places ground units each frame.
-        let y = match &self.ground {
-            Some(ground) => {
-                let height = |x: f32, z: f32, y: f32| {
-                    y / POSITION_UNITS_PER_METRE
-                        - ground
-                            .image
-                            .ground(x / POSITION_UNITS_PER_METRE, z / POSITION_UNITS_PER_METRE)
-                };
-                let from = height(dot.from_x, dot.from_z, dot.from_y);
-                let to = height(dot.x as f32, dot.z as f32, dot.y as f32);
-                ground.image.ground(x, z) + from + (to - from) * progress
-            }
-            None => lerp(dot.from_y, dot.y) / POSITION_UNITS_PER_METRE,
-        };
+        let [x, y, z] = self.entity_position(dot, progress);
         let angle = dot.from_angle + turn_towards(dot.from_angle, dot.angle) * progress;
         let rot_y = angle / 256.0 * std::f32::consts::TAU;
         // CCmpPosition::GetInterpolatedTransform turns models by rotY + PI.
@@ -1026,6 +1007,163 @@ impl Field {
         if self.placed > placed {
             self.stats.levels[level.min(COARSE_LEVEL)] += 1;
         }
+    }
+
+    /// Where the entity is drawn this frame, in metres.
+    fn entity_position(&self, dot: &Dot, progress: f32) -> [f32; 3] {
+        let lerp = |from: f32, to: i32| from + (to as f32 - from) * progress;
+        let x = lerp(dot.from_x, dot.x) / POSITION_UNITS_PER_METRE;
+        let z = lerp(dot.from_z, dot.z) / POSITION_UNITS_PER_METRE;
+        // Over ground, follow the terrain between turns rather than cut
+        // across it, as the engine places ground units each frame.
+        let y = match &self.ground {
+            Some(ground) => {
+                let height = |x: f32, z: f32, y: f32| {
+                    y / POSITION_UNITS_PER_METRE
+                        - ground
+                            .image
+                            .ground(x / POSITION_UNITS_PER_METRE, z / POSITION_UNITS_PER_METRE)
+                };
+                let from = height(dot.from_x, dot.from_z, dot.from_y);
+                let to = height(dot.x as f32, dot.z as f32, dot.y as f32);
+                ground.image.ground(x, z) + from + (to - from) * progress
+            }
+            None => lerp(dot.from_y, dot.y) / POSITION_UNITS_PER_METRE,
+        };
+        [x, y, z]
+    }
+
+    /// The model the entity's actor resolves to, through the cache;
+    /// `None` while its manifest loads or when it resolves to nothing.
+    fn entity_model(&mut self, dot: &Dot) -> Option<Rc<Model>> {
+        let actor = string(&self.entities.strings, dot.actor)?;
+        let manifest = match self.store.borrow_mut().actor(actor) {
+            Get::Ready(manifest) => manifest,
+            Get::Pending | Get::Missing => return None,
+        };
+        let key = (dot.actor, dot.variants, dot.animation, dot.seed);
+        if let Some(model) = self.models.get(&key) {
+            return model.clone();
+        }
+        let selections = self.selections(dot);
+        let model = variation::resolve(&manifest, &selections, dot.seed).map(Rc::new);
+        self.models.insert(key, model.clone());
+        model
+    }
+
+    /// The sound groups whose point the animations passed since the last
+    /// frame, as `CUnitAnimation::Update` plays them: of every entity, on
+    /// screen or not, at most once per frame, at the `sound` point or else
+    /// the `event` point of the root model's animation.
+    fn animation_sounds(&mut self, progress: f32) -> Vec<AnimationSound> {
+        let mut sounds = Vec::new();
+        let dots = std::mem::take(&mut self.entities.dots);
+        let mut clocks = std::mem::take(&mut self.sound_clocks);
+        let mut seen = HashMap::with_capacity(clocks.len());
+        for (id, dot) in &dots {
+            if dot.sound_group == 0 {
+                continue;
+            }
+            let Some((key, time, start, point, duration, once)) =
+                self.sound_clock(*id, dot, progress)
+            else {
+                continue;
+            };
+            // A clock first seen now (a join, a seek, a model just loaded)
+            // starts here rather than replaying what went before.
+            let last = match clocks.remove(id) {
+                Some(clock) if clock.key == key => clock.time,
+                Some(_) => start - f32::EPSILON.max(start.abs() * f32::EPSILON),
+                None => time,
+            };
+            let passed = if once {
+                last < point && point <= time
+            } else {
+                time > last
+                    && ((time - point) / duration).floor() > ((last - point) / duration).floor()
+            };
+            if passed {
+                sounds.push(AnimationSound {
+                    group: dot.sound_group - 1,
+                    owner: dot.owner,
+                    visibility: dot.visibility,
+                    position: self.entity_position(dot, progress),
+                });
+            }
+            seen.insert(*id, SoundClock { key, time });
+        }
+        self.entities.dots = dots;
+        self.sound_clocks = seen;
+        sounds
+    }
+
+    /// The entity's animation clock: its key, the time now and at the
+    /// animation's start (unwrapped, ms), the sound point and duration in
+    /// ms, and whether it plays once. `None` while pieces load or when the
+    /// animation has no point.
+    #[allow(clippy::type_complexity)]
+    fn sound_clock(
+        &mut self,
+        id: u32,
+        dot: &Dot,
+        progress: f32,
+    ) -> Option<((u32, u32, u32, u64), f32, f32, f32, f32, bool)> {
+        let model = self.entity_model(dot)?;
+        let Shape::Mesh(root_file) = model.shape else {
+            return None;
+        };
+        let root_mesh = match self.store.borrow_mut().mesh(root_file, false) {
+            Get::Ready(mesh) => mesh,
+            Get::Pending | Get::Missing => return None,
+        };
+        let state = string(&self.entities.strings, dot.animation)
+            .map_or_else(|| "idle".to_string(), str::to_lowercase);
+        let mut pick = DefaultHasher::new();
+        (id, dot.animation_turn).hash(&mut pick);
+        let (chosen, data) = self.root_animation(&model, &root_mesh, &state, pick.finish())??;
+        let fraction = if chosen.sound >= 0.0 {
+            chosen.sound
+        } else {
+            chosen.event
+        };
+        if fraction < 0.0 {
+            return None;
+        }
+        let duration = data.frames as f32 * data.frame_ms;
+        if duration <= 0.0 {
+            return None;
+        }
+        let mut entity = EntityState {
+            dot: *dot,
+            turn: self.entities.turn,
+            progress,
+            state,
+            pick: 0,
+            color: 0,
+            level: 0,
+            time: None,
+        };
+        let (time, _) = animation_clock(&entity, chosen, &data);
+        let start_turn = if dot.sync_repeat > 0 && chosen.event >= 0.0 {
+            dot.sync_turn
+        } else {
+            dot.animation_turn
+        };
+        entity.turn = start_turn;
+        entity.progress = 0.0;
+        let (start, _) = animation_clock(&entity, chosen, &data);
+        let key = (
+            dot.animation,
+            dot.animation_turn,
+            dot.sync_turn,
+            chosen.file.hash,
+        );
+        let time = if dot.once {
+            time.min(duration - 1.0)
+        } else {
+            time
+        };
+        Some((key, time, start, fraction * duration, duration, dot.once))
     }
 
     /// Draws the entity as its look's impostor; false while the atlas is
@@ -1846,6 +1984,24 @@ impl View for Field {
         self.camera.borrow_mut().target = [x, z];
     }
 
+    fn asset_store(&self) -> Option<Rc<RefCell<Store>>> {
+        Some(Rc::clone(&self.store))
+    }
+
+    fn listener(&self) -> Option<Listener> {
+        let (view_projection, eye, _, _) = self.view_projection();
+        Some(Listener {
+            view_projection,
+            eye,
+            width: self.config.width as f32 / self.device_pixel_ratio,
+            height: self.config.height as f32 / self.device_pixel_ratio,
+        })
+    }
+
+    fn take_animation_sounds(&mut self, progress: f32) -> Vec<AnimationSound> {
+        self.animation_sounds(progress)
+    }
+
     fn set_terrain(&mut self, image: Option<&TerrainImage>) {
         match image {
             Some(image) if image.size > 0 => self.upload_ground(image),
@@ -2313,6 +2469,24 @@ fn animation_time(
     if let Some(time) = entity.time {
         return (time.rem_euclid(duration.max(f32::EPSILON)), true);
     }
+    let (time, duration) = animation_clock(entity, chosen, data);
+    if dot.once {
+        // "Very nearly the end of the last frame", as the engine holds it.
+        (time.min(duration - 1.0).max(0.0), false)
+    } else {
+        (time.rem_euclid(duration.max(f32::EPSILON)), true)
+    }
+}
+
+/// The animation's time in ms as `animation_time` works it out, before it
+/// wraps or holds at the end, and its duration.
+fn animation_clock(
+    entity: &EntityState,
+    chosen: &ModelAnimation,
+    data: &AnimationData,
+) -> (f32, f32) {
+    let dot = &entity.dot;
+    let duration = data.frames as f32 * data.frame_ms;
     let since =
         |turn: u32| (entity.turn.saturating_sub(turn) as f32 + entity.progress) * TURN_MS as f32;
     let time = if dot.sync_repeat > 0 && chosen.event >= 0.0 {
@@ -2326,12 +2500,7 @@ fn animation_time(
         let speed = dot.speed as f32 / 256.0 * chosen.speed;
         since(dot.animation_turn) * speed
     };
-    if dot.once {
-        // "Very nearly the end of the last frame", as the engine holds it.
-        (time.min(duration - 1.0).max(0.0), false)
-    } else {
-        (time.rem_euclid(duration.max(f32::EPSILON)), true)
-    }
+    (time, duration)
 }
 
 fn owner_color(dot: &Dot, palette: &[u32]) -> u32 {
