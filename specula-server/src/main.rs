@@ -232,7 +232,7 @@ fn serve(stream: UnixStream, hub: &Hub) -> io::Result<()> {
     feed::read_header(&mut reader)?;
     let mut templates = HashMap::new();
     let mut classifier = Classifier::default();
-    let mut meter = DeltaMeter::new()?;
+    let mut meter = DeltaMeter::new();
     while let Some(record) = feed::read_record(&mut reader)? {
         match record {
             Record::Template {

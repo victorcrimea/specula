@@ -6,8 +6,9 @@
 //! - `varint`: sorted ids delta-coded, fields as zigzag varint differences.
 //! - `quantized`: as `varint`, with position in 1/16 m and angle in 1/256
 //!   turn. A change below one step is not sent.
-//! - `zstd`: `quantized` through a streaming zstd context that is reset at
-//!   every segment boundary, so a viewer can join at any segment.
+//! - `brotli`: `quantized` through a streaming brotli context, flushed every
+//!   turn and reset at every segment boundary, so a viewer can join at any
+//!   segment.
 
 use std::collections::BTreeMap;
 use std::io;
@@ -21,9 +22,10 @@ use crate::wire::quantize_position;
 
 /// 25 turns of 200 ms, about 5 s per summary.
 const WINDOW_TURNS: u32 = 25;
-/// 50 turns of 200 ms: a keyframe every 10 s (init.md 3).
-const SEGMENT_TURNS: u32 = 50;
-const ZSTD_LEVEL: i32 = 3;
+/// As the viewer stream's: 150 turns of 200 ms, a keyframe every 30 s.
+const SEGMENT_TURNS: u32 = 150;
+const BROTLI_QUALITY: u32 = 5;
+const BROTLI_WINDOW_BITS: u32 = 22;
 const TURN_LENGTH_SECS: f64 = 0.2;
 
 const CHANGED_POSITION: u8 = 1;
@@ -58,7 +60,7 @@ struct Sizes {
     delta: u64,
     varint: u64,
     quantized: u64,
-    zstd: u64,
+    brotli: u64,
 }
 
 impl std::ops::AddAssign for Sizes {
@@ -67,35 +69,35 @@ impl std::ops::AddAssign for Sizes {
         self.delta += other.delta;
         self.varint += other.varint;
         self.quantized += other.quantized;
-        self.zstd += other.zstd;
+        self.brotli += other.brotli;
     }
 }
 
 pub struct DeltaMeter {
     previous: Option<BTreeMap<u32, Entity>>,
     previous_quantized: BTreeMap<u32, Quantized>,
-    zstd: zstd::stream::write::Encoder<'static, Vec<u8>>,
+    brotli: brotli::CompressorWriter<Vec<u8>>,
     turns_in_segment: u32,
     window_first_turn: u32,
     window_turns: u32,
     window: Sizes,
     keyframe_quantized: u64,
-    keyframe_zstd: u64,
+    keyframe_brotli: u64,
 }
 
 impl DeltaMeter {
-    pub fn new() -> io::Result<Self> {
-        Ok(DeltaMeter {
+    pub fn new() -> Self {
+        DeltaMeter {
             previous: None,
             previous_quantized: BTreeMap::new(),
-            zstd: zstd::stream::write::Encoder::new(Vec::new(), ZSTD_LEVEL)?,
+            brotli: new_encoder(),
             turns_in_segment: 0,
             window_first_turn: 0,
             window_turns: 0,
             window: Sizes::default(),
             keyframe_quantized: 0,
-            keyframe_zstd: 0,
-        })
+            keyframe_brotli: 0,
+        }
     }
 
     /// Returns a summary line when a window is complete.
@@ -108,16 +110,14 @@ impl DeltaMeter {
             .collect();
 
         if self.turns_in_segment == 0 {
-            // A new segment starts with a keyframe, and the zstd context
+            // A new segment starts with a keyframe, and the brotli context
             // restarts with it: a viewer joining here needs nothing earlier.
             let keyframe = encode_keyframe(turn, &current_quantized);
             self.keyframe_quantized = keyframe.len() as u64;
-            self.keyframe_zstd = zstd::bulk::compress(&keyframe, ZSTD_LEVEL)?.len() as u64;
-            let finished = std::mem::replace(
-                &mut self.zstd,
-                zstd::stream::write::Encoder::new(Vec::new(), ZSTD_LEVEL)?,
-            );
-            finished.finish()?;
+            let mut compressed = new_encoder();
+            compressed.write_all(&keyframe)?;
+            self.keyframe_brotli = compressed.into_inner().len() as u64;
+            self.brotli = new_encoder();
         }
         self.turns_in_segment = (self.turns_in_segment + 1) % SEGMENT_TURNS;
 
@@ -130,18 +130,18 @@ impl DeltaMeter {
         let current = self.previous.as_ref().unwrap();
 
         let quantized = encode_quantized(turn, &self.previous_quantized, &current_quantized);
-        let before = self.zstd.get_ref().len();
-        self.zstd.write_all(&quantized)?;
-        self.zstd.flush()?;
-        let zstd = (self.zstd.get_ref().len() - before) as u64;
-        self.zstd.get_mut().clear();
+        let before = self.brotli.get_ref().len();
+        self.brotli.write_all(&quantized)?;
+        self.brotli.flush()?;
+        let brotli = (self.brotli.get_ref().len() - before) as u64;
+        self.brotli.get_mut().clear();
 
         let sizes = Sizes {
             full: 8 + 24 * current.len() as u64,
             delta: encode_fixed(turn, &previous, current).len() as u64,
             varint: encode_varint(turn, &previous, current).len() as u64,
             quantized: quantized.len() as u64,
-            zstd,
+            brotli,
         };
         self.previous_quantized = current_quantized;
 
@@ -166,7 +166,7 @@ impl DeltaMeter {
         let w = &self.window;
         format!(
             "turns {}-{} bytes/turn (KB/s): full {} ({:.1}), delta {} ({:.2}), varint {} ({:.2}), \
-             quantized {} ({:.2}), zstd {} ({:.2}); keyframe quantized {} zstd {}",
+             quantized {} ({:.2}), brotli {} ({:.2}); keyframe quantized {} brotli {}",
             self.window_first_turn,
             last_turn,
             w.full / turns,
@@ -177,12 +177,16 @@ impl DeltaMeter {
             rate(w.varint),
             w.quantized / turns,
             rate(w.quantized),
-            w.zstd / turns,
-            rate(w.zstd),
+            w.brotli / turns,
+            rate(w.brotli),
             self.keyframe_quantized,
-            self.keyframe_zstd,
+            self.keyframe_brotli,
         )
     }
+}
+
+fn new_encoder() -> brotli::CompressorWriter<Vec<u8>> {
+    brotli::CompressorWriter::new(Vec::new(), 4096, BROTLI_QUALITY, BROTLI_WINDOW_BITS)
 }
 
 fn changed_mask(position: bool, angle: bool, owner: bool, template: bool) -> u8 {

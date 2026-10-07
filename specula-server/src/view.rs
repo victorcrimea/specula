@@ -1,6 +1,6 @@
-//! The viewer stream, wire format v10: one binary WebSocket message per
-//! keyframe, turn or match end, varints and zigzag as in `wire.rs`, positions and
-//! heights in 1/16 m.
+//! The viewer stream, wire format v11: messages for each keyframe, turn or
+//! match end, varints and zigzag as in `wire.rs`, positions and heights in
+//! 1/16 m, carried brotli-compressed as below.
 //!
 //! - kind 1 keyframe: varint turn, u64 match id, f32 game speed (the
 //!   match's sim rate), varint first turn of the match's history, varint
@@ -155,23 +155,42 @@
 //! Tables only grow during a match, so an index once sent stays valid.
 //! Ids in each list are sorted and delta-coded from 0.
 //!
-//! The match's history is split into segments, served at
-//! `/match/<match id as 16 hex digits>/seg/<n>` as one zstd frame of
-//! {varint length, message} entries. Segment n holds the turns from
-//! `first turn + n * turns per segment` on; after a gap in the turns it
-//! starts at the first turn it has. Its first message is a keyframe of its
-//! first turn T, then comes the delta into T from the turn before (absent
-//! in segment 0), so playback can cross into it without a keyframe, then
-//! the deltas of the later turns. Every segment but the last is immutable;
-//! once the match has ended, the last is too. The segments and terrain of
-//! the match before the current one stay served, so its viewers can keep
-//! watching it.
+//! The match's history is split into segments. Segment n holds the turns
+//! from `first turn + n * turns per segment` on; after a gap in the turns
+//! it starts at the first turn it has. It is a keyframe of its first turn
+//! T and a frame: the delta into T from the turn before (absent in segment
+//! 0), so playback can cross into it without a keyframe, then the deltas
+//! of the later turns. A frame is one brotli stream of {varint length,
+//! message} entries, flushed after each turn, so every turn's bytes can be
+//! sent on their own; a keyframe is a brotli stream of its own.
+//!
+//! A segment is served at `/match/<match id as 16 hex digits>/seg/<n>` as
+//! varint n, n bytes of the compressed keyframe, then the frame. Every
+//! segment but the last is immutable and its frame finished; the last
+//! one's frame is what has been flushed so far, a stream that needs more
+//! input, until the match ends. The segments and terrain of the match
+//! before the current one stay served, so its viewers can keep watching
+//! it.
+//!
+//! Each WebSocket message is u8 envelope, then by envelope:
+//! - 1 join: varint n, n bytes of a compressed keyframe, then the bytes of
+//!   the frame that follows it so far (possibly none). A decoder of a new
+//!   frame takes them; deltas in it not after the keyframe's turn are
+//!   already in the keyframe. A new viewer gets the open segment this way,
+//!   and every viewer gets a new match's first turn.
+//! - 2 frame: the bytes one turn flushed, starting a new frame.
+//! - 3 more: the bytes one turn flushed, continuing the frame.
+//! - 4 ended: an ended message, uncompressed.
+//!
+//! So the compression is done once per match, not per viewer, and a
+//! viewer joins at the open segment's keyframe (init.md 4).
 
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::io;
 use std::io::ErrorKind;
+use std::io::Write;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Instant;
@@ -229,9 +248,18 @@ const TURN_SECS: f64 = 0.2;
 const PROJECTILE_KEEP_SECS: f64 = 35.0;
 /// About 50 s of turns; a viewer further behind is resent a keyframe.
 const BACKLOG_MESSAGES: usize = 256;
-/// 50 turns of 200 ms: a keyframe every 10 s of game time (init.md 3).
-const SEGMENT_TURNS: u32 = 50;
-const SEGMENT_ZSTD_LEVEL: i32 = 3;
+/// 150 turns of 200 ms: a keyframe every 30 s of game time. Longer
+/// frames compress better, and a viewer joining replays at most this many
+/// deltas (`DATA_OPTIMIZATION.md`).
+const SEGMENT_TURNS: u32 = 150;
+/// Past 5 the ratio barely improves for several times the CPU
+/// (`DATA_OPTIMIZATION.md` 12).
+const BROTLI_QUALITY: u32 = 5;
+const BROTLI_WINDOW_BITS: u32 = 22;
+const ENVELOPE_JOIN: u8 = 1;
+const ENVELOPE_FRAME: u8 = 2;
+const ENVELOPE_MORE: u8 = 3;
+const ENVELOPE_ENDED: u8 = 4;
 
 pub type Message = Arc<[u8]>;
 
@@ -446,11 +474,13 @@ struct Archive {
 
 struct Ended {
     at: Instant,
-    /// The final state, for viewers who join before the next match: the
-    /// tables a keyframe would be built from belong to the next feed by
-    /// then.
+    /// The final state, compressed, for viewers who join before the next
+    /// match: the tables a keyframe would be built from belong to the next
+    /// feed by then.
     keyframe: Message,
 }
+
+type Frame = brotli::CompressorWriter<Vec<u8>>;
 
 struct State {
     turn: u32,
@@ -462,10 +492,14 @@ struct State {
     match_id: u64,
     /// The turn segment 0 starts at.
     first_turn: u32,
-    /// Closed segments, zstd-compressed.
+    /// Closed segments, as served.
     segments: Vec<Message>,
-    /// The open segment, index `segments.len()`, uncompressed.
-    open: Vec<u8>,
+    /// The open segment, index `segments.len()`: its compressed keyframe,
+    /// and its frame once a delta has gone into it. The frame's output is
+    /// kept whole, since it is the segment's body and what a joining viewer
+    /// is sent.
+    open_keyframe: Message,
+    frame: Option<Frame>,
     terrain: Option<(u64, Message)>,
     ground: Option<Ground>,
     /// What viewers hold after the last turn, which the next delta builds
@@ -535,7 +569,8 @@ impl Hub {
                 match_id: 0,
                 first_turn: 0,
                 segments: Vec::new(),
-                open: Vec::new(),
+                open_keyframe: Arc::new([]),
+                frame: None,
                 terrain: None,
                 ground: None,
                 dots: BTreeMap::new(),
@@ -693,21 +728,14 @@ impl Hub {
         if !state.has_turn || state.ended.is_some() {
             return;
         }
-        match zstd::bulk::compress(&state.open, SEGMENT_ZSTD_LEVEL) {
-            Ok(closed) => {
-                state.segments.push(closed.into());
-                state.open.clear();
-            }
-            // The history then ends at the last closed segment.
-            Err(error) => eprintln!("cannot compress the last segment: {error}"),
-        }
-        let keyframe: Message = encode_keyframe(
+        close_segment(state);
+        let keyframe: Message = compress(&encode_keyframe(
             state,
             state.turn,
             &state.tables(true),
             &state.dots,
             &state.shots,
-        )
+        ))
         .into();
         state.previous = Some(Archive {
             match_id: state.match_id,
@@ -719,7 +747,9 @@ impl Hub {
             keyframe,
         });
         println!("match {:016x} ended at turn {}", state.match_id, state.turn);
-        let _ = state.sender.send(encode_ended(state.match_id, 0).into());
+        let _ = state
+            .sender
+            .send(envelope_ended(&encode_ended(state.match_id, 0)).into());
     }
 
     pub fn set_map(&self, size: u32, game_speed: f32) {
@@ -792,16 +822,15 @@ impl Hub {
             state.ended = None;
             state.first_turn = turn;
             state.segments.clear();
-            state.open.clear();
+            state.frame = None;
             let ground = state.ground.as_ref();
             let shown = dots
                 .iter()
                 .map(|(id, dot)| (*id, arrive(ground, dot)))
                 .collect();
-            let keyframe: Message =
-                encode_keyframe(state, turn, &state.tables(true), &shown, &shots).into();
-            append_framed(&mut state.open, &keyframe);
-            (keyframe, shown)
+            let keyframe = encode_keyframe(state, turn, &state.tables(true), &shown, &shots);
+            state.open_keyframe = compress(&keyframe).into();
+            (envelope_join(&state.open_keyframe, &[]).into(), shown)
         } else {
             let (delta, shown) = encode_delta(
                 turn,
@@ -823,17 +852,32 @@ impl Hub {
                 &launches,
                 &removals,
             );
-            let delta: Message = delta.into();
             let next_start = state.first_turn + SEGMENT_TURNS * (state.segments.len() as u32 + 1);
             if turn >= next_start {
-                let closed = zstd::bulk::compress(&state.open, SEGMENT_ZSTD_LEVEL)?;
-                state.segments.push(closed.into());
-                state.open.clear();
+                close_segment(state);
                 let keyframe = encode_keyframe(state, turn, &state.tables(true), &shown, &shots);
-                append_framed(&mut state.open, &keyframe);
+                state.open_keyframe = compress(&keyframe).into();
             }
-            append_framed(&mut state.open, &delta);
-            (delta, shown)
+            let (envelope, frame) = match &mut state.frame {
+                Some(frame) => (ENVELOPE_MORE, frame),
+                None => (
+                    ENVELOPE_FRAME,
+                    state.frame.insert(Frame::new(
+                        Vec::new(),
+                        4096,
+                        BROTLI_QUALITY,
+                        BROTLI_WINDOW_BITS,
+                    )),
+                ),
+            };
+            let before = frame.get_ref().len();
+            let mut entry = Vec::with_capacity(delta.len() + 5);
+            append_framed(&mut entry, &delta);
+            frame.write_all(&entry)?;
+            frame.flush()?;
+            let mut message = vec![envelope];
+            message.extend_from_slice(&frame.get_ref()[before..]);
+            (message.into(), shown)
         };
         state.icons.sent = state.icons.items.len();
         state.templates.sent = state.templates.items.len();
@@ -858,8 +902,7 @@ impl Hub {
     }
 
     /// A segment of the current or the previous match, and whether it is
-    /// closed. The open one is compressed on each request; it changes every
-    /// turn anyway.
+    /// closed.
     pub fn segment(&self, match_id: u64, index: usize) -> Option<(Message, bool)> {
         let state = self.state.lock().unwrap();
         // An ended match is archived but keeps its id until the next one
@@ -880,37 +923,26 @@ impl Hub {
         if index != state.segments.len() {
             return None;
         }
-        match zstd::bulk::compress(&state.open, SEGMENT_ZSTD_LEVEL) {
-            Ok(bytes) => Some((bytes.into(), false)),
-            Err(error) => {
-                eprintln!("cannot compress the open segment: {error}");
-                None
-            }
-        }
+        Some((open_segment(&state).into(), false))
     }
 
     /// What a new viewer is sent first (nothing before the first turn) and
-    /// the receiver are taken under one lock, so the first delta a viewer
-    /// receives applies to exactly that keyframe.
+    /// the receiver are taken under one lock, so the first bytes a viewer
+    /// receives continue exactly the frame it was sent.
     pub fn subscribe(&self) -> (Vec<Message>, broadcast::Receiver<Message>) {
         let state = self.state.lock().unwrap();
         let first = if let Some(ended) = &state.ended {
             let since = ended.at.elapsed().as_millis() as u64;
             vec![
-                Arc::clone(&ended.keyframe),
-                encode_ended(state.match_id, since).into(),
+                envelope_join(&ended.keyframe, &[]).into(),
+                envelope_ended(&encode_ended(state.match_id, since)).into(),
             ]
         } else if state.has_turn {
-            vec![
-                encode_keyframe(
-                    &state,
-                    state.turn,
-                    &state.tables(false),
-                    &state.dots,
-                    &state.shots,
-                )
-                .into(),
-            ]
+            let frame = state
+                .frame
+                .as_ref()
+                .map_or(&[][..], |frame| frame.get_ref());
+            vec![envelope_join(&state.open_keyframe, frame).into()]
         } else {
             Vec::new()
         };
@@ -936,6 +968,48 @@ fn encode_ended(match_id: u64, since_ms: u64) -> Vec<u8> {
     out.u64(match_id);
     out.varint(since_ms);
     out.0
+}
+
+/// Keyframes are compressed on their own: a viewer starts at one.
+fn compress(bytes: &[u8]) -> Vec<u8> {
+    let mut writer = Frame::new(Vec::new(), 4096, BROTLI_QUALITY, BROTLI_WINDOW_BITS);
+    // Writing to a Vec cannot fail.
+    writer.write_all(bytes).unwrap();
+    writer.into_inner()
+}
+
+fn envelope_join(keyframe: &[u8], frame: &[u8]) -> Vec<u8> {
+    let mut out = Writer::default();
+    out.u8(ENVELOPE_JOIN);
+    append_framed(&mut out.0, keyframe);
+    out.0.extend_from_slice(frame);
+    out.0
+}
+
+fn envelope_ended(message: &[u8]) -> Vec<u8> {
+    let mut out = vec![ENVELOPE_ENDED];
+    out.extend_from_slice(message);
+    out
+}
+
+/// The open segment as served: its frame so far, unfinished.
+fn open_segment(state: &State) -> Vec<u8> {
+    let mut segment = Vec::new();
+    append_framed(&mut segment, &state.open_keyframe);
+    if let Some(frame) = &state.frame {
+        segment.extend_from_slice(frame.get_ref());
+    }
+    segment
+}
+
+/// Finishes the open segment's frame and keeps the segment.
+fn close_segment(state: &mut State) {
+    let mut segment = Vec::new();
+    append_framed(&mut segment, &state.open_keyframe);
+    if let Some(frame) = state.frame.take() {
+        segment.extend_from_slice(&frame.into_inner());
+    }
+    state.segments.push(segment.into());
 }
 
 fn append_framed(segment: &mut Vec<u8>, message: &[u8]) {

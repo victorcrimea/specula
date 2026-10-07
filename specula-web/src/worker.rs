@@ -41,6 +41,7 @@ use web_sys::WorkerGlobalScope;
 
 use crate::TURN_MS;
 use crate::stream;
+use crate::stream::FrameDecoder;
 use crate::stream::Ground;
 use crate::stream::Scene;
 
@@ -88,6 +89,16 @@ struct Segment {
     messages: Vec<(u32, Vec<u8>)>,
 }
 
+/// What applying one live message did.
+enum Applied {
+    /// It went into the live scene, so the page should see it.
+    Live(Vec<u8>),
+    /// It went elsewhere: the next match, or the end of this one.
+    Other,
+    /// The stream was dropped.
+    Failed,
+}
+
 enum Next {
     Message(u32, Vec<u8>),
     /// A segment is being fetched; its arrival resumes playback.
@@ -100,6 +111,9 @@ struct Playback {
     socket: Option<WebSocket>,
     /// The current socket's handlers, dropped with it.
     socket_handlers: Option<SocketHandlers>,
+    /// Decodes the frame the stream is in; a join or a new frame replaces
+    /// it.
+    frame: Option<FrameDecoder>,
     reconnect_ms: f64,
     /// Calls `resume`, for timers.
     wake: js_sys::Function,
@@ -140,9 +154,9 @@ struct Playback {
     segment_bytes: u64,
     /// Fetched terrains, oldest first: the heightmap and the resource.
     terrains: Vec<(Rc<Ground>, Rc<[u8]>)>,
-    /// Live messages waiting, from the first keyframe whose terrain is
-    /// being fetched on.
-    held: Vec<Vec<u8>>,
+    /// Live messages waiting, by WebSocket message, from the first
+    /// keyframe whose terrain is being fetched on.
+    held: Vec<Vec<Vec<u8>>>,
     /// The terrain the page was last handed.
     page_terrain: Cell<u64>,
 }
@@ -191,16 +205,51 @@ impl Playback {
         Ok(())
     }
 
-    fn on_live(&mut self, message: Vec<u8>) {
+    fn on_socket(&mut self, bytes: Vec<u8>) {
+        self.live_bytes += bytes.len() as u64;
+        let Some((&envelope, body)) = bytes.split_first() else {
+            self.drop_stream("empty message");
+            return;
+        };
+        let messages = match envelope {
+            stream::ENVELOPE_JOIN => stream::read_join(body).map(|(frame, messages)| {
+                self.frame = Some(frame);
+                messages
+            }),
+            stream::ENVELOPE_FRAME => {
+                let frame = self.frame.insert(FrameDecoder::new());
+                frame.feed(body)
+            }
+            stream::ENVELOPE_MORE => match &mut self.frame {
+                Some(frame) => frame.feed(body),
+                None => Err("frame continued before it started"),
+            },
+            stream::ENVELOPE_ENDED => Ok(vec![body.to_vec()]),
+            _ => Err("unknown envelope"),
+        };
+        match messages {
+            Ok(messages) => self.on_live(messages),
+            Err(error) => {
+                self.frame = None;
+                self.drop_stream(error);
+            }
+        }
+    }
+
+    /// `messages` came in one WebSocket message; only a join's keyframe
+    /// can name a terrain.
+    fn on_live(&mut self, messages: Vec<Vec<u8>>) {
         self.reconnect_ms = RECONNECT_MIN_MS;
         if !self.held.is_empty() {
-            self.held.push(message);
+            self.held.push(messages);
             return;
         }
-        if stream::is_keyframe(&message) {
-            match stream::keyframe_terrain(&message) {
+        if let Some(first) = messages.first()
+            && stream::is_keyframe(first)
+        {
+            match stream::keyframe_terrain(first) {
                 Ok(id) if id != 0 && self.ground(id).is_none() => {
-                    self.held.push(message);
+                    self.held.push(messages);
                     self.request_terrain(id);
                     return;
                 }
@@ -211,7 +260,7 @@ impl Playback {
                 }
             }
         }
-        self.apply_live(message);
+        self.apply_live(messages);
     }
 
     fn request_terrain(&mut self, id: u64) {
@@ -236,8 +285,8 @@ impl Playback {
                     self.terrains.remove(0);
                 }
                 self.terrains.push(terrain);
-                for message in held {
-                    self.on_live(message);
+                for messages in held {
+                    self.on_live(messages);
                 }
             }
             // The reconnect's keyframe asks for it again, after the
@@ -249,13 +298,42 @@ impl Playback {
         }
     }
 
-    fn apply_live(&mut self, message: Vec<u8>) {
+    /// A join replays up to a segment of deltas at once; the page gets
+    /// the result as one keyframe rather than all of them in one go.
+    fn apply_live(&mut self, messages: Vec<Vec<u8>>) {
+        let mut shown = Vec::new();
+        for message in messages {
+            match self.apply_message(message) {
+                Applied::Live(message) => shown.push(message),
+                Applied::Other => {}
+                Applied::Failed => return,
+            }
+        }
+        if shown.is_empty() {
+            return;
+        }
+        if self.live {
+            if let [message] = &shown[..] {
+                self.post_scene(0.0, message);
+            } else {
+                self.post_scene(0.0, &self.live_scene.encode_keyframe());
+            }
+        }
+        self.post_status();
+    }
+
+    fn apply_message(&mut self, message: Vec<u8>) -> Applied {
         if stream::is_ended(&message) {
             match stream::read_ended(&message) {
-                Ok((match_id, since_ms)) => self.on_ended(match_id, since_ms),
-                Err(error) => self.drop_stream(error),
+                Ok((match_id, since_ms)) => {
+                    self.on_ended(match_id, since_ms);
+                    return Applied::Other;
+                }
+                Err(error) => {
+                    self.drop_stream(error);
+                    return Applied::Failed;
+                }
             }
-            return;
         }
         if self.ended_at.is_some() {
             if let Some(mut next) = self.next_scene.take() {
@@ -266,8 +344,9 @@ impl Playback {
                 if let Err(error) = applied {
                     self.next_scene = None;
                     self.drop_stream(error);
+                    return Applied::Failed;
                 }
-                return;
+                return Applied::Other;
             }
             if stream::is_keyframe(&message) {
                 let mut scene = Scene::default();
@@ -276,14 +355,14 @@ impl Playback {
                     .and_then(|()| scene.apply(&message, 1.0))
                 {
                     self.drop_stream(error);
-                    return;
+                    return Applied::Failed;
                 }
                 // A reconnect resends the ended match itself; that replaces
                 // it as any keyframe does, below.
                 if scene.match_id != self.live_scene.match_id {
                     self.next_scene = Some(scene);
                     self.switch_due();
-                    return;
+                    return Applied::Other;
                 }
             }
         }
@@ -295,7 +374,7 @@ impl Playback {
         self.live_scene = scene;
         if let Err(error) = applied {
             self.drop_stream(error);
-            return;
+            return Applied::Failed;
         }
         let turn = self.live_scene.turn;
         self.newest_turn = turn;
@@ -312,10 +391,7 @@ impl Playback {
             }
             self.recent.push_back((turn, message.clone()));
         }
-        if self.live {
-            self.post_scene(0.0, &message);
-        }
-        self.post_status();
+        Applied::Live(message)
     }
 
     fn on_ended(&mut self, match_id: u64, since_ms: u64) {
@@ -799,6 +875,7 @@ fn start() -> Result<(), String> {
             scope: scope.clone(),
             socket: None,
             socket_handlers: None,
+            frame: None,
             reconnect_ms: RECONNECT_MIN_MS,
             wake: function,
             switch_wake: switch_function,
@@ -874,9 +951,7 @@ fn connect(playback: &Weak<RefCell<Playback>>) -> Result<(), String> {
         };
         let bytes = js_sys::Uint8Array::new(&buffer).to_vec();
         if let Some(playback) = receiver.upgrade() {
-            let mut playback = playback.borrow_mut();
-            playback.live_bytes += bytes.len() as u64;
-            playback.on_live(bytes);
+            playback.borrow_mut().on_socket(bytes);
         }
     });
     socket.set_onmessage(Some(on_message.as_ref().unchecked_ref()));

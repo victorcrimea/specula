@@ -1,12 +1,18 @@
 //! Decoder for specula-server's viewer stream and match segments, wire
-//! format v10; the layout is documented in `specula-server/src/view.rs`.
+//! format v11; the layout is documented in `specula-server/src/view.rs`.
 
 use std::collections::BTreeMap;
-use std::io::Read;
 use std::rc::Rc;
 
-use ruzstd::decoding::StreamingDecoder;
+use brotli_decompressor::BrotliDecompressStream;
+use brotli_decompressor::BrotliResult;
+use brotli_decompressor::BrotliState;
+use brotli_decompressor::StandardAlloc;
 
+pub const ENVELOPE_JOIN: u8 = 1;
+pub const ENVELOPE_FRAME: u8 = 2;
+pub const ENVELOPE_MORE: u8 = 3;
+pub const ENVELOPE_ENDED: u8 = 4;
 const MESSAGE_KEYFRAME: u8 = 1;
 const MESSAGE_DELTA: u8 = 2;
 const MESSAGE_ENDED: u8 = 3;
@@ -884,23 +890,123 @@ pub fn read_ended(message: &[u8]) -> Result<(u64, u64), &'static str> {
     Ok((match_id, since_ms))
 }
 
-/// Splits a zstd-compressed segment into its messages.
-pub fn read_segment(compressed: &[u8]) -> Result<Vec<Vec<u8>>, &'static str> {
-    let mut decoder = StreamingDecoder::new(compressed).map_err(|_| "segment not zstd")?;
+/// Splits a segment into its messages, the keyframe first.
+pub fn read_segment(segment: &[u8]) -> Result<Vec<Vec<u8>>, &'static str> {
+    Ok(read_keyframe_and_frame(segment)?.1)
+}
+
+/// A join's messages, the keyframe first, and the decoder its frame goes
+/// on in.
+pub fn read_join(body: &[u8]) -> Result<(FrameDecoder, Vec<Vec<u8>>), &'static str> {
+    let (frame, mut messages) = read_keyframe_and_frame(body)?;
+    let keyframe_turn = message_turn(&messages[0])?;
+    // The delta into the keyframe's turn is in the frame for playback
+    // crossing into the segment; the keyframe already holds it.
+    let mut kept = vec![std::mem::take(&mut messages[0])];
+    for message in messages.into_iter().skip(1) {
+        if message_turn(&message)? > keyframe_turn {
+            kept.push(message);
+        }
+    }
+    Ok((frame, kept))
+}
+
+/// varint n, n bytes of a compressed keyframe, then (part of) a frame.
+fn read_keyframe_and_frame(bytes: &[u8]) -> Result<(FrameDecoder, Vec<Vec<u8>>), &'static str> {
+    let mut cursor = Cursor(bytes);
+    let length = cursor.varint()? as usize;
+    let keyframe = decompress(cursor.take(length)?)?;
+    if !is_keyframe(&keyframe) {
+        return Err("does not start with a keyframe");
+    }
+    let mut frame = FrameDecoder::new();
+    let mut messages = vec![keyframe];
+    messages.extend(frame.feed(cursor.0)?);
+    Ok((frame, messages))
+}
+
+/// One brotli stream of {varint length, message} entries, fed as it
+/// arrives.
+pub struct FrameDecoder {
+    state: Box<BrotliState<StandardAlloc, StandardAlloc, StandardAlloc>>,
+}
+
+impl FrameDecoder {
+    pub fn new() -> Self {
+        FrameDecoder {
+            state: Box::new(new_brotli_state()),
+        }
+    }
+
+    /// The messages `chunk` holds. The server flushes after every entry,
+    /// so a chunk that ends inside one is corrupt.
+    pub fn feed(&mut self, chunk: &[u8]) -> Result<Vec<Vec<u8>>, &'static str> {
+        let mut bytes = Vec::new();
+        inflate(&mut self.state, chunk, &mut bytes)?;
+        let mut cursor = Cursor(&bytes);
+        let mut messages = Vec::new();
+        while !cursor.0.is_empty() {
+            let length = cursor.varint()? as usize;
+            messages.push(cursor.take(length)?.to_vec());
+        }
+        Ok(messages)
+    }
+}
+
+/// One whole brotli stream.
+fn decompress(compressed: &[u8]) -> Result<Vec<u8>, &'static str> {
+    let mut state = new_brotli_state();
     let mut bytes = Vec::new();
-    decoder
-        .read_to_end(&mut bytes)
-        .map_err(|_| "segment zstd corrupt")?;
-    let mut cursor = Cursor(&bytes);
-    let mut messages = Vec::new();
-    while !cursor.0.is_empty() {
-        let length = cursor.varint()? as usize;
-        messages.push(cursor.take(length)?.to_vec());
+    if !inflate(&mut state, compressed, &mut bytes)? {
+        return Err("brotli stream cut short");
     }
-    if !messages.first().is_some_and(|first| is_keyframe(first)) {
-        return Err("segment does not start with a keyframe");
+    Ok(bytes)
+}
+
+fn new_brotli_state() -> BrotliState<StandardAlloc, StandardAlloc, StandardAlloc> {
+    BrotliState::new(
+        StandardAlloc::default(),
+        StandardAlloc::default(),
+        StandardAlloc::default(),
+    )
+}
+
+/// Appends what `input` decodes to; true once the stream has ended, which
+/// must be at the end of `input`.
+fn inflate(
+    state: &mut BrotliState<StandardAlloc, StandardAlloc, StandardAlloc>,
+    input: &[u8],
+    out: &mut Vec<u8>,
+) -> Result<bool, &'static str> {
+    let mut available_in = input.len();
+    let mut input_offset = 0;
+    let mut buffer = vec![0; 64 * 1024];
+    let mut total_out = 0;
+    loop {
+        let mut available_out = buffer.len();
+        let mut output_offset = 0;
+        let result = BrotliDecompressStream(
+            &mut available_in,
+            &mut input_offset,
+            input,
+            &mut available_out,
+            &mut output_offset,
+            &mut buffer,
+            &mut total_out,
+            state,
+        );
+        out.extend_from_slice(&buffer[..output_offset]);
+        match result {
+            BrotliResult::NeedsMoreOutput => {}
+            // With the input used up and the buffer full, the decoder says
+            // it needs input even when it still holds decoded bytes.
+            BrotliResult::NeedsMoreInput if output_offset == buffer.len() => {}
+            BrotliResult::NeedsMoreInput => return Ok(false),
+            BrotliResult::ResultSuccess if available_in == 0 => return Ok(true),
+            BrotliResult::ResultSuccess => return Err("bytes after the brotli stream"),
+            BrotliResult::ResultFailure => return Err("brotli corrupt"),
+        }
     }
-    Ok(messages)
 }
 
 #[derive(Default)]
