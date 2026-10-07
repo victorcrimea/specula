@@ -78,7 +78,7 @@ async fn main() {
             "/",
             rocket::routes![
                 viewer,
-                terrain_file,
+                web::terrain,
                 segment_file,
                 web::index,
                 web::page,
@@ -158,18 +158,6 @@ fn viewer(socket: WebSocket, hub: &State<Arc<Hub>>) -> Channel<'static> {
             }
         })
     })
-}
-
-#[derive(rocket::Responder)]
-#[response(content_type = "binary")]
-struct TerrainBytes(Vec<u8>, Header<'static>);
-
-#[rocket::get("/terrain/<id>")]
-fn terrain_file(id: &str, hub: &State<Arc<Hub>>) -> Option<TerrainBytes> {
-    let bytes = hub.terrain(u64::from_str_radix(id, 16).ok()?)?;
-    // The id is a hash of the content, so a cached copy is never stale.
-    let cache = Header::new("Cache-Control", "public, max-age=31536000, immutable");
-    Some(TerrainBytes(bytes.to_vec(), cache))
 }
 
 #[derive(rocket::Responder)]

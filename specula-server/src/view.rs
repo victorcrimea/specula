@@ -193,6 +193,7 @@ use std::io::ErrorKind;
 use std::io::Write;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::OnceLock;
 use std::time::Instant;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
@@ -207,6 +208,7 @@ use crate::feed::Sound;
 use crate::feed::SoundTarget;
 use crate::feed::Territory;
 use crate::terrain::Ground;
+use crate::web;
 use crate::wire::Writer;
 use crate::wire::quantize_angle;
 use crate::wire::quantize_position;
@@ -464,12 +466,19 @@ pub struct Hub {
     state: Mutex<State>,
 }
 
+/// A terrain resource as served, and its brotli copy once made.
+#[derive(Clone)]
+pub struct TerrainFile {
+    pub raw: Message,
+    pub brotli: Arc<OnceLock<Message>>,
+}
+
 /// A finished match's history, kept for its viewers once the next one
 /// starts.
 struct Archive {
     match_id: u64,
     segments: Vec<Message>,
-    terrain: Option<(u64, Message)>,
+    terrain: Option<(u64, TerrainFile)>,
 }
 
 struct Ended {
@@ -500,7 +509,7 @@ struct State {
     /// is sent.
     open_keyframe: Message,
     frame: Option<Frame>,
-    terrain: Option<(u64, Message)>,
+    terrain: Option<(u64, TerrainFile)>,
     ground: Option<Ground>,
     /// What viewers hold after the last turn, which the next delta builds
     /// on; near the simulation's state, not equal to it.
@@ -698,13 +707,23 @@ impl Hub {
             eprintln!("terrain {id:016x} arrived during a match, ignored");
             return;
         }
-        state.terrain = Some((id, bytes.into()));
+        let file = TerrainFile {
+            raw: bytes.into(),
+            brotli: Arc::new(OnceLock::new()),
+        };
+        // The highest quality takes seconds on a large map, which the feed
+        // thread must not wait for.
+        let (raw, brotli) = (Arc::clone(&file.raw), Arc::clone(&file.brotli));
+        std::thread::spawn(move || {
+            let _ = brotli.set(web::compress(&raw).into());
+        });
+        state.terrain = Some((id, file));
         state.ground = Some(ground);
     }
 
     /// Only the current and the previous match's terrain are kept; an
     /// older id is gone.
-    pub fn terrain(&self, id: u64) -> Option<Message> {
+    pub fn terrain(&self, id: u64) -> Option<TerrainFile> {
         let state = self.state.lock().unwrap();
         let archived = state
             .previous
@@ -714,7 +733,7 @@ impl Hub {
             .into_iter()
             .flatten()
             .find(|(known, _)| *known == id)
-            .map(|(_, bytes)| Arc::clone(bytes))
+            .map(|(_, file)| file.clone())
     }
 
     pub fn feed_activity(&self) -> Option<Instant> {

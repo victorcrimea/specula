@@ -1,7 +1,8 @@
 //! The browser client's files where the plain file server is not enough:
 //! baked assets with the brotli copy bake-assets writes next to each, the
 //! wasm and its glue compressed here once per build, and the pages with
-//! the current glue and wasm versions in their URLs.
+//! the current glue and wasm versions in their URLs, and the match terrain
+//! with its brotli copy.
 //!
 //! A page names `./pkg/specula_web.js?v=GLUE` and
 //! `./pkg/specula_web_bg.wasm?v=WASM`; the placeholders become a hash of
@@ -37,6 +38,7 @@ use rocket::response::Responder;
 use rocket::response::content::RawHtml;
 
 use crate::WEB_ROOT;
+use crate::view::Hub;
 
 const IMMUTABLE: &str = "public, max-age=31536000, immutable";
 const REVALIDATE: &str = "no-cache";
@@ -44,7 +46,8 @@ const GLUE: &str = "specula_web.js";
 const WASM: &str = "specula_web_bg.wasm";
 const GLUE_PLACEHOLDER: &str = "specula_web.js?v=GLUE";
 const WASM_PLACEHOLDER: &str = "specula_web_bg.wasm?v=WASM";
-/// Highest quality: a build is compressed once and served many times.
+/// Highest quality: a build or a terrain is compressed once and served
+/// many times.
 const BROTLI_QUALITY: u32 = 11;
 const BROTLI_WINDOW_BITS: u32 = 22;
 
@@ -193,7 +196,7 @@ fn compressed(build: &Arc<Build>) -> Option<Shared> {
     None
 }
 
-fn compress(bytes: &[u8]) -> Vec<u8> {
+pub fn compress(bytes: &[u8]) -> Vec<u8> {
     let mut writer =
         brotli::CompressorWriter::new(Vec::new(), 4096, BROTLI_QUALITY, BROTLI_WINDOW_BITS);
     // Writing to a Vec cannot fail.
@@ -247,6 +250,30 @@ pub async fn pkg_file(
         brotli: brotli.is_some(),
         body: brotli.unwrap_or_else(|| build.raw.clone()),
         content_type,
+        cache,
+    })
+}
+
+#[rocket::get("/terrain/<id>")]
+pub fn terrain(
+    id: &str,
+    accepts: AcceptsBrotli,
+    hub: &State<Arc<Hub>>,
+) -> Option<Encoded<Vec<u8>>> {
+    let file = hub.terrain(u64::from_str_radix(id, 16).ok()?)?;
+    let brotli = accepts.0.then(|| file.brotli.get()).flatten();
+    // The id is a hash of the content, so a copy never goes stale, but the
+    // raw file sent while the brotli copy is still being made must not be
+    // kept for good.
+    let cache = if accepts.0 && brotli.is_none() {
+        REVALIDATE
+    } else {
+        IMMUTABLE
+    };
+    Some(Encoded {
+        brotli: brotli.is_some(),
+        body: brotli.unwrap_or(&file.raw).to_vec(),
+        content_type: ContentType::Binary,
         cache,
     })
 }
