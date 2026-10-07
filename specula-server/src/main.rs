@@ -74,6 +74,7 @@ async fn main() {
     let result = rocket::build()
         .manage(hub)
         .manage(web::Pkg::default())
+        .manage(web::AssetsSize::default())
         .mount(
             "/",
             rocket::routes![

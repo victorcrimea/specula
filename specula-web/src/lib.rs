@@ -98,6 +98,10 @@ const SOUND_SETTINGS_KEY: &str = "specula.sound";
 const SHADOW_SETTINGS_KEY: &str = "specula.shadows";
 /// localStorage key of the texture quality: 1 low, 2 medium, 3 high.
 const TEXTURE_SETTINGS_KEY: &str = "specula.textures";
+/// localStorage key of when the storage notice was last shown, in ms since
+/// the epoch.
+const STORAGE_NOTICE_KEY: &str = "specula.storage-notice";
+const STORAGE_NOTICE_INTERVAL_MS: f64 = 7.0 * 24.0 * 60.0 * 60.0 * 1000.0;
 
 /// The camera a sound is placed against, as the engine's listener sits at
 /// it: the view-projection matrix (row-major), the eye in metres and the
@@ -466,8 +470,29 @@ impl App {
                 .asset_store()
                 .is_some_and(|store| store.borrow().index_name().is_some());
             warmup.frame(index_loaded);
+            if warmup.take_request() {
+                self.start_warmup();
+            }
         }
         self.play_sounds(now, progress);
+    }
+
+    /// Covers the civs, the terrains and the entities on the map now.
+    fn start_warmup(&mut self) {
+        let (Some(store), Some(warmup)) = (self.renderer.asset_store(), &mut self.warmup) else {
+            return;
+        };
+        let actors: BTreeSet<&str> = self
+            .scene
+            .dots
+            .values()
+            .filter_map(|dot| {
+                let index = dot.actor.checked_sub(1)?;
+                self.scene.strings.get(index as usize).map(String::as_str)
+            })
+            .collect();
+        let actors: Vec<&str> = actors.into_iter().collect();
+        warmup.start(&store.borrow(), &actors);
     }
 
     fn play_sounds(&mut self, now: f64, progress: f32) {
@@ -798,6 +823,9 @@ async fn run(page: Page, glue_url: String, wasm_url: String) -> Result<(), Strin
     }
     wire_sound(&app, &window);
     wire_warmup(&app);
+    if page == Page::Observer {
+        wire_storage_notice(&app, &document)?;
+    }
     wire_playback(&app);
     connect(&app);
     wasm_bindgen_futures::spawn_local(load_icons(Rc::clone(&app)));
@@ -981,23 +1009,55 @@ fn wire_warmup(app: &Rc<RefCell<App>>) {
     let target = Rc::clone(app);
     let on_click = Closure::<dyn FnMut()>::new(move || {
         let app = &mut *target.borrow_mut();
-        if let (Some(store), Some(warmup)) = (app.renderer.asset_store(), &mut app.warmup) {
-            let actors: BTreeSet<&str> = app
-                .scene
-                .dots
-                .values()
-                .filter_map(|dot| {
-                    let index = dot.actor.checked_sub(1)?;
-                    app.scene.strings.get(index as usize).map(String::as_str)
-                })
-                .collect();
-            let actors: Vec<&str> = actors.into_iter().collect();
-            warmup.start(&store.borrow(), &actors);
+        if app.renderer.asset_store().is_some() && app.warmup.is_some() {
+            app.start_warmup();
             stored::persist();
         }
     });
     button.set_onclick(Some(on_click.as_ref().unchecked_ref()));
     on_click.forget();
+}
+
+/// Explains what the page stores and what Warm up is for, on the first
+/// visit and then at most once a week.
+fn wire_storage_notice(app: &Rc<RefCell<App>>, document: &Document) -> Result<(), String> {
+    let notice: HtmlElement = element(document, "storage-notice")?;
+    let ok: HtmlButtonElement = element(document, "storage-notice-ok")?;
+    let warm: HtmlButtonElement = element(document, "storage-notice-warmup")?;
+    let storage = web_sys::window().and_then(|window| window.local_storage().ok().flatten());
+    let now = js_sys::Date::now();
+    let shown_at = storage
+        .as_ref()
+        .and_then(|storage| storage.get_item(STORAGE_NOTICE_KEY).ok().flatten())
+        .and_then(|text| text.parse::<f64>().ok());
+    if shown_at.is_some_and(|at| now - at < STORAGE_NOTICE_INTERVAL_MS) {
+        return Ok(());
+    }
+    // Recorded when shown, not when answered, so a viewer who closes the
+    // tab is not asked again on every visit.
+    if let Some(storage) = &storage {
+        let _ = storage.set_item(STORAGE_NOTICE_KEY, &now.to_string());
+    }
+    notice.set_hidden(false);
+
+    let popup = notice.clone();
+    let on_ok = Closure::<dyn FnMut()>::new(move || popup.set_hidden(true));
+    ok.set_onclick(Some(on_ok.as_ref().unchecked_ref()));
+    on_ok.forget();
+
+    let target = Rc::clone(app);
+    let on_warm = Closure::<dyn FnMut()>::new(move || {
+        notice.set_hidden(true);
+        if let Some(warmup) = &mut target.borrow_mut().warmup {
+            warmup.request();
+        }
+        // Here rather than when the run starts: Firefox asks the viewer,
+        // and only from a click.
+        stored::persist();
+    });
+    warm.set_onclick(Some(on_warm.as_ref().unchecked_ref()));
+    on_warm.forget();
+    Ok(())
 }
 
 fn wire_sound(app: &Rc<RefCell<App>>, window: &web_sys::Window) {

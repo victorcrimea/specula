@@ -34,6 +34,9 @@ pub struct Warmup {
     /// The (civs, terrains) the last run was for.
     ran_for: Option<(Vec<String>, Vec<String>)>,
     shown: String,
+    /// Asked for before the button could start a run: the storage notice
+    /// can be answered before the match's civs are known.
+    requested: bool,
 }
 
 #[derive(Default)]
@@ -70,6 +73,7 @@ impl Warmup {
             run: None,
             ran_for: None,
             shown: String::new(),
+            requested: false,
         }
     }
 
@@ -108,6 +112,20 @@ impl Warmup {
         pump(&run);
         self.run = Some(run);
         self.ran_for = Some((self.civs.clone(), self.terrains.clone()));
+    }
+
+    pub fn request(&mut self) {
+        self.requested = true;
+    }
+
+    /// Whether a request is waiting and the button would now start it;
+    /// clears the request when it does.
+    pub fn take_request(&mut self) -> bool {
+        let ready = self.requested && !self.button.disabled();
+        if ready {
+            self.requested = false;
+        }
+        ready
     }
 
     fn running(&self) -> bool {

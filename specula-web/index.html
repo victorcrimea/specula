@@ -66,6 +66,18 @@ body:not(.debug) #stats, body:not(.debug) #errors { display: none; }
 #match-over button { font: inherit; color: #e6e9eb; background: rgba(15, 18, 20, 0.85);
   border: 1px solid #3a4248; border-radius: 4px; padding: 4px 8px; }
 #match-over :disabled { opacity: 0.5; }
+#storage-notice { position: fixed; inset: 0; display: flex; align-items: center;
+  justify-content: center; padding: 16px; background: rgba(0, 0, 0, 0.5); }
+#storage-notice[hidden] { display: none; }
+#storage-notice-box { max-width: 460px; max-height: 100%; overflow: auto;
+  box-sizing: border-box; padding: 12px 16px; font: 14px/1.45 system-ui, sans-serif;
+  color: #e6e9eb; background: rgba(15, 18, 20, 0.95);
+  border: 1px solid #3a4248; border-radius: 4px; }
+#storage-notice h2 { margin: 0 0 8px; font-size: 16px; }
+#storage-notice p { margin: 0 0 8px; }
+#storage-notice-buttons { display: flex; justify-content: flex-end; gap: 6px; margin-top: 12px; }
+#storage-notice button { font: inherit; color: #e6e9eb; background: rgba(15, 18, 20, 0.85);
+  border: 1px solid #3a4248; border-radius: 4px; padding: 4px 10px; }
 </style>
 </head>
 <body>
@@ -117,6 +129,34 @@ body:not(.debug) #stats, body:not(.debug) #errors { display: none; }
 <span id="match-over-text">Match over</span>
 <button id="match-over-current" type="button" disabled>Current match</button>
 <button id="match-over-close" type="button" aria-label="Close">x</button>
+</div>
+<div id="storage-notice" role="dialog" aria-modal="true" aria-labelledby="storage-notice-title" hidden>
+<div id="storage-notice-box">
+<h2 id="storage-notice-title">Assets for the 3D view</h2>
+<p>To show the match in 3D, this observer uses the game's own models,
+textures, animations and sounds. It downloads them from this server as the
+match needs them and keeps them in your browser's storage. Your next match
+or visit then reuses them instead of downloading them again.</p>
+<p>Over time this observer may store up to <b>ASSETS_SIZE</b> of data on your
+machine.</p>
+<p>You don't need to wait for any of it. The match starts right away, and
+each model is fetched the first time it comes on screen. It shows first as
+a small rough version of a few KB, and full detail follows. A lower texture
+quality in the settings stores less.</p>
+<p><b>Warm up</b> downloads, in the background, everything this match can
+need: the buildings and units of every civilisation in it, the map's
+terrain, and the trees, animals and rocks on it. Then nothing has to load
+when it first appears. This helps on a slow connection, or before the
+armies meet. It also asks your browser to keep these files rather than
+clear them when space runs low, and some browsers will ask your permission
+first.</p>
+<p>You can delete the stored files at any time in your browser's site data
+settings.</p>
+<div id="storage-notice-buttons">
+<button id="storage-notice-warmup" type="button">Warm up now</button>
+<button id="storage-notice-ok" type="button">Got it</button>
+</div>
+</div>
 </div>
 <script>
 // Phones have no console to read, so errors and the console's lines are

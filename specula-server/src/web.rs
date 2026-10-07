@@ -9,8 +9,12 @@
 //! the file, so a cache in front of the server cannot pair a new wasm with
 //! an old glue, and a `pkg/` file asked for by its current hash never
 //! changes. A server that does not fill them in still serves working pages.
+//!
+//! `/` also names `ASSETS_SIZE`, which becomes how much the current bake
+//! can store in a viewer's browser, worked out once per bake.
 
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::hash::DefaultHasher;
 use std::hash::Hash;
 use std::hash::Hasher;
@@ -46,6 +50,7 @@ const GLUE: &str = "specula_web.js";
 const WASM: &str = "specula_web_bg.wasm";
 const GLUE_PLACEHOLDER: &str = "specula_web.js?v=GLUE";
 const WASM_PLACEHOLDER: &str = "specula_web_bg.wasm?v=WASM";
+const ASSETS_SIZE_PLACEHOLDER: &str = "ASSETS_SIZE";
 /// Highest quality: a build or a terrain is compressed once and served
 /// many times.
 const BROTLI_QUALITY: u32 = 11;
@@ -204,21 +209,104 @@ pub fn compress(bytes: &[u8]) -> Vec<u8> {
     writer.into_inner()
 }
 
+/// The bytes the current bake's files take uncompressed, which is what
+/// the client keeps in the Cache API, for the `assets.txt` it was summed
+/// against.
+#[derive(Default)]
+pub struct AssetsSize {
+    last: Mutex<Option<(String, u64)>>,
+}
+
+impl AssetsSize {
+    /// Rereads only the pointer on each request, so a rebake under a
+    /// running server is summed again.
+    async fn get(&self) -> Option<u64> {
+        let pointer = Path::new(WEB_ROOT).join("assets.txt");
+        let pointer = rocket::tokio::fs::read_to_string(pointer).await.ok()?;
+        let pointer = pointer.trim().to_string();
+        if let Some((summed, size)) = &*self.last.lock().unwrap()
+            && *summed == pointer
+        {
+            return Some(*size);
+        }
+        let index = pointer.clone();
+        let size = rocket::tokio::task::spawn_blocking(move || bake_size(&index))
+            .await
+            .ok()??;
+        *self.last.lock().unwrap() = Some((pointer, size));
+        Some(size)
+    }
+}
+
+/// `index` is `assets/index-<hash>.bin`; its `files-<hash>.bin` lists the
+/// hash of every file of the bake, so files of older bakes left in the
+/// directory are not counted.
+fn bake_size(index: &str) -> Option<u64> {
+    let hash = asset_hash(index.rsplit('/').next()?)?;
+    let dir = Path::new(WEB_ROOT).join("assets");
+    let list = std::fs::read(dir.join(format!("files-{hash:016x}.bin"))).ok()?;
+    let keep: HashSet<u64> = list
+        .chunks_exact(8)
+        .map(|chunk| u64::from_le_bytes(chunk.try_into().unwrap()))
+        .collect();
+    let mut size = 0;
+    for entry in std::fs::read_dir(dir).ok()? {
+        let Ok(entry) = entry else {
+            continue;
+        };
+        if asset_hash(&entry.file_name().to_string_lossy()).is_some_and(|hash| keep.contains(&hash))
+            && let Ok(metadata) = entry.metadata()
+        {
+            size += metadata.len();
+        }
+    }
+    Some(size)
+}
+
+/// The hash in `<kind>-<hash>.bin`; brotli copies are left out, since the
+/// browser keeps the decoded bytes.
+fn asset_hash(name: &str) -> Option<u64> {
+    let (_, hash) = name.strip_suffix(".bin")?.rsplit_once('-')?;
+    u64::from_str_radix(hash, 16).ok()
+}
+
+/// Rounded up, so the page never promises less than is stored.
+fn format_size(bytes: u64) -> String {
+    if bytes >= 1_000_000_000 {
+        format!("{:.1} GB", (bytes as f64 / 1e8).ceil() / 10.0)
+    } else {
+        format!("{} MB", bytes.div_ceil(1_000_000))
+    }
+}
+
 #[rocket::get("/")]
-pub async fn index(pkg: &State<Pkg>) -> Option<RawHtml<String>> {
-    page(Page("index.html"), pkg).await
+pub async fn index(pkg: &State<Pkg>, assets: &State<AssetsSize>) -> Option<RawHtml<String>> {
+    page(Page("index.html"), pkg, assets).await
 }
 
 #[rocket::get("/<page>")]
-pub async fn page(page: Page, pkg: &State<Pkg>) -> Option<RawHtml<String>> {
+pub async fn page(
+    page: Page,
+    pkg: &State<Pkg>,
+    assets: &State<AssetsSize>,
+) -> Option<RawHtml<String>> {
     let path = Path::new(WEB_ROOT).join(page.0);
     let html = rocket::tokio::fs::read_to_string(path).await.ok()?;
     let glue = pkg.version(GLUE).await;
     let wasm = pkg.version(WASM).await;
-    Some(RawHtml(
-        html.replace(GLUE_PLACEHOLDER, &format!("{GLUE}?v={glue}"))
-            .replace(WASM_PLACEHOLDER, &format!("{WASM}?v={wasm}")),
-    ))
+    let mut html = html
+        .replace(GLUE_PLACEHOLDER, &format!("{GLUE}?v={glue}"))
+        .replace(WASM_PLACEHOLDER, &format!("{WASM}?v={wasm}"));
+    if html.contains(ASSETS_SIZE_PLACEHOLDER) {
+        // Without a bake the 3D page has nothing to store, but the text
+        // must still read.
+        let size = assets
+            .get()
+            .await
+            .map_or_else(|| "a few GB".to_string(), format_size);
+        html = html.replace(ASSETS_SIZE_PLACEHOLDER, &size);
+    }
+    Some(RawHtml(html))
 }
 
 #[rocket::get("/pkg/<name>?<v>")]
