@@ -1,5 +1,5 @@
 //! Decoder for specula-server's viewer stream and match segments, wire
-//! format v8; the layout is documented in `specula-server/src/view.rs`.
+//! format v9; the layout is documented in `specula-server/src/view.rs`.
 
 use std::collections::BTreeMap;
 use std::io::Read;
@@ -30,8 +30,13 @@ const ANIMATION_ONCE: u8 = 1;
 /// scripted jump), not walking, so the dot does not slide there. It is well
 /// above cavalry at 2x game speed.
 const SNAP_UNITS: f32 = 24.0 * 16.0;
+/// The simulation's turn, in seconds.
+const TURN_SECS: f32 = 0.2;
+/// As specula-server keeps a projectile: `PROJECTILE_DECAY_TIME` and a
+/// margin for the launch point drawn.
+const PROJECTILE_KEEP_SECS: f32 = 35.0;
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Default)]
 pub struct Dot {
     /// In 1/16 m.
     pub x: i32,
@@ -114,6 +119,49 @@ pub enum SoundTarget {
     Player(i32),
 }
 
+/// A projectile, as `CCmpProjectileManager::LaunchProjectile` was given it.
+#[derive(Clone, Copy)]
+pub struct Shot {
+    pub launch_turn: u32,
+    /// The entity that shot it, 0 for none; it may be gone.
+    pub shooter: u32,
+    /// The shooter's as of the launch, as in `Dot`.
+    pub owner: i32,
+    pub actor: u32,
+    pub seed: u32,
+    pub variants: u32,
+    /// The simulation's launch point and the target, x, y, z in 1/16 m.
+    pub launch: [i32; 3],
+    pub target: [i32; 3],
+    /// Horizontal, in 1/256 m/s.
+    pub speed: u32,
+    /// In 1/256 m/s^2.
+    pub gravity: i32,
+    /// 1-based indices into `Scene::strings`, or 0 for none; without a
+    /// projectile actor the shooter's actor's `projectile` prop is drawn.
+    pub projectile_actor: u32,
+    pub impact_actor: u32,
+    /// In ms.
+    pub impact_lifetime: u32,
+}
+
+impl Shot {
+    /// The last turn the server keeps it for.
+    fn last_turn(&self) -> u32 {
+        let dx = (self.target[0] - self.launch[0]) as f32 / 16.0;
+        let dz = (self.target[2] - self.launch[2]) as f32 / 16.0;
+        let speed = self.speed as f32 / 256.0;
+        let flight = if speed > 0.0 {
+            dx.hypot(dz) / speed
+        } else {
+            0.0
+        };
+        let secs = flight + PROJECTILE_KEEP_SECS + self.impact_lifetime as f32 / 1000.0;
+        self.launch_turn
+            .saturating_add((secs / TURN_SECS).ceil() as u32)
+    }
+}
+
 /// (key, selection) indices into `Scene::strings`, sorted by key.
 pub type VariantSet = Vec<(u32, u32)>;
 
@@ -147,6 +195,8 @@ pub struct Scene {
     pub dots: BTreeMap<u32, Dot>,
     /// The sounds of the last delta applied; a keyframe has none.
     pub sounds: Vec<Sound>,
+    /// By id: in flight, or lying on the ground.
+    pub shots: BTreeMap<u32, Shot>,
 }
 
 /// `ICmpTerritoryManager`'s grid, a tile per `territory::TILE_SIZE`.
@@ -239,6 +289,18 @@ impl Scene {
             id += cursor.varint_u32()?;
             let dot = cursor.dot(id, self.turn)?;
             self.dots.insert(id, dot);
+        }
+        self.shots.clear();
+        let count = cursor.varint_u32()?;
+        let mut id = 0;
+        for _ in 0..count {
+            id += cursor.varint_u32()?;
+            let mut shot = cursor.shot(self.turn)?;
+            shot.launch_turn = self
+                .turn
+                .checked_sub(cursor.varint_u32()?)
+                .ok_or("projectile launched before the first turn")?;
+            self.shots.insert(id, shot);
         }
         Ok(())
     }
@@ -369,6 +431,21 @@ impl Scene {
                 _ => return Err("unknown sound target"),
             };
             self.sounds.push(Sound { group, target });
+        }
+        let turn = self.turn;
+        self.shots.retain(|_, shot| shot.last_turn() >= turn);
+        let count = cursor.varint_u32()?;
+        let mut id = 0;
+        for _ in 0..count {
+            id += cursor.varint_u32()?;
+            let shot = cursor.shot(turn)?;
+            self.shots.insert(id, shot);
+        }
+        let count = cursor.varint_u32()?;
+        let mut id = 0;
+        for _ in 0..count {
+            id += cursor.varint_u32()?;
+            self.shots.remove(&id);
         }
         Ok(())
     }
@@ -567,6 +644,28 @@ impl Scene {
             out.u8(dot.construction);
             out.varint(u64::from(dot.visibility));
         }
+        out.varint(self.shots.len() as u64);
+        let mut last_id = 0;
+        for (id, shot) in &self.shots {
+            out.varint(u64::from(id - last_id));
+            last_id = *id;
+            out.varint(u64::from(shot.shooter));
+            out.zigzag(shot.owner);
+            out.varint(u64::from(shot.actor));
+            out.zigzag_i64(i64::from(shot.seed) - i64::from(shot.shooter));
+            out.varint(u64::from(shot.variants));
+            for point in [shot.launch, shot.target] {
+                out.zigzag(point[0]);
+                out.zigzag(point[2]);
+                out.zigzag(point[1]);
+            }
+            out.varint(u64::from(shot.speed));
+            out.zigzag(shot.gravity);
+            out.varint(u64::from(shot.projectile_actor));
+            out.varint(u64::from(shot.impact_actor));
+            out.varint(u64::from(shot.impact_lifetime));
+            out.varint(u64::from(self.turn - shot.launch_turn));
+        }
         out.0
     }
 }
@@ -753,6 +852,38 @@ impl<'a> Cursor<'a> {
             visibility: self.varint_u32()? as u16,
             from_x: x as f32,
             from_z: z as f32,
+        })
+    }
+
+    /// A projectile launched on `turn`.
+    fn shot(&mut self, turn: u32) -> Result<Shot, &'static str> {
+        let shooter = self.varint_u32()?;
+        let owner = self.zigzag()?;
+        let actor = self.varint_u32()?;
+        let seed = self.seed(shooter)?;
+        let variants = self.varint_u32()?;
+        let mut point = || -> Result<[i32; 3], &'static str> {
+            let x = self.zigzag()?;
+            let z = self.zigzag()?;
+            let y = self.zigzag()?;
+            Ok([x, y, z])
+        };
+        let launch = point()?;
+        let target = point()?;
+        Ok(Shot {
+            launch_turn: turn,
+            shooter,
+            owner,
+            actor,
+            seed,
+            variants,
+            launch,
+            target,
+            speed: self.varint_u32()?,
+            gravity: self.zigzag()?,
+            projectile_actor: self.varint_u32()?,
+            impact_actor: self.varint_u32()?,
+            impact_lifetime: self.varint_u32()?,
         })
     }
 }

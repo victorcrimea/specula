@@ -253,6 +253,7 @@ fn serve(stream: UnixStream, hub: &Hub) -> io::Result<()> {
             Record::Players(players) => hub.set_players(players),
             Record::Territory(territory) => hub.set_territory(territory),
             Record::Sounds(sounds) => hub.set_sounds(sounds),
+            Record::Projectiles { launches, removals } => hub.set_projectiles(launches, removals),
             Record::String { index, text } => hub.add_string(index, text)?,
             Record::VariantSet { index, pairs } => hub.add_variant_set(index, pairs)?,
             Record::Terrain(terrain) => {

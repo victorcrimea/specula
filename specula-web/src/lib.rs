@@ -11,6 +11,7 @@ mod march;
 mod minimap;
 mod opfs;
 mod pose;
+mod projectile;
 mod render;
 mod stored;
 mod stream;
@@ -27,10 +28,12 @@ use std::rc::Rc;
 
 use specula_assets::files::MusicKind;
 use wasm_bindgen::JsCast;
+use wasm_bindgen::JsValue;
 use wasm_bindgen::closure::Closure;
 use wasm_bindgen::prelude::wasm_bindgen;
 use wasm_bindgen_futures::JsFuture;
 use web_sys::Document;
+use web_sys::Event;
 use web_sys::HtmlButtonElement;
 use web_sys::HtmlCanvasElement;
 use web_sys::HtmlElement;
@@ -124,6 +127,8 @@ trait View {
     fn animating(&self) -> bool {
         false
     }
+    /// Whether to draw projectiles, where it draws any.
+    fn set_projectiles(&mut self, _on: bool) {}
     /// Downloads to show on the loading bar.
     fn progress(&self) -> Progress {
         Progress::Idle
@@ -255,6 +260,9 @@ struct App {
     palette: Vec<u32>,
     diplomacy_button: HtmlButtonElement,
     perspective_select: HtmlSelectElement,
+    projectiles: bool,
+    /// Only the 3D view draws projectiles.
+    projectiles_button: Option<HtmlButtonElement>,
     /// The players the perspective list was built for, gaia excluded.
     player_names: Vec<String>,
     worker: Worker,
@@ -523,6 +531,22 @@ impl App {
             "false"
         };
         let _ = self.diplomacy_button.set_attribute("aria-pressed", pressed);
+        if let Some(button) = &self.projectiles_button {
+            let pressed = if self.projectiles { "true" } else { "false" };
+            let _ = button.set_attribute("aria-pressed", pressed);
+            button.set_text_content(Some(if self.projectiles {
+                "Projectiles on"
+            } else {
+                "Projectiles off"
+            }));
+        }
+    }
+
+    fn toggle_projectiles(&mut self) {
+        self.projectiles = !self.projectiles;
+        self.renderer.set_projectiles(self.projectiles);
+        self.show_controls();
+        self.dirty = true;
     }
 
     fn command(&self, command: u8, value: f64) {
@@ -662,6 +686,10 @@ async fn run(page: Page, glue_url: String, wasm_url: String) -> Result<(), Strin
     };
     let diplomacy_button = element(&document, "diplomacy")?;
     let perspective_select = element(&document, "perspective")?;
+    let projectiles_button = match page {
+        Page::Map => None,
+        Page::Observer => Some(element(&document, "projectiles")?),
+    };
     let sound = match (page, renderer.asset_store()) {
         (Page::Observer, Some(store)) => Some(SoundControls {
             audio: Audio::new(store, load_sound_settings()),
@@ -706,6 +734,8 @@ async fn run(page: Page, glue_url: String, wasm_url: String) -> Result<(), Strin
         palette: Vec::new(),
         diplomacy_button,
         perspective_select,
+        projectiles: true,
+        projectiles_button,
         player_names: Vec::new(),
         worker,
         clock: element(&document, "clock")?,
@@ -735,6 +765,7 @@ async fn run(page: Page, glue_url: String, wasm_url: String) -> Result<(), Strin
         warmup,
     }));
     wire_controls(&app);
+    wire_projectiles(&app, &window);
     wire_sound(&app, &window);
     wire_warmup(&app);
     wire_playback(&app);
@@ -781,6 +812,51 @@ fn wire_controls(app: &Rc<RefCell<App>>) {
     on_change.forget();
 
     app.borrow().show_controls();
+}
+
+/// The button and the P key, which the game itself leaves free.
+fn wire_projectiles(app: &Rc<RefCell<App>>, window: &web_sys::Window) {
+    let Some(button) = app.borrow().projectiles_button.clone() else {
+        return;
+    };
+    let target = Rc::clone(app);
+    let on_click = Closure::<dyn FnMut()>::new(move || {
+        target.borrow_mut().toggle_projectiles();
+    });
+    button.set_onclick(Some(on_click.as_ref().unchecked_ref()));
+    // The controls live as long as the page, so their handlers do too.
+    on_click.forget();
+
+    let target = Rc::clone(app);
+    let on_key = Closure::<dyn FnMut(Event)>::new(move |event: Event| {
+        let text = |object: &JsValue, name: &str| {
+            js_sys::Reflect::get(object, &name.into())
+                .ok()
+                .and_then(|value| value.as_string())
+                .unwrap_or_default()
+        };
+        let flag = |name: &str| {
+            js_sys::Reflect::get(&event, &name.into()).is_ok_and(|value| value.is_truthy())
+        };
+        if text(&event, "code") != "KeyP" || flag("repeat") {
+            return;
+        }
+        // As the camera keys: not while a control has the focus, nor as
+        // part of a browser shortcut.
+        let control = event.target().is_some_and(|element| {
+            matches!(
+                text(&element, "tagName").as_str(),
+                "INPUT" | "SELECT" | "TEXTAREA"
+            )
+        });
+        if control || flag("ctrlKey") || flag("metaKey") || flag("altKey") {
+            return;
+        }
+        event.prevent_default();
+        target.borrow_mut().toggle_projectiles();
+    });
+    let _ = window.add_event_listener_with_callback("keydown", on_key.as_ref().unchecked_ref());
+    on_key.forget();
 }
 
 fn wire_warmup(app: &Rc<RefCell<App>>) {

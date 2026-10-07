@@ -63,8 +63,11 @@ use crate::far::Request;
 use crate::gpu;
 use crate::impostor;
 use crate::pose;
+use crate::projectile;
+use crate::projectile::Flight;
 use crate::stream::Dot;
 use crate::stream::Scene;
+use crate::stream::Shot;
 use crate::stream::VariantSet;
 use crate::stream::turn_towards;
 use crate::terrain::TILE_SIZE;
@@ -167,6 +170,20 @@ type ModelKey = (u32, u32, u32, u32);
 
 /// (mesh, level of detail, texture) of one instanced draw.
 type GroupKey = (u64, usize, u64);
+const SHOOTING_ANIMATION: &str = "attack_ranged";
+/// What a shot's model resolves from: its projectile actor, else the
+/// shooter's actor, variant set and seed.
+type ShotModelKey = (u32, u32, u32, u32);
+
+/// A projectile the view draws, with what it works out once.
+struct Flying {
+    shot: Shot,
+    /// The shooter's ammo prop at the launch, when it could be posed then.
+    origin: Option<Vec3>,
+    /// Worked out when first drawn: the flight, when it lands and the
+    /// ground height there; `Some(None)` for one that cannot fly.
+    flight: Option<Option<(Flight, f32, f32)>>,
+}
 
 /// A decal laid this frame.
 struct PlacedDecal {
@@ -318,6 +335,12 @@ pub struct Field {
     eye: [f32; 3],
     /// The animation time each entity's sound was last checked at.
     sound_clocks: HashMap<u32, SoundClock>,
+    shots: HashMap<u32, Flying>,
+    shot_models: HashMap<ShotModelKey, Option<Rc<Model>>>,
+    /// By 1-based string index of the impact actor.
+    impact_models: HashMap<u32, Option<Rc<Model>>>,
+    /// Whether projectiles are drawn at all.
+    projectiles: bool,
     device_pixel_ratio: f32,
     stats: Stats,
 }
@@ -808,6 +831,10 @@ impl Field {
             decal_indices,
             eye: [0.0; 3],
             sound_clocks: HashMap::new(),
+            shots: HashMap::new(),
+            shot_models: HashMap::new(),
+            impact_models: HashMap::new(),
+            projectiles: true,
             device_pixel_ratio: 1.0,
             stats,
         })
@@ -894,6 +921,9 @@ impl Field {
             );
         }
         self.entities.dots = dots;
+        if self.projectiles {
+            self.place_shots(progress, view_proj, &planes, pixel_scale, &mut groups);
+        }
         self.groups = groups;
         self.stats.models = self.placed;
     }
@@ -1708,19 +1738,367 @@ impl Field {
     /// and the animation name, lower case as `SetEntitySelection` keeps
     /// them.
     fn selections(&self, dot: &Dot) -> BTreeSet<String> {
+        let mut selections = self.variant_selections(dot.variants);
+        if let Some(animation) = string(&self.entities.strings, dot.animation) {
+            selections.insert(animation.to_lowercase());
+        }
+        selections
+    }
+
+    /// The selections of a 1-based variant set index, lower case.
+    fn variant_selections(&self, variants: u32) -> BTreeSet<String> {
         let strings = &self.entities.strings;
-        let mut selections: BTreeSet<String> = (dot.variants as usize)
+        (variants as usize)
             .checked_sub(1)
             .and_then(|index| self.entities.variant_sets.get(index))
             .into_iter()
             .flatten()
             .filter_map(|(_, selection)| strings.get(*selection as usize))
             .map(|selection| selection.to_lowercase())
-            .collect();
-        if let Some(animation) = string(strings, dot.animation) {
-            selections.insert(animation.to_lowercase());
+            .collect()
+    }
+
+    /// Where `CModel::FindFirstAmmoProp` has the shooter's ammo as the turn
+    /// starts, which is where the engine launches from; `None` when it has
+    /// no ammo prop or a piece of it has not arrived.
+    fn ammo_point(&mut self, id: u32) -> Option<Vec3> {
+        let dots = &self.entities.dots;
+        let index = dots.binary_search_by_key(&id, |(id, _)| *id).ok()?;
+        let dot = dots[index].1;
+        let model = self.entity_model(&dot)?;
+        let Shape::Mesh(root_file) = model.shape else {
+            return None;
+        };
+        let root_mesh = match self.store.borrow_mut().mesh(root_file, false) {
+            Get::Ready(mesh) => mesh,
+            Get::Pending | Get::Missing => return None,
+        };
+        // As place_entity places it.
+        let [x, y, z] = self.entity_position(&dot, 0.0);
+        let rot_y = dot.from_angle / 256.0 * std::f32::consts::TAU;
+        let half = (rot_y + std::f32::consts::PI) / 2.0;
+        let mut transform = Mat4::from_quat(Quat {
+            x: 0.0,
+            y: half.sin(),
+            z: 0.0,
+            w: half.cos(),
+        });
+        let height = root_mesh.max[1] - root_mesh.min[1];
+        let sink = if dot.construction == 0 {
+            0.0
+        } else {
+            (f32::from(dot.construction) / 255.0 - 1.0) * height
+        };
+        transform.translate(Vec3::new(x, y + sink, z));
+        let state = string(&self.entities.strings, dot.animation)
+            .map_or_else(|| "idle".to_string(), str::to_lowercase);
+        let mut pick = DefaultHasher::new();
+        (id, dot.animation_turn).hash(&mut pick);
+        let entity = EntityState {
+            dot,
+            turn: self.entities.turn,
+            progress: 0.0,
+            state,
+            pick: pick.finish(),
+            color: 0,
+            level: 0,
+            time: None,
+        };
+        self.find_ammo(&model, &transform, &entity, None, 0)?
+    }
+
+    /// `CModel::FindFirstAmmoProp` over a posed tree: the model's own ammo
+    /// point, else the first prop's. `None` while a piece is on its way.
+    fn find_ammo(
+        &mut self,
+        model: &Model,
+        transform: &Mat4,
+        entity: &EntityState,
+        root_id: Option<&str>,
+        depth: usize,
+    ) -> Option<Option<Vec3>> {
+        let Shape::Mesh(file) = model.shape else {
+            return Some(None);
+        };
+        let mesh = match self.store.borrow_mut().mesh(file, false) {
+            Get::Ready(mesh) => mesh,
+            Get::Pending => return None,
+            Get::Missing => return Some(None),
+        };
+        let skeleton = match mesh.skeleton {
+            Some(file) => match self.store.borrow_mut().skeleton(file) {
+                Get::Ready(skeleton) => Some(skeleton),
+                Get::Pending => return None,
+                Get::Missing => return Some(None),
+            },
+            None => None,
+        };
+        let chosen = choose_animation(&model.animations, &entity.state, root_id, entity.pick);
+        let animation = match (chosen, &skeleton) {
+            (Some(chosen), Some(_)) => match self.store.borrow_mut().animation(chosen.file) {
+                Get::Ready(data) => Some((chosen, data)),
+                Get::Pending => return None,
+                Get::Missing => None,
+            },
+            _ => None,
+        };
+        let timing = animation.as_ref().map(|(chosen, data)| {
+            let (time, looping) = animation_time(entity, chosen, data);
+            (data, pose::frames(data, time, looping))
+        });
+        let place = |point: &PropPoint| {
+            let mut placed = *transform;
+            if point.bone != NO_BONE
+                && let Some(skeleton) = &skeleton
+            {
+                let bone = pose::bone_matrix(
+                    timing.map(|(data, frames)| (data.as_ref(), frames)),
+                    skeleton,
+                    usize::from(point.bone),
+                );
+                placed = placed.mul(&bone);
+            }
+            placed.mul(&point_matrix(point))
+        };
+        let ammo = model
+            .ammo_points
+            .iter()
+            .rev()
+            .find_map(|name| mesh.prop_points.iter().find(|point| point.name == *name));
+        if let Some(point) = ammo {
+            let m = place(point).m;
+            return Some(Some(Vec3::new(m[0][3], m[1][3], m[2][3])));
         }
-        selections
+        if depth >= 8 {
+            return Some(None);
+        }
+        let root_id = root_id.or(animation.as_ref().map(|(chosen, _)| chosen.id.as_str()));
+        for (point_name, prop) in &model.props {
+            let Some(point) = mesh
+                .prop_points
+                .iter()
+                .find(|point| point.name == *point_name)
+            else {
+                continue;
+            };
+            let placed = place(point);
+            if let Some(found) = self.find_ammo(prop, &placed, entity, root_id, depth + 1)? {
+                return Some(Some(found));
+            }
+        }
+        Some(None)
+    }
+
+    /// The model a shot flies as: its projectile actor, else the shooter's
+    /// `projectile` prop, as `Attack.js` and `CObjectEntry` pick it.
+    fn shot_model(&mut self, shot: &Shot) -> Option<Rc<Model>> {
+        let key = (shot.projectile_actor, shot.actor, shot.variants, shot.seed);
+        if let Some(model) = self.shot_models.get(&key) {
+            return model.clone();
+        }
+        let named = shot.projectile_actor != 0;
+        let actor = if named {
+            shot.projectile_actor
+        } else {
+            shot.actor
+        };
+        let manifest = match self
+            .store
+            .borrow_mut()
+            .actor(string(&self.entities.strings, actor)?)
+        {
+            Get::Ready(manifest) => manifest,
+            Get::Pending | Get::Missing => return None,
+        };
+        // The engine seeds a projectile from a counter no other client
+        // shares, so any seed is as right.
+        let model = if named {
+            variation::resolve(&manifest, &BTreeSet::new(), 0)
+        } else {
+            let mut selections = self.variant_selections(shot.variants);
+            // Every attack with a projectile is Ranged, and Attack.js
+            // plays "attack_" + type while it shoots: the variant that
+            // holds the projectile prop.
+            selections.insert(SHOOTING_ANIMATION.to_string());
+            variation::resolve(&manifest, &selections, shot.seed)
+                .and_then(|shooter| shooter.projectile)
+                .and_then(|object| {
+                    variation::resolve_object(&manifest, object, &BTreeSet::new(), 0)
+                })
+        }
+        .map(Rc::new);
+        self.shot_models.insert(key, model.clone());
+        model
+    }
+
+    fn impact_model(&mut self, actor: u32) -> Option<Rc<Model>> {
+        if let Some(model) = self.impact_models.get(&actor) {
+            return model.clone();
+        }
+        let manifest = match self
+            .store
+            .borrow_mut()
+            .actor(string(&self.entities.strings, actor)?)
+        {
+            Get::Ready(manifest) => manifest,
+            Get::Pending | Get::Missing => return None,
+        };
+        let model = variation::resolve(&manifest, &BTreeSet::new(), 0).map(Rc::new);
+        self.impact_models.insert(actor, model.clone());
+        model
+    }
+
+    /// Adds this frame's projectiles and impact actors to `groups`, as
+    /// `CCmpProjectileManager::Interpolate` keeps them: a projectile that
+    /// missed lies on the ground until `DECAY_SECS` after reaching its
+    /// target, and the impact actor shows from its landing for its
+    /// lifetime.
+    fn place_shots(
+        &mut self,
+        progress: f32,
+        view_proj: &[[f32; 4]; 4],
+        planes: &[[f32; 4]; 6],
+        pixel_scale: f32,
+        groups: &mut HashMap<GroupKey, Vec<u8>>,
+    ) {
+        let Some(ground) = &self.ground else {
+            return;
+        };
+        let image = &ground.image;
+        let metres = |point: [i32; 3]| {
+            Vec3::new(
+                point[0] as f32 / POSITION_UNITS_PER_METRE,
+                point[1] as f32 / POSITION_UNITS_PER_METRE,
+                point[2] as f32 / POSITION_UNITS_PER_METRE,
+            )
+        };
+        let mut shots = std::mem::take(&mut self.shots);
+        let mut placing = Vec::new();
+        for flying in shots.values_mut() {
+            let shot = &flying.shot;
+            let flight = *flying.flight.get_or_insert_with(|| {
+                let origin = flying.origin.unwrap_or_else(|| metres(shot.launch));
+                Flight::new(
+                    origin,
+                    metres(shot.target),
+                    shot.speed as f32 / 256.0,
+                    shot.gravity as f32 / 256.0,
+                )
+                .map(|flight| {
+                    let stop = flight.stop_time(|x, z| image.ground(x, z));
+                    let at = flight.position(stop);
+                    (flight, stop, image.ground(at.x, at.z))
+                })
+            });
+            let Some((flight, stop, rest)) = flight else {
+                continue;
+            };
+            let since = self.entities.turn.saturating_sub(shot.launch_turn) as f32 + progress;
+            let t = since * TURN_MS as f32 / 1000.0;
+            placing.push((*shot, flight, stop, rest, t));
+        }
+        self.shots = shots;
+
+        for (shot, flight, stop, rest, t) in placing {
+            if t - flight.time_hit() <= projectile::DECAY_SECS
+                && let Some(model) = self.shot_model(&shot)
+            {
+                let transform = flight.transform(t, stop, rest);
+                let place = ShotPlace {
+                    owner: shot.owner,
+                    time: t * 1000.0,
+                    progress,
+                };
+                self.place_shot_model(
+                    &model,
+                    &transform,
+                    &place,
+                    view_proj,
+                    planes,
+                    pixel_scale,
+                    groups,
+                );
+            }
+            let lifetime = shot.impact_lifetime as f32 / 1000.0;
+            if shot.impact_actor != 0
+                && t >= stop
+                && t - stop <= lifetime
+                && let Some(model) = self.impact_model(shot.impact_actor)
+            {
+                let mut transform = Mat4::identity();
+                let at = flight.position(stop);
+                transform.translate(Vec3::new(at.x, rest, at.z));
+                let place = ShotPlace {
+                    owner: shot.owner,
+                    time: (t - stop) * 1000.0,
+                    progress,
+                };
+                self.place_shot_model(
+                    &model,
+                    &transform,
+                    &place,
+                    view_proj,
+                    planes,
+                    pixel_scale,
+                    groups,
+                );
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn place_shot_model(
+        &mut self,
+        model: &Model,
+        transform: &Mat4,
+        place: &ShotPlace,
+        view_proj: &[[f32; 4]; 4],
+        planes: &[[f32; 4]; 6],
+        pixel_scale: f32,
+        groups: &mut HashMap<GroupKey, Vec<u8>>,
+    ) {
+        let file = match model.shape {
+            Shape::Mesh(file) => file,
+            Shape::Decal(decal) => {
+                self.place_decal(model, &decal, transform, true);
+                return;
+            }
+        };
+        let mesh = match self.store.borrow_mut().mesh(file, false) {
+            Get::Ready(mesh) => mesh,
+            Get::Pending | Get::Missing => return,
+        };
+        let low = Vec3::new(mesh.min[0], mesh.min[1], mesh.min[2]);
+        let high = Vec3::new(mesh.max[0], mesh.max[1], mesh.max[2]);
+        let centre = transform.transform(low.lerp(high, 0.5));
+        let radius =
+            Vec3::new(high.x - low.x, high.y - low.y, high.z - low.z).length() / 2.0 * REACH_MARGIN;
+        let Some(level) = screen_level(
+            [centre.x, centre.y, centre.z],
+            radius,
+            view_proj,
+            planes,
+            pixel_scale,
+        ) else {
+            return;
+        };
+        let dot = Dot {
+            owner: place.owner,
+            ..Dot::default()
+        };
+        let entity = EntityState {
+            dot,
+            turn: self.entities.turn,
+            progress: place.progress,
+            state: "idle".to_string(),
+            pick: 0,
+            color: owner_color(&dot, &self.palette),
+            // Impostors are for entities; a projectile is too small to
+            // need one.
+            level: level.min(COARSE_LEVEL),
+            time: Some(place.time),
+        };
+        self.place_model(model, transform, &entity, None, 0, groups);
     }
 
     fn upload_ground(&mut self, image: &TerrainImage) {
@@ -1887,6 +2265,10 @@ impl View for Field {
         true
     }
 
+    fn set_projectiles(&mut self, on: bool) {
+        self.projectiles = on;
+    }
+
     fn progress(&self) -> Progress {
         self.store.borrow().progress()
     }
@@ -1902,6 +2284,9 @@ impl View for Field {
             self.models.clear();
             self.bounds.clear();
             self.far.clear();
+            self.shots.clear();
+            self.shot_models.clear();
+            self.impact_models.clear();
             entities.match_id = scene.match_id;
             entities.strings.clear();
             entities.variant_sets.clear();
@@ -1928,6 +2313,26 @@ impl View for Field {
         entities
             .dots
             .extend(scene.dots.iter().map(|(id, dot)| (*id, *dot)));
+        self.shots.retain(|id, _| scene.shots.contains_key(id));
+        for (id, shot) in &scene.shots {
+            if self.shots.contains_key(id) {
+                continue;
+            }
+            // Only on its launch turn is the shooter where it shot from.
+            let origin = if self.projectiles && shot.launch_turn == scene.turn {
+                self.ammo_point(shot.shooter)
+            } else {
+                None
+            };
+            self.shots.insert(
+                *id,
+                Flying {
+                    shot: *shot,
+                    origin,
+                    flight: None,
+                },
+            );
+        }
         self.palette = palette.to_vec();
         self.borders
             .set_territory(&scene.territory, scene.territory_generation, palette);
@@ -2394,6 +2799,14 @@ fn now() -> f64 {
 }
 
 /// What every model of one entity shares this frame.
+/// Who a projectile or impact actor belongs to, and its animation time
+/// in ms.
+struct ShotPlace {
+    owner: i32,
+    time: f32,
+    progress: f32,
+}
+
 struct EntityState {
     dot: Dot,
     turn: u32,

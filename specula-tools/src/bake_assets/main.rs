@@ -86,8 +86,6 @@ const SOUND_CACHE_DIR: &str = "sounds";
 const EFFECT_BITRATE: i32 = 32_000;
 const MUSIC_BITRATE: i32 = 48_000;
 const MUSIC_PREFIX: &str = "audio/music/";
-/// The engine draws `projectile` props only when something is shot.
-const PROJECTILE_POINT: &str = "projectile";
 /// For the summary: how the split compares with bake-unit's 4.4 MB VAT
 /// bake of the same unit.
 const SAMPLE_ACTOR: &str = "units/athenians/infantry_spearman_b.xml";
@@ -742,8 +740,8 @@ fn manifest(
             .iter()
             .flat_map(|definition| definition.groups.iter().flatten())
         {
-            for (point, prop) in &variant.props {
-                if prop.is_empty() || point == PROJECTILE_POINT || index_of.contains_key(prop) {
+            for (_, prop) in &variant.props {
+                if prop.is_empty() || index_of.contains_key(prop) {
                     continue;
                 }
                 if let Some(Ok(prop_actor)) = actors.get(prop)
@@ -776,7 +774,6 @@ fn manifest(
                     let props = variant
                         .props
                         .iter()
-                        .filter(|(point, _)| point != PROJECTILE_POINT)
                         .map(|(point, prop)| files::Prop {
                             point: point.clone(),
                             object: index_of.get(prop).copied().unwrap_or(files::NONE),

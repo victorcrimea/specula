@@ -1,4 +1,4 @@
-//! The viewer stream, wire format v8: one binary WebSocket message per
+//! The viewer stream, wire format v9: one binary WebSocket message per
 //! keyframe, turn or match end, varints and zigzag as in `wire.rs`, positions and
 //! heights in 1/16 m.
 //!
@@ -7,7 +7,9 @@
 //!   turns per segment, varint map size in metres, u64 terrain id (0: none
 //!   yet, else fetch `/terrain/<id as 16 hex digits>`), icon table, player
 //!   table, territory, template table, string table, variant set table,
-//!   varint count, then count x {varint id delta, entity}.
+//!   varint count, then count x {varint id delta, entity}, then the
+//!   projectiles in flight or lying on the ground: varint count, count x
+//!   {varint id delta, projectile, varint turns since the launch}.
 //! - kind 2 delta: varint turn, icons added to the table, u8 1 if a new
 //!   player table follows (it replaces the old one) else 0, u8 1 if a new
 //!   territory follows (likewise) else 0, templates,
@@ -22,8 +24,11 @@
 //!   1024 varint variant set; 2048 u8
 //!   construction; 4096 varint visibility}, then the sounds of the turn:
 //!   varint count, count x sound, in the order the simulation played
-//!   them. An animation (32) starts, and a sync (128) is set, at the
-//!   delta's turn; it is also sent when only its sound group changed.
+//!   them, then the projectiles launched in the turn: varint count, count
+//!   x {varint id delta, projectile}, then the ids of the projectiles that
+//!   hit something and are gone: varint count, count x id delta. An
+//!   animation (32) starts, and a sync (128) is set, at the delta's turn;
+//!   it is also sent when only its sound group changed.
 //! - kind 3 ended: u64 match id, varint ms since the match ended. No more
 //!   turns of that match follow; the next keyframe with another id is the
 //!   next match. A viewer joining between matches gets the final keyframe
@@ -67,6 +72,26 @@
 //! relative to audio/. An entity's position, owner and visibility are as of
 //! the call, since it may be gone by the end of the turn. Keyframes carry
 //! no sounds.
+//!
+//! A projectile is {varint shooter id (0: none), zigzag owner, varint
+//! actor, zigzag seed - shooter id, varint variant set, zigzag x, zigzag z,
+//! zigzag y launch point, zigzag x, zigzag z, zigzag y target, varint
+//! speed, zigzag gravity, varint projectile actor, varint impact actor,
+//! varint impact lifetime}, as `CCmpProjectileManager::LaunchProjectile`
+//! was given it:
+//! - owner, actor, seed and variant set are the shooter's as of the launch
+//!   turn (the turn before when it died in it), as in an entity, so its
+//!   projectile prop can be found after it is gone; owner -1 and the rest
+//!   0 without a shooter;
+//! - the launch point is the simulation's, not the shooter's ammo prop's;
+//! - speed is horizontal, in 1/256 m/s; gravity in 1/256 m/s^2;
+//! - the projectile and impact actors are 1-based indices into the string
+//!   table, 0 for none: without a projectile actor the shooter's actor's
+//!   `projectile` prop is drawn;
+//! - impact lifetime is in ms.
+//!
+//! A projectile is kept from its launch until it hits something or until
+//! it would have lain on the ground for 30 s.
 //!
 //! An icon table is varint count, count x {varint name length, UTF-8 name,
 //! f32 size in CSS pixels}; the name is an entry of `/icons.bin`. An
@@ -121,6 +146,7 @@ use rocket::tokio::sync::broadcast;
 
 use crate::feed::Entity;
 use crate::feed::Icon;
+use crate::feed::Launch;
 use crate::feed::Player;
 use crate::feed::Sound;
 use crate::feed::SoundTarget;
@@ -150,6 +176,11 @@ const SOUND_ENTITY: u8 = 0;
 const SOUND_POSITION: u8 = 1;
 const SOUND_PLAYER: u8 = 2;
 const ANIMATION_ONCE: u8 = 1;
+/// The simulation's turn, in seconds.
+const TURN_SECS: f64 = 0.2;
+/// `PROJECTILE_DECAY_TIME`, plus a margin for the client's launch point,
+/// which moves the landing a little from the one reckoned here.
+const PROJECTILE_KEEP_SECS: f64 = 35.0;
 /// About 50 s of turns; a viewer further behind is resent a keyframe.
 const BACKLOG_MESSAGES: usize = 256;
 /// 50 turns of 200 ms: a keyframe every 10 s of game time (init.md 3).
@@ -223,6 +254,62 @@ impl Dot {
             construction: quantize_construction(entity.construction),
             sound_group: one_based(visual.and_then(|visual| visual.sound_group)),
             visibility: entity.visibility,
+        }
+    }
+}
+
+/// A projectile as viewers are sent it.
+#[derive(Clone, Copy)]
+struct Shot {
+    launch_turn: u32,
+    /// The last turn it is sent in keyframes.
+    last_turn: u32,
+    shooter: u32,
+    owner: i32,
+    actor: u32,
+    seed: u32,
+    variants: u32,
+    launch: [i32; 3],
+    target: [i32; 3],
+    speed: u32,
+    gravity: i32,
+    projectile_actor: u32,
+    impact_actor: u32,
+    impact_lifetime: u32,
+}
+
+impl Shot {
+    fn new(launch: &Launch, turn: u32, shooter: Option<&Dot>) -> Self {
+        let one_based = |index: Option<u32>| index.map_or(0, |index| index + 1);
+        let metres = |raw: i32| f64::from(raw) / 65536.0;
+        let flight_secs = {
+            let dx = metres(launch.target[0]) - metres(launch.launch[0]);
+            let dz = metres(launch.target[2]) - metres(launch.launch[2]);
+            let speed = metres(launch.speed);
+            if speed > 0.0 {
+                dx.hypot(dz) / speed
+            } else {
+                0.0
+            }
+        };
+        let impact_secs = metres(launch.impact_lifetime).max(0.0);
+        let keep_turns =
+            ((flight_secs + PROJECTILE_KEEP_SECS + impact_secs) / TURN_SECS).ceil() as u32;
+        Shot {
+            launch_turn: turn,
+            last_turn: turn.saturating_add(keep_turns),
+            shooter: if shooter.is_some() { launch.shooter } else { 0 },
+            owner: shooter.map_or(-1, |dot| dot.owner),
+            actor: shooter.map_or(0, |dot| dot.actor),
+            seed: shooter.map_or(0, |dot| dot.seed),
+            variants: shooter.map_or(0, |dot| dot.variants),
+            launch: launch.launch.map(quantize_position),
+            target: launch.target.map(quantize_position),
+            speed: quantize_speed(launch.speed),
+            gravity: ((i64::from(launch.gravity) + 128) >> 8) as i32,
+            projectile_actor: one_based(launch.actor),
+            impact_actor: one_based(launch.impact_actor),
+            impact_lifetime: (impact_secs * 1000.0).round() as u32,
         }
     }
 }
@@ -344,6 +431,11 @@ struct State {
     territory_changed: bool,
     /// The sounds of the next turn.
     sounds: Vec<Sound>,
+    /// The projectile calls of the next turn.
+    launches: Vec<Launch>,
+    removals: Vec<u32>,
+    /// By id: launched and neither hit nor long on the ground.
+    shots: BTreeMap<u32, Shot>,
     has_turn: bool,
     /// Set when a new observer connects: its entity ids belong to another
     /// match, so its first turn must replace, not patch, what viewers have.
@@ -401,6 +493,9 @@ impl Hub {
                 territory: None,
                 territory_changed: false,
                 sounds: Vec::new(),
+                launches: Vec::new(),
+                removals: Vec::new(),
+                shots: BTreeMap::new(),
                 has_turn: false,
                 new_feed: true,
                 ended: None,
@@ -425,6 +520,8 @@ impl Hub {
         state.players.clear();
         state.territory = None;
         state.sounds.clear();
+        state.launches.clear();
+        state.removals.clear();
     }
 
     pub fn add_template(&self, index: u32, name: String) -> io::Result<()> {
@@ -477,6 +574,12 @@ impl Hub {
 
     pub fn set_sounds(&self, sounds: Vec<Sound>) {
         self.state.lock().unwrap().sounds = sounds;
+    }
+
+    pub fn set_projectiles(&self, launches: Vec<Launch>, removals: Vec<u32>) {
+        let state = &mut *self.state.lock().unwrap();
+        state.launches = launches;
+        state.removals = removals;
     }
 
     pub fn set_template_icon(&self, template: u32, icon: Icon) {
@@ -533,8 +636,14 @@ impl Hub {
             // The history then ends at the last closed segment.
             Err(error) => eprintln!("cannot compress the last segment: {error}"),
         }
-        let keyframe: Message =
-            encode_keyframe(state, state.turn, &state.tables(true), &state.dots).into();
+        let keyframe: Message = encode_keyframe(
+            state,
+            state.turn,
+            &state.tables(true),
+            &state.dots,
+            &state.shots,
+        )
+        .into();
         state.previous = Some(Archive {
             match_id: state.match_id,
             segments: std::mem::take(&mut state.segments),
@@ -582,6 +691,35 @@ impl Hub {
                 (entity.id, dot)
             })
             .collect();
+        // The old match's projectile ids are unrelated to the new one's.
+        let mut shots = if state.new_feed {
+            BTreeMap::new()
+        } else {
+            state.shots.clone()
+        };
+        shots.retain(|_, shot| shot.last_turn >= turn);
+        let mut removals: Vec<u32> = state
+            .removals
+            .iter()
+            .copied()
+            .filter(|id| shots.remove(id).is_some())
+            .collect();
+        removals.sort_unstable();
+        let mut launches = Vec::with_capacity(state.launches.len());
+        for launch in &state.launches {
+            // Taken out in the turn that shot it: nothing to draw.
+            if state.removals.contains(&launch.id) {
+                continue;
+            }
+            let shooter = dots
+                .get(&launch.shooter)
+                .or_else(|| state.dots.get(&launch.shooter))
+                .filter(|_| launch.shooter != 0);
+            let shot = Shot::new(launch, turn, shooter);
+            shots.insert(launch.id, shot);
+            launches.push((launch.id, shot));
+        }
+        launches.sort_unstable_by_key(|(id, _)| *id);
         let message: Message = if state.new_feed {
             // The history restarts only now, so until the new match's first
             // turn, viewers and segment requests still get the old one.
@@ -590,7 +728,8 @@ impl Hub {
             state.first_turn = turn;
             state.segments.clear();
             state.open.clear();
-            let keyframe: Message = encode_keyframe(state, turn, &state.tables(true), &dots).into();
+            let keyframe: Message =
+                encode_keyframe(state, turn, &state.tables(true), &dots, &shots).into();
             append_framed(&mut state.open, &keyframe);
             keyframe
         } else {
@@ -610,6 +749,8 @@ impl Hub {
                 &state.dots,
                 &dots,
                 &state.sounds,
+                &launches,
+                &removals,
             )
             .into();
             let next_start = state.first_turn + SEGMENT_TURNS * (state.segments.len() as u32 + 1);
@@ -617,7 +758,7 @@ impl Hub {
                 let closed = zstd::bulk::compress(&state.open, SEGMENT_ZSTD_LEVEL)?;
                 state.segments.push(closed.into());
                 state.open.clear();
-                let keyframe = encode_keyframe(state, turn, &state.tables(true), &dots);
+                let keyframe = encode_keyframe(state, turn, &state.tables(true), &dots, &shots);
                 append_framed(&mut state.open, &keyframe);
             }
             append_framed(&mut state.open, &delta);
@@ -632,6 +773,9 @@ impl Hub {
         // A keyframe carries no sounds, so a new match's first turn drops
         // its own.
         state.sounds.clear();
+        state.launches.clear();
+        state.removals.clear();
+        state.shots = shots;
         state.turn = turn;
         state.dots = dots;
         state.has_turn = true;
@@ -686,7 +830,16 @@ impl Hub {
                 encode_ended(state.match_id, since).into(),
             ]
         } else if state.has_turn {
-            vec![encode_keyframe(&state, state.turn, &state.tables(false), &state.dots).into()]
+            vec![
+                encode_keyframe(
+                    &state,
+                    state.turn,
+                    &state.tables(false),
+                    &state.dots,
+                    &state.shots,
+                )
+                .into(),
+            ]
         } else {
             Vec::new()
         };
@@ -726,6 +879,7 @@ fn encode_keyframe(
     turn: u32,
     tables: &Tables,
     dots: &BTreeMap<u32, Dot>,
+    shots: &BTreeMap<u32, Shot>,
 ) -> Vec<u8> {
     let mut out = Writer::default();
     out.u8(MESSAGE_KEYFRAME);
@@ -749,9 +903,18 @@ fn encode_keyframe(
         last_id = *id;
         write_dot(&mut out, *id, turn, dot);
     }
+    out.varint(shots.len() as u64);
+    let mut last_id = 0;
+    for (id, shot) in shots {
+        out.varint(u64::from(id - last_id));
+        last_id = *id;
+        write_shot(&mut out, shot);
+        out.varint(u64::from(turn - shot.launch_turn));
+    }
     out.0
 }
 
+#[allow(clippy::too_many_arguments)]
 fn encode_delta(
     turn: u32,
     new_tables: &Tables,
@@ -760,6 +923,8 @@ fn encode_delta(
     previous: &BTreeMap<u32, Dot>,
     current: &BTreeMap<u32, Dot>,
     sounds: &[Sound],
+    launches: &[(u32, Shot)],
+    removals: &[u32],
 ) -> Vec<u8> {
     let diff = diff(previous, current);
     let mut out = Writer::default();
@@ -807,7 +972,38 @@ fn encode_delta(
     for sound in sounds {
         write_sound(&mut out, sound);
     }
+    out.varint(launches.len() as u64);
+    let mut last_id = 0;
+    for (id, shot) in launches {
+        out.varint(u64::from(id - last_id));
+        last_id = *id;
+        write_shot(&mut out, shot);
+    }
+    out.varint(removals.len() as u64);
+    let mut last_id = 0;
+    for id in removals {
+        out.varint(u64::from(id - last_id));
+        last_id = *id;
+    }
     out.0
+}
+
+fn write_shot(out: &mut Writer, shot: &Shot) {
+    out.varint(u64::from(shot.shooter));
+    out.zigzag(i64::from(shot.owner));
+    out.varint(u64::from(shot.actor));
+    out.zigzag(i64::from(shot.seed) - i64::from(shot.shooter));
+    out.varint(u64::from(shot.variants));
+    for point in [shot.launch, shot.target] {
+        out.zigzag(i64::from(point[0]));
+        out.zigzag(i64::from(point[2]));
+        out.zigzag(i64::from(point[1]));
+    }
+    out.varint(u64::from(shot.speed));
+    out.zigzag(i64::from(shot.gravity));
+    out.varint(u64::from(shot.projectile_actor));
+    out.varint(u64::from(shot.impact_actor));
+    out.varint(u64::from(shot.impact_lifetime));
 }
 
 fn write_sound(out: &mut Writer, sound: &Sound) {

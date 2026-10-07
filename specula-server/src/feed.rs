@@ -1,4 +1,4 @@
-//! Decoder for the observer hook's feed, format v9. The writer is
+//! Decoder for the observer hook's feed, format v10. The writer is
 //! `source/network/SpeculaFeed.cpp` in the `specula` branch of 0ad-specula.
 
 use std::io;
@@ -6,7 +6,7 @@ use std::io::ErrorKind;
 use std::io::Read;
 
 const MAGIC: [u8; 4] = *b"SPCF";
-const VERSION: u32 = 9;
+const VERSION: u32 = 10;
 const RECORD_TEMPLATE: u8 = 1;
 const RECORD_TURN: u8 = 2;
 const RECORD_MAP: u8 = 3;
@@ -16,8 +16,10 @@ const RECORD_STRING: u8 = 6;
 const RECORD_VARIANT_SET: u8 = 7;
 const RECORD_TERRITORY: u8 = 8;
 const RECORD_SOUNDS: u8 = 9;
+const RECORD_PROJECTILES: u8 = 10;
 const ENTITY_SIZE: usize = 70;
 const SOUND_SIZE: usize = 27;
+const LAUNCH_SIZE: usize = 52;
 const COLOR_MINIMAP: u8 = 1;
 const HAS_VISUAL: u8 = 2;
 const ANIMATION_ONCE: u8 = 4;
@@ -99,6 +101,25 @@ pub enum SoundTarget {
     Player(i32),
 }
 
+/// A `LaunchProjectileAtPoint` call.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct Launch {
+    pub id: u32,
+    /// The entity that asked for its launch point right before, 0 for none.
+    pub shooter: u32,
+    /// Raw 16.16 fixed point, in metres; the simulation's launch point.
+    pub launch: [i32; 3],
+    pub target: [i32; 3],
+    /// Raw 16.16 fixed point: horizontal m/s, and m/s^2.
+    pub speed: i32,
+    pub gravity: i32,
+    /// Indices of string records, actor file names.
+    pub actor: Option<u32>,
+    pub impact_actor: Option<u32>,
+    /// Raw 16.16 fixed point, in seconds.
+    pub impact_lifetime: i32,
+}
+
 /// A template's minimap icon, as the in-game minimap draws it.
 pub struct Icon {
     /// Relative to art/textures/ui/session/icons/minimap/.
@@ -149,6 +170,13 @@ pub enum Record {
     Territory(Territory),
     /// The sounds of the next turn record, in the order they were played.
     Sounds(Vec<Sound>),
+    /// The projectiles of the next turn record, each list in the order of
+    /// the calls.
+    Projectiles {
+        launches: Vec<Launch>,
+        /// Ids hit and taken away by `RemoveProjectile`.
+        removals: Vec<u32>,
+    },
     String {
         index: u32,
         text: String,
@@ -236,6 +264,7 @@ pub fn read_record(reader: &mut impl Read) -> io::Result<Option<Record>> {
             RECORD_VARIANT_SET => return decode_variant_set(&payload).map(Some),
             RECORD_TERRITORY => return decode_territory(&payload).map(Some),
             RECORD_SOUNDS => return decode_sounds(&payload).map(Some),
+            RECORD_PROJECTILES => return decode_projectiles(&payload).map(Some),
             // Newer hooks may add kinds; the length prefix lets them be skipped.
             _ => continue,
         }
@@ -431,6 +460,38 @@ fn decode_sounds(payload: &[u8]) -> io::Result<Record> {
         });
     }
     Ok(Record::Sounds(sounds))
+}
+
+fn decode_projectiles(payload: &[u8]) -> io::Result<Record> {
+    let mut cursor = Cursor(payload);
+    let count = cursor.u32()? as usize;
+    if cursor.0.len() < count * LAUNCH_SIZE {
+        return Err(invalid("projectiles record shorter than its launches"));
+    }
+    let mut launches = Vec::with_capacity(count);
+    for _ in 0..count {
+        launches.push(Launch {
+            id: cursor.u32()?,
+            shooter: cursor.u32()?,
+            launch: [cursor.i32()?, cursor.i32()?, cursor.i32()?],
+            target: [cursor.i32()?, cursor.i32()?, cursor.i32()?],
+            speed: cursor.i32()?,
+            gravity: cursor.i32()?,
+            actor: optional(cursor.u32()?),
+            impact_actor: optional(cursor.u32()?),
+            impact_lifetime: cursor.i32()?,
+        });
+    }
+    let count = cursor.u32()? as usize;
+    if cursor.0.len() != count * 4 {
+        return Err(invalid(
+            "projectiles record length does not match its counts",
+        ));
+    }
+    let removals = (0..count)
+        .map(|_| cursor.u32())
+        .collect::<io::Result<_>>()?;
+    Ok(Record::Projectiles { launches, removals })
 }
 
 fn decode_variant_set(payload: &[u8]) -> io::Result<Record> {

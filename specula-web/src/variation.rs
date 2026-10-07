@@ -23,6 +23,9 @@ const MAX_QUALITY: u8 = 255;
 /// `CObjectEntry::BuildVariation` attaches these to the point after the
 /// prefix only while a projectile is loaded; they are not drawn.
 const AMMO_PREFIX: &str = "loaded-";
+/// `CObjectEntry::BuildVariation` keeps this point's actor as the one to
+/// shoot rather than drawing it.
+const PROJECTILE_POINT: &str = "projectile";
 /// Props nest a few levels; a cycle in a modded actor must end.
 const MAX_DEPTH: usize = 8;
 
@@ -38,6 +41,12 @@ pub struct Model {
     pub animations: Vec<ModelAnimation>,
     /// (prop point, model), in the order the engine adds them.
     pub props: Vec<(String, Model)>,
+    /// The object in the manifest this model shoots: its own `projectile`
+    /// prop, else the first prop's (a rider's), as `m_ProjectileModelName`.
+    pub projectile: Option<u32>,
+    /// The points a `loaded-` prop names, in the order the engine adds
+    /// them; the last one the mesh has holds the ammo, as `AddAmmoProp`.
+    pub ammo_points: Vec<String>,
 }
 
 /// What `CObjectEntry::BuildVariation` makes of a variation.
@@ -65,12 +74,27 @@ pub struct ModelAnimation {
 /// does not draw.
 /// `entity` holds the entity's selections, lower case.
 pub fn resolve(manifest: &Manifest, entity: &Selections, seed: u32) -> Option<Model> {
-    let actor = random_remaining(manifest, 0, MAX_QUALITY, seed, &[]);
+    resolve_object(manifest, 0, entity, seed)
+}
+
+/// `resolve` for another object of the manifest as the actor, as the
+/// engine makes a unit of a projectile actor.
+pub fn resolve_object(
+    manifest: &Manifest,
+    object: u32,
+    entity: &Selections,
+    seed: u32,
+) -> Option<Model> {
+    let object = object as usize;
+    if object >= manifest.objects.len() {
+        return None;
+    }
+    let actor = random_remaining(manifest, object, MAX_QUALITY, seed, &[]);
     let selections = [entity.clone(), actor];
-    let high = random_remaining(manifest, 0, MAX_QUALITY, seed, &selections);
-    let remaining = random_remaining(manifest, 0, MAX_ACTOR_QUALITY, seed, &selections);
+    let high = random_remaining(manifest, object, MAX_QUALITY, seed, &selections);
+    let remaining = random_remaining(manifest, object, MAX_ACTOR_QUALITY, seed, &selections);
     let complete = [&selections[0], &selections[1], &high, &remaining];
-    build(manifest, 0, MAX_ACTOR_QUALITY, &complete, 0)
+    build(manifest, object, MAX_ACTOR_QUALITY, &complete, 0)
 }
 
 /// `CActorDef::GetBase`: the first base at or above `quality`.
@@ -262,6 +286,8 @@ fn build(
             alpha_ref: definition.alpha_ref,
             animations: Vec::new(),
             props: Vec::new(),
+            projectile: None,
+            ammo_points: Vec::new(),
         });
     }
     // Without a mesh the engine makes a dummy model, which has no props.
@@ -285,14 +311,23 @@ fn build(
     // A stable sort keeps equal names in insertion order, as the multimap.
     model_animations.sort_by(|a, b| a.name.cmp(&b.name));
 
-    let mut model_props = Vec::new();
+    let mut model_props: Vec<(String, Model)> = Vec::new();
+    let mut projectile = props
+        .get(PROJECTILE_POINT)
+        .and_then(|objects| objects.last().copied());
+    let mut ammo_points = Vec::new();
     if depth < MAX_DEPTH {
         for (point, objects) in &props {
-            if point.starts_with(AMMO_PREFIX) {
+            if point == PROJECTILE_POINT {
+                continue;
+            }
+            if let Some(ammo) = point.strip_prefix(AMMO_PREFIX) {
+                ammo_points.push(ammo.to_string());
                 continue;
             }
             for &prop in objects {
                 if let Some(model) = build(manifest, prop as usize, level, selections, depth + 1) {
+                    projectile = projectile.or(model.projectile);
                     model_props.push((point.clone(), model));
                 }
             }
@@ -305,6 +340,8 @@ fn build(
         alpha_ref: definition.alpha_ref,
         animations: model_animations,
         props: model_props,
+        projectile,
+        ammo_points,
     })
 }
 
