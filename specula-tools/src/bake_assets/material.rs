@@ -12,6 +12,7 @@ pub struct Material {
     pub normal_map: bool,
     pub specular_map: bool,
     pub ao_map: bool,
+    pub triplanar: bool,
     /// Components the uniform does not name stay 0, as an unset uniform.
     pub effect: [f32; 4],
 }
@@ -68,6 +69,7 @@ pub fn load(mod_dir: &Path, name: &str) -> Material {
         normal_map: defined("USE_NORMAL_MAP"),
         specular_map: defined("USE_SPECULAR_MAP"),
         ao_map: defined("USE_AO"),
+        triplanar: defined("USE_TRIPLANAR"),
         effect,
     }
 }

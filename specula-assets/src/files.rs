@@ -1,4 +1,4 @@
-//! The split asset files, format v6. Little-endian; every file starts with
+//! The split asset files, format v7. Little-endian; every file starts with
 //! a 4-byte magic and a u8 version. Strings are u16 length and UTF-8,
 //! counts are u32. A file is served as `assets/<kind>-<16 hex>.bin`, the
 //! hex being a hash of its content, so a cached copy is never stale and
@@ -14,7 +14,8 @@
 //!   the terrain resource names it, file ref of its baseTex texture, f32
 //!   angle in radians, f32 size in metres, optional normTex texture,
 //!   optional specTex texture, f32 normal strength and f32 specular power
-//!   (its material's `effectSettings` x and y)}, optional alpha map atlas.
+//!   (its material's `effectSettings` x and y), u8 1 when its material
+//!   maps it triplanar}, optional alpha map atlas.
 //!   The atlas is an RGBA8 texture, one mip, holding the engine's 14
 //!   standard blend masks in its alpha, side by side in
 //!   `CTerrainTextureManager::LoadAlphaMap`'s order and layout. Then
@@ -84,7 +85,7 @@
 use crate::half::f16_bits;
 use crate::half::f16_to_f32;
 
-pub const VERSION: u8 = 6;
+pub const VERSION: u8 = 7;
 /// The largest side of each texture detail tier, which a viewer's
 /// texture quality picks from: low, medium and the whole chain as the
 /// engine uploads it at its default quality.
@@ -250,6 +251,9 @@ pub struct TerrainTexture {
     pub specular: Option<FileRef>,
     pub normal_strength: f32,
     pub specular_power: f32,
+    /// World-space triplanar instead of the planar mapping
+    /// (`USE_TRIPLANAR`).
+    pub triplanar: bool,
 }
 
 pub struct Manifest {
@@ -416,6 +420,7 @@ impl Index {
             out.optional_file(terrain.specular);
             out.f32(terrain.normal_strength);
             out.f32(terrain.specular_power);
+            out.u8(u8::from(terrain.triplanar));
         }
         out.optional_file(self.alpha_maps);
         out.count(self.sound_groups.len());
@@ -463,6 +468,7 @@ impl Index {
                 let specular = input.optional_file()?;
                 let normal_strength = input.f32()?;
                 let specular_power = input.f32()?;
+                let triplanar = input.u8()? != 0;
                 Ok((
                     name,
                     TerrainTexture {
@@ -473,6 +479,7 @@ impl Index {
                         specular,
                         normal_strength,
                         specular_power,
+                        triplanar,
                     },
                 ))
             })

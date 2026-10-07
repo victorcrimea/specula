@@ -156,6 +156,18 @@ const MESH_ATTRIBUTES: [wgpu::VertexAttribute; 7] = wgpu::vertex_attr_array![
 ];
 /// The shaders' `MAPS` override, by the material maps setting.
 const MAPS_CONSTANTS: [[(&str, f64); 1]; 2] = [[("MAPS", 0.0)], [("MAPS", 1.0)]];
+/// field.wgsl's ground overrides, by the material maps setting and then
+/// the triplanar setting.
+const GROUND_CONSTANTS: [[[(&str, f64); 2]; 2]; 2] = [
+    [
+        [("MAPS", 0.0), ("TRIPLANAR", 0.0)],
+        [("MAPS", 0.0), ("TRIPLANAR", 1.0)],
+    ],
+    [
+        [("MAPS", 1.0), ("TRIPLANAR", 0.0)],
+        [("MAPS", 1.0), ("TRIPLANAR", 1.0)],
+    ],
+];
 /// A model material's uniform: `effectSettings`, then 1 when it has a
 /// normal map; model.wgsl `Material`.
 const MATERIAL_SIZE: usize = 32;
@@ -327,11 +339,15 @@ pub struct Field {
     bc: bool,
     /// Without and with the material maps.
     model_pipelines: [wgpu::RenderPipeline; 2],
-    terrain_pipelines: [wgpu::RenderPipeline; 2],
-    blend_pipelines: [wgpu::RenderPipeline; 2],
+    /// By the material maps, then the triplanar setting.
+    terrain_pipelines: [[wgpu::RenderPipeline; 2]; 2],
+    blend_pipelines: [[wgpu::RenderPipeline; 2]; 2],
     /// The viewer's material maps setting: normal, specular and ambient
     /// occlusion maps fetched and drawn.
     material_maps: bool,
+    /// The viewer's triplanar setting: the terrains whose material asks
+    /// for it mapped triplanar rather than planar.
+    triplanar: bool,
     water_pipeline: wgpu::RenderPipeline,
     decal_pipeline: wgpu::RenderPipeline,
     shadow: Shadow,
@@ -678,29 +694,31 @@ impl Field {
             immediate_size: 0,
         });
         let terrain_pipelines = [false, true].map(|maps| {
-            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some("terrain"),
-                layout: Some(&terrain_layout),
-                vertex: wgpu::VertexState {
-                    module: &field_shader,
-                    entry_point: Some("vs_terrain"),
-                    compilation_options: Default::default(),
-                    buffers: &terrain_buffers,
-                },
-                primitive: wgpu::PrimitiveState::default(),
-                depth_stencil: Some(depth_stencil(true)),
-                multisample: Default::default(),
-                fragment: Some(wgpu::FragmentState {
-                    module: &field_shader,
-                    entry_point: Some("fs_terrain"),
-                    compilation_options: wgpu::PipelineCompilationOptions {
-                        constants: &MAPS_CONSTANTS[usize::from(maps)],
-                        ..Default::default()
+            [false, true].map(|triplanar| {
+                device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                    label: Some("terrain"),
+                    layout: Some(&terrain_layout),
+                    vertex: wgpu::VertexState {
+                        module: &field_shader,
+                        entry_point: Some("vs_terrain"),
+                        compilation_options: Default::default(),
+                        buffers: &terrain_buffers,
                     },
-                    targets: &[Some(config.format.into())],
-                }),
-                multiview_mask: None,
-                cache: None,
+                    primitive: wgpu::PrimitiveState::default(),
+                    depth_stencil: Some(depth_stencil(true)),
+                    multisample: Default::default(),
+                    fragment: Some(wgpu::FragmentState {
+                        module: &field_shader,
+                        entry_point: Some("fs_terrain"),
+                        compilation_options: wgpu::PipelineCompilationOptions {
+                            constants: &GROUND_CONSTANTS[usize::from(maps)][usize::from(triplanar)],
+                            ..Default::default()
+                        },
+                        targets: &[Some(config.format.into())],
+                    }),
+                    multiview_mask: None,
+                    cache: None,
+                })
             })
         });
         let blend_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -714,37 +732,39 @@ impl Field {
             immediate_size: 0,
         });
         let blend_pipelines = [false, true].map(|maps| {
-            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some("terrain blend"),
-                layout: Some(&blend_layout),
-                vertex: wgpu::VertexState {
-                    module: &field_shader,
-                    entry_point: Some("vs_terrain"),
-                    compilation_options: Default::default(),
-                    buffers: &terrain_buffers,
-                },
-                primitive: wgpu::PrimitiveState::default(),
-                // Over the base pass's surface, at the very same depth.
-                depth_stencil: Some(wgpu::DepthStencilState {
-                    depth_compare: Some(wgpu::CompareFunction::LessEqual),
-                    ..depth_stencil(false)
-                }),
-                multisample: Default::default(),
-                fragment: Some(wgpu::FragmentState {
-                    module: &field_shader,
-                    entry_point: Some("fs_blend"),
-                    compilation_options: wgpu::PipelineCompilationOptions {
-                        constants: &MAPS_CONSTANTS[usize::from(maps)],
-                        ..Default::default()
+            [false, true].map(|triplanar| {
+                device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                    label: Some("terrain blend"),
+                    layout: Some(&blend_layout),
+                    vertex: wgpu::VertexState {
+                        module: &field_shader,
+                        entry_point: Some("vs_terrain"),
+                        compilation_options: Default::default(),
+                        buffers: &terrain_buffers,
                     },
-                    targets: &[Some(wgpu::ColorTargetState {
-                        format: config.format,
-                        blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                        write_mask: wgpu::ColorWrites::ALL,
-                    })],
-                }),
-                multiview_mask: None,
-                cache: None,
+                    primitive: wgpu::PrimitiveState::default(),
+                    // Over the base pass's surface, at the very same depth.
+                    depth_stencil: Some(wgpu::DepthStencilState {
+                        depth_compare: Some(wgpu::CompareFunction::LessEqual),
+                        ..depth_stencil(false)
+                    }),
+                    multisample: Default::default(),
+                    fragment: Some(wgpu::FragmentState {
+                        module: &field_shader,
+                        entry_point: Some("fs_blend"),
+                        compilation_options: wgpu::PipelineCompilationOptions {
+                            constants: &GROUND_CONSTANTS[usize::from(maps)][usize::from(triplanar)],
+                            ..Default::default()
+                        },
+                        targets: &[Some(wgpu::ColorTargetState {
+                            format: config.format,
+                            blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                            write_mask: wgpu::ColorWrites::ALL,
+                        })],
+                    }),
+                    multiview_mask: None,
+                    cache: None,
+                })
             })
         });
         let water_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -948,6 +968,7 @@ impl Field {
             terrain_pipelines,
             blend_pipelines,
             material_maps: false,
+            triplanar: true,
             water_pipeline,
             decal_pipeline,
             shadow,
@@ -2436,7 +2457,7 @@ impl Field {
                     normal_map,
                     terrain.normal_strength,
                     terrain.specular_power,
-                    0.0,
+                    if terrain.triplanar { 1.0 } else { 0.0 },
                     0.0,
                 ];
                 (uniform, maps)
@@ -2604,6 +2625,10 @@ impl View for Field {
     fn set_material_maps(&mut self, on: bool) {
         self.material_maps = on;
         self.store.borrow_mut().set_material_maps(on);
+    }
+
+    fn set_triplanar(&mut self, on: bool) {
+        self.triplanar = on;
     }
 
     fn progress(&self) -> Progress {
@@ -2964,7 +2989,10 @@ impl View for Field {
                         .and_then(Option::as_ref)
                         .map_or(&ground.minimap, |(group, _)| group)
                 };
-                pass.set_pipeline(&self.terrain_pipelines[usize::from(self.material_maps)]);
+                pass.set_pipeline(
+                    &self.terrain_pipelines[usize::from(self.material_maps)]
+                        [usize::from(self.triplanar)],
+                );
                 pass.set_bind_group(3, &self.shadow.bind_group, &[]);
                 pass.set_vertex_buffer(0, ground.vertices.slice(..));
                 pass.set_index_buffer(ground.indices.slice(..), wgpu::IndexFormat::Uint32);
@@ -2973,7 +3001,10 @@ impl View for Field {
                     pass.draw_indexed(splat.first..splat.first + splat.count, 0, 0..1);
                 }
                 if let Some(alpha_maps) = &ground.alpha_maps {
-                    pass.set_pipeline(&self.blend_pipelines[usize::from(self.material_maps)]);
+                    pass.set_pipeline(
+                        &self.blend_pipelines[usize::from(self.material_maps)]
+                            [usize::from(self.triplanar)],
+                    );
                     pass.set_bind_group(2, alpha_maps, &[]);
                     for splat in &ground.blends {
                         pass.set_bind_group(1, group(splat.texture), &[]);

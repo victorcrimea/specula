@@ -31,7 +31,8 @@ struct Terrain {
     // (_11, _13), then 1 when the texture is in and 0 while the minimap
     // picture stands in for it, then 1 when it has a normal map.
     transform: vec4<f32>,
-    // The material's normal strength and specular power, unused, unused.
+    // The material's normal strength and specular power, then 1 when it
+    // maps the texture triplanar, unused.
     effect: vec4<f32>,
 }
 
@@ -45,6 +46,9 @@ struct Terrain {
 // The viewer's material maps setting: off leaves the normal and specular
 // maps unsampled, for the cost of the plain shading.
 override MAPS: bool = true;
+// The viewer's triplanar setting: off maps the triplanar terrains planar
+// too, for the cost of the extra samples.
+override TRIPLANAR: bool = true;
 
 @group(2) @binding(0) var alpha_maps: texture_2d<f32>;
 @group(2) @binding(1) var alpha_sampler: sampler;
@@ -108,10 +112,39 @@ fn vs_terrain(
     return out;
 }
 
-// The terrain's texture, planar as terrain_common.vs maps it, or the
-// minimap picture's one texel per tile until it arrives; lit by the
-// heightmap's normals bent by the normal map, with the specular map's
-// highlight, and shadowed (terrain_common.fs).
+// terrain_common.fs' triplanar weights: the normal's axes, tightened so
+// that only steep faces take the side projections.
+fn triplanar_weights(normal: vec3<f32>) -> vec3<f32> {
+    let blending = max(abs(normalize(normal)) - 0.4679, vec3<f32>(0.0));
+    return blending / (blending.x + blending.y + blending.z);
+}
+
+// terrain_common.fs' triplanar: world position over 32, projected along
+// x onto (y, z), along y onto (z, x) and along z onto (y, x).
+fn triplanar_sample(texture: texture_2d<f32>, coords: vec3<f32>, weights: vec3<f32>) -> vec4<f32> {
+    return textureSample(texture, terrain_sampler, coords.yz) * weights.x
+        + textureSample(texture, terrain_sampler, coords.zx) * weights.y
+        + textureSample(texture, terrain_sampler, coords.yx) * weights.z;
+}
+
+// A normal map texel as the planar path reads it, in the frame of a
+// projection whose u and v run along `u_axis` and `v_axis`. Unlike
+// terrain_common.vs, which gives every projection the tangent (1, 0, 0)
+// (its own TODO), each gets its axes, made orthogonal to the surface so
+// that a face looking down an axis keeps its handedness.
+fn projected_normal(packed: vec3<f32>, normal: vec3<f32>, u_axis: vec3<f32>, v_axis: vec3<f32>) -> vec3<f32> {
+    let tangent = normalize(u_axis - normal * dot(normal, u_axis));
+    let bitangent = normalize(v_axis - normal * dot(normal, v_axis));
+    var local = packed * 2.0 - 1.0;
+    local.y = -local.y;
+    return mat3x3<f32>(tangent, bitangent, normal) * local;
+}
+
+// The terrain's texture, planar as terrain_common.vs maps it or triplanar
+// where its material asks, or the minimap picture's one texel per tile
+// until it arrives; lit by the heightmap's normals bent by the normal
+// map, with the specular map's highlight, and shadowed
+// (terrain_common.fs).
 fn shade(in: TerrainVaryings) -> vec3<f32> {
     let size = view.misc.z;
     let c = terrain.transform.x;
@@ -120,25 +153,47 @@ fn shade(in: TerrainVaryings) -> vec3<f32> {
         in.ground.x * c + in.ground.y * -s,
         in.ground.x * -s + in.ground.y * -c,
     );
-    let uv = select(in.ground / size, planar, terrain.transform.z > 0.5);
-    let color = textureSample(terrain_texture, terrain_sampler, uv).rgb;
+    let textured = terrain.transform.z > 0.5;
+    let triplanar = TRIPLANAR && textured && terrain.effect.z > 0.5;
+    let uv = select(in.ground / size, planar, textured);
     let world = vec3<f32>(in.ground.x, in.height, in.ground.y);
+    let coords = world / 32.0;
     var normal = normalize(in.normal);
+    let weights = triplanar_weights(normal);
+    var color: vec3<f32>;
+    if triplanar {
+        color = triplanar_sample(terrain_texture, coords, weights).rgb;
+    } else {
+        color = textureSample(terrain_texture, terrain_sampler, uv).rgb;
+    }
     let shadow = shadow_at(world, light.shadow.y);
     if !MAPS {
         let sun = max(dot(normal, view.sun.xyz), 0.0) * light.sun_color.rgb;
         return color * (sun * shadow + light.ambient.rgb);
     }
-    let packed_normal = textureSample(terrain_normal, terrain_sampler, uv).rgb;
-    let specular_color = textureSample(terrain_specular, terrain_sampler, uv).rgb;
-    if terrain.transform.w > 0.5 {
-        // terrain_common.vs' tangent along the mapping, then
-        // calculateNormal.
+    var mapped: vec3<f32>;
+    var specular_color: vec3<f32>;
+    if triplanar {
+        let x = vec3<f32>(1.0, 0.0, 0.0);
+        let y = vec3<f32>(0.0, 1.0, 0.0);
+        let z = vec3<f32>(0.0, 0.0, 1.0);
+        mapped = normalize(
+            projected_normal(textureSample(terrain_normal, terrain_sampler, coords.yz).rgb, normal, y, z) * weights.x
+            + projected_normal(textureSample(terrain_normal, terrain_sampler, coords.zx).rgb, normal, z, x) * weights.y
+            + projected_normal(textureSample(terrain_normal, terrain_sampler, coords.yx).rgb, normal, y, x) * weights.z
+        );
+        specular_color = triplanar_sample(terrain_specular, coords, weights).rgb;
+    } else {
+        // terrain_common.vs' tangent along the mapping.
         let tangent = normalize(vec3<f32>(c, 0.0, -s));
         let bitangent = cross(in.normal, tangent);
-        var local = packed_normal * 2.0 - 1.0;
+        var local = textureSample(terrain_normal, terrain_sampler, uv).rgb * 2.0 - 1.0;
         local.y = -local.y;
-        var mapped = normalize(mat3x3<f32>(tangent, bitangent, in.normal) * local);
+        mapped = normalize(mat3x3<f32>(tangent, bitangent, in.normal) * local);
+        specular_color = textureSample(terrain_specular, terrain_sampler, uv).rgb;
+    }
+    if terrain.transform.w > 0.5 {
+        // calculateNormal.
         let strength = terrain.effect.x;
         if strength <= 1.0 {
             mapped = normalize(mix(normal, mapped, strength));

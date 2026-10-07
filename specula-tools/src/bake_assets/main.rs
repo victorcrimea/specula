@@ -279,6 +279,7 @@ fn run() -> Result<(), String> {
                     specular,
                     normal_strength: terrain.material.effect[0],
                     specular_power: terrain.material.effect[1],
+                    triplanar: terrain.material.triplanar,
                 },
             ));
         }
