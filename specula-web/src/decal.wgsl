@@ -5,7 +5,7 @@ struct View {
     view_proj: mat4x4<f32>,
     // xyz towards the sun.
     sun: vec4<f32>,
-    // Ambient, sun strength, map size in metres, 1 on a circular map.
+    // Unused, unused, map size in metres, 1 on a circular map.
     misc: vec4<f32>,
 }
 
@@ -14,6 +14,56 @@ struct View {
 @group(1) @binding(0) var decal_texture: texture_2d<f32>;
 @group(1) @binding(1) var decal_sampler: sampler;
 
+struct Light {
+    sun_color: vec4<f32>,
+    ambient: vec4<f32>,
+    // World to the shadow map: texels in xy, depth in z (shadow.rs).
+    shadow_matrix: mat4x4<f32>,
+    // The camera, then the shadow cutoff distance in metres.
+    eye: vec4<f32>,
+    // The camera's forward, then one over the shadow map's size.
+    forward: vec4<f32>,
+    // Depth bias for models, for the ground, then 1 when shadows are on.
+    shadow: vec4<f32>,
+}
+
+@group(2) @binding(0) var<uniform> light: Light;
+@group(2) @binding(1) var shadow_map: texture_depth_2d;
+@group(2) @binding(2) var shadow_sampler: sampler_comparison;
+
+// shadows_fragment.h getShadowWithFade with its PCF: four bilinear
+// comparisons weighted into a tent over 3x3 texels, faded out over the
+// last 8 m before the cutoff. The Level form: it may follow a discard.
+fn shadow_at(world: vec3<f32>, bias: f32) -> f32 {
+    if light.shadow.z < 0.5 {
+        return 1.0;
+    }
+    let depth = dot(world - light.eye.xyz, light.forward.xyz);
+    let fade = clamp((light.eye.w - depth - 8.0) / 8.0, 0.0, 1.0);
+    if fade <= 0.0 {
+        return 1.0;
+    }
+    let projected = light.shadow_matrix * vec4<f32>(world, 1.0);
+    let reference = projected.z - bias;
+    let offset = fract(projected.xy - 0.5);
+    let size = vec4<f32>(offset + 1.0, 2.0 - offset);
+    let weight = (vec4<f32>(1.0, 1.0, -0.5, -0.5) + (projected.xy - 0.5 * offset).xyxy) * light.forward.w;
+    let taps = vec4<f32>(
+        textureSampleCompareLevel(shadow_map, shadow_sampler, weight.zw, reference),
+        textureSampleCompareLevel(shadow_map, shadow_sampler, weight.xw, reference),
+        textureSampleCompareLevel(shadow_map, shadow_sampler, weight.zy, reference),
+        textureSampleCompareLevel(shadow_map, shadow_sampler, weight.xy, reference),
+    );
+    let shadow = dot(size.zxzx * size.wwyy, taps) / 9.0;
+    return mix(1.0, shadow, fade);
+}
+
+// shading.h calculateShading, without specular and ambient occlusion.
+fn lit(albedo: vec3<f32>, normal: vec3<f32>, shadow: f32) -> vec3<f32> {
+    let sun = max(dot(normalize(normal), view.sun.xyz), 0.0);
+    return albedo * (light.sun_color.rgb * sun * shadow + light.ambient.rgb);
+}
+
 struct Varyings {
     // Invariant: tested against the ground's depth, from the same vertices.
     @builtin(position) @invariant position: vec4<f32>,
@@ -21,6 +71,8 @@ struct Varyings {
     @location(0) ground: vec2<f32>,
     @location(1) normal: vec3<f32>,
     @location(2) uv: vec2<f32>,
+    // In metres.
+    @location(3) height: f32,
 }
 
 @vertex
@@ -37,6 +89,7 @@ fn vs_decal(
     out.position = view.view_proj * vec4<f32>(position, 1.0);
     out.ground = position.xz;
     out.normal = normal;
+    out.height = position.y;
     // CDecalRData::BuildVertexData: the vertex back in decal space.
     let c = transform.x;
     let s = transform.y;
@@ -59,6 +112,6 @@ fn fs_decal(in: Varyings) -> @location(0) vec4<f32> {
     if !inside || (view.misc.w > 0.5 && distance(in.ground, vec2<f32>(size * 0.5)) > size * 0.5) {
         discard;
     }
-    let lit = max(dot(normalize(in.normal), view.sun.xyz), 0.0);
-    return vec4<f32>(tex.rgb * (view.misc.x + view.misc.y * lit), tex.a);
+    let world = vec3<f32>(in.ground.x, in.height, in.ground.y);
+    return vec4<f32>(lit(tex.rgb, in.normal, shadow_at(world, light.shadow.y)), tex.a);
 }

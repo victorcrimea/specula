@@ -1,8 +1,8 @@
-//! Decoder for specula-server's terrain resource, format v1 (layout in
+//! Decoder for specula-server's terrain resource, format v2 (layout in
 //! `specula-server/src/terrain.rs`), and the minimap-style picture made
 //! from it.
 
-const VERSION: u8 = 1;
+pub const VERSION: u8 = 2;
 /// Engine heights are u16 in these units (HEIGHT_UNITS_PER_METRE).
 const HEIGHT_UNITS_PER_METRE: f32 = 92.0;
 const NO_TEXTURE: u16 = 0xFFFF;
@@ -23,6 +23,7 @@ pub struct TerrainImage {
     pub heights: Vec<u16>,
     /// In metres.
     pub water_level: f32,
+    pub light: Light,
     /// The terrain names the tiles index.
     pub names: Vec<String>,
     /// size^2 indices into `names`, row-major, x fastest; 0xFFFF for
@@ -30,6 +31,31 @@ pub struct TerrainImage {
     pub tiles: Vec<u16>,
     /// size^2 blend priorities, likewise.
     pub priorities: Vec<u32>,
+}
+
+/// The map's `CLightEnv`.
+#[derive(Clone, Copy)]
+pub struct Light {
+    /// Unit vector towards the sun.
+    pub sun: [f32; 3],
+    pub sun_color: [f32; 3],
+    pub ambient_color: [f32; 3],
+}
+
+impl Light {
+    /// `CLightEnv::CalculateSunDirection`, negated: the engine's points
+    /// from the sun.
+    fn new(elevation: f32, rotation: f32, sun_color: [f32; 3], ambient_color: [f32; 3]) -> Self {
+        let y = -elevation.sin();
+        let scale = 1.0 + y;
+        let dir = [scale * rotation.sin(), y, scale * rotation.cos()];
+        let length = dir.iter().map(|v| v * v).sum::<f32>().sqrt();
+        Light {
+            sun: dir.map(|v| -v / length),
+            sun_color,
+            ambient_color,
+        }
+    }
 }
 
 /// `TERRAIN_TILE_SIZE`, in metres.
@@ -48,6 +74,16 @@ impl TerrainImage {
         let mid1 = self.height(i, j) + self.height(i + 1, j + 1);
         let mid2 = self.height(i, j + 1) + self.height(i + 1, j);
         mid1 < mid2
+    }
+
+    /// The lowest and highest vertex, in metres.
+    pub fn height_range(&self) -> (f32, f32) {
+        let low = self.heights.iter().min().copied().unwrap_or(0);
+        let high = self.heights.iter().max().copied().unwrap_or(0);
+        (
+            f32::from(low) / HEIGHT_UNITS_PER_METRE,
+            f32::from(high) / HEIGHT_UNITS_PER_METRE,
+        )
     }
 
     /// `CTerrain::GetExactGroundLevel`, in metres.
@@ -124,6 +160,26 @@ pub fn build(resource: &[u8]) -> Result<TerrainImage, &'static str> {
     let water_level = f32::from_bits(cursor.u32()?);
     let shallow_depth = f32::from_bits(cursor.u32()?);
     let circular = cursor.u8()? != 0;
+    let mut floats = [0.0; 8];
+    for value in &mut floats {
+        *value = f32::from_bits(cursor.u32()?);
+    }
+    let [
+        elevation,
+        rotation,
+        sun_r,
+        sun_g,
+        sun_b,
+        ambient_r,
+        ambient_g,
+        ambient_b,
+    ] = floats;
+    let light = Light::new(
+        elevation,
+        rotation,
+        [sun_r, sun_g, sun_b],
+        [ambient_r, ambient_g, ambient_b],
+    );
     let palette_size = cursor.u32()? as usize;
     let mut palette = Vec::with_capacity(palette_size);
     let mut names = Vec::with_capacity(palette_size);
@@ -194,6 +250,7 @@ pub fn build(resource: &[u8]) -> Result<TerrainImage, &'static str> {
             .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
             .collect(),
         water_level,
+        light,
         names,
         tiles: tile_textures
             .chunks_exact(2)

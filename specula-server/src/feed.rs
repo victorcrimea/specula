@@ -1,4 +1,4 @@
-//! Decoder for the observer hook's feed, format v10. The writer is
+//! Decoder for the observer hook's feed, format v11. The writer is
 //! `source/network/SpeculaFeed.cpp` in the `specula` branch of 0ad-specula.
 
 use std::io;
@@ -6,7 +6,7 @@ use std::io::ErrorKind;
 use std::io::Read;
 
 const MAGIC: [u8; 4] = *b"SPCF";
-const VERSION: u32 = 10;
+const VERSION: u32 = 11;
 const RECORD_TEMPLATE: u8 = 1;
 const RECORD_TURN: u8 = 2;
 const RECORD_MAP: u8 = 3;
@@ -206,6 +206,7 @@ pub struct Terrain {
     /// In metres; water shallower than this is drawn as a ford.
     pub shallow_depth: f32,
     pub circular: bool,
+    pub light: Light,
     /// (tiles + 1)^2 vertices, in 1/92 m.
     pub heights: Vec<u16>,
     pub textures: Vec<String>,
@@ -214,6 +215,15 @@ pub struct Terrain {
     /// tiles^2 blend priorities: a tile's texture is drawn over the
     /// neighbours of lower priority.
     pub priorities: Vec<u32>,
+}
+
+/// The map's `CLightEnv`, as it lights the match in the game.
+pub struct Light {
+    /// Radians.
+    pub elevation: f32,
+    pub rotation: f32,
+    pub sun_color: [f32; 3],
+    pub ambient_color: [f32; 3],
 }
 
 pub fn read_header(reader: &mut impl Read) -> io::Result<()> {
@@ -352,6 +362,26 @@ fn decode_terrain(payload: &[u8]) -> io::Result<Record> {
     let water_level = cursor.i32()?;
     let shallow_depth = f32::from_bits(cursor.u32()?);
     let circular = cursor.u8()? != 0;
+    let mut floats = [0.0; 8];
+    for value in &mut floats {
+        *value = f32::from_bits(cursor.u32()?);
+    }
+    let [
+        elevation,
+        rotation,
+        sun_r,
+        sun_g,
+        sun_b,
+        ambient_r,
+        ambient_g,
+        ambient_b,
+    ] = floats;
+    let light = Light {
+        elevation,
+        rotation,
+        sun_color: [sun_r, sun_g, sun_b],
+        ambient_color: [ambient_r, ambient_g, ambient_b],
+    };
     let vertices = (tiles_per_side as usize + 1).pow(2);
     let heights = (0..vertices)
         .map(|_| cursor.u16())
@@ -378,6 +408,7 @@ fn decode_terrain(payload: &[u8]) -> io::Result<Record> {
         water_level,
         shallow_depth,
         circular,
+        light,
         heights,
         textures,
         tiles,

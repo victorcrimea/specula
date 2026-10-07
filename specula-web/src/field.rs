@@ -65,11 +65,14 @@ use crate::impostor;
 use crate::pose;
 use crate::projectile;
 use crate::projectile::Flight;
+use crate::shadow;
+use crate::shadow::Shadow;
 use crate::stream::Dot;
 use crate::stream::Scene;
 use crate::stream::Shot;
 use crate::stream::VariantSet;
 use crate::stream::turn_towards;
+use crate::terrain::Light;
 use crate::terrain::TILE_SIZE;
 use crate::terrain::TerrainImage;
 use crate::territory;
@@ -89,7 +92,8 @@ use crate::worker::PEAK_WINDOW_S;
 /// The stream's positions are in 1/16 m.
 const POSITION_UNITS_PER_METRE: f32 = 16.0;
 /// Matrix, sun, misc, water, camera right, up and eye; far.wgsl `View`,
-/// of which model.wgsl and field.wgsl read the first four.
+/// of which model.wgsl and field.wgsl read the first four. The rest of the
+/// light is shadow.rs's.
 const VIEW_SIZE: u64 = 160;
 /// Three f32x4 matrix rows, u32x4 pose, f32x4 params; model.wgsl.
 const INSTANCE_SIZE: usize = 80;
@@ -106,6 +110,7 @@ const FAR_LEVEL: usize = 3;
 const FAR_PICK: u64 = 0;
 /// How often the frame rate shown is recomputed; shorter flickers.
 const FPS_INTERVAL_MS: f64 = 500.0;
+/// The light until the map's arrives.
 const AMBIENT: f32 = 0.45;
 const SUN_STRENGTH: f32 = 0.75;
 const FIELD_OF_VIEW: f32 = 0.7;
@@ -226,6 +231,10 @@ struct Ground {
     /// Palette entries whose texture will not come.
     missing: Vec<bool>,
     alpha_maps: Option<wgpu::BindGroup>,
+    /// The lowest and highest ground, in metres, for the shadow map's
+    /// depth range.
+    low: f32,
+    high: f32,
 }
 
 struct Pointer {
@@ -297,6 +306,7 @@ pub struct Field {
     blend_pipeline: wgpu::RenderPipeline,
     water_pipeline: wgpu::RenderPipeline,
     decal_pipeline: wgpu::RenderPipeline,
+    shadow: Shadow,
     borders: Borders,
     ground_layout: wgpu::BindGroupLayout,
     /// Repeating, for the terrain textures.
@@ -323,6 +333,10 @@ pub struct Field {
     camera: Rc<RefCell<Camera>>,
     instances: wgpu::Buffer,
     groups: HashMap<GroupKey, Vec<u8>>,
+    /// Shadow casters out of view or drawn as impostors, at the coarse
+    /// level; those drawn as meshes cast from `groups`.
+    shadow_instances: wgpu::Buffer,
+    shadow_groups: HashMap<GroupKey, Vec<u8>>,
     /// Model instances placed this frame, captures included.
     placed: u32,
     far: Far,
@@ -515,15 +529,6 @@ impl Field {
             stencil: Default::default(),
             bias: Default::default(),
         };
-        let model_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("model"),
-            bind_group_layouts: &[
-                Some(&view_layout),
-                Some(&pose_layout),
-                Some(&texture_layout),
-            ],
-            immediate_size: 0,
-        });
         let model_buffers = [
             Some(wgpu::VertexBufferLayout {
                 array_stride: VERTEX_SIZE as u64,
@@ -536,6 +541,33 @@ impl Field {
                 attributes: &INSTANCE_ATTRIBUTES,
             }),
         ];
+        let terrain_buffers = [Some(wgpu::VertexBufferLayout {
+            array_stride: blend::VERTEX_SIZE as u64,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &TERRAIN_ATTRIBUTES,
+        })];
+        let shadow = Shadow::new(
+            &device,
+            &view_layout,
+            VIEW_SIZE,
+            &pose_layout,
+            &texture_layout,
+            &model_shader,
+            &model_buffers,
+            &field_shader,
+            &terrain_buffers,
+        );
+        let light_layout = &shadow.layout;
+        let model_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("model"),
+            bind_group_layouts: &[
+                Some(&view_layout),
+                Some(&pose_layout),
+                Some(&texture_layout),
+                Some(light_layout),
+            ],
+            immediate_size: 0,
+        });
         let model_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("model"),
             layout: Some(&model_layout),
@@ -561,14 +593,15 @@ impl Field {
         });
         let terrain_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("terrain"),
-            bind_group_layouts: &[Some(&view_layout), Some(&ground_layout)],
+            // Group 2 is the blend pass's masks.
+            bind_group_layouts: &[
+                Some(&view_layout),
+                Some(&ground_layout),
+                None,
+                Some(light_layout),
+            ],
             immediate_size: 0,
         });
-        let terrain_buffers = [Some(wgpu::VertexBufferLayout {
-            array_stride: blend::VERTEX_SIZE as u64,
-            step_mode: wgpu::VertexStepMode::Vertex,
-            attributes: &TERRAIN_ATTRIBUTES,
-        })];
         let terrain_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("terrain"),
             layout: Some(&terrain_layout),
@@ -596,6 +629,7 @@ impl Field {
                 Some(&view_layout),
                 Some(&ground_layout),
                 Some(&texture_layout),
+                Some(light_layout),
             ],
             immediate_size: 0,
         });
@@ -668,7 +702,11 @@ impl Field {
         });
         let decal_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("decal"),
-            bind_group_layouts: &[Some(&view_layout), Some(&texture_layout)],
+            bind_group_layouts: &[
+                Some(&view_layout),
+                Some(&texture_layout),
+                Some(light_layout),
+            ],
             immediate_size: 0,
         });
         let decal_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -722,6 +760,7 @@ impl Field {
             &view_layout,
             &pose_layout,
             &texture_layout,
+            light_layout,
             START_PITCH,
         );
         let poses = pose::Atlas::new(&device);
@@ -767,6 +806,13 @@ impl Field {
             &[],
             wgpu::BufferUsages::INDEX,
         );
+        let shadow_instances = create_buffer(
+            &device,
+            &queue,
+            "shadow caster instances",
+            &[],
+            wgpu::BufferUsages::VERTEX,
+        );
         let camera = Rc::new(RefCell::new(Camera {
             target: [0.0, 0.0],
             yaw: START_YAW,
@@ -803,6 +849,7 @@ impl Field {
             blend_pipeline,
             water_pipeline,
             decal_pipeline,
+            shadow,
             borders,
             ground_layout,
             terrain_sampler,
@@ -826,6 +873,8 @@ impl Field {
             camera,
             instances,
             groups: HashMap::new(),
+            shadow_instances,
+            shadow_groups: HashMap::new(),
             placed: 0,
             far,
             far_instances,
@@ -871,8 +920,23 @@ impl Field {
         (multiply(&projection, &view), eye, right, up)
     }
 
+    /// The map's light, or a plain one until it arrives.
+    fn light(&self) -> Light {
+        match &self.ground {
+            Some(ground) => ground.image.light,
+            None => {
+                let sun = Vec3::new(0.4, 0.8, -0.45).normalized();
+                Light {
+                    sun: [sun.x, sun.y, sun.z],
+                    sun_color: [SUN_STRENGTH; 3],
+                    ambient_color: [AMBIENT; 3],
+                }
+            }
+        }
+    }
+
     fn write_view(&self, view_proj: &[[f32; 4]; 4], camera: [[f32; 3]; 3]) {
-        let sun = Vec3::new(0.4, 0.8, -0.45).normalized();
+        let [x, y, z] = self.light().sun;
         let (size, circular, water) = match &self.ground {
             Some(ground) => (
                 ground.image.size as f32 * TILE_SIZE,
@@ -888,8 +952,8 @@ impl Field {
                 uniform.push(row[column]);
             }
         }
-        uniform.extend_from_slice(&[sun.x, sun.y, sun.z, 0.0]);
-        uniform.extend_from_slice(&[AMBIENT, SUN_STRENGTH, size, circular]);
+        uniform.extend_from_slice(&[x, y, z, 0.0]);
+        uniform.extend_from_slice(&[0.0, 0.0, size, circular]);
         uniform.extend_from_slice(&[water, 0.0, 0.0, 0.0]);
         for [x, y, z] in camera {
             uniform.extend_from_slice(&[x, y, z, 0.0]);
@@ -901,10 +965,21 @@ impl Field {
         self.queue.write_buffer(&self.view_buffer, 0, &bytes);
     }
 
-    /// Fills `groups` and `far_groups` with this frame's instances.
-    fn place_entities(&mut self, progress: f32, view_proj: &[[f32; 4]; 4]) {
+    /// Fills `groups` and `far_groups` with this frame's instances, and
+    /// `shadow_groups` with the other casters inside `casters`, the shadow
+    /// map's planes.
+    fn place_entities(
+        &mut self,
+        progress: f32,
+        view_proj: &[[f32; 4]; 4],
+        casters: Option<&[[f32; 4]; 6]>,
+    ) {
         let mut groups = std::mem::take(&mut self.groups);
-        for group in groups.values_mut().chain(self.far_groups.values_mut()) {
+        for group in groups
+            .values_mut()
+            .chain(self.far_groups.values_mut())
+            .chain(self.shadow_groups.values_mut())
+        {
             group.clear();
         }
         self.placed = 0;
@@ -920,6 +995,7 @@ impl Field {
                 progress,
                 view_proj,
                 &planes,
+                casters,
                 pixel_scale,
                 &mut groups,
             );
@@ -940,6 +1016,7 @@ impl Field {
         progress: f32,
         view_proj: &[[f32; 4]; 4],
         planes: &[[f32; 4]; 6],
+        casters: Option<&[[f32; 4]; 6]>,
         pixel_scale: f32,
         groups: &mut HashMap<GroupKey, Vec<u8>>,
     ) {
@@ -1000,28 +1077,18 @@ impl Field {
         let radius = reach.hypot((high.y - low.y) / 2.0) * REACH_MARGIN + 1.0;
         let centre_y = (low.y + high.y) / 2.0;
         let centre = [x, y + sink + centre_y, z];
+        let caster = casters.is_some_and(|casters| !outside(casters, centre, radius));
         let Some(level) = screen_level(centre, radius, view_proj, planes, pixel_scale) else {
+            if caster {
+                self.place_caster(id, dot, progress, &model, &transform);
+            }
             return;
         };
         if has_decal(&model) {
             self.place_decals(&model, &transform, level < COARSE_LEVEL, 0);
         }
 
-        let state = string(&self.entities.strings, dot.animation)
-            .map_or_else(|| "idle".to_string(), str::to_lowercase);
-        let color = owner_color(dot, &self.palette);
-        let mut pick = DefaultHasher::new();
-        (id, dot.animation_turn).hash(&mut pick);
-        let entity = EntityState {
-            dot: *dot,
-            turn: self.entities.turn,
-            progress,
-            state,
-            pick: pick.finish(),
-            color,
-            level,
-            time: None,
-        };
+        let entity = self.entity_state(id, dot, progress, level);
         if level == FAR_LEVEL
             && self.place_far(
                 &model,
@@ -1033,6 +1100,9 @@ impl Field {
             )
         {
             self.stats.levels[FAR_LEVEL] += 1;
+            if caster {
+                self.place_caster(id, dot, progress, &model, &transform);
+            }
             return;
         }
         let placed = self.placed;
@@ -1041,6 +1111,36 @@ impl Field {
         if self.placed > placed {
             self.stats.levels[level.min(COARSE_LEVEL)] += 1;
         }
+    }
+
+    /// How `place_model` draws the entity at `level`.
+    fn entity_state(&self, id: u32, dot: &Dot, progress: f32, level: usize) -> EntityState {
+        let state = string(&self.entities.strings, dot.animation)
+            .map_or_else(|| "idle".to_string(), str::to_lowercase);
+        let mut pick = DefaultHasher::new();
+        (id, dot.animation_turn).hash(&mut pick);
+        EntityState {
+            dot: *dot,
+            turn: self.entities.turn,
+            progress,
+            state,
+            pick: pick.finish(),
+            color: owner_color(dot, &self.palette),
+            level,
+            time: None,
+        }
+    }
+
+    /// Places an entity that is not drawn as a mesh into `shadow_groups`,
+    /// at the coarse level: its shadow can fall in view all the same.
+    fn place_caster(&mut self, id: u32, dot: &Dot, progress: f32, model: &Model, transform: &Mat4) {
+        let entity = self.entity_state(id, dot, progress, COARSE_LEVEL);
+        let mut groups = std::mem::take(&mut self.shadow_groups);
+        // Not counted among the models drawn.
+        let placed = self.placed;
+        self.place_model(model, transform, &entity, None, 0, &mut groups);
+        self.placed = placed;
+        self.shadow_groups = groups;
     }
 
     /// Where the entity is drawn this frame, in metres.
@@ -2121,6 +2221,7 @@ impl Field {
             .iter()
             .flat_map(|index| index.to_le_bytes())
             .collect();
+        let (low, high) = image.height_range();
         self.ground = Some(Ground {
             image: image.clone(),
             vertices: create_buffer(
@@ -2143,6 +2244,8 @@ impl Field {
             textures: vec![None; image.names.len()],
             missing: vec![false; image.names.len()],
             alpha_maps: None,
+            low,
+            high,
         });
     }
 
@@ -2271,6 +2374,10 @@ impl View for Field {
 
     fn set_projectiles(&mut self, on: bool) {
         self.projectiles = on;
+    }
+
+    fn set_shadows(&mut self, size: u32) {
+        self.shadow.set_size(&self.device, size);
     }
 
     fn progress(&self) -> Progress {
@@ -2433,11 +2540,32 @@ impl View for Field {
         let (view_proj, eye, right, up) = self.view_projection();
         self.write_view(&view_proj, [right, up, eye]);
         self.eye = eye;
+        let bounds = self.ground.as_ref().map(|ground| shadow::Bounds {
+            size: ground.image.size as f32 * TILE_SIZE,
+            low: ground.low,
+            high: ground.high,
+        });
+        let casters = self.shadow.prepare(
+            &self.queue,
+            &self.light(),
+            &shadow::Eye {
+                position: eye,
+                forward: [
+                    right[1] * up[2] - right[2] * up[1],
+                    right[2] * up[0] - right[0] * up[2],
+                    right[0] * up[1] - right[1] * up[0],
+                ],
+                near: NEAR,
+                field_of_view: FIELD_OF_VIEW,
+                aspect: self.config.width as f32 / self.config.height.max(1) as f32,
+            },
+            bounds.as_ref(),
+        );
         if let Some(bake) = self.store.borrow().index_name() {
             self.far.open_storage(bake);
         }
         self.far.begin_frame(&self.device);
-        self.place_entities(progress, &view_proj);
+        self.place_entities(progress, &view_proj, casters.as_ref());
         self.far.take_loaded(&self.device, &self.queue);
         let mut prepared = Vec::new();
         for (key, request) in self.far.next_bakes(&self.device) {
@@ -2456,35 +2584,17 @@ impl View for Field {
         }
         self.bake(prepared);
 
-        // One buffer for all groups, each drawn from its own slice.
-        let mut bytes = Vec::new();
-        let mut draws = Vec::new();
-        for (key, group) in &self.groups {
-            if group.is_empty() {
-                continue;
-            }
-            let start = bytes.len() as u64;
-            bytes.extend_from_slice(group);
-            draws.push((
-                *key,
-                start,
-                bytes.len() as u64,
-                (group.len() / INSTANCE_SIZE) as u32,
-            ));
-        }
-        if bytes.len() as u64 > self.instances.size() {
-            // Doubling keeps reallocations rare while a match grows.
-            self.instances = create_buffer(
+        let draws = upload_groups(&self.device, &self.queue, &self.groups, &mut self.instances);
+        let shadow_draws = if casters.is_some() {
+            upload_groups(
                 &self.device,
                 &self.queue,
-                "model instances",
-                &vec![0; (bytes.len() as u64).next_power_of_two() as usize],
-                wgpu::BufferUsages::VERTEX,
-            );
-        }
-        if !bytes.is_empty() {
-            self.queue.write_buffer(&self.instances, 0, &bytes);
-        }
+                &self.shadow_groups,
+                &mut self.shadow_instances,
+            )
+        } else {
+            Vec::new()
+        };
         let mut far_bytes = Vec::new();
         let mut far_draws = Vec::new();
         for (key, group) in &self.far_groups {
@@ -2581,6 +2691,22 @@ impl View for Field {
         );
         let target = frame.texture.create_view(&Default::default());
         let mut encoder = self.device.create_command_encoder(&Default::default());
+        if casters.is_some()
+            && let Some(mut pass) = self.shadow.begin(&mut encoder)
+        {
+            if let Some(ground) = &self.ground {
+                pass.set_pipeline(&self.shadow.terrain_pipeline);
+                pass.set_vertex_buffer(0, ground.vertices.slice(..));
+                pass.set_index_buffer(ground.indices.slice(..), wgpu::IndexFormat::Uint32);
+                for splat in &ground.base {
+                    pass.draw_indexed(splat.first..splat.first + splat.count, 0, 0..1);
+                }
+            }
+            pass.set_pipeline(&self.shadow.model_pipeline);
+            pass.set_bind_group(1, &self.pose_bind_group, &[]);
+            self.draw_models(&mut pass, &draws, &self.instances);
+            self.draw_models(&mut pass, &shadow_draws, &self.shadow_instances);
+        }
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("field"),
@@ -2613,6 +2739,7 @@ impl View for Field {
                         .map_or(&ground.minimap, |(group, _)| group)
                 };
                 pass.set_pipeline(&self.terrain_pipeline);
+                pass.set_bind_group(3, &self.shadow.bind_group, &[]);
                 pass.set_vertex_buffer(0, ground.vertices.slice(..));
                 pass.set_index_buffer(ground.indices.slice(..), wgpu::IndexFormat::Uint32);
                 for splat in &ground.base {
@@ -2629,6 +2756,7 @@ impl View for Field {
                 }
                 if !decal_draws.is_empty() {
                     pass.set_pipeline(&self.decal_pipeline);
+                    pass.set_bind_group(2, &self.shadow.bind_group, &[]);
                     pass.set_index_buffer(self.decal_indices.slice(..), wgpu::IndexFormat::Uint32);
                     for (texture, start, first, count) in &decal_draws {
                         let Some((group, _)) = self.textures.get(texture) else {
@@ -2644,24 +2772,12 @@ impl View for Field {
             if !draws.is_empty() {
                 pass.set_pipeline(&self.model_pipeline);
                 pass.set_bind_group(1, &self.pose_bind_group, &[]);
-                for ((mesh, level, texture), start, end, count) in &draws {
-                    let Some(gpu) = self.meshes.get(mesh) else {
-                        continue;
-                    };
-                    let group = self
-                        .textures
-                        .get(texture)
-                        .map_or(&self.white, |(group, _)| group);
-                    let (first, index_count) = gpu.levels[*level];
-                    pass.set_bind_group(2, group, &[]);
-                    pass.set_vertex_buffer(0, gpu.vertices.slice(..));
-                    pass.set_vertex_buffer(1, self.instances.slice(*start..*end));
-                    pass.set_index_buffer(gpu.indices.slice(..), wgpu::IndexFormat::Uint16);
-                    pass.draw_indexed(first..first + index_count, 0, 0..*count);
-                }
+                pass.set_bind_group(3, &self.shadow.bind_group, &[]);
+                self.draw_models(&mut pass, &draws, &self.instances);
             }
             if !far_draws.is_empty() {
                 pass.set_pipeline(&self.far.pipeline);
+                pass.set_bind_group(2, &self.shadow.bind_group, &[]);
                 for (key, start, end, count) in &far_draws {
                     let Some(look) = self.far.ready(*key) else {
                         continue;
@@ -2687,6 +2803,30 @@ impl View for Field {
 }
 
 impl Field {
+    /// Instanced model draws, the pipeline and the groups below 2 set.
+    fn draw_models(
+        &self,
+        pass: &mut wgpu::RenderPass,
+        draws: &[(GroupKey, u64, u64, u32)],
+        instances: &wgpu::Buffer,
+    ) {
+        for ((mesh, level, texture), start, end, count) in draws {
+            let Some(gpu) = self.meshes.get(mesh) else {
+                continue;
+            };
+            let group = self
+                .textures
+                .get(texture)
+                .map_or(&self.white, |(group, _)| group);
+            let (first, index_count) = gpu.levels[*level];
+            pass.set_bind_group(2, group, &[]);
+            pass.set_vertex_buffer(0, gpu.vertices.slice(..));
+            pass.set_vertex_buffer(1, instances.slice(*start..*end));
+            pass.set_index_buffer(gpu.indices.slice(..), wgpu::IndexFormat::Uint16);
+            pass.draw_indexed(first..first + index_count, 0, 0..*count);
+        }
+    }
+
     fn show_stats(&mut self, draws: usize) {
         let stats = &mut self.stats;
         stats.frames += 1;
@@ -2743,6 +2883,52 @@ impl Field {
     }
 }
 
+/// Packs the groups into one buffer, grown as needed, each drawn from its
+/// own slice: (key, start, end, instance count) per draw.
+fn upload_groups(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    groups: &HashMap<GroupKey, Vec<u8>>,
+    buffer: &mut wgpu::Buffer,
+) -> Vec<(GroupKey, u64, u64, u32)> {
+    let mut bytes = Vec::new();
+    let mut draws = Vec::new();
+    for (key, group) in groups {
+        if group.is_empty() {
+            continue;
+        }
+        let start = bytes.len() as u64;
+        bytes.extend_from_slice(group);
+        draws.push((
+            *key,
+            start,
+            bytes.len() as u64,
+            (group.len() / INSTANCE_SIZE) as u32,
+        ));
+    }
+    if bytes.len() as u64 > buffer.size() {
+        // Doubling keeps reallocations rare while a match grows.
+        *buffer = create_buffer(
+            device,
+            queue,
+            "model instances",
+            &vec![0; (bytes.len() as u64).next_power_of_two() as usize],
+            wgpu::BufferUsages::VERTEX,
+        );
+    }
+    if !bytes.is_empty() {
+        queue.write_buffer(buffer, 0, &bytes);
+    }
+    draws
+}
+
+/// Whether a sphere is wholly outside the planes.
+fn outside(planes: &[[f32; 4]; 6], centre: [f32; 3], radius: f32) -> bool {
+    planes.iter().any(|plane| {
+        plane[0] * centre[0] + plane[1] * centre[1] + plane[2] * centre[2] + plane[3] < -radius
+    })
+}
+
 /// The level of detail a sphere is drawn at, `None` when it is out of
 /// view.
 fn screen_level(
@@ -2752,10 +2938,7 @@ fn screen_level(
     planes: &[[f32; 4]; 6],
     pixel_scale: f32,
 ) -> Option<usize> {
-    let outside = planes.iter().any(|plane| {
-        plane[0] * centre[0] + plane[1] * centre[1] + plane[2] * centre[2] + plane[3] < -radius
-    });
-    if outside {
+    if outside(planes, centre, radius) {
         return None;
     }
     let depth = view_proj[3][0] * centre[0]

@@ -9,6 +9,8 @@ use brotli_decompressor::BrotliResult;
 use brotli_decompressor::BrotliState;
 use brotli_decompressor::StandardAlloc;
 
+use crate::terrain;
+
 pub const ENVELOPE_JOIN: u8 = 1;
 pub const ENVELOPE_FRAME: u8 = 2;
 pub const ENVELOPE_MORE: u8 = 3;
@@ -134,12 +136,12 @@ impl Ground {
     /// From a `/terrain/<id>` resource, read up to its heights.
     pub fn from_resource(id: u64, resource: &[u8]) -> Result<Self, &'static str> {
         let mut cursor = Cursor(resource);
-        if cursor.u8()? != 1 {
+        if cursor.u8()? != terrain::VERSION {
             return Err("unknown terrain version");
         }
         let tiles = cursor.u32()?;
-        // Water level, shallow depth and circular.
-        cursor.take(9)?;
+        // Water level, shallow depth, circular and the light's eight f32.
+        cursor.take(9 + 8 * 4)?;
         for _ in 0..cursor.u32()? {
             cursor.take(4)?;
             let length = cursor.take(2)?;

@@ -7,7 +7,7 @@
 struct View {
     view_proj: mat4x4<f32>,
     sun: vec4<f32>,
-    // Ambient, sun strength, map size in metres, 1 on a circular map.
+    // Unused, unused, map size in metres, 1 on a circular map.
     misc: vec4<f32>,
     water: vec4<f32>,
     // The camera's right, up and position.
@@ -20,6 +20,29 @@ struct View {
 @group(1) @binding(0) var atlas_albedo: texture_2d<f32>;
 @group(1) @binding(1) var atlas_normal: texture_2d<f32>;
 @group(1) @binding(2) var atlas_sampler: sampler;
+
+struct Light {
+    sun_color: vec4<f32>,
+    ambient: vec4<f32>,
+    // World to the shadow map: texels in xy, depth in z (shadow.rs).
+    shadow_matrix: mat4x4<f32>,
+    // The camera, then the shadow cutoff distance in metres.
+    eye: vec4<f32>,
+    // The camera's forward, then one over the shadow map's size.
+    forward: vec4<f32>,
+    // Depth bias for models, for the ground, then 1 when shadows are on.
+    shadow: vec4<f32>,
+}
+
+@group(2) @binding(0) var<uniform> light: Light;
+
+// shading.h calculateShading, without specular and ambient occlusion, and
+// unshadowed: an impostor is too small on screen for a shadow on it to
+// show.
+fn lit(albedo: vec3<f32>, normal: vec3<f32>) -> vec3<f32> {
+    let sun = max(dot(normal, view.sun.xyz), 0.0);
+    return albedo * (light.sun_color.rgb * sun + light.ambient.rgb);
+}
 
 fn sign_not_zero(v: vec2<f32>) -> vec2<f32> {
     return select(vec2<f32>(-1.0), vec2<f32>(1.0), v >= vec2<f32>(0.0));
@@ -91,6 +114,5 @@ fn fs_impostor(in: ImpostorVaryings) -> @location(0) vec4<f32> {
     }
     let normal = turn(from_octahedral(packed.xy), in.turn.x, in.turn.y);
     let diffuse = albedo.rgb * mix(vec3<f32>(1.0), in.color, packed.z);
-    let lit = max(dot(normal, view.sun.xyz), 0.0);
-    return vec4<f32>(diffuse * (view.misc.x + view.misc.y * lit), 1.0);
+    return vec4<f32>(lit(diffuse, normal), 1.0);
 }

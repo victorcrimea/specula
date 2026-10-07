@@ -13,6 +13,7 @@ mod opfs;
 mod pose;
 mod projectile;
 mod render;
+mod shadow;
 mod stored;
 mod stream;
 mod terrain;
@@ -92,6 +93,8 @@ const SPEEDS: [f32; 5] = [0.5, 1.0, 2.0, 4.0, 8.0];
 const POSITION_UNITS_PER_METRE: f32 = 16.0;
 /// localStorage key of the sound settings: "on,master,effects,music".
 const SOUND_SETTINGS_KEY: &str = "specula.sound";
+/// localStorage key of the shadow map size, 0 for no shadows.
+const SHADOW_SETTINGS_KEY: &str = "specula.shadows";
 
 /// The camera a sound is placed against, as the engine's listener sits at
 /// it: the view-projection matrix (row-major), the eye in metres and the
@@ -131,6 +134,8 @@ trait View {
     }
     /// Whether to draw projectiles, where it draws any.
     fn set_projectiles(&mut self, _on: bool) {}
+    /// The shadow map's size, 0 for none, where it draws shadows.
+    fn set_shadows(&mut self, _size: u32) {}
     /// Downloads to show on the loading bar.
     fn progress(&self) -> Progress {
         Progress::Idle
@@ -777,6 +782,9 @@ async fn run(page: Page, glue_url: String, wasm_url: String) -> Result<(), Strin
     }));
     wire_controls(&app);
     wire_projectiles(&app, &window);
+    if page == Page::Observer {
+        wire_shadows(&app, element(&document, "shadows")?);
+    }
     wire_sound(&app, &window);
     wire_warmup(&app);
     wire_playback(&app);
@@ -868,6 +876,41 @@ fn wire_projectiles(app: &Rc<RefCell<App>>, window: &web_sys::Window) {
     });
     let _ = window.add_event_listener_with_callback("keydown", on_key.as_ref().unchecked_ref());
     on_key.forget();
+}
+
+/// The shadow list, kept across visits.
+fn wire_shadows(app: &Rc<RefCell<App>>, select: HtmlSelectElement) {
+    let saved = web_sys::window()
+        .and_then(|window| window.local_storage().ok().flatten())
+        .and_then(|storage| storage.get_item(SHADOW_SETTINGS_KEY).ok().flatten())
+        .and_then(|text| text.parse::<u32>().ok())
+        .filter(|size| shadow::SIZES.contains(size))
+        .unwrap_or(shadow::DEFAULT_SIZE);
+    select.set_value(&saved.to_string());
+    app.borrow_mut().renderer.set_shadows(saved);
+
+    let target = Rc::clone(app);
+    let list = select.clone();
+    let on_change = Closure::<dyn FnMut()>::new(move || {
+        let size = list
+            .value()
+            .parse::<u32>()
+            .ok()
+            .filter(|size| shadow::SIZES.contains(size))
+            .unwrap_or(shadow::DEFAULT_SIZE);
+        // Best effort: without storage the choice lasts only this visit.
+        if let Some(storage) =
+            web_sys::window().and_then(|window| window.local_storage().ok().flatten())
+        {
+            let _ = storage.set_item(SHADOW_SETTINGS_KEY, &size.to_string());
+        }
+        let app = &mut *target.borrow_mut();
+        app.renderer.set_shadows(size);
+        app.dirty = true;
+    });
+    select.set_onchange(Some(on_change.as_ref().unchecked_ref()));
+    // The controls live as long as the page, so their handlers do too.
+    on_change.forget();
 }
 
 fn wire_warmup(app: &Rc<RefCell<App>>) {

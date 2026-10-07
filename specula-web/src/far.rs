@@ -181,6 +181,7 @@ impl Far {
         view_layout: &wgpu::BindGroupLayout,
         pose_layout: &wgpu::BindGroupLayout,
         texture_layout: &wgpu::BindGroupLayout,
+        light_layout: &wgpu::BindGroupLayout,
         elevation: f32,
     ) -> Self {
         // The page's view uniform, one per cell at a dynamic offset, so
@@ -245,7 +246,11 @@ impl Far {
         });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("far"),
-            bind_group_layouts: &[Some(view_layout), Some(&mips.atlas_layout)],
+            bind_group_layouts: &[
+                Some(view_layout),
+                Some(&mips.atlas_layout),
+                Some(light_layout),
+            ],
             immediate_size: 0,
         });
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
