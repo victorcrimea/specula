@@ -682,9 +682,11 @@ fn write_mesh(source: &str, bytes: &[u8], output: &mut Output) -> Result<FileRef
 
 fn write_texture(bytes: &[u8], output: &mut Output) -> Result<FileRef, String> {
     let texture = texture::convert(bytes)?;
-    let (mut coarse, detail) = texture.split(texture::coarse_level(&texture));
-    if let Some(detail) = detail {
-        coarse.detail = Some(output.write(Kind::TextureDetail, &detail.encode())?);
+    let (mut coarse, details) = texture.split(texture::coarse_level(&texture));
+    for (slot, detail) in coarse.details.iter_mut().zip(details) {
+        if let Some(detail) = detail {
+            *slot = Some(output.write(Kind::TextureDetail, &detail.encode())?);
+        }
     }
     output.write(Kind::Texture, &coarse.encode())
 }
@@ -884,16 +886,23 @@ fn print_sample(index: &Index, asset_dir: &Path) {
             coarse += u64::from(file.size);
             total += u64::from(file.size);
             counts[slot] += 1;
-            let detail = match slot {
+            let details = match slot {
                 0 => read(Kind::Mesh, file.hash)
                     .and_then(|bytes| files::Mesh::decode(&bytes).ok())
-                    .and_then(|mesh| mesh.detail),
+                    .and_then(|mesh| mesh.detail)
+                    .into_iter()
+                    .collect(),
                 1 => read(Kind::Texture, file.hash)
                     .and_then(|bytes| files::Texture::decode(&bytes).ok())
-                    .and_then(|texture| texture.detail),
-                _ => None,
+                    .map_or(Vec::new(), |texture| {
+                        texture.details.into_iter().flatten().collect()
+                    }),
+                _ => Vec::new(),
             };
-            total += detail.map_or(0, |detail| u64::from(detail.size));
+            total += details
+                .iter()
+                .map(|detail| u64::from(detail.size))
+                .sum::<u64>();
         }
     }
     println!(

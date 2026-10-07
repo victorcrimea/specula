@@ -208,7 +208,7 @@ pub fn alpha_maps(mod_dir: &Path) -> Result<Texture, String> {
         width: total_width as u32,
         height: base as u32,
         levels: vec![pixels],
-        detail: None,
+        details: [None; 3],
     })
 }
 

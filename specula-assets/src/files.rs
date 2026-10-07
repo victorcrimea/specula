@@ -56,10 +56,11 @@
 //!   frames x keys x {f32x3 translation, f16x4 rotation}, frame-major.
 //! - texture "SPCT", the smallest mips: u8 format (`TextureFormat`), u32
 //!   width, u32 height, u8 level count, levels x {u32 byte count, bytes},
-//!   largest first; block rows and pixel rows top first; optional texture
-//!   detail.
-//! - texture detail "SPTD": the same up to the levels, for the larger mips
-//!   down to the one before the coarse file's first.
+//!   largest first; block rows and pixel rows top first; an optional
+//!   texture detail per tier of `TEXTURE_TIER_SIDES`, smallest first.
+//! - texture detail "SPTD": the same up to the levels, for the mips of
+//!   one tier: from `Texture::first_level` of its side down to the one
+//!   before the next smaller file's first.
 //! - sound group "SPCG", `CSoundGroup` as loaded: u8 flags (1 omnipresent,
 //!   2 distanceless, 4 heard by the owner only, 8 random gain, 16 random
 //!   pitch), f32 gain, f32 pitch, f32 gain lower, f32 gain upper, f32
@@ -76,7 +77,11 @@
 use crate::half::f16_bits;
 use crate::half::f16_to_f32;
 
-pub const VERSION: u8 = 4;
+pub const VERSION: u8 = 5;
+/// The largest side of each texture detail tier, which a viewer's
+/// texture quality picks from: low, medium and the whole chain as the
+/// engine uploads it at its default quality.
+pub const TEXTURE_TIER_SIDES: [u32; 3] = [256, 1024, u32::MAX];
 /// Bytes per mesh vertex.
 pub const VERTEX_SIZE: usize = 40;
 /// A prop that names no object only removes what was on its point.
@@ -358,12 +363,12 @@ pub struct Texture {
     pub width: u32,
     pub height: u32,
     pub levels: Vec<Vec<u8>>,
-    /// What completes a coarse texture; `None` once refined, or when the
-    /// coarse levels are all there is.
-    pub detail: Option<FileRef>,
+    /// What completes a coarse texture, per tier of `TEXTURE_TIER_SIDES`;
+    /// `None` once refined with it, or when that tier has no levels.
+    pub details: [Option<FileRef>; 3],
 }
 
-/// The mips larger than a coarse texture's first.
+/// The mips of one tier, larger than a coarse texture's first.
 pub struct TextureDetail {
     pub format: TextureFormat,
     pub width: u32,
@@ -892,10 +897,27 @@ impl TextureFormat {
 }
 
 impl Texture {
-    /// The coarse file from level `first` on and the detail of the levels
-    /// before it, if any. The coarse file's detail ref is left for the
-    /// caller, who writes the detail first to learn it.
-    pub fn split(&self, first: usize) -> (Texture, Option<TextureDetail>) {
+    /// The first level whose larger side is at most `max_side`, or a
+    /// larger one where that is not whole blocks: WebGPU takes a BC
+    /// texture only when its top level is.
+    pub fn first_level(&self, max_side: u32) -> usize {
+        let extent = |level: usize| level_extent(self.width, self.height, level as u32);
+        let small = (0..self.levels.len())
+            .find(|level| extent(*level).0.max(extent(*level).1) <= max_side)
+            .unwrap_or(0);
+        (0..=small)
+            .rev()
+            .find(|level| {
+                let (w, h) = extent(*level);
+                self.format.bc().is_none() || (w % 4 == 0 && h % 4 == 0)
+            })
+            .unwrap_or(0)
+    }
+
+    /// The coarse file from level `first` on and the detail of each tier
+    /// above it that has levels. The coarse file's detail refs are left
+    /// for the caller, who writes the details first to learn them.
+    pub fn split(&self, first: usize) -> (Texture, [Option<TextureDetail>; 3]) {
         let first = first.min(self.levels.len() - 1);
         let (width, height) = level_extent(self.width, self.height, first as u32);
         let coarse = Texture {
@@ -903,38 +925,60 @@ impl Texture {
             width,
             height,
             levels: self.levels[first..].to_vec(),
-            detail: None,
+            details: [None; 3],
         };
-        let detail = (first > 0).then(|| TextureDetail {
-            format: self.format,
-            width: self.width,
-            height: self.height,
-            levels: self.levels[..first].to_vec(),
+        let mut end = first;
+        let details = TEXTURE_TIER_SIDES.map(|side| {
+            let start = self.first_level(side).min(end);
+            let (width, height) = level_extent(self.width, self.height, start as u32);
+            let detail = (start < end).then(|| TextureDetail {
+                format: self.format,
+                width,
+                height,
+                levels: self.levels[start..end].to_vec(),
+            });
+            end = start;
+            detail
         });
-        (coarse, detail)
+        (coarse, details)
     }
 
-    /// The full texture: this coarse one completed by its detail.
-    pub fn refine(&self, detail: &TextureDetail) -> Result<Texture, &'static str> {
+    /// This texture completed by the detail of `tier`, the next larger
+    /// one it has.
+    pub fn refine(&self, tier: usize, detail: &TextureDetail) -> Result<Texture, &'static str> {
         let next = level_extent(detail.width, detail.height, detail.levels.len() as u32);
         if detail.format != self.format || next != (self.width, self.height) {
             return Err("texture detail does not fit its coarse levels");
         }
         let mut levels = detail.levels.clone();
         levels.extend_from_slice(&self.levels);
+        let mut details = self.details;
+        details[tier] = None;
         Ok(Texture {
             format: self.format,
             width: detail.width,
             height: detail.height,
             levels,
-            detail: None,
+            details,
         })
+    }
+
+    /// The tier whose detail is still missing, the smallest first, among
+    /// the first `tiers`.
+    pub fn next_detail(&self, tiers: usize) -> Option<(usize, FileRef)> {
+        self.details
+            .iter()
+            .take(tiers)
+            .enumerate()
+            .find_map(|(tier, file)| file.map(|file| (tier, file)))
     }
 
     pub fn encode(&self) -> Vec<u8> {
         let mut out = Writer::new(Kind::Texture);
         out.mips(self.format, self.width, self.height, &self.levels);
-        out.optional_file(self.detail);
+        for detail in self.details {
+            out.optional_file(detail);
+        }
         out.0
     }
 
@@ -946,14 +990,18 @@ impl Texture {
             height,
             levels,
         } = input.mips()?;
-        let detail = input.optional_file()?;
+        let details = [
+            input.optional_file()?,
+            input.optional_file()?,
+            input.optional_file()?,
+        ];
         input.finish()?;
         Ok(Texture {
             format,
             width,
             height,
             levels,
-            detail,
+            details,
         })
     }
 }

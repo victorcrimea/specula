@@ -27,6 +27,7 @@ use specula_assets::files::FileRef;
 use specula_assets::files::Mesh;
 use specula_assets::files::NO_BONE;
 use specula_assets::files::PropPoint;
+use specula_assets::files::TEXTURE_TIER_SIDES;
 use specula_assets::files::Texture;
 use specula_assets::files::TextureFormat;
 use specula_assets::files::VERTEX_SIZE;
@@ -173,6 +174,9 @@ const TERRAIN_ANISOTROPY: u16 = 16;
 /// (actor, variant set, animation, seed) as the stream indexes them: what
 /// decides an entity's variation.
 type ModelKey = (u32, u32, u32, u32);
+/// The level count and first uploaded level of a texture on the GPU: a
+/// tier of detail adds levels, the texture quality moves the first.
+type Uploaded = (usize, usize);
 
 /// (mesh, level of detail, texture) of one instanced draw.
 type GroupKey = (u64, usize, u64);
@@ -225,9 +229,10 @@ struct Ground {
     blends: Vec<Splat>,
     /// The minimap picture, for a terrain whose texture is not in (yet).
     minimap: wgpu::BindGroup,
-    /// Per palette entry, its texture's bind group and whether it holds
-    /// the detail; `None` while it is on its way or missing.
-    textures: Vec<Option<(wgpu::BindGroup, bool)>>,
+    /// Per palette entry, its texture's bind group and what it was
+    /// uploaded from (`Uploaded`); `None` while it is on its way or
+    /// missing.
+    textures: Vec<Option<(wgpu::BindGroup, Uploaded)>>,
     /// Palette entries whose texture will not come.
     missing: Vec<bool>,
     alpha_maps: Option<wgpu::BindGroup>,
@@ -323,8 +328,11 @@ pub struct Field {
     ground: Option<Ground>,
     store: Rc<RefCell<Store>>,
     meshes: HashMap<u64, GpuMesh>,
-    /// By coarse file hash; true once uploaded with the detail.
-    textures: HashMap<u64, (wgpu::BindGroup, bool)>,
+    /// By coarse file hash, with what it was uploaded from.
+    textures: HashMap<u64, (wgpu::BindGroup, Uploaded)>,
+    /// How many of `TEXTURE_TIER_SIDES` textures are fetched and drawn
+    /// with: the viewer's texture quality, at most medium without BC.
+    texture_tiers: usize,
     entities: Entities,
     palette: Vec<u32>,
     models: HashMap<ModelKey, Option<Rc<Model>>>,
@@ -772,9 +780,9 @@ impl Field {
                 width: 1,
                 height: 1,
                 levels: vec![vec![0xFF; 4]],
-                detail: None,
+                details: [None; 3],
             };
-            let view = upload_texture(&device, &queue, &texture, false);
+            let view = upload_texture(&device, &queue, &texture, 0, false);
             texture_bind_group(&device, &texture_layout, &view, &sampler)
         };
         let depth = create_depth(&device, config.width, config.height);
@@ -844,6 +852,7 @@ impl Field {
             config,
             depth,
             bc,
+            texture_tiers: max_texture_tiers(bc),
             model_pipeline,
             terrain_pipeline,
             blend_pipeline,
@@ -863,7 +872,11 @@ impl Field {
             sampler,
             white,
             ground: None,
-            store: assets::new(),
+            store: {
+                let store = assets::new();
+                store.borrow_mut().set_texture_tiers(max_texture_tiers(bc));
+                store
+            },
             meshes: HashMap::new(),
             textures: HashMap::new(),
             entities: Entities::default(),
@@ -1817,25 +1830,32 @@ impl Field {
 
     /// The bind group of a texture: `Some(Some(hash))` when ready,
     /// `Some(None)` to draw it white (it will not come), `None` while it
-    /// is on its way. Uploaded again once its detail has arrived.
+    /// is on its way. Uploaded again once a tier of its detail has
+    /// arrived or the texture quality has changed.
     fn texture(&mut self, file: FileRef, detail: bool) -> Option<Option<u64>> {
         let texture = match self.store.borrow_mut().texture(file, detail) {
             Get::Ready(texture) => texture,
             Get::Pending => return None,
             Get::Missing => return Some(None),
         };
-        let complete = texture.detail.is_none();
+        let uploaded = self.uploaded(&texture);
         let current = self
             .textures
             .get(&file.hash)
-            .is_some_and(|(_, held)| *held == complete);
+            .is_some_and(|(_, held)| *held == uploaded);
         if !current {
-            let view = upload_texture(&self.device, &self.queue, &texture, self.bc);
+            let view = upload_texture(&self.device, &self.queue, &texture, uploaded.1, self.bc);
             let group =
                 texture_bind_group(&self.device, &self.texture_layout, &view, &self.sampler);
-            self.textures.insert(file.hash, (group, complete));
+            self.textures.insert(file.hash, (group, uploaded));
         }
         Some(Some(file.hash))
+    }
+
+    /// What `texture` is uploaded from at the current texture quality.
+    fn uploaded(&self, texture: &Texture) -> Uploaded {
+        let first = texture.first_level(TEXTURE_TIER_SIDES[self.texture_tiers - 1]);
+        (texture.levels.len(), first)
     }
 
     /// `CUnit::ReloadObject`'s entity selections: the variant selections
@@ -2212,9 +2232,9 @@ impl Field {
             width: image.size,
             height: image.size,
             levels: vec![image.pixels.clone()],
-            detail: None,
+            details: [None; 3],
         };
-        let view = upload_texture(&self.device, &self.queue, &minimap, false);
+        let view = upload_texture(&self.device, &self.queue, &minimap, 0, false);
         let minimap = self.ground_bind_group(&view, &self.sampler, None);
         let indices: Vec<u8> = mesh
             .indices
@@ -2301,10 +2321,7 @@ impl Field {
             return;
         };
         for (at, name) in ground.image.names.iter().enumerate() {
-            let complete = ground.textures[at]
-                .as_ref()
-                .is_some_and(|(_, complete)| *complete);
-            if complete || ground.missing[at] {
+            if ground.missing[at] {
                 continue;
             }
             let terrain = match self.store.borrow().terrain(name) {
@@ -2324,17 +2341,20 @@ impl Field {
                     continue;
                 }
             };
-            let complete = texture.detail.is_none();
-            if ground.textures[at].is_some() && !complete {
+            let uploaded = self.uploaded(&texture);
+            if ground.textures[at]
+                .as_ref()
+                .is_some_and(|(_, held)| *held == uploaded)
+            {
                 continue;
             }
-            let view = upload_texture(&self.device, &self.queue, &texture, self.bc);
+            let view = upload_texture(&self.device, &self.queue, &texture, uploaded.1, self.bc);
             let group = self.ground_bind_group(
                 &view,
                 &self.terrain_sampler,
                 Some((terrain.angle, terrain.size)),
             );
-            ground.textures[at] = Some((group, complete));
+            ground.textures[at] = Some((group, uploaded));
         }
         if ground.alpha_maps.is_none() {
             let file = self.store.borrow().alpha_maps();
@@ -2342,7 +2362,7 @@ impl Field {
                 && let Get::Ready(texture) = self.store.borrow_mut().texture(file, false)
             {
                 // Linear and clamped, as the engine's composite.
-                let view = upload_texture(&self.device, &self.queue, &texture, false);
+                let view = upload_texture(&self.device, &self.queue, &texture, 0, false);
                 ground.alpha_maps = Some(texture_bind_group(
                     &self.device,
                     &self.texture_layout,
@@ -2378,6 +2398,17 @@ impl View for Field {
 
     fn set_shadows(&mut self, size: u32) {
         self.shadow.set_size(&self.device, size);
+    }
+
+    fn max_texture_tiers(&self) -> usize {
+        max_texture_tiers(self.bc)
+    }
+
+    fn set_texture_tiers(&mut self, tiers: usize) {
+        self.texture_tiers = tiers.clamp(1, max_texture_tiers(self.bc));
+        self.store
+            .borrow_mut()
+            .set_texture_tiers(self.texture_tiers);
     }
 
     fn progress(&self) -> Progress {
@@ -3167,14 +3198,28 @@ fn texture_bind_group(
     })
 }
 
-/// BC levels go up as they are when the device takes them; otherwise, and
-/// for RGBA8, as RGBA8.
+/// The texture tiers a device can be given: without BC the levels are
+/// decoded to RGBA8, four to eight times the memory, so the largest tier
+/// is left out.
+fn max_texture_tiers(bc_supported: bool) -> usize {
+    if bc_supported {
+        TEXTURE_TIER_SIDES.len()
+    } else {
+        TEXTURE_TIER_SIDES.len() - 1
+    }
+}
+
+/// BC levels from `first` on go up as they are when the device takes
+/// them; otherwise, and for RGBA8, as RGBA8.
 fn upload_texture(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     texture: &Texture,
+    first: usize,
     bc_supported: bool,
 ) -> wgpu::TextureView {
+    let first = first.min(texture.levels.len() - 1);
+    let (top_width, top_height) = level_extent(texture.width, texture.height, first as u32);
     let bc_format = texture.format.bc().filter(|_| bc_supported);
     let format = match bc_format {
         Some(bc::Format::Bc1) => wgpu::TextureFormat::Bc1RgbaUnorm,
@@ -3185,19 +3230,19 @@ fn upload_texture(
     let gpu_texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("skin"),
         size: wgpu::Extent3d {
-            width: texture.width,
-            height: texture.height,
+            width: top_width,
+            height: top_height,
             depth_or_array_layers: 1,
         },
-        mip_level_count: texture.levels.len() as u32,
+        mip_level_count: (texture.levels.len() - first) as u32,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
         format,
         usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
         view_formats: &[],
     });
-    for (level, data) in texture.levels.iter().enumerate() {
-        let (width, height) = level_extent(texture.width, texture.height, level as u32);
+    for (level, data) in texture.levels[first..].iter().enumerate() {
+        let (width, height) = level_extent(top_width, top_height, level as u32);
         let (bytes, bytes_per_row, extent) = match (bc_format, texture.format.bc()) {
             // Small mips still take whole 4x4 blocks.
             (Some(format), _) => (

@@ -6,7 +6,9 @@
 //!
 //! A mesh or texture is ready once its coarse file is in. Its detail file
 //! is fetched only when asked for, after every pending coarse file, and
-//! then replaces the coarse value with the full one.
+//! then replaces the coarse value with the full one. A texture's detail
+//! comes in tiers, each fetched once the smaller one is in, up to the
+//! viewer's texture quality.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -25,6 +27,7 @@ use specula_assets::files::MeshDetail;
 use specula_assets::files::MusicKind;
 use specula_assets::files::Skeleton;
 use specula_assets::files::SoundGroup;
+use specula_assets::files::TEXTURE_TIER_SIDES;
 use specula_assets::files::TerrainTexture;
 use specula_assets::files::Texture;
 use specula_assets::files::TextureDetail;
@@ -121,8 +124,10 @@ pub struct Store {
     sound_group_files: HashMap<u64, Slot<Rc<SoundGroup>>>,
     queue: VecDeque<Job>,
     detail_queue: VecDeque<Job>,
-    /// Coarse hashes whose detail was asked for, so it is fetched once.
+    /// Detail files asked for, so each is fetched once.
     detail_asked: HashSet<u64>,
+    /// How many of `TEXTURE_TIER_SIDES` a texture's detail is fetched for.
+    texture_tiers: usize,
     in_flight: usize,
     detail_in_flight: usize,
     /// Whether the last file came from the cache.
@@ -349,8 +354,19 @@ impl Store {
         )
     }
 
-    /// The smallest mips until the rest has arrived, which is fetched
-    /// when `detail` is asked for.
+    pub fn texture_tiers(&self) -> usize {
+        self.texture_tiers
+    }
+
+    /// Raising it fetches the larger tiers the next time a texture is
+    /// asked for with its detail; lowering it keeps what has arrived.
+    pub fn set_texture_tiers(&mut self, tiers: usize) {
+        self.texture_tiers = tiers.min(TEXTURE_TIER_SIDES.len());
+    }
+
+    /// The smallest mips until the rest has arrived, which is fetched,
+    /// one tier at a time up to `texture_tiers`, when `detail` is asked
+    /// for.
     pub fn texture(&mut self, file: FileRef, detail: bool) -> Get<Rc<Texture>> {
         let got = get(
             &mut self.textures,
@@ -361,7 +377,7 @@ impl Store {
         );
         if let Get::Ready(texture) = &got
             && detail
-            && let Some(rest) = texture.detail
+            && let Some((_, rest)) = texture.next_detail(self.texture_tiers)
         {
             self.ask_detail(Kind::TextureDetail, rest, file.hash);
         }
@@ -369,7 +385,7 @@ impl Store {
     }
 
     fn ask_detail(&mut self, kind: Kind, file: FileRef, coarse: u64) {
-        if self.detail_asked.insert(coarse) {
+        if self.detail_asked.insert(file.hash) {
             self.detail_queue.push_back(Job { kind, file, coarse });
             self.queued_bytes += u64::from(file.size);
         }
@@ -383,7 +399,7 @@ impl Store {
         }
         self.done_bytes += u64::from(file.size);
         let hash = file.hash;
-        let decoded = decoded.and_then(|decoded| self.refine(coarse, decoded));
+        let decoded = decoded.and_then(|decoded| self.refine(coarse, hash, decoded));
         if decoded.is_ok() {
             self.stats.files += 1;
             self.stats.bytes += u64::from(file.size);
@@ -434,7 +450,7 @@ impl Store {
 
 impl Store {
     /// Puts a detail file into the coarse value it completes.
-    fn refine(&mut self, coarse: u64, decoded: Decoded) -> Result<Decoded, String> {
+    fn refine(&mut self, coarse: u64, file: u64, decoded: Decoded) -> Result<Decoded, String> {
         match decoded {
             Decoded::MeshDetail(detail) => {
                 if let Some(Slot::Ready(mesh)) = self.meshes.get(&coarse) {
@@ -444,8 +460,13 @@ impl Store {
                 Ok(Decoded::MeshDetail(detail))
             }
             Decoded::TextureDetail(detail) => {
-                if let Some(Slot::Ready(texture)) = self.textures.get(&coarse) {
-                    let full = texture.refine(&detail)?;
+                if let Some(Slot::Ready(texture)) = self.textures.get(&coarse)
+                    && let Some(tier) = texture
+                        .details
+                        .iter()
+                        .position(|detail| detail.is_some_and(|detail| detail.hash == file))
+                {
+                    let full = texture.refine(tier, &detail)?;
                     self.textures.insert(coarse, Slot::Ready(Rc::new(full)));
                 }
                 Ok(Decoded::TextureDetail(detail))
@@ -489,7 +510,10 @@ pub fn new() -> Rc<RefCell<Store>> {
     if let Some(performance) = web_sys::window().and_then(|window| window.performance()) {
         performance.set_resource_timing_buffer_size(1_000_000);
     }
-    let store = Rc::new(RefCell::new(Store::default()));
+    let store = Rc::new(RefCell::new(Store {
+        texture_tiers: TEXTURE_TIER_SIDES.len(),
+        ..Store::default()
+    }));
     wasm_bindgen_futures::spawn_local(load_index(Rc::clone(&store)));
     store
 }

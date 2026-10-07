@@ -1,15 +1,14 @@
 //! The engine's cached DDS as the client uploads it: BC blocks kept as
-//! they are where the GPU can take them, mips above `MAX_SIDE` dropped,
-//! and where the coarse file of the smallest mips starts.
+//! they are where the GPU can take them, every mip kept as the engine
+//! uploads them at its default texture quality, and where the coarse
+//! file of the smallest mips starts. The viewer's quality caps what it
+//! fetches.
 
 use specula_assets::bc;
 use specula_assets::files::Texture;
 use specula_assets::files::TextureFormat;
 use specula_assets::files::level_extent;
 
-/// An infantryman is at most a couple of hundred pixels tall on an RTS
-/// camera, and one skin covers the whole body, so more is not seen.
-pub const MAX_SIDE: u32 = 256;
 /// The largest mip of the coarse file: enough for a unit a few dozen
 /// pixels tall and for its impostor cells, and a few KB.
 const COARSE_SIDE: u32 = 64;
@@ -73,18 +72,11 @@ pub fn convert(bytes: &[u8]) -> Result<Texture, String> {
         levels.push(level);
     }
 
-    // A full chain lets the cap simply drop levels; otherwise there is
-    // nothing smaller to take, so decode, shrink and build the chain.
+    // The client needs the chain down to 1x1; without it there is
+    // nothing smaller to take, so decode and build the chain.
     let full_chain = levels.len() as u32 == 32 - width.max(height).leading_zeros();
     // WebGPU takes BC only when the top level is whole blocks.
-    let first = (0..levels.len() as u32)
-        .find(|level| {
-            let (w, h) = level_extent(width, height, *level);
-            w.max(h) <= MAX_SIDE
-        })
-        .unwrap_or(0);
-    let (top_width, top_height) = level_extent(width, height, first);
-    let blocks_whole = top_width % 4 == 0 && top_height % 4 == 0;
+    let blocks_whole = width % 4 == 0 && height % 4 == 0;
     if let Some(format) = format
         && full_chain
         && blocks_whole
@@ -95,23 +87,19 @@ pub fn convert(bytes: &[u8]) -> Result<Texture, String> {
                 bc::Format::Bc2 => TextureFormat::Bc2,
                 bc::Format::Bc3 => TextureFormat::Bc3,
             },
-            width: top_width,
-            height: top_height,
-            levels: levels.split_off(first as usize),
-            detail: None,
+            width,
+            height,
+            levels,
+            details: [None; 3],
         });
     }
 
-    let mut rgba = match format {
+    let rgba = match format {
         Some(format) => bc::decode(format, width, height, &levels[0])?,
         None => levels.swap_remove(0),
     };
     let (mut w, mut h) = (width, height);
-    while w.max(h) > MAX_SIDE {
-        (rgba, w, h) = halve(&rgba, w, h);
-    }
     let mut chain = vec![rgba];
-    let (top_width, top_height) = (w, h);
     while w > 1 || h > 1 {
         let (smaller, sw, sh) = halve(chain.last().unwrap(), w, h);
         chain.push(smaller);
@@ -119,28 +107,16 @@ pub fn convert(bytes: &[u8]) -> Result<Texture, String> {
     }
     Ok(Texture {
         format: TextureFormat::Rgba8,
-        width: top_width,
-        height: top_height,
+        width,
+        height,
         levels: chain,
-        detail: None,
+        details: [None; 3],
     })
 }
 
-/// The first level of the coarse file. WebGPU takes a BC texture only
-/// when its top level is whole blocks, so a BC coarse file starts no
-/// smaller than that.
+/// The first level of the coarse file.
 pub fn coarse_level(texture: &Texture) -> usize {
-    let extent = |level: usize| level_extent(texture.width, texture.height, level as u32);
-    let small = (0..texture.levels.len())
-        .find(|level| extent(*level).0.max(extent(*level).1) <= COARSE_SIDE)
-        .unwrap_or(0);
-    (0..=small)
-        .rev()
-        .find(|level| {
-            let (w, h) = extent(*level);
-            texture.format.bc().is_none() || (w % 4 == 0 && h % 4 == 0)
-        })
-        .unwrap_or(0)
+    texture.first_level(COARSE_SIDE)
 }
 
 fn take<'a>(data: &mut &'a [u8], length: usize) -> Result<&'a [u8], String> {

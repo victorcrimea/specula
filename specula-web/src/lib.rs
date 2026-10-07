@@ -28,6 +28,7 @@ use std::collections::BTreeSet;
 use std::rc::Rc;
 
 use specula_assets::files::MusicKind;
+use specula_assets::files::TEXTURE_TIER_SIDES;
 use wasm_bindgen::JsCast;
 use wasm_bindgen::JsValue;
 use wasm_bindgen::closure::Closure;
@@ -95,6 +96,8 @@ const POSITION_UNITS_PER_METRE: f32 = 16.0;
 const SOUND_SETTINGS_KEY: &str = "specula.sound";
 /// localStorage key of the shadow map size, 0 for no shadows.
 const SHADOW_SETTINGS_KEY: &str = "specula.shadows";
+/// localStorage key of the texture quality: 1 low, 2 medium, 3 high.
+const TEXTURE_SETTINGS_KEY: &str = "specula.textures";
 
 /// The camera a sound is placed against, as the engine's listener sits at
 /// it: the view-projection matrix (row-major), the eye in metres and the
@@ -136,6 +139,13 @@ trait View {
     fn set_projectiles(&mut self, _on: bool) {}
     /// The shadow map's size, 0 for none, where it draws shadows.
     fn set_shadows(&mut self, _size: u32) {}
+    /// The texture quality, as a count of `TEXTURE_TIER_SIDES`, where it
+    /// draws textures.
+    fn set_texture_tiers(&mut self, _tiers: usize) {}
+    /// The highest texture quality the device is given.
+    fn max_texture_tiers(&self) -> usize {
+        TEXTURE_TIER_SIDES.len()
+    }
     /// Downloads to show on the loading bar.
     fn progress(&self) -> Progress {
         Progress::Idle
@@ -784,6 +794,7 @@ async fn run(page: Page, glue_url: String, wasm_url: String) -> Result<(), Strin
     wire_projectiles(&app, &window);
     if page == Page::Observer {
         wire_shadows(&app, element(&document, "shadows")?);
+        wire_textures(&app, element(&document, "textures")?);
     }
     wire_sound(&app, &window);
     wire_warmup(&app);
@@ -876,6 +887,51 @@ fn wire_projectiles(app: &Rc<RefCell<App>>, window: &web_sys::Window) {
     });
     let _ = window.add_event_listener_with_callback("keydown", on_key.as_ref().unchecked_ref());
     on_key.forget();
+}
+
+/// The texture quality list, kept across visits. A device that is not
+/// given the higher qualities has them disabled.
+fn wire_textures(app: &Rc<RefCell<App>>, select: HtmlSelectElement) {
+    let max = app.borrow().renderer.max_texture_tiers();
+    for at in 0..select.length() {
+        if let Some(option) = select
+            .item(at)
+            .and_then(|option| option.dyn_into::<HtmlOptionElement>().ok())
+            && option
+                .value()
+                .parse::<usize>()
+                .is_ok_and(|tiers| tiers > max)
+        {
+            option.set_disabled(true);
+        }
+    }
+    let parse = move |text: &str| text.parse::<usize>().ok().filter(|tiers| *tiers >= 1);
+    let saved = web_sys::window()
+        .and_then(|window| window.local_storage().ok().flatten())
+        .and_then(|storage| storage.get_item(TEXTURE_SETTINGS_KEY).ok().flatten())
+        .and_then(|text| parse(&text))
+        .unwrap_or(TEXTURE_TIER_SIDES.len())
+        .min(max);
+    select.set_value(&saved.to_string());
+    app.borrow_mut().renderer.set_texture_tiers(saved);
+
+    let target = Rc::clone(app);
+    let list = select.clone();
+    let on_change = Closure::<dyn FnMut()>::new(move || {
+        let tiers = parse(&list.value()).unwrap_or(max).min(max);
+        // Best effort: without storage the choice lasts only this visit.
+        if let Some(storage) =
+            web_sys::window().and_then(|window| window.local_storage().ok().flatten())
+        {
+            let _ = storage.set_item(TEXTURE_SETTINGS_KEY, &tiers.to_string());
+        }
+        let app = &mut *target.borrow_mut();
+        app.renderer.set_texture_tiers(tiers);
+        app.dirty = true;
+    });
+    select.set_onchange(Some(on_change.as_ref().unchecked_ref()));
+    // The controls live as long as the page, so their handlers do too.
+    on_change.forget();
 }
 
 /// The shadow list, kept across visits.

@@ -44,6 +44,8 @@ struct Run {
     done_bytes: u64,
     total_bytes: u64,
     failed: u32,
+    /// The store's texture tiers when the run started.
+    texture_tiers: usize,
 }
 
 impl Run {
@@ -95,7 +97,10 @@ impl Warmup {
         let Some(roots) = store.warmup_roots(&civs, actors, &self.terrains) else {
             return;
         };
-        let mut run = Run::default();
+        let mut run = Run {
+            texture_tiers: store.texture_tiers(),
+            ..Run::default()
+        };
         for (kind, file) in roots {
             run.add(kind, file);
         }
@@ -169,9 +174,9 @@ fn pump(run: &Rc<RefCell<Run>>) {
 /// The same URL the store fetches, so its request hits the cache.
 async fn fetch(run: Rc<RefCell<Run>>, kind: Kind, file: FileRef) {
     let url = format!("/assets/{}", kind.file_name(file.hash));
-    let named = crate::stored::fetch(&url)
-        .await
-        .and_then(|(bytes, _)| names(kind, &bytes).map_err(String::from));
+    let named = crate::stored::fetch(&url).await.and_then(|(bytes, _)| {
+        names(kind, &bytes, run.borrow().texture_tiers).map_err(String::from)
+    });
     {
         let mut state = run.borrow_mut();
         state.in_flight -= 1;
@@ -191,8 +196,12 @@ async fn fetch(run: Rc<RefCell<Run>>, kind: Kind, file: FileRef) {
     pump(&run);
 }
 
-/// The files this one names.
-fn names(kind: Kind, bytes: &[u8]) -> Result<Vec<(Kind, FileRef)>, &'static str> {
+/// The files this one names, a texture's detail up to `texture_tiers`.
+fn names(
+    kind: Kind,
+    bytes: &[u8],
+    texture_tiers: usize,
+) -> Result<Vec<(Kind, FileRef)>, &'static str> {
     let mut out = Vec::new();
     match kind {
         Kind::Actor => {
@@ -222,7 +231,12 @@ fn names(kind: Kind, bytes: &[u8]) -> Result<Vec<(Kind, FileRef)>, &'static str>
         }
         Kind::Texture => {
             let texture = Texture::decode(bytes)?;
-            out.extend(texture.detail.map(|file| (Kind::TextureDetail, file)));
+            out.extend(
+                texture.details[..texture_tiers]
+                    .iter()
+                    .flatten()
+                    .map(|file| (Kind::TextureDetail, *file)),
+            );
         }
         Kind::SoundGroup => {
             let group = SoundGroup::decode(bytes)?;
