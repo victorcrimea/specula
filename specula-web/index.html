@@ -78,28 +78,41 @@ body:not(.debug) #stats, body:not(.debug) #errors { display: none; }
 #storage-notice-buttons { display: flex; justify-content: flex-end; gap: 6px; margin-top: 12px; }
 #storage-notice button { font: inherit; color: #e6e9eb; background: rgba(15, 18, 20, 0.85);
   border: 1px solid #3a4248; border-radius: 4px; padding: 4px 10px; }
+#settings { position: fixed; top: 0; bottom: 0; left: 0;
+  width: min(280px, calc(100vw - 48px)); box-sizing: border-box;
+  display: flex; flex-direction: column; overflow: auto;
+  font: 13px system-ui, sans-serif; color: #e6e9eb;
+  background: rgba(15, 18, 20, 0.95); border-right: 1px solid #3a4248;
+  transform: translateX(-100%); visibility: hidden;
+  transition: transform 0.2s ease, visibility 0s 0.2s; }
+#settings.open { transform: none; visibility: visible;
+  transition: transform 0.2s ease; }
+#settings-head { display: flex; align-items: center; justify-content: space-between;
+  padding: 8px 8px 8px 12px; border-bottom: 1px solid #3a4248; }
+#settings h2 { margin: 0; font-size: 15px; }
+#settings button, #settings select {
+  font: inherit; color: #e6e9eb; background: rgba(15, 18, 20, 0.85);
+  border: 1px solid #3a4248; border-radius: 4px; padding: 4px 8px; }
+#settings select:disabled, #settings option:disabled { opacity: 0.5; }
+/* A single tab needs no tab bar; it appears once a second tab is added. */
+#settings .tabs:not(:has(> :nth-child(2))) { display: none; }
+#settings .tabs { display: flex; gap: 4px; padding: 8px 12px 0;
+  border-bottom: 1px solid #3a4248; }
+#settings .tabs button { border-bottom: none; border-radius: 4px 4px 0 0; }
+#settings .tabs button[aria-selected="true"] { border-color: #8fa3b0; }
+#settings .pane { display: flex; flex-direction: column; gap: 10px; padding: 12px; }
+#settings .pane[hidden] { display: none; }
+#settings .pane label { display: flex; align-items: center;
+  justify-content: space-between; gap: 8px; }
+@media (prefers-reduced-motion: reduce) { #settings, #settings.open { transition: none; } }
 </style>
 </head>
 <body>
 <canvas id="view"></canvas>
 <div id="controls">
+<button id="settings-open" type="button" aria-expanded="false" aria-controls="settings">Graphics</button>
 <button id="diplomacy" type="button" aria-pressed="false">Diplomacy colours</button>
 <button id="projectiles" type="button" aria-pressed="true" title="Projectiles (P)">Projectiles on</button>
-<select id="shadows" aria-label="Shadows">
-<option value="0">Shadows off</option>
-<option value="1024">Shadows low</option>
-<option value="2048">Shadows medium</option>
-<option value="4096">Shadows high</option>
-</select>
-<select id="textures" aria-label="Textures">
-<option value="1">Textures low</option>
-<option value="2">Textures medium</option>
-<option value="3">Textures high</option>
-</select>
-<select id="maps" aria-label="Material maps">
-<option value="0">Maps off</option>
-<option value="1">Maps on</option>
-</select>
 <select id="perspective" aria-label="Perspective">
 <option value="0">Observer</option>
 </select>
@@ -133,6 +146,32 @@ body:not(.debug) #stats, body:not(.debug) #errors { display: none; }
 <span id="match-over-text">Match over</span>
 <button id="match-over-current" type="button" disabled>Current match</button>
 <button id="match-over-close" type="button" aria-label="Close">x</button>
+</div>
+<div id="settings" role="dialog" aria-labelledby="settings-title" inert>
+<div id="settings-head">
+<h2 id="settings-title">Graphics</h2>
+<button id="settings-close" type="button" aria-label="Close">x</button>
+</div>
+<div class="tabs" role="tablist">
+<button type="button" role="tab" id="tab-quality" aria-controls="pane-quality" aria-selected="true">Quality</button>
+</div>
+<div class="pane" role="tabpanel" id="pane-quality" aria-labelledby="tab-quality">
+<label>Shadows <select id="shadows">
+<option value="0">Off</option>
+<option value="1024">Low</option>
+<option value="2048">Medium</option>
+<option value="4096">High</option>
+</select></label>
+<label>Textures <select id="textures">
+<option value="1">Low</option>
+<option value="2">Medium</option>
+<option value="3">High</option>
+</select></label>
+<label>Material maps <select id="maps">
+<option value="0">Off</option>
+<option value="1">On</option>
+</select></label>
+</div>
 </div>
 <div id="storage-notice" role="dialog" aria-modal="true" aria-labelledby="storage-notice-title" hidden>
 <div id="storage-notice-box">
@@ -190,6 +229,38 @@ settings.</p>
   window.addEventListener("touchstart", (event) => {
     if (event.touches.length === 4) toggle();
   }, { passive: true });
+})();
+</script>
+<script>
+// The settings panel and its tabs are plain page chrome; the wasm only
+// reads the selects inside it, by id.
+(() => {
+  const panel = document.getElementById("settings");
+  const opener = document.getElementById("settings-open");
+  const show = (open) => {
+    panel.classList.toggle("open", open);
+    // Inert while closed, so Tab cannot reach controls slid off screen.
+    panel.inert = !open;
+    opener.setAttribute("aria-expanded", String(open));
+    opener.setAttribute("aria-pressed", String(open));
+    if (open) panel.querySelector(".pane:not([hidden]) select").focus();
+    else if (panel.contains(document.activeElement)) opener.focus();
+  };
+  opener.addEventListener("click", () => show(!panel.classList.contains("open")));
+  document.getElementById("settings-close").addEventListener("click", () => show(false));
+  window.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && panel.classList.contains("open")) show(false);
+  });
+  const tabs = [...panel.querySelectorAll("[role=tab]")];
+  for (const tab of tabs) {
+    tab.addEventListener("click", () => {
+      for (const other of tabs) {
+        const selected = other === tab;
+        other.setAttribute("aria-selected", String(selected));
+        document.getElementById(other.getAttribute("aria-controls")).hidden = !selected;
+      }
+    });
+  }
 })();
 </script>
 <script type="module">
