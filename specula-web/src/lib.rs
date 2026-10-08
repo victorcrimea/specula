@@ -112,6 +112,7 @@ const BLOOM_SETTINGS_KEY: &str = "specula.bloom";
 const DOF_SETTINGS_KEY: &str = "specula.dof";
 const FOG_SETTINGS_KEY: &str = "specula.fog";
 const WATER_SETTINGS_KEY: &str = "specula.water";
+const SKY_SETTINGS_KEY: &str = "specula.sky";
 /// localStorage key of when the storage notice was last shown, in ms since
 /// the epoch.
 const STORAGE_NOTICE_KEY: &str = "specula.storage-notice";
@@ -176,6 +177,8 @@ trait View {
     fn set_fog(&mut self, _on: bool) {}
     /// Whether the water is drawn as the engine's fancy water, likewise.
     fn set_water_effects(&mut self, _on: bool) {}
+    /// Whether the map's sky is drawn behind everything, likewise.
+    fn set_sky(&mut self, _on: bool) {}
     /// The highest texture quality the device is given.
     fn max_texture_tiers(&self) -> usize {
         TEXTURE_TIER_SIDES.len()
@@ -887,6 +890,13 @@ async fn run(page: Page, glue_url: String, wasm_url: String) -> Result<(), Strin
             element(&document, "water")?,
             WATER_SETTINGS_KEY,
             |view, on| view.set_water_effects(on),
+            Vec::new(),
+        );
+        wire_switch(
+            &app,
+            element(&document, "sky")?,
+            SKY_SETTINGS_KEY,
+            |view, on| view.set_sky(on),
             Vec::new(),
         );
     }

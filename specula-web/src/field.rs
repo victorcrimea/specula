@@ -84,6 +84,7 @@ use crate::territory;
 use crate::territory::Borders;
 use crate::unit::DEPTH_FORMAT;
 use crate::unit::create_buffer;
+use crate::unit::cross;
 use crate::unit::frustum_planes;
 use crate::unit::look_at;
 use crate::unit::multiply;
@@ -375,6 +376,9 @@ pub struct Field {
     water_normals: Option<Normals>,
     /// `water`'s bind group once `water_normals` is complete.
     water_group: Option<wgpu::BindGroup>,
+    /// The viewer's sky setting: the map's sky drawn behind everything,
+    /// where off keeps the plain background.
+    sky_visible: bool,
     sky: Sky,
     decal_pipeline: wgpu::RenderPipeline,
     shadow: Shadow,
@@ -884,7 +888,7 @@ impl Field {
         });
 
         let borders = Borders::new(&device, &queue, config.format, &view_layout)?;
-        let sky = Sky::new(&device, &queue);
+        let sky = Sky::new(&device, &queue, config.format);
         let water = Water::new(
             &device,
             config.format,
@@ -1014,6 +1018,7 @@ impl Field {
             water,
             water_normals: None,
             water_group: None,
+            sky_visible: false,
             sky,
             decal_pipeline,
             shadow,
@@ -2771,6 +2776,10 @@ impl View for Field {
         self.water_effects = on;
     }
 
+    fn set_sky(&mut self, on: bool) {
+        self.sky_visible = on;
+    }
+
     fn progress(&self) -> Progress {
         self.store.borrow().progress()
     }
@@ -2972,6 +2981,23 @@ impl View for Field {
             }
         }
         self.refresh_ground();
+        if let Some(ground) = &self.ground
+            && (self.sky_visible || self.water_effects)
+        {
+            self.sky
+                .refresh(&self.device, &self.queue, &self.store, &ground.image.sky);
+        }
+        if self.sky_visible {
+            let tan = (FIELD_OF_VIEW / 2.0).tan();
+            let aspect = self.config.width as f32 / self.config.height.max(1) as f32;
+            self.sky.prepare(
+                &self.queue,
+                right.map(|value| value * tan * aspect),
+                up.map(|value| value * tan),
+                cross(right, up),
+                light.rotation,
+            );
+        }
         self.refresh_water(progress);
         assets::pump(&self.store);
         self.poses.upload(&self.device, &self.queue);
@@ -3136,6 +3162,9 @@ impl View for Field {
                 }),
                 ..Default::default()
             });
+            if self.sky_visible && self.ground.is_some() {
+                self.sky.draw(&mut pass);
+            }
             pass.set_bind_group(0, &self.view_bind_group, &[]);
             if let Some(ground) = &self.ground {
                 let group = |texture: u16| {

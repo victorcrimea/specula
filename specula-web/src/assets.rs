@@ -256,6 +256,21 @@ impl Store {
         }
     }
 
+    /// A sky set's cube layers.
+    pub fn sky(&self, name: &str) -> Get<[FileRef; 6]> {
+        if self.index.is_none() {
+            return if self.index_failed {
+                Get::Missing
+            } else {
+                Get::Pending
+            };
+        }
+        match self.skies.get(name) {
+            Some(layers) => Get::Ready(*layers),
+            None => Get::Missing,
+        }
+    }
+
     /// A sound group as the stream names it, relative to audio/.
     pub fn sound_group(&mut self, name: &str) -> Get<Rc<SoundGroup>> {
         if self.index.is_none() {

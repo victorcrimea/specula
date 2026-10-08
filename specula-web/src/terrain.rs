@@ -24,6 +24,8 @@ pub struct TerrainImage {
     /// In metres.
     pub water_level: f32,
     pub water: Water,
+    /// The `art/textures/skies` set; empty for none.
+    pub sky: String,
     pub light: Light,
     /// The terrain names the tiles index.
     pub names: Vec<String>,
@@ -274,8 +276,7 @@ pub fn build(resource: &[u8]) -> Result<TerrainImage, &'static str> {
         wind_angle,
         kind: cursor.string()?,
     };
-    // The sky set, which the 3D view does not draw yet.
-    cursor.string()?;
+    let sky = cursor.string()?;
     let palette_size = cursor.u32()? as usize;
     let mut palette = Vec::with_capacity(palette_size);
     let mut names = Vec::with_capacity(palette_size);
@@ -347,6 +348,7 @@ pub fn build(resource: &[u8]) -> Result<TerrainImage, &'static str> {
             .collect(),
         water_level,
         water,
+        sky,
         light,
         names,
         tiles: tile_textures
