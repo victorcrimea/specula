@@ -106,6 +106,10 @@ pub struct Store {
     /// Terrain name -> its texture, from the same index.
     terrains: HashMap<String, TerrainTexture>,
     alpha_maps: Option<FileRef>,
+    /// Water type -> its normal map frames.
+    waters: HashMap<String, Vec<FileRef>>,
+    /// Sky set -> its cube layers.
+    skies: HashMap<String, [FileRef; 6]>,
     /// Sound group path relative to audio/ -> its manifest.
     sound_groups: HashMap<String, FileRef>,
     /// Civ code -> its tracks; the empty code holds the defaults.
@@ -232,6 +236,22 @@ impl Store {
         }
         match self.alpha_maps {
             Some(file) => Get::Ready(file),
+            None => Get::Missing,
+        }
+    }
+
+    /// A water type's normal map frames, as the terrain resource names
+    /// the type.
+    pub fn water(&self, kind: &str) -> Get<Vec<FileRef>> {
+        if self.index.is_none() {
+            return if self.index_failed {
+                Get::Missing
+            } else {
+                Get::Pending
+            };
+        }
+        match self.waters.get(kind) {
+            Some(frames) => Get::Ready(frames.clone()),
             None => Get::Missing,
         }
     }
@@ -619,6 +639,8 @@ async fn load_index(store: Rc<RefCell<Store>>) {
                 store.index = Some(index.actors.into_iter().collect());
                 store.terrains = index.terrains.into_iter().collect();
                 store.alpha_maps = index.alpha_maps;
+                store.waters = index.waters.into_iter().collect();
+                store.skies = index.skies.into_iter().collect();
                 store.sound_groups = index.sound_groups.into_iter().collect();
                 store.music = index.music.into_iter().collect();
                 store.ambient = index.ambient;

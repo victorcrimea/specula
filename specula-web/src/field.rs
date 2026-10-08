@@ -71,6 +71,7 @@ use crate::projectile;
 use crate::projectile::Flight;
 use crate::shadow;
 use crate::shadow::Shadow;
+use crate::sky::Sky;
 use crate::stream::Dot;
 use crate::stream::Scene;
 use crate::stream::Shot;
@@ -90,6 +91,9 @@ use crate::variation;
 use crate::variation::Model;
 use crate::variation::ModelAnimation;
 use crate::variation::Shape;
+use crate::water;
+use crate::water::Normals;
+use crate::water::Water;
 use crate::worker::PEAK_WINDOW_S;
 
 /// The stream's positions are in 1/16 m.
@@ -258,6 +262,10 @@ struct Ground {
     indices: wgpu::Buffer,
     base: Vec<Splat>,
     blends: Vec<Splat>,
+    /// `water::surface`.
+    water_vertices: wgpu::Buffer,
+    water_indices: wgpu::Buffer,
+    water_index_count: u32,
     /// The minimap picture, for a terrain whose texture is not in (yet).
     minimap: wgpu::BindGroup,
     /// Per palette entry, its textures' bind group and what its colour,
@@ -357,7 +365,17 @@ pub struct Field {
     dof: bool,
     /// The viewer's fog setting.
     fog: bool,
+    /// The viewer's water effects setting: the engine's fancy water,
+    /// where off keeps the flat plane.
+    water_effects: bool,
+    /// The flat plane.
     water_pipeline: wgpu::RenderPipeline,
+    water: Water,
+    /// The map's water type's frames, while water effects are on.
+    water_normals: Option<Normals>,
+    /// `water`'s bind group once `water_normals` is complete.
+    water_group: Option<wgpu::BindGroup>,
+    sky: Sky,
     decal_pipeline: wgpu::RenderPipeline,
     shadow: Shadow,
     borders: Borders,
@@ -866,6 +884,15 @@ impl Field {
         });
 
         let borders = Borders::new(&device, &queue, config.format, &view_layout)?;
+        let sky = Sky::new(&device, &queue);
+        let water = Water::new(
+            &device,
+            config.format,
+            DEPTH_FORMAT,
+            &view_layout,
+            &sky.layout,
+            light_layout,
+        );
         let far = Far::new(
             &device,
             config.format,
@@ -982,7 +1009,12 @@ impl Field {
             bloom: false,
             dof: false,
             fog: false,
+            water_effects: false,
             water_pipeline,
+            water,
+            water_normals: None,
+            water_group: None,
+            sky,
             decal_pipeline,
             shadow,
             borders,
@@ -2403,6 +2435,12 @@ impl Field {
 
     fn upload_ground(&mut self, image: &TerrainImage) {
         let mesh = blend::build(image);
+        let water = water::surface(image);
+        let water_indices: Vec<u8> = water
+            .indices
+            .iter()
+            .flat_map(|index| index.to_le_bytes())
+            .collect();
         let minimap = Texture {
             format: TextureFormat::Rgba8,
             width: image.size,
@@ -2436,6 +2474,21 @@ impl Field {
             ),
             base: mesh.base,
             blends: mesh.blends,
+            water_vertices: create_buffer(
+                &self.device,
+                &self.queue,
+                "water",
+                &water.vertices,
+                wgpu::BufferUsages::VERTEX,
+            ),
+            water_indices: create_buffer(
+                &self.device,
+                &self.queue,
+                "water indices",
+                &water_indices,
+                wgpu::BufferUsages::INDEX,
+            ),
+            water_index_count: water.indices.len() as u32,
             minimap,
             textures: vec![None; image.names.len()],
             missing: vec![false; image.names.len()],
@@ -2595,6 +2648,63 @@ impl Field {
     }
 }
 
+impl Field {
+    /// Fetches the map's water type's frames while water effects are on,
+    /// uploads those in, and writes the water's uniform for this frame.
+    fn refresh_water(&mut self, progress: f32) {
+        let Some(ground) = &self.ground else {
+            return;
+        };
+        if !self.water_effects {
+            return;
+        }
+        let kind = &ground.image.water.kind;
+        if self
+            .water_normals
+            .as_ref()
+            .is_none_or(|normals| normals.kind != *kind)
+        {
+            self.water_group = None;
+            self.water_normals = match self.store.borrow().water(kind) {
+                Get::Ready(files) => Some(Normals::new(kind.clone(), files)),
+                Get::Pending => return,
+                Get::Missing => {
+                    crate::log(&format!("water type {kind} is not in the asset bake"));
+                    Some(Normals::new(kind.clone(), Vec::new()))
+                }
+            };
+        }
+        let normals = self.water_normals.as_mut().unwrap();
+        if self.water_group.is_none() && normals.files.len() == water::FRAMES {
+            let tiers = self.store.borrow().texture_tiers();
+            for (frame, file) in normals.files.clone().into_iter().enumerate() {
+                let Get::Ready(texture) = self.store.borrow_mut().texture(file, true) else {
+                    continue;
+                };
+                // Whole at the texture quality, or it would be uploaded
+                // without the mips still on their way.
+                if texture.next_detail(tiers).is_some() {
+                    continue;
+                }
+                if let Err(error) =
+                    normals.upload(&self.device, &self.queue, frame, &texture, self.bc)
+                {
+                    crate::log(&error);
+                    normals.files.clear();
+                    return;
+                }
+            }
+            if let Some(view) = &normals.view {
+                self.water_group = Some(self.water.bind_group(&self.device, view));
+            }
+        }
+        // m_WaterTexTimer: the sim time since the match began.
+        let time = (f64::from(self.entities.turn) + f64::from(progress)) * TURN_MS / 1000.0;
+        let uniform = water::uniform(&ground.image, time, self.light().rotation);
+        self.queue.write_buffer(&self.water.buffer, 0, &uniform);
+    }
+}
+
 impl View for Field {
     fn max_size(&self) -> u32 {
         self.device.limits().max_texture_dimension_2d
@@ -2655,6 +2765,10 @@ impl View for Field {
 
     fn set_fog(&mut self, on: bool) {
         self.fog = on;
+    }
+
+    fn set_water_effects(&mut self, on: bool) {
+        self.water_effects = on;
     }
 
     fn progress(&self) -> Progress {
@@ -2858,6 +2972,7 @@ impl View for Field {
             }
         }
         self.refresh_ground();
+        self.refresh_water(progress);
         assets::pump(&self.store);
         self.poses.upload(&self.device, &self.queue);
         if self.poses.generation != self.pose_generation {
@@ -3085,10 +3200,28 @@ impl View for Field {
                     pass.draw(0..4, 0..*count);
                 }
             }
-            if self.ground.is_some() {
-                pass.set_pipeline(&self.water_pipeline);
-                pass.set_bind_group(3, &self.shadow.bind_group, &[]);
-                pass.draw(0..4, 0..1);
+            if let Some(ground) = &self.ground {
+                match &self.water_group {
+                    Some(group) if self.water_effects => {
+                        if ground.water_index_count > 0 {
+                            pass.set_pipeline(&self.water.pipeline);
+                            pass.set_bind_group(1, group, &[]);
+                            pass.set_bind_group(2, self.sky.group(), &[]);
+                            pass.set_bind_group(3, &self.shadow.bind_group, &[]);
+                            pass.set_vertex_buffer(0, ground.water_vertices.slice(..));
+                            pass.set_index_buffer(
+                                ground.water_indices.slice(..),
+                                wgpu::IndexFormat::Uint32,
+                            );
+                            pass.draw_indexed(0..ground.water_index_count, 0, 0..1);
+                        }
+                    }
+                    _ => {
+                        pass.set_pipeline(&self.water_pipeline);
+                        pass.set_bind_group(3, &self.shadow.bind_group, &[]);
+                        pass.draw(0..4, 0..1);
+                    }
+                }
                 // After the water, as the engine draws overlays, so a line
                 // floating on it shows.
                 self.borders.draw(&mut pass);
@@ -3545,13 +3678,6 @@ fn upload_texture(
 ) -> wgpu::TextureView {
     let first = first.min(texture.levels.len() - 1);
     let (top_width, top_height) = level_extent(texture.width, texture.height, first as u32);
-    let bc_format = texture.format.bc().filter(|_| bc_supported);
-    let format = match bc_format {
-        Some(bc::Format::Bc1) => wgpu::TextureFormat::Bc1RgbaUnorm,
-        Some(bc::Format::Bc2) => wgpu::TextureFormat::Bc2RgbaUnorm,
-        Some(bc::Format::Bc3) => wgpu::TextureFormat::Bc3RgbaUnorm,
-        None => wgpu::TextureFormat::Rgba8Unorm,
-    };
     let gpu_texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("skin"),
         size: wgpu::Extent3d {
@@ -3562,10 +3688,38 @@ fn upload_texture(
         mip_level_count: (texture.levels.len() - first) as u32,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
-        format,
+        format: gpu_format(texture, bc_supported),
         usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
         view_formats: &[],
     });
+    write_levels(queue, &gpu_texture, texture, first, 0, bc_supported);
+    gpu_texture.create_view(&Default::default())
+}
+
+/// The format `texture` goes up as: its BC blocks when the device takes
+/// them, otherwise RGBA8.
+pub fn gpu_format(texture: &Texture, bc_supported: bool) -> wgpu::TextureFormat {
+    match texture.format.bc().filter(|_| bc_supported) {
+        Some(bc::Format::Bc1) => wgpu::TextureFormat::Bc1RgbaUnorm,
+        Some(bc::Format::Bc2) => wgpu::TextureFormat::Bc2RgbaUnorm,
+        Some(bc::Format::Bc3) => wgpu::TextureFormat::Bc3RgbaUnorm,
+        None => wgpu::TextureFormat::Rgba8Unorm,
+    }
+}
+
+/// Writes `texture`'s levels from `first` on into `layer` of
+/// `gpu_texture`, whose format is `gpu_format`'s.
+pub fn write_levels(
+    queue: &wgpu::Queue,
+    gpu_texture: &wgpu::Texture,
+    texture: &Texture,
+    first: usize,
+    layer: u32,
+    bc_supported: bool,
+) {
+    let first = first.min(texture.levels.len() - 1);
+    let (top_width, top_height) = level_extent(texture.width, texture.height, first as u32);
+    let bc_format = texture.format.bc().filter(|_| bc_supported);
     for (level, data) in texture.levels[first..].iter().enumerate() {
         let (width, height) = level_extent(top_width, top_height, level as u32);
         let (bytes, bytes_per_row, extent) = match (bc_format, texture.format.bc()) {
@@ -3587,9 +3741,13 @@ fn upload_texture(
         };
         queue.write_texture(
             wgpu::TexelCopyTextureInfo {
-                texture: &gpu_texture,
+                texture: gpu_texture,
                 mip_level: level as u32,
-                origin: wgpu::Origin3d::ZERO,
+                origin: wgpu::Origin3d {
+                    x: 0,
+                    y: 0,
+                    z: layer,
+                },
                 aspect: wgpu::TextureAspect::All,
             },
             &bytes,
@@ -3605,7 +3763,6 @@ fn upload_texture(
             },
         );
     }
-    gpu_texture.create_view(&Default::default())
 }
 
 /// Where the camera starts: the first player's civic centre, else the

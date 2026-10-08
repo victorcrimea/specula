@@ -1,4 +1,4 @@
-//! Decoder for the observer hook's feed, format v12. The writer is
+//! Decoder for the observer hook's feed, format v13. The writer is
 //! `source/network/SpeculaFeed.cpp` in the `specula` branch of 0ad-specula.
 
 use std::io;
@@ -6,7 +6,7 @@ use std::io::ErrorKind;
 use std::io::Read;
 
 const MAGIC: [u8; 4] = *b"SPCF";
-const VERSION: u32 = 12;
+const VERSION: u32 = 13;
 const RECORD_TEMPLATE: u8 = 1;
 const RECORD_TURN: u8 = 2;
 const RECORD_MAP: u8 = 3;
@@ -165,7 +165,7 @@ pub enum Record {
         /// The sim rate the match was set up with; 1.0 is normal speed.
         speed: f32,
     },
-    Terrain(Terrain),
+    Terrain(Box<Terrain>),
     Players(Vec<Player>),
     Territory(Territory),
     /// The sounds of the next turn record, in the order they were played.
@@ -207,6 +207,9 @@ pub struct Terrain {
     pub shallow_depth: f32,
     pub circular: bool,
     pub light: Light,
+    pub water: Water,
+    /// The `art/textures/skies` set; empty for none.
+    pub sky: String,
     /// (tiles + 1)^2 vertices, in 1/92 m.
     pub heights: Vec<u16>,
     pub textures: Vec<String>,
@@ -215,6 +218,18 @@ pub struct Terrain {
     /// tiles^2 blend priorities: a tile's texture is drawn over the
     /// neighbours of lower priority.
     pub priorities: Vec<u32>,
+}
+
+/// The map's `WaterManager` settings.
+pub struct Water {
+    pub color: [f32; 3],
+    pub tint: [f32; 3],
+    pub waviness: f32,
+    pub murkiness: f32,
+    /// Radians.
+    pub wind_angle: f32,
+    /// The `art/textures/animated/water` set of normal maps.
+    pub kind: String,
 }
 
 /// The map's `CLightEnv`, as it lights the match in the game.
@@ -429,6 +444,30 @@ fn decode_terrain(payload: &[u8]) -> io::Result<Record> {
         bloom,
         post_effect: PostEffect::from_name(cursor.bytes(length)?),
     };
+    let mut floats = [0.0; 9];
+    for value in &mut floats {
+        *value = f32::from_bits(cursor.u32()?);
+    }
+    let [
+        r,
+        g,
+        b,
+        tint_r,
+        tint_g,
+        tint_b,
+        waviness,
+        murkiness,
+        wind_angle,
+    ] = floats;
+    let water = Water {
+        color: [r, g, b],
+        tint: [tint_r, tint_g, tint_b],
+        waviness,
+        murkiness,
+        wind_angle,
+        kind: cursor.string("water type not UTF-8")?,
+    };
+    let sky = cursor.string("sky set not UTF-8")?;
     let vertices = (tiles_per_side as usize + 1).pow(2);
     let heights = (0..vertices)
         .map(|_| cursor.u16())
@@ -436,10 +475,7 @@ fn decode_terrain(payload: &[u8]) -> io::Result<Record> {
     let count = cursor.u32()?;
     let mut textures = Vec::with_capacity(count as usize);
     for _ in 0..count {
-        let length = cursor.u16()? as usize;
-        let name = cursor.bytes(length)?;
-        textures
-            .push(String::from_utf8(name.to_vec()).map_err(|_| invalid("texture name not UTF-8"))?);
+        textures.push(cursor.string("texture name not UTF-8")?);
     }
     let tiles = (0..(tiles_per_side as usize).pow(2))
         .map(|_| cursor.u16())
@@ -450,17 +486,19 @@ fn decode_terrain(payload: &[u8]) -> io::Result<Record> {
     if !cursor.0.is_empty() {
         return Err(invalid("terrain record longer than its contents"));
     }
-    Ok(Record::Terrain(Terrain {
+    Ok(Record::Terrain(Box::new(Terrain {
         tiles_per_side,
         water_level,
         shallow_depth,
         circular,
         light,
+        water,
+        sky,
         heights,
         textures,
         tiles,
         priorities,
-    }))
+    })))
 }
 
 fn decode_players(payload: &[u8]) -> io::Result<Record> {
@@ -631,6 +669,12 @@ impl<'a> Cursor<'a> {
 
     fn i32(&mut self) -> io::Result<i32> {
         self.u32().map(|value| value as i32)
+    }
+
+    /// u16 length and UTF-8.
+    fn string(&mut self, error: &str) -> io::Result<String> {
+        let length = self.u16()? as usize;
+        String::from_utf8(self.bytes(length)?.to_vec()).map_err(|_| invalid(error))
     }
 }
 

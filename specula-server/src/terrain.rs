@@ -1,12 +1,15 @@
-//! The terrain resource, format v3, served once per match at
+//! The terrain resource, format v4, served once per match at
 //! `/terrain/<id>`. Little-endian:
 //!
 //! u8 version, u32 tiles per side n, f32 water level (m), f32 shallow water
 //! depth (m), u8 circular, f32 sun elevation, f32 sun rotation (radians),
 //! 3 x f32 sun colour, 3 x f32 ambient colour, 3 x f32 fog colour, f32 fog
 //! factor, f32 fog max, f32 brightness, f32 contrast, f32 saturation, f32
-//! bloom, u8 post effect (0 default, 1 hdr, 2 DOF), u32 palette count,
-//! count x {u32 0xRRGGBB, u16 name length, UTF-8 name}, (n+1)^2 x u16 heights (1/92 m), n^2 x u16
+//! bloom, u8 post effect (0 default, 1 hdr, 2 DOF), 3 x f32 water colour,
+//! 3 x f32 water tint, f32 waviness, f32 murkiness, f32 wind angle
+//! (radians), u16 length and UTF-8 water type, u16 length and UTF-8 sky set
+//! (empty: none), u32 palette count, count x {u32 0xRRGGBB, u16 name
+//! length, UTF-8 name}, (n+1)^2 x u16 heights (1/92 m), n^2 x u16
 //! palette index (0xFFFF: none), n^2 x u32 blend priority. Heights and
 //! tiles are row-major, x fastest.
 //!
@@ -25,7 +28,7 @@ use std::sync::Mutex;
 use crate::feed::Terrain;
 use crate::wire::Writer;
 
-const VERSION: u8 = 3;
+const VERSION: u8 = 4;
 /// What the minimap shows for a tile without a known texture.
 const UNKNOWN_COLOR: u32 = 0xFF_FF_FF;
 
@@ -95,6 +98,17 @@ pub fn encode(terrain: &Terrain) -> Resource {
         out.f32(value);
     }
     out.u8(light.post_effect as u8);
+    let water = &terrain.water;
+    for value in water.color.iter().chain(&water.tint) {
+        out.f32(*value);
+    }
+    out.f32(water.waviness);
+    out.f32(water.murkiness);
+    out.f32(water.wind_angle);
+    for name in [&water.kind, &terrain.sky] {
+        out.u16(name.len() as u16);
+        out.0.extend_from_slice(name.as_bytes());
+    }
     out.u32(palette.len() as u32);
     for (color, name) in palette.iter().zip(&terrain.textures) {
         out.u32(*color);

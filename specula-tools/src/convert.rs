@@ -41,9 +41,11 @@ const LOG_TAIL_BYTES: u64 = 4096;
 /// Returns the directory the converted files were unpacked into and the
 /// sources the engine did not convert; each source is there under
 /// `cached_path`. Sources that are not converted, such as textures.xml,
-/// are only staged.
+/// are only staged. Each source, and art/skeletons, is taken from the
+/// first of `mod_dirs` that has it, as the engine's VFS lets a mod
+/// override the ones it depends on.
 pub fn run(
-    mod_dir: &Path,
+    mod_dirs: &[PathBuf],
     pyrogenesis: &Path,
     work_dir: &Path,
     sources: &[String],
@@ -62,14 +64,21 @@ pub fn run(
             .map_err(|error| format!("cannot remove {}: {error}", archive.display()))?;
     }
 
-    copy_directory(&mod_dir.join("art/skeletons"), &stage.join("art/skeletons"))?;
+    let find = |path: &str| {
+        mod_dirs
+            .iter()
+            .map(|dir| dir.join(path))
+            .find(|path| path.exists())
+            .ok_or_else(|| format!("{path}: in none of the mods"))
+    };
+    copy_directory(&find("art/skeletons")?, &stage.join("art/skeletons"))?;
     for source in sources {
         let target = stage.join(source);
         if let Some(parent) = target.parent() {
             fs::create_dir_all(parent)
                 .map_err(|error| format!("cannot create {}: {error}", parent.display()))?;
         }
-        fs::copy(mod_dir.join(source), &target).map_err(|error| format!("{source}: {error}"))?;
+        fs::copy(find(source)?, &target).map_err(|error| format!("{source}: {error}"))?;
     }
 
     // The engine resolves relative paths against its own directories.

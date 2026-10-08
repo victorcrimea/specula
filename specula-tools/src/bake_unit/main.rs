@@ -87,8 +87,12 @@ fn run() -> Result<(), String> {
     root.sources(&ANIMATIONS, &mut sources);
     sources.sort();
     sources.dedup();
-    let (converted, missing) =
-        convert::run(&mod_dir, &pyrogenesis, &PathBuf::from(WORK_DIR), &sources)?;
+    let (converted, missing) = convert::run(
+        std::slice::from_ref(&mod_dir),
+        &pyrogenesis,
+        &PathBuf::from(WORK_DIR),
+        &sources,
+    )?;
     if !missing.is_empty() {
         return Err(format!("the engine did not convert: {missing:?}"));
     }

@@ -140,9 +140,14 @@ impl Ground {
             return Err("unknown terrain version");
         }
         let tiles = cursor.u32()?;
-        // Water level, shallow depth, circular, the light's seventeen f32
-        // and the post effect.
-        cursor.take(9 + 17 * 4 + 1)?;
+        // Water level, shallow depth, circular, the light's seventeen f32,
+        // the post effect and the water's nine f32.
+        cursor.take(9 + 17 * 4 + 1 + 9 * 4)?;
+        // The water type and the sky set.
+        for _ in 0..2 {
+            let length = cursor.take(2)?;
+            cursor.take(usize::from(u16::from_le_bytes([length[0], length[1]])))?;
+        }
         for _ in 0..cursor.u32()? {
             cursor.take(4)?;
             let length = cursor.take(2)?;

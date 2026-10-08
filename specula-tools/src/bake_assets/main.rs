@@ -5,11 +5,14 @@
 //! content, so pieces shared by many actors are fetched once. Also every
 //! terrain's textures and the blend mask atlas for the ground, and
 //! every sound group, the session music and the ambient loop, their Ogg
-//! Vorbis files transcoded to Ogg Opus.
+//! Vorbis files transcoded to Ogg Opus, and the water's normal maps and
+//! shore wave textures and the sky cubes the map environment names.
 //!
 //! Usage: bake-assets [output dir]
 //! Default: specula-web. MOD_DIR overrides the mod,
-//! ../0ad/binaries/data/mods/public; PYROGENESIS overrides the engine,
+//! ../0ad/binaries/data/mods/public; BASE_MOD_DIR the engine's own mod
+//! under it, ../0ad/binaries/data/mods/mod, which holds some of the
+//! water and sky textures; PYROGENESIS overrides the engine,
 //! ../0ad-specula/binaries/system/pyrogenesis, which converts the meshes,
 //! animations and textures. Transcoded sounds are cached in
 //! target/bake-assets/sounds by their source's content.
@@ -23,6 +26,7 @@
 //! write are removed.
 
 mod actor;
+mod environment;
 mod material;
 mod mesh;
 mod sound;
@@ -74,6 +78,7 @@ use crate::actor::Variant;
 use crate::terrain::TerrainDef;
 
 const DEFAULT_MOD: &str = "../0ad/binaries/data/mods/public";
+const DEFAULT_BASE_MOD: &str = "../0ad/binaries/data/mods/mod";
 const DEFAULT_PYROGENESIS: &str = "../0ad-specula/binaries/system/pyrogenesis";
 const DEFAULT_OUTPUT: &str = "specula-web";
 const ASSET_DIR: &str = "assets";
@@ -156,6 +161,10 @@ fn run() -> Result<(), String> {
             .unwrap_or_else(|| DEFAULT_OUTPUT.into()),
     );
     let mod_dir = PathBuf::from(std::env::var("MOD_DIR").unwrap_or_else(|_| DEFAULT_MOD.into()));
+    let base_mod_dir =
+        PathBuf::from(std::env::var("BASE_MOD_DIR").unwrap_or_else(|_| DEFAULT_BASE_MOD.into()));
+    // The public mod first, as it overrides the base.
+    let mods = [mod_dir.clone(), base_mod_dir];
     let pyrogenesis =
         PathBuf::from(std::env::var("PYROGENESIS").unwrap_or_else(|_| DEFAULT_PYROGENESIS.into()));
 
@@ -191,7 +200,20 @@ fn run() -> Result<(), String> {
         println!("  {error}");
     }
 
-    let terrain_textures: Vec<String> = terrains
+    let (waters, unusable_waters) = environment::water_sets(&mods, |source| {
+        let path = environment::find(&mods, source).ok_or("missing")?;
+        unusable(&path, source).map_or(Ok(()), |reason| Err(format!("{source}: {reason}")))
+    });
+    println!(
+        "{} water types, {} left out",
+        waters.len(),
+        unusable_waters.len()
+    );
+    for reason in &unusable_waters {
+        println!("  {reason}");
+    }
+
+    let textures: Vec<String> = terrains
         .iter()
         .flat_map(|terrain| {
             let [_, normal, specular] = terrain_maps(terrain);
@@ -199,15 +221,17 @@ fn run() -> Result<(), String> {
                 .chain(normal.cloned())
                 .chain(specular.cloned())
         })
+        .chain(waters.iter().flat_map(|(_, frames)| frames.iter().cloned()))
+        .chain([environment::FOAM, environment::COASTAL_WAVE].map(String::from))
         .collect();
-    let (sources, rejected) = collect_sources(&mod_dir, loader.actors(), &terrain_textures);
+    let (sources, rejected) = collect_sources(&mods, loader.actors(), &textures);
     println!("{} sources left out", rejected.len());
     for reason in &rejected {
         println!("  {reason}");
     }
     println!("converting {} files with the engine", sources.len());
     let (converted, missing) =
-        convert::run(&mod_dir, &pyrogenesis, &PathBuf::from(WORK_DIR), &sources)?;
+        convert::run(&mods, &pyrogenesis, &PathBuf::from(WORK_DIR), &sources)?;
     println!(
         "converted in {:.0} s; the engine dropped {}",
         start.elapsed().as_secs_f32(),
@@ -234,6 +258,10 @@ fn run() -> Result<(), String> {
         actors: Vec::new(),
         terrains: Vec::new(),
         alpha_maps: None,
+        waters: Vec::new(),
+        foam: None,
+        coastal_wave: None,
+        skies: Vec::new(),
         sound_groups: Vec::new(),
         music: Vec::new(),
         ambient: None,
@@ -291,6 +319,7 @@ fn run() -> Result<(), String> {
     );
     let alpha_maps = terrain::alpha_maps(&mod_dir)?;
     index.alpha_maps = Some(output.write(Kind::Texture, &alpha_maps.encode())?);
+    write_environment(&mods, &waters, &pieces, &mut index, &mut output)?;
     write_sounds(&mod_dir, &mut index, &mut output)?;
     add_civs(&mod_dir, &mut index);
     let index_file = output.write(Kind::Index, &index.encode())?;
@@ -534,16 +563,16 @@ fn list_actors(dir: &Path, prefix: &str, out: &mut Vec<String>) -> Result<(), St
 }
 
 /// Every mesh, animation and texture the actors' materials use, the
-/// terrain textures, and the textures.xml files whose settings the converter
-/// applies to them.
+/// other `textures`, and the textures.xml files whose settings the
+/// converter applies to them, each as the first of `mods` has it.
 /// Also returns the sources left out, with why: the archive builder fails
 /// an `ENSURE` on a texture it cannot convert, so those must not reach it.
 fn collect_sources(
-    mod_dir: &Path,
+    mods: &[PathBuf],
     actors: &BTreeMap<String, Result<Rc<ActorDef>, String>>,
-    terrain_textures: &[String],
+    textures: &[String],
 ) -> (Vec<String>, Vec<String>) {
-    let mut sources: BTreeSet<String> = terrain_textures.iter().cloned().collect();
+    let mut sources: BTreeSet<String> = textures.iter().cloned().collect();
     for actor in actors.values().flatten() {
         for (definition, variant) in actor.definitions.iter().flat_map(|definition| {
             definition
@@ -572,7 +601,11 @@ fn collect_sources(
     let mut rejected = Vec::new();
     let mut present = BTreeSet::new();
     for source in sources {
-        match unusable(&mod_dir.join(&source), &source) {
+        let reason = match environment::find(mods, &source) {
+            Some(path) => unusable(&path, &source),
+            None => Some("missing".into()),
+        };
+        match reason {
             Some(reason) => rejected.push(format!("{source}: {reason}")),
             None => {
                 present.insert(source);
@@ -593,7 +626,7 @@ fn collect_sources(
             }
             dirs
         })
-        .filter(|settings| mod_dir.join(settings).is_file())
+        .filter(|settings| environment::find(mods, settings).is_some_and(|path| path.is_file()))
         .collect();
     present.extend(settings);
     (present.into_iter().collect(), rejected)
@@ -712,6 +745,59 @@ fn write_texture(bytes: &[u8], output: &mut Output) -> Result<FileRef, String> {
         }
     }
     output.write(Kind::Texture, &coarse.encode())
+}
+
+/// The water types whose frames all converted, the shore wave textures,
+/// and every sky set that can be read.
+fn write_environment(
+    mods: &[PathBuf],
+    waters: &[(String, Vec<String>)],
+    pieces: &Pieces,
+    index: &mut Index,
+    output: &mut Output,
+) -> Result<(), String> {
+    let texture = |source: &str| pieces.textures.get(source).copied().flatten();
+    let mut failed = Vec::new();
+    for (name, sources) in waters {
+        match sources.iter().map(|source| texture(source)).collect() {
+            Some(frames) => index.waters.push((name.clone(), frames)),
+            None => failed.push(format!("water {name}: a frame did not convert")),
+        }
+    }
+    index.foam = texture(environment::FOAM);
+    index.coastal_wave = texture(environment::COASTAL_WAVE);
+    for (source, file) in [
+        (environment::FOAM, index.foam),
+        (environment::COASTAL_WAVE, index.coastal_wave),
+    ] {
+        if file.is_none() {
+            failed.push(format!("{source} did not convert"));
+        }
+    }
+    for name in environment::sky_sets(mods) {
+        let layers = match environment::sky_layers(mods, &name) {
+            Ok(layers) => layers,
+            Err(error) => {
+                failed.push(error);
+                continue;
+            }
+        };
+        let mut files = [FileRef { hash: 0, size: 0 }; 6];
+        for (file, layer) in files.iter_mut().zip(&layers) {
+            *file = output.write(Kind::Texture, &layer.encode())?;
+        }
+        index.skies.push((name, files));
+    }
+    println!(
+        "{} water types and {} sky sets baked, {} failed",
+        index.waters.len(),
+        index.skies.len(),
+        failed.len()
+    );
+    for error in &failed {
+        println!("  {error}");
+    }
+    Ok(())
 }
 
 fn write_animation(bytes: &[u8], output: &mut Output) -> Result<FileRef, String> {

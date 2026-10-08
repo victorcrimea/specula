@@ -1,8 +1,8 @@
-//! Decoder for specula-server's terrain resource, format v3 (layout in
+//! Decoder for specula-server's terrain resource, format v4 (layout in
 //! `specula-server/src/terrain.rs`), and the minimap-style picture made
 //! from it.
 
-pub const VERSION: u8 = 3;
+pub const VERSION: u8 = 4;
 /// Engine heights are u16 in these units (HEIGHT_UNITS_PER_METRE).
 const HEIGHT_UNITS_PER_METRE: f32 = 92.0;
 const NO_TEXTURE: u16 = 0xFFFF;
@@ -23,6 +23,7 @@ pub struct TerrainImage {
     pub heights: Vec<u16>,
     /// In metres.
     pub water_level: f32,
+    pub water: Water,
     pub light: Light,
     /// The terrain names the tiles index.
     pub names: Vec<String>,
@@ -33,11 +34,26 @@ pub struct TerrainImage {
     pub priorities: Vec<u32>,
 }
 
+/// The map's `WaterManager` settings.
+#[derive(Clone)]
+pub struct Water {
+    pub color: [f32; 3],
+    pub tint: [f32; 3],
+    pub waviness: f32,
+    pub murkiness: f32,
+    /// Radians.
+    pub wind_angle: f32,
+    /// The `art/textures/animated/water` set of normal maps.
+    pub kind: String,
+}
+
 /// The map's `CLightEnv`, and its post effect.
 #[derive(Clone, Copy)]
 pub struct Light {
     /// Unit vector towards the sun.
     pub sun: [f32; 3],
+    /// `CLightEnv::m_Rotation`, radians, which also turns the sky.
+    pub rotation: f32,
     pub sun_color: [f32; 3],
     pub ambient_color: [f32; 3],
     pub fog_color: [f32; 3],
@@ -63,6 +79,7 @@ impl Light {
     pub fn plain(sun: [f32; 3], sun_color: [f32; 3], ambient_color: [f32; 3]) -> Self {
         Light {
             sun,
+            rotation: 0.0,
             sun_color,
             ambient_color,
             fog_color: [
@@ -218,6 +235,7 @@ pub fn build(resource: &[u8]) -> Result<TerrainImage, &'static str> {
     ] = floats;
     let light = Light {
         sun: sun_direction(elevation, rotation),
+        rotation,
         sun_color: [sun_r, sun_g, sun_b],
         ambient_color: [ambient_r, ambient_g, ambient_b],
         fog_color: [fog_r, fog_g, fog_b],
@@ -233,6 +251,31 @@ pub fn build(resource: &[u8]) -> Result<TerrainImage, &'static str> {
             _ => PostEffect::Default,
         },
     };
+    let mut floats = [0.0; 9];
+    for value in &mut floats {
+        *value = f32::from_bits(cursor.u32()?);
+    }
+    let [
+        r,
+        g,
+        b,
+        tint_r,
+        tint_g,
+        tint_b,
+        waviness,
+        murkiness,
+        wind_angle,
+    ] = floats;
+    let water = Water {
+        color: [r, g, b],
+        tint: [tint_r, tint_g, tint_b],
+        waviness,
+        murkiness,
+        wind_angle,
+        kind: cursor.string()?,
+    };
+    // The sky set, which the 3D view does not draw yet.
+    cursor.string()?;
     let palette_size = cursor.u32()? as usize;
     let mut palette = Vec::with_capacity(palette_size);
     let mut names = Vec::with_capacity(palette_size);
@@ -303,6 +346,7 @@ pub fn build(resource: &[u8]) -> Result<TerrainImage, &'static str> {
             .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
             .collect(),
         water_level,
+        water,
         light,
         names,
         tiles: tile_textures
@@ -338,5 +382,12 @@ impl<'a> Cursor<'a> {
 
     fn u32(&mut self) -> Result<u32, &'static str> {
         Ok(u32::from_le_bytes(self.take(4)?.try_into().unwrap()))
+    }
+
+    /// u16 length and UTF-8.
+    fn string(&mut self) -> Result<String, &'static str> {
+        let length = usize::from(self.u16()?);
+        let bytes = self.take(length)?;
+        String::from_utf8(bytes.to_vec()).map_err(|_| "terrain resource name not UTF-8")
     }
 }

@@ -1,4 +1,4 @@
-//! The split asset files, format v7. Little-endian; every file starts with
+//! The split asset files, format v8. Little-endian; every file starts with
 //! a 4-byte magic and a u8 version. Strings are u16 length and UTF-8,
 //! counts are u32. A file is served as `assets/<kind>-<16 hex>.bin`, the
 //! hex being a hash of its content, so a cached copy is never stale and
@@ -19,6 +19,14 @@
 //!   The atlas is an RGBA8 texture, one mip, holding the engine's 14
 //!   standard blend masks in its alpha, side by side in
 //!   `CTerrainTextureManager::LoadAlphaMap`'s order and layout. Then
+//!   count x {water type, the directory under art/textures/animated/water
+//!   the terrain resource names, count x texture: its normal maps,
+//!   `normal0001.png` on, the frames `WaterManager` animates through},
+//!   optional foam texture and optional coastal wave texture (the shore
+//!   waves' `foam.png` and `coastalWave.png`), count x {sky set, the
+//!   directory under art/textures/skies, 6 x texture: the cube's layers
+//!   +X, -X, +Y, -Y, +Z, -Z as `SkyManager` uploads them, one RGBA8 mip
+//!   each, rows already flipped and the two top faces turned}. Then
 //!   count x {sound group path relative to audio/, as the stream names
 //!   groups, file ref of its sound group}, count x {civ code (empty: the
 //!   default playlists of gui/common/music.js), count x {u8 kind (0 peace,
@@ -85,7 +93,7 @@
 use crate::half::f16_bits;
 use crate::half::f16_to_f32;
 
-pub const VERSION: u8 = 7;
+pub const VERSION: u8 = 8;
 /// The largest side of each texture detail tier, which a viewer's
 /// texture quality picks from: low, medium and the whole chain as the
 /// engine uploads it at its default quality.
@@ -180,6 +188,12 @@ pub struct Index {
     pub actors: Vec<(String, FileRef)>,
     pub terrains: Vec<(String, TerrainTexture)>,
     pub alpha_maps: Option<FileRef>,
+    /// Water type -> its normal map frames.
+    pub waters: Vec<(String, Vec<FileRef>)>,
+    pub foam: Option<FileRef>,
+    pub coastal_wave: Option<FileRef>,
+    /// Sky set -> its cube layers.
+    pub skies: Vec<(String, [FileRef; 6])>,
     pub sound_groups: Vec<(String, FileRef)>,
     /// By civ code; the empty code holds the defaults.
     pub music: Vec<(String, Vec<(MusicKind, FileRef)>)>,
@@ -423,6 +437,23 @@ impl Index {
             out.u8(u8::from(terrain.triplanar));
         }
         out.optional_file(self.alpha_maps);
+        out.count(self.waters.len());
+        for (name, frames) in &self.waters {
+            out.string(name);
+            out.count(frames.len());
+            for frame in frames {
+                out.file(*frame);
+            }
+        }
+        out.optional_file(self.foam);
+        out.optional_file(self.coastal_wave);
+        out.count(self.skies.len());
+        for (name, layers) in &self.skies {
+            out.string(name);
+            for layer in layers {
+                out.file(*layer);
+            }
+        }
         out.count(self.sound_groups.len());
         for (name, group) in &self.sound_groups {
             out.string(name);
@@ -485,6 +516,27 @@ impl Index {
             })
             .collect::<Result<_, &'static str>>()?;
         let alpha_maps = input.optional_file()?;
+        let waters = (0..input.count()?)
+            .map(|_| {
+                let name = input.string()?;
+                let frames = (0..input.count()?)
+                    .map(|_| input.file())
+                    .collect::<Result<_, &'static str>>()?;
+                Ok((name, frames))
+            })
+            .collect::<Result<_, &'static str>>()?;
+        let foam = input.optional_file()?;
+        let coastal_wave = input.optional_file()?;
+        let skies = (0..input.count()?)
+            .map(|_| {
+                let name = input.string()?;
+                let mut layers = [FileRef { hash: 0, size: 0 }; 6];
+                for layer in &mut layers {
+                    *layer = input.file()?;
+                }
+                Ok((name, layers))
+            })
+            .collect::<Result<_, &'static str>>()?;
         let sound_groups = (0..input.count()?)
             .map(|_| Ok((input.string()?, input.file()?)))
             .collect::<Result<_, &'static str>>()?;
@@ -521,6 +573,10 @@ impl Index {
             actors,
             terrains,
             alpha_maps,
+            waters,
+            foam,
+            coastal_wave,
+            skies,
             sound_groups,
             music,
             ambient,

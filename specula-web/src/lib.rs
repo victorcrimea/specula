@@ -15,6 +15,7 @@ mod postproc;
 mod projectile;
 mod render;
 mod shadow;
+mod sky;
 mod stored;
 mod stream;
 mod terrain;
@@ -22,6 +23,7 @@ mod territory;
 mod unit;
 mod variation;
 mod warmup;
+mod water;
 mod worker;
 
 use std::cell::RefCell;
@@ -109,6 +111,7 @@ const POSTPROC_SETTINGS_KEY: &str = "specula.postproc";
 const BLOOM_SETTINGS_KEY: &str = "specula.bloom";
 const DOF_SETTINGS_KEY: &str = "specula.dof";
 const FOG_SETTINGS_KEY: &str = "specula.fog";
+const WATER_SETTINGS_KEY: &str = "specula.water";
 /// localStorage key of when the storage notice was last shown, in ms since
 /// the epoch.
 const STORAGE_NOTICE_KEY: &str = "specula.storage-notice";
@@ -171,6 +174,8 @@ trait View {
     fn set_dof(&mut self, _on: bool) {}
     /// Whether the map's fog is drawn, likewise.
     fn set_fog(&mut self, _on: bool) {}
+    /// Whether the water is drawn as the engine's fancy water, likewise.
+    fn set_water_effects(&mut self, _on: bool) {}
     /// The highest texture quality the device is given.
     fn max_texture_tiers(&self) -> usize {
         TEXTURE_TIER_SIDES.len()
@@ -875,6 +880,13 @@ async fn run(page: Page, glue_url: String, wasm_url: String) -> Result<(), Strin
             element(&document, "fog")?,
             FOG_SETTINGS_KEY,
             |view, on| view.set_fog(on),
+            Vec::new(),
+        );
+        wire_switch(
+            &app,
+            element(&document, "water")?,
+            WATER_SETTINGS_KEY,
+            |view, on| view.set_water_effects(on),
             Vec::new(),
         );
     }
