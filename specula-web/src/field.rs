@@ -434,8 +434,8 @@ pub struct Field {
     entities: Entities,
     palette: Vec<u32>,
     models: HashMap<ModelKey, Option<Rc<Model>>>,
-    /// `tree_bounds`, once every piece of the tree has arrived.
-    bounds: HashMap<ModelKey, (Vec3, Vec3)>,
+    /// `tree_bounds`' pieces, once every piece of the tree has arrived.
+    bounds: HashMap<ModelKey, Vec<(Vec3, Vec3)>>,
     camera: Rc<RefCell<Camera>>,
     instances: wgpu::Buffer,
     groups: HashMap<GroupKey, Vec<u8>>,
@@ -1255,7 +1255,12 @@ impl Field {
         };
         transform.translate(Vec3::new(x, y + sink, z));
 
-        let (low, high) = self.tree_bounds(key, &model).unwrap_or((
+        // The ground under the entity, in the root's space.
+        let floor = self
+            .ground
+            .as_ref()
+            .map_or(f32::MIN, |ground| ground.image.ground(x, z) - (y + sink));
+        let (low, high) = self.tree_bounds(key, &model, floor).unwrap_or((
             Vec3::new(root_mesh.min[0], root_mesh.min[1], root_mesh.min[2]),
             Vec3::new(root_mesh.max[0], root_mesh.max[1], root_mesh.max[2]),
         ));
@@ -1677,32 +1682,50 @@ impl Field {
         }
     }
 
-    /// The bounds of every mesh in the model tree, props in their bind
-    /// pose, in the root's space; `None` while a piece is on its way. The
-    /// root mesh alone can be far off: a field's is a small plane buried
-    /// 27 m down that only carries the prop points of its crop.
-    fn tree_bounds(&mut self, key: ModelKey, model: &Model) -> Option<(Vec3, Vec3)> {
-        if let Some(bounds) = self.bounds.get(&key) {
-            return Some(*bounds);
+    /// The bounds of the meshes in the model tree, props in their bind
+    /// pose, in the root's space, leaving out those wholly under `floor`,
+    /// the ground there, which cannot be seen and would drag the sphere
+    /// down to them: a field's root mesh is a small plane buried 27 m down
+    /// that only carries the prop points of its crop. Measured from the
+    /// ground rather than the root, as a floating root's meshes may hang
+    /// under it in the water, a fish's all of them. `None` while a piece
+    /// is on its way.
+    fn tree_bounds(&mut self, key: ModelKey, model: &Model, floor: f32) -> Option<(Vec3, Vec3)> {
+        if !self.bounds.contains_key(&key) {
+            let mut pieces = Vec::new();
+            if !self.add_bounds(model, &Mat4::identity(), 0, &mut pieces) {
+                return None;
+            }
+            self.bounds.insert(key, pieces);
         }
-        let mut bounds = None;
-        if !self.add_bounds(model, &Mat4::identity(), 0, &mut bounds) {
-            return None;
-        }
-        let bounds = bounds?;
-        self.bounds.insert(key, bounds);
+        let pieces = &self.bounds[&key];
+        let seen = || pieces.iter().filter(|(_, high)| high.y >= floor);
+        let all = || pieces.iter();
+        let join =
+            |(min, max): (Vec3, Vec3), (low, high): &(Vec3, Vec3)| (min.min(*low), max.max(*high));
+        let empty = (
+            Vec3::new(f32::MAX, f32::MAX, f32::MAX),
+            Vec3::new(f32::MIN, f32::MIN, f32::MIN),
+        );
+        // Wholly underground, it is still somewhere.
+        let bounds = if seen().next().is_some() {
+            seen().fold(empty, join)
+        } else {
+            all().next()?;
+            all().fold(empty, join)
+        };
         Some(bounds)
     }
 
-    /// Joins `model`'s mesh, moved by `transform`, and its props' into
-    /// `bounds`, as `place_model` places them; false while a piece is on
-    /// its way.
+    /// Adds the bounds of `model`'s mesh, moved by `transform`, and its
+    /// props' to `pieces`, as `place_model` places them; false while a
+    /// piece is on its way.
     fn add_bounds(
         &mut self,
         model: &Model,
         transform: &Mat4,
         depth: usize,
-        bounds: &mut Option<(Vec3, Vec3)>,
+        pieces: &mut Vec<(Vec3, Vec3)>,
     ) -> bool {
         // Decals lie on the ground and are culled on their own.
         let Shape::Mesh(file) = model.shape else {
@@ -1735,14 +1758,7 @@ impl Field {
             low = low.min(moved);
             high = high.max(moved);
         }
-        // Wholly underground it cannot be seen, and would drag the sphere
-        // down to it.
-        if high.y >= 0.0 {
-            *bounds = Some(match *bounds {
-                Some((min, max)) => (min.min(low), max.max(high)),
-                None => (low, high),
-            });
-        }
+        pieces.push((low, high));
         if depth >= 8 {
             return true;
         }
@@ -1762,7 +1778,7 @@ impl Field {
                 placed = placed.mul(&pose::bone_matrix(None, skeleton, usize::from(point.bone)));
             }
             placed = placed.mul(&point_matrix(point));
-            complete &= self.add_bounds(prop, &placed, depth + 1, bounds);
+            complete &= self.add_bounds(prop, &placed, depth + 1, pieces);
         }
         complete
     }
