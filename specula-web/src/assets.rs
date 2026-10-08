@@ -108,6 +108,9 @@ pub struct Store {
     alpha_maps: Option<FileRef>,
     /// Water type -> its normal map frames.
     waters: HashMap<String, Vec<FileRef>>,
+    /// The shore waves' foam.png and coastalWave.png.
+    foam: Option<FileRef>,
+    coastal_wave: Option<FileRef>,
     /// Sky set -> its cube layers.
     skies: HashMap<String, [FileRef; 6]>,
     /// Sound group path relative to audio/ -> its manifest.
@@ -253,6 +256,21 @@ impl Store {
         match self.waters.get(kind) {
             Some(frames) => Get::Ready(frames.clone()),
             None => Get::Missing,
+        }
+    }
+
+    /// The shore waves' textures: foam.png, then coastalWave.png.
+    pub fn wave_textures(&self) -> Get<(FileRef, FileRef)> {
+        if self.index.is_none() {
+            return if self.index_failed {
+                Get::Missing
+            } else {
+                Get::Pending
+            };
+        }
+        match (self.foam, self.coastal_wave) {
+            (Some(foam), Some(coastal_wave)) => Get::Ready((foam, coastal_wave)),
+            _ => Get::Missing,
         }
     }
 
@@ -655,6 +673,8 @@ async fn load_index(store: Rc<RefCell<Store>>) {
                 store.terrains = index.terrains.into_iter().collect();
                 store.alpha_maps = index.alpha_maps;
                 store.waters = index.waters.into_iter().collect();
+                store.foam = index.foam;
+                store.coastal_wave = index.coastal_wave;
                 store.skies = index.skies.into_iter().collect();
                 store.sound_groups = index.sound_groups.into_iter().collect();
                 store.music = index.music.into_iter().collect();

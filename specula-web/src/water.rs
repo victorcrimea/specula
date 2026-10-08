@@ -2,14 +2,17 @@
 //! over every tile near water, with `WaterManager`'s wind strength and
 //! depth at each vertex, drawn with water.wgsl as
 //! `TerrainRenderer::RenderFancyWater` draws it, animated through the
-//! water type's 60 normal map frames.
+//! water type's 60 normal map frames, and with the fancy effects the
+//! shore waves `WaterManager::CreateWaveMeshes` lays along the coasts.
 //!
 //! `WaterManager` works the wind and the shore distance out against the
 //! water height it held before the map set its own (CCmpWaterManager's
 //! `RecomputeWaterData` runs before it stores the new height), so in the
 //! game they depend on the map played before. This takes the map's own.
 
+use std::collections::BTreeSet;
 use std::collections::HashMap;
+use std::collections::VecDeque;
 use std::rc::Rc;
 
 use specula_assets::files::FileRef;
@@ -28,11 +31,23 @@ const FRAME_PERIOD: f64 = 8.0;
 pub const VERTEX_SIZE: usize = 20;
 /// water.wgsl's `Water`.
 const UNIFORM_SIZE: u64 = 288;
+/// `RecomputeDistanceHeightmap`'s lookahead.
+const MAX_SHORE_DISTANCE: usize = 5;
+/// `CreateWaveMeshes`' widest wave, in coastal points.
+const WAVE_POINTS: usize = 14;
+/// f32 x 3 base, apex, splash and retreat positions, f32 x 2 the coast's
+/// perpendicular, f32 x 2 uv, f32 the wave's time offset and f32 its
+/// width (waves.wgsl takes as attributes what the engine sets per wave).
+pub const WAVE_VERTEX_SIZE: usize = 72;
 
-/// The water surface's vertices and indices.
+/// The water surface's vertices and indices, and with the fancy effects
+/// the shore tiles: the tiles partly over land, laid on the ground, which
+/// the waves may run up.
 pub struct Surface {
     pub vertices: Vec<u8>,
     pub indices: Vec<u32>,
+    pub shore_vertices: Vec<u8>,
+    pub shore_indices: Vec<u32>,
 }
 
 /// The engine's ground height in metres, clamped to the map as
@@ -68,6 +83,9 @@ pub fn surface(image: &TerrainImage) -> Surface {
     let mut index_of = vec![u32::MAX; side * side];
     let mut vertices = Vec::new();
     let mut indices = Vec::new();
+    let mut shore_index_of = vec![u32::MAX; side * side];
+    let mut shore_vertices = Vec::new();
+    let mut shore_indices = Vec::new();
     for z in 0..size {
         for x in 0..size {
             if !CHECK
@@ -96,9 +114,384 @@ pub fn surface(image: &TerrainImage) -> Surface {
             };
             let quad = [corner(0, 0), corner(1, 0), corner(0, 1), corner(1, 1)];
             indices.extend_from_slice(&[quad[2], quad[0], quad[1], quad[1], quad[3], quad[2]]);
+
+            if [(0, 0), (1, 0), (0, 1), (1, 1)]
+                .iter()
+                .all(|(dx, dz)| ground(image, x + dx, z + dz) < level)
+            {
+                continue;
+            }
+            // Just over the ground, carrying a depth of -5 that
+            // water_high reads as shore.
+            let mut corner = |dx: isize, dz: isize| {
+                let (i, j) = ((x + dx) as usize, (z + dz) as usize);
+                let at = j * side + i;
+                if shore_index_of[at] == u32::MAX {
+                    shore_index_of[at] = (shore_vertices.len() / VERTEX_SIZE) as u32;
+                    for value in [
+                        i as f32 * TILE_SIZE,
+                        ground(image, i as isize, j as isize) + 0.02,
+                        j as f32 * TILE_SIZE,
+                        0.0,
+                        -5.0,
+                    ] {
+                        shore_vertices.extend_from_slice(&value.to_le_bytes());
+                    }
+                }
+                shore_index_of[at]
+            };
+            let quad = [corner(0, 0), corner(1, 0), corner(0, 1), corner(1, 1)];
+            if image.triangulation_dir(x as usize, z as usize) {
+                shore_indices
+                    .extend_from_slice(&[quad[2], quad[0], quad[1], quad[1], quad[3], quad[2]]);
+            } else {
+                shore_indices
+                    .extend_from_slice(&[quad[3], quad[2], quad[0], quad[3], quad[0], quad[1]]);
+            }
         }
     }
-    Surface { vertices, indices }
+    Surface {
+        vertices,
+        indices,
+        shore_vertices,
+        shore_indices,
+    }
+}
+
+/// `WaterManager::RecomputeDistanceHeightmap`: per vertex, the distance
+/// along its row or its column to the nearest vertex at or above the
+/// water, up to `MAX_SHORE_DISTANCE`. Ahead, the map's edge counts as
+/// such a vertex, as `ComputeDirection`'s lookahead stops there.
+fn distance_heightmap(image: &TerrainImage) -> Vec<f32> {
+    let side = image.size as usize + 1;
+    let level = image.water_level;
+    let mut distance = vec![MAX_SHORE_DISTANCE as f32; side * side];
+    for transpose in [false, true] {
+        for id1 in 0..side {
+            let at = |id2: usize| if transpose { (id1, id2) } else { (id2, id1) };
+            let above = |id2: usize| {
+                let (x, z) = at(id2);
+                ground(image, x as isize, z as isize) >= level
+            };
+            let advance = |lookahead: &mut usize, id2: usize| {
+                while *lookahead <= id2 + MAX_SHORE_DISTANCE
+                    && *lookahead < side
+                    && !above(*lookahead)
+                {
+                    *lookahead += 1;
+                }
+            };
+            let mut shore = if above(0) { 0 } else { MAX_SHORE_DISTANCE };
+            let mut lookahead = usize::from(shore > 0);
+            advance(&mut lookahead, 0);
+            for id2 in 0..side {
+                shore = if above(id2) {
+                    0
+                } else {
+                    (shore + 1).min(MAX_SHORE_DISTANCE)
+                };
+                if lookahead == id2 {
+                    lookahead += 1;
+                }
+                advance(&mut lookahead, id2);
+                let (x, z) = at(id2);
+                let cell = &mut distance[z * side + x];
+                *cell = cell.min((lookahead - id2).min(shore) as f32);
+            }
+        }
+    }
+    distance
+}
+
+/// The C library's `rand` as the engine calls it for the waves' time
+/// offsets: any sequence will do, so a fixed one keeps a map's waves the
+/// same on every viewer.
+struct Random(u32);
+
+impl Random {
+    fn next(&mut self) -> u32 {
+        // Numerical Recipes' LCG, its high bits.
+        self.0 = self.0.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        self.0 >> 16
+    }
+}
+
+/// `WaterManager::CreateWaveMeshes`: waves along every coast long enough,
+/// each a strip `WAVE_POINTS` coastal points wide at most and 9 vertices
+/// deep, every vertex with its four positions the wave moves through.
+/// None where the water is calm, as the engine skips them.
+pub fn waves(image: &TerrainImage) -> Surface {
+    let mut out = Surface {
+        vertices: Vec::new(),
+        indices: Vec::new(),
+        shore_vertices: Vec::new(),
+        shore_indices: Vec::new(),
+    };
+    let water = &image.water;
+    if water.waviness < 5.0 && water.kind != "ocean" {
+        return out;
+    }
+    let side = image.size as usize + 1;
+    let level = image.water_level;
+    let distance = distance_heightmap(image);
+
+    // The points near the coast, on the water's side.
+    let mut coastal = BTreeSet::new();
+    for z in 1..side.saturating_sub(1) {
+        for x in 1..side - 1 {
+            let d = distance[z * side + x];
+            if d > 0.5 && d < 1.5 {
+                coastal.insert(z * side + x);
+            }
+        }
+    }
+
+    // Chains of them, each point at most two neighbours.
+    const AROUND: [(isize, isize); 8] = [
+        (-1, -1),
+        (-1, 0),
+        (-1, 1),
+        (0, 1),
+        (1, 1),
+        (1, 0),
+        (1, -1),
+        (0, -1),
+    ];
+    let point = |index: usize| {
+        let (x, y) = (index % side, index / side);
+        [x as f32 * TILE_SIZE, y as f32 * TILE_SIZE]
+    };
+    let neighbour = |index: usize, (dx, dy): (isize, isize)| {
+        let (x, y) = ((index % side) as isize, (index / side) as isize);
+        ((x + dx) + (y + dy) * side as isize) as usize
+    };
+    let mut chains: Vec<Vec<[f32; 2]>> = Vec::new();
+    while let Some(index) = coastal.pop_first() {
+        let mut chain = VecDeque::from([point(index)]);
+        let mut neighbours = [None; 2];
+        let mut count = 0;
+        for step in AROUND {
+            let next = neighbour(index, step);
+            if coastal.contains(&next) {
+                if count < 2 {
+                    neighbours[count] = Some(next);
+                }
+                count += 1;
+            }
+        }
+        if count > 2 {
+            continue;
+        }
+        'directions: for (i, next) in neighbours.into_iter().enumerate() {
+            let Some(mut at) = next else {
+                continue;
+            };
+            let push = |chain: &mut VecDeque<[f32; 2]>, at: usize| {
+                if i == 0 {
+                    chain.push_back(point(at));
+                } else {
+                    chain.push_front(point(at));
+                }
+            };
+            push(&mut chain, at);
+            // Gone already: the chain came round to its start.
+            if !coastal.remove(&at) {
+                break 'directions;
+            }
+            // On to the first neighbour left, in `AROUND`'s order, until
+            // none is. (The engine's check for a third neighbour there
+            // never runs, as it moves on at the first.)
+            while let Some(next) = AROUND
+                .into_iter()
+                .map(|step| neighbour(at, step))
+                .find(|next| coastal.contains(next))
+            {
+                at = next;
+                push(&mut chain, at);
+                coastal.remove(&at);
+            }
+        }
+        if chain.len() > 10 {
+            chains.push(chain.into());
+        }
+    }
+
+    // Smoothed, three times over, in place.
+    for chain in &mut chains {
+        for _ in 0..3 {
+            for j in 1..chain.len() - 1 {
+                let middle = [
+                    (chain[j - 1][0] + chain[j + 1][0]) / 2.0,
+                    (chain[j - 1][1] + chain[j + 1][1]) / 2.0,
+                ];
+                chain[j] = [
+                    (chain[j][0] + middle[0]) / 2.0,
+                    (chain[j][1] + middle[1]) / 2.0,
+                ];
+            }
+        }
+    }
+
+    // The waves, along stretches of the chains.
+    let mut random = Random(1);
+    let mut time_offset = (random.next() % 50) as f32 / 5.0;
+    let ground_at = |at: [f32; 2]| image.ground(at[0], at[1]);
+    // The coast's normal at `a` points into a stretch from `start`,
+    // averaged over the segments either side within the widest wave.
+    let perpendicular = |chain: &[[f32; 2]], start: usize, a: usize| {
+        let pos = chain[start + a];
+        let mut sum = [0.0, 0.0];
+        let mut count = 0.0;
+        if a > 0 {
+            count += 1.0;
+            let before = chain[start + a - 1];
+            sum = [sum[0] + pos[0] - before[0], sum[1] + pos[1] - before[1]];
+        }
+        if a < WAVE_POINTS - 1 {
+            count += 1.0;
+            let after = chain[start + a + 1];
+            sum = [sum[0] + after[0] - pos[0], sum[1] + after[1] - pos[1]];
+        }
+        let along = [sum[0] / count, sum[1] / count];
+        let length = along[0].hypot(along[1]);
+        if length > 0.0 {
+            [-along[1] / length, along[0] / length]
+        } else {
+            [0.0, 0.0]
+        }
+    };
+    let dot = |a: [f32; 2], b: [f32; 2]| a[0] * b[0] + a[1] * b[1];
+    // Offsets along the normal, and heights, of each of a wave's 9 rows
+    // at its four stages.
+    const PERP_BASE: [f32; 9] = [6.0, 6.05, 6.1, 6.2, 6.3, 6.4, 6.5, 6.6, 9.7];
+    const PERP_APEX: [f32; 9] = [2.0, 2.1, 2.2, 2.3, 2.4, 3.0, 3.3, 3.6, 9.5];
+    const PERP_SPLASH: [f32; 9] = [1.1, 0.7, -0.2, 0.0, 0.6, 1.3, 2.2, 3.6, 9.0];
+    const PERP_RETREAT: [f32; 9] = [2.0, 2.1, 1.2, 1.5, 1.7, 1.9, 2.7, 3.8, 9.0];
+    const HEIGHT_BASE: [f32; 9] = [0.0, 0.2, 0.5, 0.8, 0.9, 0.85, 0.6, 0.2, 0.0];
+    const HEIGHT_SPLASH: [f32; 9] = [-0.8, -0.4, 0.0, 0.1, 0.1, 0.03, 0.0, 0.0, 0.0];
+    const BASE_HEIGHT: f32 = 0.04;
+    for chain in &chains {
+        let mut j = 0;
+        while j + WAVE_POINTS < chain.len() {
+            let mut width = WAVE_POINTS;
+            let mut outmost = 0.0;
+            let mut average_depth = 0.0;
+            let mut sign = 1.0;
+            let mut first = [0.0, 0.0];
+            let mut perp = [0.0, 0.0];
+            for a in 0..WAVE_POINTS {
+                let last = perp;
+                perp = perpendicular(chain, j, a);
+                let pos = chain[j + a];
+                if a == 0 {
+                    first = perp;
+                }
+                // The coast turns too much: a narrower wave.
+                if a > 1 && dot(perp, last) < 0.90 && dot(perp, first) < 0.70 {
+                    width = a + 1;
+                    break;
+                }
+                if ground_at([pos[0] + perp[0] * 1.5, pos[1] + perp[1] * 1.5]) > level {
+                    sign = -1.0;
+                }
+                average_depth += ground_at([
+                    pos[0] + sign * perp[0] * 20.0,
+                    pos[1] + sign * perp[1] * 20.0,
+                ]) - level;
+                let mut local_outmost = -2.0_f32;
+                while local_outmost < 0.0 {
+                    let depth = ground_at([
+                        pos[0] + sign * perp[0] * local_outmost,
+                        pos[1] + sign * perp[1] * local_outmost,
+                    ]) - level;
+                    if !(0.0..=0.6).contains(&depth) {
+                        local_outmost += 0.2;
+                    } else {
+                        break;
+                    }
+                }
+                outmost += local_outmost;
+            }
+            if width < 5 {
+                j += 7;
+                continue;
+            }
+            outmost /= width as f32;
+            if outmost > -0.5 {
+                j += 4;
+                continue;
+            }
+            outmost = -2.5 + outmost * water.waviness / 10.0;
+            average_depth /= width as f32;
+            if average_depth > -1.3 {
+                j += 4;
+                continue;
+            }
+
+            let wave_offset = time_offset;
+            time_offset += (random.next() % 100) as f32 / 25.0 + 4.0;
+            let first_vertex = (out.vertices.len() / WAVE_VERTEX_SIZE) as u32;
+            let mut columns: Vec<[[f32; 18]; 9]> = Vec::with_capacity(width);
+            for a in 0..width {
+                let perp = perpendicular(chain, j, a);
+                let pos = chain[j + a];
+                let half_width = (width as f32 - 1.0) / 2.0;
+                let sideness = ((half_width - (a as f32 - half_width).abs()) / 3.0)
+                    .clamp(0.0, 1.0)
+                    .sqrt();
+                let at = |offset: f32, height: f32| {
+                    let x = pos[0] + sign * perp[0] * offset;
+                    let z = pos[1] + sign * perp[1] * offset;
+                    let ground = 0.05 + ground_at([x, z]);
+                    [x, BASE_HEIGHT + height * sideness + level.max(ground), z]
+                };
+                // Rows from the outermost, the engine's point[8], in.
+                let mut column = [[0.0; 18]; 9];
+                for (row, t) in (0..9).rev().enumerate() {
+                    let base = at(PERP_BASE[t] + outmost, HEIGHT_BASE[t]);
+                    let apex = at(PERP_APEX[t] + outmost, HEIGHT_BASE[t]);
+                    let splash = at(PERP_SPLASH[t] + outmost * sideness, HEIGHT_SPLASH[t]);
+                    let retreat = at(PERP_RETREAT[t] + outmost, 0.0);
+                    column[row] = [
+                        base[0],
+                        base[1],
+                        base[2],
+                        apex[0],
+                        apex[1],
+                        apex[2],
+                        splash[0],
+                        splash[1],
+                        splash[2],
+                        retreat[0],
+                        retreat[1],
+                        retreat[2],
+                        perp[0],
+                        perp[1],
+                        a as f32,
+                        (8 - t) as f32,
+                        wave_offset,
+                        width as f32,
+                    ];
+                }
+                columns.push(column);
+            }
+            if sign > 0.0 {
+                columns.reverse();
+            }
+            for value in columns.iter().flatten().flatten() {
+                out.vertices.extend_from_slice(&value.to_le_bytes());
+            }
+            for a in 0..width as u32 - 1 {
+                for rect in 0..7 {
+                    let at = first_vertex + a * 9 + rect;
+                    out.indices
+                        .extend_from_slice(&[at, at + 9, at + 1, at + 9, at + 10, at + 1]);
+                }
+            }
+            j += width / 2;
+        }
+    }
+    out
 }
 
 /// `WaterManager::RecomputeWindStrength`: wind marched across the map
@@ -375,6 +768,7 @@ pub struct Options {
     pub refraction: bool,
     pub real_depth: bool,
     pub reflection: bool,
+    pub fancy: bool,
 }
 
 /// The textures the refraction and reflection passes draw into, as
@@ -501,6 +895,7 @@ impl Water {
                     texture_entry(3, wgpu::TextureViewDimension::D2, false),
                     sampler_entry(4),
                     texture_entry(5, wgpu::TextureViewDimension::D2, true),
+                    texture_entry(6, wgpu::TextureViewDimension::D2, true),
                 ],
             });
         let buffer = device.create_buffer(&wgpu::BufferDescriptor {
@@ -582,6 +977,7 @@ impl Water {
             ("REFRACTION", flag(options.refraction)),
             ("REAL_DEPTH", flag(options.refraction && options.real_depth)),
             ("REFLECTION", flag(options.reflection)),
+            ("FANCY", flag(options.fancy)),
         ];
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("water"),
@@ -655,14 +1051,16 @@ impl Water {
         })
     }
 
-    /// The sky cube and the refraction and reflection passes' textures,
-    /// while they are drawn.
+    /// The sky cube, the refraction and reflection passes' textures and
+    /// the fancy effects', while they are drawn.
     pub fn environment_group(
         &self,
         device: &wgpu::Device,
         sky: (&wgpu::TextureView, &wgpu::Sampler),
         targets: Option<&Targets>,
+        effects: Option<&Effects>,
     ) -> wgpu::BindGroup {
+        let effects = effects.map_or(&self.stand_in, |effects| &effects.color);
         let (refraction, refraction_depth, reflection) = match targets {
             Some(targets) => (
                 &targets.refraction,
@@ -698,6 +1096,242 @@ impl Water {
                 wgpu::BindGroupEntry {
                     binding: 5,
                     resource: wgpu::BindingResource::TextureView(reflection),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: wgpu::BindingResource::TextureView(effects),
+                },
+            ],
+        })
+    }
+}
+
+/// The fancy effects' textures, `WaterManager`'s m_FancyTexture and its
+/// depth: the screen's size.
+pub struct Effects {
+    pub size: (u32, u32),
+    pub color: wgpu::TextureView,
+    pub depth: wgpu::TextureView,
+}
+
+impl Effects {
+    pub fn new(device: &wgpu::Device, width: u32, height: u32) -> Self {
+        let target = |label: &str, format: wgpu::TextureFormat| {
+            device
+                .create_texture(&wgpu::TextureDescriptor {
+                    label: Some(label),
+                    size: wgpu::Extent3d {
+                        width: width.max(1),
+                        height: height.max(1),
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format,
+                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                        | wgpu::TextureUsages::TEXTURE_BINDING,
+                    view_formats: &[],
+                })
+                .create_view(&Default::default())
+        };
+        Effects {
+            size: (width, height),
+            color: target("water effects", wgpu::TextureFormat::Rgba8Unorm),
+            depth: target("water effects depth", crate::unit::DEPTH_FORMAT),
+        }
+    }
+}
+
+/// The pipelines that draw the fancy effects: the shore waves
+/// (water_waves.xml) and the shore tiles over them (the solid shader with
+/// a depth test).
+pub struct Waves {
+    pub wave_pipeline: wgpu::RenderPipeline,
+    pub occluder_pipeline: wgpu::RenderPipeline,
+    layout: wgpu::BindGroupLayout,
+    sampler: wgpu::Sampler,
+}
+
+impl Waves {
+    pub fn new(device: &wgpu::Device, view_layout: &wgpu::BindGroupLayout) -> Self {
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("water waves"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("waves.wgsl").into()),
+        });
+        let texture_entry = |binding| wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                view_dimension: wgpu::TextureViewDimension::D2,
+                multisampled: false,
+            },
+            count: None,
+        };
+        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("water waves"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: wgpu::BufferSize::new(UNIFORM_SIZE),
+                    },
+                    count: None,
+                },
+                texture_entry(1),
+                texture_entry(2),
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+        // Repeating, as LoadWaterTextures loads both.
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("water waves"),
+            address_mode_u: wgpu::AddressMode::Repeat,
+            address_mode_v: wgpu::AddressMode::Repeat,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Linear,
+            ..Default::default()
+        });
+        let wave_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("water waves"),
+            bind_group_layouts: &[Some(view_layout), Some(&layout)],
+            immediate_size: 0,
+        });
+        let occluder_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("water foam occluders"),
+            bind_group_layouts: &[Some(view_layout)],
+            immediate_size: 0,
+        });
+        // `<blend src="src_alpha" dst="one_minus_src_alpha"/>` blends the
+        // alpha the same way, which the water reads.
+        let blend = wgpu::BlendComponent {
+            src_factor: wgpu::BlendFactor::SrcAlpha,
+            dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+            operation: wgpu::BlendOperation::Add,
+        };
+        let wave_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("water waves"),
+            layout: Some(&wave_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_wave"),
+                compilation_options: Default::default(),
+                buffers: &[Some(wgpu::VertexBufferLayout {
+                    array_stride: WAVE_VERTEX_SIZE as u64,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &wgpu::vertex_attr_array![
+                        0 => Float32x3,
+                        1 => Float32x3,
+                        2 => Float32x3,
+                        3 => Float32x3,
+                        4 => Float32x2,
+                        5 => Float32x2,
+                        6 => Float32x2,
+                    ],
+                })],
+            },
+            primitive: wgpu::PrimitiveState::default(),
+            // water_waves.xml: a depth test that always passes, and writes,
+            // so the shore tiles test against the waves.
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: crate::unit::DEPTH_FORMAT,
+                depth_write_enabled: Some(true),
+                depth_compare: Some(wgpu::CompareFunction::Always),
+                stencil: Default::default(),
+                bias: Default::default(),
+            }),
+            multisample: Default::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_wave"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: wgpu::TextureFormat::Rgba8Unorm,
+                    blend: Some(wgpu::BlendState {
+                        color: blend,
+                        alpha: blend,
+                    }),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+        let occluder_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("water foam occluders"),
+            layout: Some(&occluder_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_occluder"),
+                compilation_options: Default::default(),
+                buffers: &[Some(wgpu::VertexBufferLayout {
+                    array_stride: VERTEX_SIZE as u64,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &wgpu::vertex_attr_array![0 => Float32x3],
+                })],
+            },
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: crate::unit::DEPTH_FORMAT,
+                depth_write_enabled: Some(true),
+                depth_compare: Some(wgpu::CompareFunction::Less),
+                stencil: Default::default(),
+                bias: Default::default(),
+            }),
+            multisample: Default::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_occluder"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::TextureFormat::Rgba8Unorm.into())],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+        Waves {
+            wave_pipeline,
+            occluder_pipeline,
+            layout,
+            sampler,
+        }
+    }
+
+    pub fn bind_group(
+        &self,
+        device: &wgpu::Device,
+        water: &wgpu::Buffer,
+        wave: &wgpu::TextureView,
+        foam: &wgpu::TextureView,
+    ) -> wgpu::BindGroup {
+        device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("water waves"),
+            layout: &self.layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: water.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(wave),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(foam),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::Sampler(&self.sampler),
                 },
             ],
         })

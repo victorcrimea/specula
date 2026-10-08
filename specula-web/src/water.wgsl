@@ -77,6 +77,8 @@ struct Light {
 @group(2) @binding(4) var refraction_sampler: sampler;
 // The reflection pass's colour, sampled as the refraction's.
 @group(2) @binding(5) var reflection_map: texture_2d<f32>;
+// The fancy effects texture waves.wgsl draws, screen-sized.
+@group(2) @binding(6) var effects_map: texture_2d<f32>;
 
 @group(3) @binding(0) var<uniform> light: Light;
 @group(3) @binding(1) var shadow_map: texture_depth_2d;
@@ -88,6 +90,10 @@ override REFRACTION: bool = false;
 // waterrealdepth: the depth under the surface from the refraction's depth
 // rather than from the vertex depth.
 override REAL_DEPTH: bool = false;
+
+// waterfancyeffects: the shore waves' bend and foam, and foam where the
+// waves are wild.
+override FANCY: bool = false;
 
 // waterreflection: the reflection texture of what is over the water, the
 // sky where it holds nothing, rather than the sky alone.
@@ -171,22 +177,44 @@ fn frame_blend() -> f32 {
     return (water.motion.x * 60.0 % 8.0) / 8.0;
 }
 
-// getNormal without the fancy effects.
-fn water_normal(in: Varyings) -> vec3<f32> {
+// The texels the water reads that need derivatives, taken before any
+// discard: the two frames at the waves' coordinates (their alpha is
+// getFoam's foam1 and foam2) and at the foam's wider ones (foam3, foam4).
+struct Samples {
+    first: vec4<f32>,
+    second: vec4<f32>,
+    wide_first: vec4<f32>,
+    wide_second: vec4<f32>,
+}
+
+fn sample_normals(in: Varyings) -> Samples {
     let waviness = water.color.w;
     let wavy_effect = water.wave1.x;
     let base_scale = water.wave1.y;
-    let flattenism = water.wave1.z;
-    let base_bump = water.wave1.w;
     let big_movement = water.wave2.z;
     // normalCoords.zw is (time, 0).
-    let coords = (in.normal_coords + vec2<f32>(water.motion.x, 0.0) * big_movement * waviness / 10.0)
+    let time = vec2<f32>(water.motion.x, 0.0);
+    let coords = (in.normal_coords + time * big_movement * waviness / 10.0)
         * (base_scale - waviness / wavy_effect);
+    let wide = in.normal_coords / 6.0 - time * 0.02;
     let frame = i32(water.frames.x);
     let next = i32(water.frames.y);
-    let first = textureSample(normal_maps, normal_sampler, coords, frame).xzy;
-    let second = textureSample(normal_maps, normal_sampler, coords, next).xzy;
-    let interpolated = mix(first, second, frame_blend()) - vec3<f32>(0.5, 0.0, 0.5);
+    var out: Samples;
+    out.first = textureSample(normal_maps, normal_sampler, coords, frame);
+    out.second = textureSample(normal_maps, normal_sampler, coords, next);
+    if FANCY {
+        out.wide_first = textureSample(normal_maps, normal_sampler, wide, frame);
+        out.wide_second = textureSample(normal_maps, normal_sampler, wide, next);
+    }
+    return out;
+}
+
+// getNormal.
+fn water_normal(in: Varyings, samples: Samples, effects: vec4<f32>) -> vec3<f32> {
+    let flattenism = water.wave1.z;
+    let base_bump = water.wave1.w;
+    let interpolated = mix(samples.first.xzy, samples.second.xzy, frame_blend())
+        - vec3<f32>(0.5, 0.0, 0.5);
     let wind = water.motion.yz;
     let bent = vec3<f32>(
         interpolated.x * wind.x - interpolated.z * wind.y,
@@ -196,7 +224,25 @@ fn water_normal(in: Varyings) -> vec3<f32> {
     var normal = normalize(mix(vec3<f32>(0.0, 1.0, 0.0), bent,
         clamp(base_bump + in.waviness / flattenism, 0.0, 1.0)));
     normal = mix(vec3<f32>(0.0, 1.0, 0.0), normal, 0.5 + in.water_info.x / 2.0);
+    if FANCY {
+        let bent_by_waves = mix(normal.xz, effects.rb, effects.a / 2.0);
+        normal = vec3<f32>(bent_by_waves.x, normal.y, bent_by_waves.y);
+    }
     return vec3<f32>(-normal.x, normal.y, -normal.z);
+}
+
+// getFoam: foam where the normal maps' alpha has it and the waves left
+// some, lit by the sun and the ambient.
+fn foam(samples: Samples, effects: vec4<f32>, shadow: f32) -> vec4<f32> {
+    let waviness = water.color.w;
+    let blend = frame_blend();
+    let near = mix(samples.first.a, samples.second.a, blend);
+    let wide = mix(samples.wide_first.a, samples.wide_second.a, blend);
+    let interpolated = near * wide;
+    let wind = water.motion.yz;
+    let amount = abs(interpolated * wind.x) + abs(interpolated * wind.y);
+    let alpha = (effects.g + pow(amount * (3.0 + waviness), 2.6 - waviness / 5.5)) * 2.0;
+    return vec4<f32>(light.sun_color.rgb * shadow + light.ambient.rgb, clamp(alpha, 0.0, 1.0));
 }
 
 // The sky cube in direction `direction`, as `vec4(direction, 0.0) *
@@ -236,9 +282,9 @@ fn refraction_position(gl_uv: vec2<f32>, water_position: vec3<f32>) -> vec3<f32>
     return position;
 }
 
-// getRefraction without the fancy effects: the colour under the surface
-// and the water's alpha.
-fn refracted(in: Varyings, normal: vec3<f32>, eye: vec3<f32>) -> vec4<f32> {
+// getRefraction: the colour under the surface and the water's alpha;
+// `depth_limit` is the fancy effects' wave coverage.
+fn refracted(in: Varyings, normal: vec3<f32>, eye: vec3<f32>, depth_limit: f32) -> vec4<f32> {
     let color = water.color.rgb;
     let coords = in.refraction_coords;
     var depth: f32;
@@ -260,6 +306,12 @@ fn refracted(in: Varyings, normal: vec3<f32>, eye: vec3<f32>) -> vec4<f32> {
                 depth = new_depth;
             }
         }
+        if FANCY {
+            depth = max(depth, depth_limit);
+            if in.water_info.y < 0.0 {
+                depth = 0.0;
+            }
+        }
         let uv = (0.5 * coords.xy - normal.xz * distortion) / coords.z + 0.5;
         under = sample_refraction(uv).rgb;
         let blur = (0.1 + clamp(normal.x, -0.1, 0.1)) / coords.z;
@@ -276,6 +328,8 @@ fn refracted(in: Varyings, normal: vec3<f32>, eye: vec3<f32>) -> vec4<f32> {
         blurred /= blurred.a;
         let blur_factor = distortion / 7.0;
         under = (under + blurred.rgb * blur_factor) / (1.0 + blur_factor);
+    } else if FANCY {
+        depth = max(depth, depth_limit);
     }
     let murkiness = water.tint.w;
     let fixed_vy = max(eye.y, 0.01);
@@ -311,7 +365,13 @@ fn reflected(in: Varyings, normal: vec3<f32>, eye: vec3<f32>) -> vec4<f32> {
 fn fs_water(in: Varyings) -> @location(0) vec4<f32> {
     // Sampled before the discard: WGSL wants textureSample in uniform
     // control flow.
-    let normal = water_normal(in);
+    let samples = sample_normals(in);
+    var effects = vec4<f32>(0.0);
+    if FANCY {
+        effects = textureSampleLevel(effects_map, refraction_sampler,
+            in.position.xy / vec2<f32>(textureDimensions(effects_map)), 0.0);
+    }
+    let normal = water_normal(in, samples, effects);
     let size = view.misc.z;
     if view.misc.w > 0.5 && distance(in.world.xz, vec2<f32>(size * 0.5)) > size * 0.5 {
         discard;
@@ -319,7 +379,7 @@ fn fs_water(in: Varyings) -> @location(0) vec4<f32> {
     let eye = normalize(light.eye.xyz - in.world);
 
     let murkiness = water.tint.w;
-    let refraction = refracted(in, normal, eye);
+    let refraction = refracted(in, normal, eye, effects.a);
 
     let reflection = reflected(in, normal, eye);
 
@@ -336,6 +396,10 @@ fn fs_water(in: Varyings) -> @location(0) vec4<f32> {
 
     var out = mix(refraction.rgb, reflection.rgb, fresnel * reflection.a);
     out += shadow * specular;
+    if FANCY {
+        let foamed = foam(samples, effects, shadow);
+        out = mix(out, foamed.rgb, foamed.a);
+    }
     out = clamp(out, vec3<f32>(0.0), vec3<f32>(1.0));
     return vec4<f32>(apply_fog(out, in.world), refraction.a);
 }

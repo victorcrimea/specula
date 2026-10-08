@@ -253,6 +253,13 @@ struct Ground {
     water_vertices: wgpu::Buffer,
     water_indices: wgpu::Buffer,
     water_index_count: u32,
+    shore_vertices: wgpu::Buffer,
+    shore_indices: wgpu::Buffer,
+    shore_index_count: u32,
+    /// `water::waves`.
+    wave_vertices: wgpu::Buffer,
+    wave_indices: wgpu::Buffer,
+    wave_index_count: u32,
     /// The minimap picture, for a terrain whose texture is not in (yet).
     minimap: wgpu::BindGroup,
     /// Per palette entry, its textures' bind group and what its colour,
@@ -380,8 +387,16 @@ pub struct Field {
     /// their changes.
     water_targets: Option<water::Targets>,
     water_targets_generation: u64,
+    /// The viewer's high-quality water effects setting, under the water
+    /// effects, its pipelines, and its textures while it is drawn.
+    fancy_water: bool,
+    waves: water::Waves,
+    water_effects_targets: Option<water::Effects>,
+    /// The waves' group once their textures are in.
+    waves_group: Option<wgpu::BindGroup>,
     /// `water`'s environment group, with the sky's and the targets'
-    /// generations it was made from.
+    /// generations it was made from; the targets' counts the fancy
+    /// effects' changes too.
     water_environment: Option<(u64, u64, wgpu::BindGroup)>,
     decal_pipeline: wgpu::RenderPipeline,
     shadow: Shadow,
@@ -838,6 +853,7 @@ impl Field {
         let borders = Borders::new(&device, &queue, config.format, &view_layout)?;
         let sky = Sky::new(&device, &queue, config.format);
         let water = Water::new(&device, config.format, &view_layout, light_layout);
+        let waves = water::Waves::new(&device, &view_layout);
         let far = Far::new(
             &device,
             config.format,
@@ -969,6 +985,10 @@ impl Field {
             reflection_view: (reflection_buffer, reflection_group),
             water_targets: None,
             water_targets_generation: 0,
+            fancy_water: false,
+            waves,
+            water_effects_targets: None,
+            waves_group: None,
             water_environment: None,
             decal_pipeline,
             shadow,
@@ -2435,11 +2455,16 @@ impl Field {
     fn upload_ground(&mut self, image: &TerrainImage) {
         let mesh = blend::build(image);
         let water = water::surface(image);
-        let water_indices: Vec<u8> = water
-            .indices
-            .iter()
-            .flat_map(|index| index.to_le_bytes())
-            .collect();
+        let waves = water::waves(image);
+        let bytes = |indices: &[u32]| -> Vec<u8> {
+            indices
+                .iter()
+                .flat_map(|index| index.to_le_bytes())
+                .collect()
+        };
+        let buffer = |label: &str, contents: &[u8], usage: wgpu::BufferUsages| {
+            create_buffer(&self.device, &self.queue, label, contents, usage)
+        };
         let minimap = Texture {
             format: TextureFormat::Rgba8,
             width: image.size,
@@ -2473,21 +2498,31 @@ impl Field {
             ),
             base: mesh.base,
             blends: mesh.blends,
-            water_vertices: create_buffer(
-                &self.device,
-                &self.queue,
-                "water",
-                &water.vertices,
-                wgpu::BufferUsages::VERTEX,
-            ),
-            water_indices: create_buffer(
-                &self.device,
-                &self.queue,
+            water_vertices: buffer("water", &water.vertices, wgpu::BufferUsages::VERTEX),
+            water_indices: buffer(
                 "water indices",
-                &water_indices,
+                &bytes(&water.indices),
                 wgpu::BufferUsages::INDEX,
             ),
             water_index_count: water.indices.len() as u32,
+            shore_vertices: buffer(
+                "water shore",
+                &water.shore_vertices,
+                wgpu::BufferUsages::VERTEX,
+            ),
+            shore_indices: buffer(
+                "water shore indices",
+                &bytes(&water.shore_indices),
+                wgpu::BufferUsages::INDEX,
+            ),
+            shore_index_count: water.shore_indices.len() as u32,
+            wave_vertices: buffer("water waves", &waves.vertices, wgpu::BufferUsages::VERTEX),
+            wave_indices: buffer(
+                "water wave indices",
+                &bytes(&waves.indices),
+                wgpu::BufferUsages::INDEX,
+            ),
+            wave_index_count: waves.indices.len() as u32,
             minimap,
             textures: vec![None; image.names.len()],
             missing: vec![false; image.names.len()],
@@ -2709,6 +2744,42 @@ impl Field {
                 .then(|| water::Targets::new(&self.device, self.config.format, self.config.height));
             self.water_targets_generation += 1;
         }
+        let effects_size = (self.config.width, self.config.height);
+        if options.fancy
+            != self
+                .water_effects_targets
+                .as_ref()
+                .is_some_and(|effects| effects.size == effects_size)
+        {
+            self.water_effects_targets = options
+                .fancy
+                .then(|| water::Effects::new(&self.device, effects_size.0, effects_size.1));
+            self.water_targets_generation += 1;
+        }
+        // Asked for apart, as the store is borrowed again below.
+        let wave_files = self.store.borrow().wave_textures();
+        if options.fancy
+            && self.waves_group.is_none()
+            && let Get::Ready((foam, coastal_wave)) = wave_files
+        {
+            let textures = [coastal_wave, foam].map(|file| {
+                match self.store.borrow_mut().texture(file, true) {
+                    Get::Ready(texture) => Some(texture),
+                    Get::Pending | Get::Missing => None,
+                }
+            });
+            if let [Some(wave), Some(foam)] = textures {
+                let [wave, foam] = [wave, foam].map(|texture| {
+                    let first = self.uploaded(&texture).1;
+                    upload_texture(&self.device, &self.queue, &texture, first, self.bc)
+                });
+                self.waves_group =
+                    Some(
+                        self.waves
+                            .bind_group(&self.device, &self.water.buffer, &wave, &foam),
+                    );
+            }
+        }
         if options.reflection && self.reflection_scene.is_none() {
             self.reflection_scene = Some(ScenePipelines::new(
                 &self.device,
@@ -2733,6 +2804,7 @@ impl Field {
                 &self.device,
                 self.sky.view(),
                 self.water_targets.as_ref(),
+                self.water_effects_targets.as_ref(),
             );
             self.water_environment = Some((key.0, key.1, group));
         }
@@ -2772,6 +2844,7 @@ impl Field {
             refraction: self.refraction,
             real_depth: self.refraction && self.real_depth,
             reflection: self.reflection,
+            fancy: self.fancy_water,
         })
     }
 }
@@ -2866,6 +2939,10 @@ impl View for Field {
 
     fn set_water_reflection(&mut self, on: bool) {
         self.reflection = on;
+    }
+
+    fn set_fancy_water(&mut self, on: bool) {
+        self.fancy_water = on;
     }
 
     fn progress(&self) -> Progress {
@@ -3260,6 +3337,48 @@ impl View for Field {
             self.draw_ground(&mut pass, scene);
             self.draw_scene_models(&mut pass, scene, &draws);
         }
+        if water_options.is_some_and(|options| options.fancy)
+            && let (Some(effects), Some(ground)) = (&self.water_effects_targets, &self.ground)
+        {
+            // RenderWaves, then RenderWaterFoamOccluders over them.
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("water effects"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &effects.color,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &effects.depth,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Discard,
+                    }),
+                    stencil_ops: None,
+                }),
+                ..Default::default()
+            });
+            pass.set_bind_group(0, &self.view_bind_group, &[]);
+            if let Some(group) = &self.waves_group
+                && ground.wave_index_count > 0
+            {
+                pass.set_pipeline(&self.waves.wave_pipeline);
+                pass.set_bind_group(1, group, &[]);
+                pass.set_vertex_buffer(0, ground.wave_vertices.slice(..));
+                pass.set_index_buffer(ground.wave_indices.slice(..), wgpu::IndexFormat::Uint32);
+                pass.draw_indexed(0..ground.wave_index_count, 0, 0..1);
+            }
+            if ground.shore_index_count > 0 {
+                pass.set_pipeline(&self.waves.occluder_pipeline);
+                pass.set_vertex_buffer(0, ground.shore_vertices.slice(..));
+                pass.set_index_buffer(ground.shore_indices.slice(..), wgpu::IndexFormat::Uint32);
+                pass.draw_indexed(0..ground.shore_index_count, 0, 0..1);
+            }
+        }
         if water_options.is_some_and(|options| options.reflection)
             && let (Some(targets), Some(scene)) = (&self.water_targets, &self.reflection_scene)
         {
@@ -3373,6 +3492,18 @@ impl View for Field {
                             wgpu::IndexFormat::Uint32,
                         );
                         pass.draw_indexed(0..ground.water_index_count, 0, 0..1);
+                        // RenderWaterShore, which only the fancy effects
+                        // draw.
+                        if water_options.is_some_and(|options| options.fancy)
+                            && ground.shore_index_count > 0
+                        {
+                            pass.set_vertex_buffer(0, ground.shore_vertices.slice(..));
+                            pass.set_index_buffer(
+                                ground.shore_indices.slice(..),
+                                wgpu::IndexFormat::Uint32,
+                            );
+                            pass.draw_indexed(0..ground.shore_index_count, 0, 0..1);
+                        }
                     }
                     // A map without water draws none, as the engine.
                     None if water_options.is_some() => {}
