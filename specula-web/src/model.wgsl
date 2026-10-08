@@ -56,12 +56,36 @@ struct Light {
 @group(3) @binding(1) var shadow_map: texture_depth_2d;
 @group(3) @binding(2) var shadow_sampler: sampler_comparison;
 
+// Which side of the water this pass keeps, as the engine's water cameras
+// clip (SceneRenderer's oblique near planes): 0 everything, for the view;
+// 1 what is under the water, for the refraction; 2 what is over it, for
+// the mirrored reflection.
+override WATER_CLIP: u32 = 0u;
+
+// The camera this pass sees from, for fog and highlights: the view's, or
+// for the reflection its mirror image under the water, so that a
+// reflected fragment is as far and lit from where the engine's
+// reflection camera sees it.
+fn pass_eye() -> vec3<f32> {
+    if WATER_CLIP == 2u {
+        return vec3<f32>(light.eye.x, 2.0 * view.water.x - light.eye.y, light.eye.z);
+    }
+    return light.eye.xyz;
+}
+
+fn pass_forward() -> vec3<f32> {
+    if WATER_CLIP == 2u {
+        return vec3<f32>(light.forward.x, -light.forward.y, light.forward.z);
+    }
+    return light.forward.xyz;
+}
+
 // common/fog.h applyFog. Its depth, gl_FragCoord.z / gl_FragCoord.w, is
 // the GL window depth times clip w under the engine's default planes (2
 // and 4096 m), rebuilt here from the view depth so a map's fog factor
 // reaches as far as in the game.
 fn apply_fog(color: vec3<f32>, world: vec3<f32>) -> vec3<f32> {
-    let w = dot(world - light.eye.xyz, light.forward.xyz);
+    let w = dot(world - pass_eye(), pass_forward());
     let z = 4096.0 * (w - 2.0) / (4096.0 - 2.0);
     let density = light.fog.x;
     let max_fog = light.fog.y;
@@ -252,7 +276,9 @@ fn fs_model(in: ModelVaryings) -> @location(0) vec4<f32> {
         specular_color = textureSample(specular_map, skin_sampler, in.uv).rgb;
         ao = textureSample(ao_map, skin_sampler, in.uv2).r;
     }
-    if tested_alpha(tex.a, in.uv) < in.alpha_ref {
+    let clipped = (WATER_CLIP == 1u && in.world.y > view.water.x + 2.0)
+        || (WATER_CLIP == 2u && in.world.y < view.water.x - 0.5);
+    if tested_alpha(tex.a, in.uv) < in.alpha_ref || clipped {
         discard;
     }
     let tint = mix(in.color.rgb, vec3<f32>(1.0), tex.a);
@@ -278,7 +304,7 @@ fn fs_model(in: ModelVaryings) -> @location(0) vec4<f32> {
     var specular = vec3<f32>(0.0);
     if MAPS {
         // calculateSpecular, with model_common.vs' half vector.
-        let half_vector = normalize(view.sun.xyz + normalize(light.eye.xyz - in.world));
+        let half_vector = normalize(view.sun.xyz + normalize(pass_eye() - in.world));
         specular = light.sun_color.rgb * specular_color
             * pow(max(0.001, dot(normal, half_vector)), material.effect.y);
     }

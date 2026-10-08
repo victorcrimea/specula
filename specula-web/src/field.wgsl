@@ -74,12 +74,41 @@ struct Light {
 @group(3) @binding(1) var shadow_map: texture_depth_2d;
 @group(3) @binding(2) var shadow_sampler: sampler_comparison;
 
+// Which side of the water this pass keeps, as the engine's water cameras
+// clip (SceneRenderer's oblique near planes): 0 everything, for the view;
+// 1 what is under the water, for the refraction; 2 what is over it, for
+// the mirrored reflection.
+override WATER_CLIP: u32 = 0u;
+
+fn water_clipped(height: f32) -> bool {
+    return (WATER_CLIP == 1u && height > view.water.x + 2.0)
+        || (WATER_CLIP == 2u && height < view.water.x - 0.5);
+}
+
+// The camera this pass sees from, for fog and highlights: the view's, or
+// for the reflection its mirror image under the water, so that a
+// reflected fragment is as far and lit from where the engine's
+// reflection camera sees it.
+fn pass_eye() -> vec3<f32> {
+    if WATER_CLIP == 2u {
+        return vec3<f32>(light.eye.x, 2.0 * view.water.x - light.eye.y, light.eye.z);
+    }
+    return light.eye.xyz;
+}
+
+fn pass_forward() -> vec3<f32> {
+    if WATER_CLIP == 2u {
+        return vec3<f32>(light.forward.x, -light.forward.y, light.forward.z);
+    }
+    return light.forward.xyz;
+}
+
 // common/fog.h applyFog. Its depth, gl_FragCoord.z / gl_FragCoord.w, is
 // the GL window depth times clip w under the engine's default planes (2
 // and 4096 m), rebuilt here from the view depth so a map's fog factor
 // reaches as far as in the game.
 fn apply_fog(color: vec3<f32>, world: vec3<f32>) -> vec3<f32> {
-    let w = dot(world - light.eye.xyz, light.forward.xyz);
+    let w = dot(world - pass_eye(), pass_forward());
     let z = 4096.0 * (w - 2.0) / (4096.0 - 2.0);
     let density = light.fog.x;
     let max_fog = light.fog.y;
@@ -220,7 +249,7 @@ fn shade(in: TerrainVaryings) -> vec3<f32> {
         normal = mapped;
     }
     let sun_diffuse = max(dot(normal, view.sun.xyz), 0.0) * light.sun_color.rgb;
-    let half_vector = normalize(view.sun.xyz + normalize(light.eye.xyz - world));
+    let half_vector = normalize(view.sun.xyz + normalize(pass_eye() - world));
     let specular = light.sun_color.rgb * specular_color
         * pow(max(0.001, dot(normal, half_vector)), terrain.effect.y);
     return (color * sun_diffuse + specular) * shadow + color * light.ambient.rgb;
@@ -236,7 +265,7 @@ fn fs_terrain(in: TerrainVaryings) -> @location(0) vec4<f32> {
     // Sampled before the discard: WGSL wants textureSample in uniform
     // control flow.
     let color = shade(in);
-    if outside(in) {
+    if outside(in) || water_clipped(in.height) {
         discard;
     }
     let world = vec3<f32>(in.ground.x, in.height, in.ground.y);
@@ -253,7 +282,7 @@ fn fs_blend(in: TerrainVaryings) -> @location(0) vec4<f32> {
     let base = atlas.y;
     let u = (in.mask.z * (base + 4.0) + 2.0 + in.mask.x * base) / atlas.x;
     let alpha = 1.0 - textureSample(alpha_maps, alpha_sampler, vec2<f32>(u, in.mask.y)).a;
-    if outside(in) {
+    if outside(in) || water_clipped(in.height) {
         discard;
     }
     let world = vec3<f32>(in.ground.x, in.height, in.ground.y);

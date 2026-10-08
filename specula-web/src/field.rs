@@ -160,20 +160,6 @@ const MESH_ATTRIBUTES: [wgpu::VertexAttribute; 7] = wgpu::vertex_attr_array![
     3 => Uint8x4,
     4 => Unorm8x4,
 ];
-/// The shaders' `MAPS` override, by the material maps setting.
-const MAPS_CONSTANTS: [[(&str, f64); 1]; 2] = [[("MAPS", 0.0)], [("MAPS", 1.0)]];
-/// field.wgsl's ground overrides, by the material maps setting and then
-/// the triplanar setting.
-const GROUND_CONSTANTS: [[[(&str, f64); 2]; 2]; 2] = [
-    [
-        [("MAPS", 0.0), ("TRIPLANAR", 0.0)],
-        [("MAPS", 0.0), ("TRIPLANAR", 1.0)],
-    ],
-    [
-        [("MAPS", 1.0), ("TRIPLANAR", 0.0)],
-        [("MAPS", 1.0), ("TRIPLANAR", 1.0)],
-    ],
-];
 /// A model material's uniform: `effectSettings`, then 1 when it has a
 /// normal map; model.wgsl `Material`.
 const MATERIAL_SIZE: usize = 32;
@@ -348,11 +334,9 @@ pub struct Field {
     /// The scene's target and depth when post-processing, and the passes.
     post: Post,
     bc: bool,
-    /// Without and with the material maps.
-    model_pipelines: [wgpu::RenderPipeline; 2],
-    /// By the material maps, then the triplanar setting.
-    terrain_pipelines: [[wgpu::RenderPipeline; 2]; 2],
-    blend_pipelines: [[wgpu::RenderPipeline; 2]; 2],
+    scene_sources: SceneSources,
+    /// The ground's and models' pipelines for the view.
+    scene: ScenePipelines,
     /// The viewer's material maps setting: normal, specular and ambient
     /// occlusion maps fetched and drawn.
     material_maps: bool,
@@ -380,6 +364,22 @@ pub struct Field {
     /// where off keeps the plain background.
     sky_visible: bool,
     sky: Sky,
+    /// The viewer's water refraction and real water depth settings, under
+    /// the water effects.
+    refraction: bool,
+    real_depth: bool,
+    /// The ground's and models' pipelines for the refraction pass, made
+    /// when it is first drawn.
+    refraction_scene: Option<ScenePipelines>,
+    /// The refraction pass's view.
+    refraction_view: (wgpu::Buffer, wgpu::BindGroup),
+    /// The refraction pass's textures while it is drawn, and a count of
+    /// their changes.
+    water_targets: Option<water::Targets>,
+    water_targets_generation: u64,
+    /// `water`'s environment group, with the sky's and the targets'
+    /// generations it was made from.
+    water_environment: Option<(u64, u64, wgpu::BindGroup)>,
     decal_pipeline: wgpu::RenderPipeline,
     shadow: Shadow,
     borders: Borders,
@@ -520,6 +520,20 @@ impl Field {
             entries: &[wgpu::BindGroupEntry {
                 binding: 0,
                 resource: view_buffer.as_entire_binding(),
+            }],
+        });
+        let refraction_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("water refraction view"),
+            size: VIEW_SIZE,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let refraction_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("water refraction view"),
+            layout: &view_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: refraction_buffer.as_entire_binding(),
             }],
         });
         // Read with textureLoad, so it needs no filtering.
@@ -685,34 +699,6 @@ impl Field {
             ],
             immediate_size: 0,
         });
-        let model_pipelines = [false, true].map(|maps| {
-            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some("model"),
-                layout: Some(&model_layout),
-                vertex: wgpu::VertexState {
-                    module: &model_shader,
-                    entry_point: Some("vs_model"),
-                    compilation_options: Default::default(),
-                    buffers: &model_buffers,
-                },
-                // The engine draws models double-sided where the material asks;
-                // without culling every model looks right.
-                primitive: wgpu::PrimitiveState::default(),
-                depth_stencil: Some(depth_stencil(true)),
-                multisample: Default::default(),
-                fragment: Some(wgpu::FragmentState {
-                    module: &model_shader,
-                    entry_point: Some("fs_model"),
-                    compilation_options: wgpu::PipelineCompilationOptions {
-                        constants: &MAPS_CONSTANTS[usize::from(maps)],
-                        ..Default::default()
-                    },
-                    targets: &[Some(config.format.into())],
-                }),
-                multiview_mask: None,
-                cache: None,
-            })
-        });
         let terrain_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("terrain"),
             // Group 2 is the blend pass's masks.
@@ -724,34 +710,6 @@ impl Field {
             ],
             immediate_size: 0,
         });
-        let terrain_pipelines = [false, true].map(|maps| {
-            [false, true].map(|triplanar| {
-                device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                    label: Some("terrain"),
-                    layout: Some(&terrain_layout),
-                    vertex: wgpu::VertexState {
-                        module: &field_shader,
-                        entry_point: Some("vs_terrain"),
-                        compilation_options: Default::default(),
-                        buffers: &terrain_buffers,
-                    },
-                    primitive: wgpu::PrimitiveState::default(),
-                    depth_stencil: Some(depth_stencil(true)),
-                    multisample: Default::default(),
-                    fragment: Some(wgpu::FragmentState {
-                        module: &field_shader,
-                        entry_point: Some("fs_terrain"),
-                        compilation_options: wgpu::PipelineCompilationOptions {
-                            constants: &GROUND_CONSTANTS[usize::from(maps)][usize::from(triplanar)],
-                            ..Default::default()
-                        },
-                        targets: &[Some(config.format.into())],
-                    }),
-                    multiview_mask: None,
-                    cache: None,
-                })
-            })
-        });
         let blend_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("terrain blend"),
             bind_group_layouts: &[
@@ -762,42 +720,15 @@ impl Field {
             ],
             immediate_size: 0,
         });
-        let blend_pipelines = [false, true].map(|maps| {
-            [false, true].map(|triplanar| {
-                device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                    label: Some("terrain blend"),
-                    layout: Some(&blend_layout),
-                    vertex: wgpu::VertexState {
-                        module: &field_shader,
-                        entry_point: Some("vs_terrain"),
-                        compilation_options: Default::default(),
-                        buffers: &terrain_buffers,
-                    },
-                    primitive: wgpu::PrimitiveState::default(),
-                    // Over the base pass's surface, at the very same depth.
-                    depth_stencil: Some(wgpu::DepthStencilState {
-                        depth_compare: Some(wgpu::CompareFunction::LessEqual),
-                        ..depth_stencil(false)
-                    }),
-                    multisample: Default::default(),
-                    fragment: Some(wgpu::FragmentState {
-                        module: &field_shader,
-                        entry_point: Some("fs_blend"),
-                        compilation_options: wgpu::PipelineCompilationOptions {
-                            constants: &GROUND_CONSTANTS[usize::from(maps)][usize::from(triplanar)],
-                            ..Default::default()
-                        },
-                        targets: &[Some(wgpu::ColorTargetState {
-                            format: config.format,
-                            blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                            write_mask: wgpu::ColorWrites::ALL,
-                        })],
-                    }),
-                    multiview_mask: None,
-                    cache: None,
-                })
-            })
-        });
+        let scene_sources = SceneSources {
+            field_shader: field_shader.clone(),
+            model_shader: model_shader.clone(),
+            terrain_layout,
+            blend_layout,
+            model_layout,
+            format: config.format,
+        };
+        let scene = ScenePipelines::new(&device, &scene_sources, WaterClip::None);
         let water_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("water"),
             bind_group_layouts: &[Some(&view_layout), None, None, Some(light_layout)],
@@ -889,14 +820,7 @@ impl Field {
 
         let borders = Borders::new(&device, &queue, config.format, &view_layout)?;
         let sky = Sky::new(&device, &queue, config.format);
-        let water = Water::new(
-            &device,
-            config.format,
-            DEPTH_FORMAT,
-            &view_layout,
-            &sky.layout,
-            light_layout,
-        );
+        let water = Water::new(&device, config.format, &view_layout, light_layout);
         let far = Far::new(
             &device,
             config.format,
@@ -1004,9 +928,8 @@ impl Field {
             post,
             bc,
             texture_tiers: max_texture_tiers(bc),
-            model_pipelines,
-            terrain_pipelines,
-            blend_pipelines,
+            scene_sources,
+            scene,
             material_maps: false,
             triplanar: true,
             postproc: false,
@@ -1020,6 +943,13 @@ impl Field {
             water_group: None,
             sky_visible: false,
             sky,
+            refraction: false,
+            real_depth: false,
+            refraction_scene: None,
+            refraction_view: (refraction_buffer, refraction_group),
+            water_targets: None,
+            water_targets_generation: 0,
+            water_environment: None,
             decal_pipeline,
             shadow,
             borders,
@@ -1076,6 +1006,20 @@ impl Field {
     /// The view-projection matrix, row-major, left-handed with depth 0..1
     /// like the engine's camera (as `unit.rs`), and the eye, right and up.
     fn view_projection(&self) -> ([[f32; 4]; 4], [f32; 3], [f32; 3], [f32; 3]) {
+        let (view, eye, right, up) = self.camera_view();
+        let aspect = self.config.width as f32 / self.config.height.max(1) as f32;
+        let f = 1.0 / (FIELD_OF_VIEW / 2.0).tan();
+        let projection = [
+            [f / aspect, 0.0, 0.0, 0.0],
+            [0.0, f, 0.0, 0.0],
+            [0.0, 0.0, FAR / (FAR - NEAR), -NEAR * FAR / (FAR - NEAR)],
+            [0.0, 0.0, 1.0, 0.0],
+        ];
+        (multiply(&projection, &view), eye, right, up)
+    }
+
+    /// The view matrix, where the camera is, and its right and up.
+    fn camera_view(&self) -> ([[f32; 4]; 4], [f32; 3], [f32; 3], [f32; 3]) {
         let camera = self.camera.borrow();
         let ground = self.ground.as_ref().map_or(0.0, |ground| {
             ground.image.ground(camera.target[0], camera.target[1])
@@ -1089,15 +1033,31 @@ impl Field {
             target[2] + camera.distance * cos_pitch * cos_yaw,
         ];
         let (view, right, up) = look_at(eye, target);
-        let aspect = self.config.width as f32 / self.config.height.max(1) as f32;
-        let f = 1.0 / (FIELD_OF_VIEW / 2.0).tan();
+        (view, eye, right, up)
+    }
+
+    /// `ComputeRefractionCamera`'s camera: the view's, its field of view
+    /// 5 % wider so ripples can show what is just off the screen, drawn
+    /// square and stretched back to the screen's aspect.
+    fn refraction_camera(&self) -> water::WaterCamera {
+        let (view, _, right, up) = self.camera_view();
+        let f = 1.0 / (FIELD_OF_VIEW * 1.05 / 2.0).tan();
+        let stretch = self.config.height as f32 / self.config.width.max(1) as f32;
         let projection = [
-            [f / aspect, 0.0, 0.0, 0.0],
+            [f * stretch, 0.0, 0.0, 0.0],
             [0.0, f, 0.0, 0.0],
             [0.0, 0.0, FAR / (FAR - NEAR), -NEAR * FAR / (FAR - NEAR)],
             [0.0, 0.0, 1.0, 0.0],
         ];
-        (multiply(&projection, &view), eye, right, up)
+        water::WaterCamera {
+            view_proj: multiply(&projection, &view),
+            right,
+            up,
+            forward: cross(right, up),
+            scale: [f * stretch, f],
+            near: NEAR,
+            far: FAR,
+        }
     }
 
     /// The map's light, or a plain one until it arrives.
@@ -1111,7 +1071,7 @@ impl Field {
         }
     }
 
-    fn write_view(&self, view_proj: &[[f32; 4]; 4], camera: [[f32; 3]; 3]) {
+    fn write_view(&self, buffer: &wgpu::Buffer, view_proj: &[[f32; 4]; 4], camera: [[f32; 3]; 3]) {
         let [x, y, z] = self.light().sun;
         let (size, circular, water) = match &self.ground {
             Some(ground) => (
@@ -1138,7 +1098,7 @@ impl Field {
             .iter()
             .flat_map(|value| value.to_le_bytes())
             .collect();
-        self.queue.write_buffer(&self.view_buffer, 0, &bytes);
+        self.queue.write_buffer(buffer, 0, &bytes);
     }
 
     /// Fills `groups` and `far_groups` with this frame's instances, and
@@ -2655,7 +2615,8 @@ impl Field {
 
 impl Field {
     /// Fetches the map's water type's frames while water effects are on,
-    /// uploads those in, and writes the water's uniform for this frame.
+    /// uploads those in, and once all are, readies what this frame's
+    /// water options draw with and writes the water's uniform.
     fn refresh_water(&mut self, progress: f32) {
         let Some(ground) = &self.ground else {
             return;
@@ -2703,10 +2664,66 @@ impl Field {
                 self.water_group = Some(self.water.bind_group(&self.device, view));
             }
         }
+        let Some(options) = self.water_options() else {
+            return;
+        };
+        self.water.prepare(&self.device, options);
+
+        if options.refraction != self.water_targets.is_some() {
+            self.water_targets = options
+                .refraction
+                .then(|| water::Targets::new(&self.device, self.config.format, self.config.height));
+            self.water_targets_generation += 1;
+        }
+        if options.refraction && self.refraction_scene.is_none() {
+            self.refraction_scene = Some(ScenePipelines::new(
+                &self.device,
+                &self.scene_sources,
+                WaterClip::Below,
+            ));
+        }
+        let key = (self.sky.generation(), self.water_targets_generation);
+        if self
+            .water_environment
+            .as_ref()
+            .is_none_or(|(sky, targets, _)| (*sky, *targets) != key)
+        {
+            let group = self.water.environment_group(
+                &self.device,
+                self.sky.view(),
+                self.water_targets.as_ref(),
+            );
+            self.water_environment = Some((key.0, key.1, group));
+        }
+
+        let camera = self.refraction_camera();
+        if options.refraction {
+            let (_, eye, right, up) = self.camera_view();
+            self.write_view(&self.refraction_view.0, &camera.view_proj, [right, up, eye]);
+        }
+        let Some(ground) = &self.ground else {
+            return;
+        };
         // m_WaterTexTimer: the sim time since the match began.
         let time = (f64::from(self.entities.turn) + f64::from(progress)) * TURN_MS / 1000.0;
-        let uniform = water::uniform(&ground.image, time, self.light().rotation);
+        let uniform = water::uniform(&ground.image, time, self.light().rotation, &camera);
         self.queue.write_buffer(&self.water.buffer, 0, &uniform);
+    }
+
+    /// The water options this frame draws with: `None` while the flat
+    /// plane stands in, with the water effects off or their frames on
+    /// their way, or on a map without water.
+    fn water_options(&self) -> Option<water::Options> {
+        let drawn = self.water_effects
+            && self.water_group.is_some()
+            && self
+                .ground
+                .as_ref()
+                .is_some_and(|ground| ground.water_index_count > 0);
+        drawn.then_some(water::Options {
+            refraction: self.refraction,
+            real_depth: self.refraction && self.real_depth,
+        })
     }
 }
 
@@ -2722,6 +2739,16 @@ impl View for Field {
         self.surface.configure(&self.device, &self.config);
         self.post
             .resize(&self.device, self.config.width, self.config.height);
+        if self.water_targets.as_ref().is_some_and(|targets| {
+            targets.side != water::Targets::side(&self.device, self.config.height)
+        }) {
+            self.water_targets = Some(water::Targets::new(
+                &self.device,
+                self.config.format,
+                self.config.height,
+            ));
+            self.water_targets_generation += 1;
+        }
     }
 
     fn animating(&self) -> bool {
@@ -2778,6 +2805,14 @@ impl View for Field {
 
     fn set_sky(&mut self, on: bool) {
         self.sky_visible = on;
+    }
+
+    fn set_water_refraction(&mut self, on: bool) {
+        self.refraction = on;
+    }
+
+    fn set_water_real_depth(&mut self, on: bool) {
+        self.real_depth = on;
     }
 
     fn progress(&self) -> Progress {
@@ -2938,7 +2973,7 @@ impl View for Field {
         };
         self.camera.borrow_mut().step(now());
         let (view_proj, eye, right, up) = self.view_projection();
-        self.write_view(&view_proj, [right, up, eye]);
+        self.write_view(&self.view_buffer, &view_proj, [right, up, eye]);
         self.eye = eye;
         let bounds = self.ground.as_ref().map(|ground| shadow::Bounds {
             size: ground.image.size as f32 * TILE_SIZE,
@@ -3136,6 +3171,42 @@ impl View for Field {
             self.draw_models(&mut pass, &draws, &self.instances);
             self.draw_models(&mut pass, &shadow_draws, &self.shadow_instances);
         }
+        let water_options = self.water_options();
+        if water_options.is_some_and(|options| options.refraction)
+            && let (Some(targets), Some(scene)) = (&self.water_targets, &self.refraction_scene)
+        {
+            // RenderRefractions: what is under the water, cleared to an
+            // alpha of 0 where nothing is, which the blur leaves out.
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("water refraction"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &targets.refraction,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color {
+                            r: 1.0,
+                            g: 0.0,
+                            b: 0.0,
+                            a: 0.0,
+                        }),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &targets.refraction_depth,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                ..Default::default()
+            });
+            pass.set_bind_group(0, &self.refraction_view.1, &[]);
+            self.draw_ground(&mut pass, scene);
+            self.draw_scene_models(&mut pass, scene, &draws);
+        }
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("field"),
@@ -3166,57 +3237,22 @@ impl View for Field {
                 self.sky.draw(&mut pass);
             }
             pass.set_bind_group(0, &self.view_bind_group, &[]);
-            if let Some(ground) = &self.ground {
-                let group = |texture: u16| {
-                    ground
-                        .textures
-                        .get(usize::from(texture))
-                        .and_then(Option::as_ref)
-                        .map_or(&ground.minimap, |(group, _)| group)
-                };
-                pass.set_pipeline(
-                    &self.terrain_pipelines[usize::from(self.material_maps)]
-                        [usize::from(self.triplanar)],
-                );
-                pass.set_bind_group(3, &self.shadow.bind_group, &[]);
-                pass.set_vertex_buffer(0, ground.vertices.slice(..));
-                pass.set_index_buffer(ground.indices.slice(..), wgpu::IndexFormat::Uint32);
-                for splat in &ground.base {
-                    pass.set_bind_group(1, group(splat.texture), &[]);
-                    pass.draw_indexed(splat.first..splat.first + splat.count, 0, 0..1);
-                }
-                if let Some(alpha_maps) = &ground.alpha_maps {
-                    pass.set_pipeline(
-                        &self.blend_pipelines[usize::from(self.material_maps)]
-                            [usize::from(self.triplanar)],
-                    );
-                    pass.set_bind_group(2, alpha_maps, &[]);
-                    for splat in &ground.blends {
-                        pass.set_bind_group(1, group(splat.texture), &[]);
-                        pass.draw_indexed(splat.first..splat.first + splat.count, 0, 0..1);
-                    }
-                }
-                if !decal_draws.is_empty() {
-                    pass.set_pipeline(&self.decal_pipeline);
-                    pass.set_bind_group(2, &self.shadow.bind_group, &[]);
-                    pass.set_index_buffer(self.decal_indices.slice(..), wgpu::IndexFormat::Uint32);
-                    for (texture, start, first, count) in &decal_draws {
-                        let Some(GpuTexture { group, .. }) = self.textures.get(texture) else {
-                            continue;
-                        };
-                        let end = start + DECAL_INSTANCE_SIZE as u64;
-                        pass.set_bind_group(1, group, &[]);
-                        pass.set_vertex_buffer(1, self.decal_instances.slice(*start..end));
-                        pass.draw_indexed(*first..first + count, 0, 0..1);
-                    }
+            self.draw_ground(&mut pass, &self.scene);
+            if self.ground.is_some() && !decal_draws.is_empty() {
+                pass.set_pipeline(&self.decal_pipeline);
+                pass.set_bind_group(2, &self.shadow.bind_group, &[]);
+                pass.set_index_buffer(self.decal_indices.slice(..), wgpu::IndexFormat::Uint32);
+                for (texture, start, first, count) in &decal_draws {
+                    let Some(GpuTexture { group, .. }) = self.textures.get(texture) else {
+                        continue;
+                    };
+                    let end = start + DECAL_INSTANCE_SIZE as u64;
+                    pass.set_bind_group(1, group, &[]);
+                    pass.set_vertex_buffer(1, self.decal_instances.slice(*start..end));
+                    pass.draw_indexed(*first..first + count, 0, 0..1);
                 }
             }
-            if !draws.is_empty() {
-                pass.set_pipeline(&self.model_pipelines[usize::from(self.material_maps)]);
-                pass.set_bind_group(1, &self.pose_bind_group, &[]);
-                pass.set_bind_group(3, &self.shadow.bind_group, &[]);
-                self.draw_models(&mut pass, &draws, &self.instances);
-            }
+            self.draw_scene_models(&mut pass, &self.scene, &draws);
             if !far_draws.is_empty() {
                 pass.set_pipeline(&self.far.pipeline);
                 pass.set_bind_group(2, &self.shadow.bind_group, &[]);
@@ -3230,22 +3266,29 @@ impl View for Field {
                 }
             }
             if let Some(ground) = &self.ground {
-                match &self.water_group {
-                    Some(group) if self.water_effects => {
-                        if ground.water_index_count > 0 {
-                            pass.set_pipeline(&self.water.pipeline);
-                            pass.set_bind_group(1, group, &[]);
-                            pass.set_bind_group(2, self.sky.group(), &[]);
-                            pass.set_bind_group(3, &self.shadow.bind_group, &[]);
-                            pass.set_vertex_buffer(0, ground.water_vertices.slice(..));
-                            pass.set_index_buffer(
-                                ground.water_indices.slice(..),
-                                wgpu::IndexFormat::Uint32,
-                            );
-                            pass.draw_indexed(0..ground.water_index_count, 0, 0..1);
-                        }
+                let fancy = water_options.and_then(|options| {
+                    Some((
+                        self.water.pipeline(options)?,
+                        self.water_group.as_ref()?,
+                        &self.water_environment.as_ref()?.2,
+                    ))
+                });
+                match fancy {
+                    Some((pipeline, group, environment)) => {
+                        pass.set_pipeline(pipeline);
+                        pass.set_bind_group(1, group, &[]);
+                        pass.set_bind_group(2, environment, &[]);
+                        pass.set_bind_group(3, &self.shadow.bind_group, &[]);
+                        pass.set_vertex_buffer(0, ground.water_vertices.slice(..));
+                        pass.set_index_buffer(
+                            ground.water_indices.slice(..),
+                            wgpu::IndexFormat::Uint32,
+                        );
+                        pass.draw_indexed(0..ground.water_index_count, 0, 0..1);
                     }
-                    _ => {
+                    // A map without water draws none, as the engine.
+                    None if water_options.is_some() => {}
+                    None => {
                         pass.set_pipeline(&self.water_pipeline);
                         pass.set_bind_group(3, &self.shadow.bind_group, &[]);
                         pass.draw(0..4, 0..1);
@@ -3268,6 +3311,55 @@ impl View for Field {
 
 impl Field {
     /// Instanced model draws, the pipeline and the groups below 2 set.
+    /// The ground's base and blend passes with `scene`'s pipelines, the
+    /// view's group set.
+    fn draw_ground(&self, pass: &mut wgpu::RenderPass, scene: &ScenePipelines) {
+        let Some(ground) = &self.ground else {
+            return;
+        };
+        let group = |texture: u16| {
+            ground
+                .textures
+                .get(usize::from(texture))
+                .and_then(Option::as_ref)
+                .map_or(&ground.minimap, |(group, _)| group)
+        };
+        let maps = usize::from(self.material_maps);
+        let triplanar = usize::from(self.triplanar);
+        pass.set_pipeline(&scene.terrain[maps][triplanar]);
+        pass.set_bind_group(3, &self.shadow.bind_group, &[]);
+        pass.set_vertex_buffer(0, ground.vertices.slice(..));
+        pass.set_index_buffer(ground.indices.slice(..), wgpu::IndexFormat::Uint32);
+        for splat in &ground.base {
+            pass.set_bind_group(1, group(splat.texture), &[]);
+            pass.draw_indexed(splat.first..splat.first + splat.count, 0, 0..1);
+        }
+        if let Some(alpha_maps) = &ground.alpha_maps {
+            pass.set_pipeline(&scene.blend[maps][triplanar]);
+            pass.set_bind_group(2, alpha_maps, &[]);
+            for splat in &ground.blends {
+                pass.set_bind_group(1, group(splat.texture), &[]);
+                pass.draw_indexed(splat.first..splat.first + splat.count, 0, 0..1);
+            }
+        }
+    }
+
+    /// The near models with `scene`'s pipeline, the view's group set.
+    fn draw_scene_models(
+        &self,
+        pass: &mut wgpu::RenderPass,
+        scene: &ScenePipelines,
+        draws: &[(GroupKey, u64, u64, u32)],
+    ) {
+        if draws.is_empty() {
+            return;
+        }
+        pass.set_pipeline(&scene.model[usize::from(self.material_maps)]);
+        pass.set_bind_group(1, &self.pose_bind_group, &[]);
+        pass.set_bind_group(3, &self.shadow.bind_group, &[]);
+        self.draw_models(pass, draws, &self.instances);
+    }
+
     fn draw_models(
         &self,
         pass: &mut wgpu::RenderPass,
@@ -3693,6 +3785,157 @@ fn max_texture_tiers(bc_supported: bool) -> usize {
         TEXTURE_TIER_SIDES.len()
     } else {
         TEXTURE_TIER_SIDES.len() - 1
+    }
+}
+
+/// Which side of the water a pass keeps, as the engine's water cameras
+/// clip; field.wgsl's and model.wgsl's `WATER_CLIP`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum WaterClip {
+    None = 0,
+    /// The refraction: what is under the water.
+    Below = 1,
+    /// The reflection, mirrored: what is over it.
+    Above = 2,
+}
+
+/// What the ground and model pipelines are made from, kept to make the
+/// water passes' when they are first drawn.
+struct SceneSources {
+    field_shader: wgpu::ShaderModule,
+    model_shader: wgpu::ShaderModule,
+    terrain_layout: wgpu::PipelineLayout,
+    blend_layout: wgpu::PipelineLayout,
+    model_layout: wgpu::PipelineLayout,
+    format: wgpu::TextureFormat,
+}
+
+/// The ground's base and blend passes and the models, for one view or
+/// water pass, by the material maps setting and then the triplanar one.
+struct ScenePipelines {
+    terrain: [[wgpu::RenderPipeline; 2]; 2],
+    blend: [[wgpu::RenderPipeline; 2]; 2],
+    model: [wgpu::RenderPipeline; 2],
+}
+
+impl ScenePipelines {
+    fn new(device: &wgpu::Device, sources: &SceneSources, clip: WaterClip) -> Self {
+        let flag = |on: bool| if on { 1.0 } else { 0.0 };
+        let clip_value = f64::from(clip as u8);
+        let depth_stencil = |write: bool| wgpu::DepthStencilState {
+            format: DEPTH_FORMAT,
+            depth_write_enabled: Some(write),
+            depth_compare: Some(wgpu::CompareFunction::Less),
+            stencil: Default::default(),
+            bias: Default::default(),
+        };
+        // The engine draws models double-sided where the material asks,
+        // and without culling every model looks right. The mirrored
+        // reflection culls front faces, as the engine's reflection pass
+        // flips its culling, for its mirror turns the winding round.
+        let primitive = wgpu::PrimitiveState {
+            cull_mode: (clip == WaterClip::Above).then_some(wgpu::Face::Front),
+            ..Default::default()
+        };
+        let terrain_buffers = [Some(wgpu::VertexBufferLayout {
+            array_stride: blend::VERTEX_SIZE as u64,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &TERRAIN_ATTRIBUTES,
+        })];
+        let model_buffers = [
+            Some(wgpu::VertexBufferLayout {
+                array_stride: VERTEX_SIZE as u64,
+                step_mode: wgpu::VertexStepMode::Vertex,
+                attributes: &MESH_ATTRIBUTES,
+            }),
+            Some(wgpu::VertexBufferLayout {
+                array_stride: INSTANCE_SIZE as u64,
+                step_mode: wgpu::VertexStepMode::Instance,
+                attributes: &INSTANCE_ATTRIBUTES,
+            }),
+        ];
+        let ground = |blend: bool, maps: bool, triplanar: bool| {
+            let constants = [
+                ("MAPS", flag(maps)),
+                ("TRIPLANAR", flag(triplanar)),
+                ("WATER_CLIP", clip_value),
+            ];
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some(if blend { "terrain blend" } else { "terrain" }),
+                layout: Some(if blend {
+                    &sources.blend_layout
+                } else {
+                    &sources.terrain_layout
+                }),
+                vertex: wgpu::VertexState {
+                    module: &sources.field_shader,
+                    entry_point: Some("vs_terrain"),
+                    compilation_options: Default::default(),
+                    buffers: &terrain_buffers,
+                },
+                primitive,
+                // The blend pass goes over the base pass's surface, at the
+                // very same depth.
+                depth_stencil: Some(if blend {
+                    wgpu::DepthStencilState {
+                        depth_compare: Some(wgpu::CompareFunction::LessEqual),
+                        ..depth_stencil(false)
+                    }
+                } else {
+                    depth_stencil(true)
+                }),
+                multisample: Default::default(),
+                fragment: Some(wgpu::FragmentState {
+                    module: &sources.field_shader,
+                    entry_point: Some(if blend { "fs_blend" } else { "fs_terrain" }),
+                    compilation_options: wgpu::PipelineCompilationOptions {
+                        constants: &constants,
+                        ..Default::default()
+                    },
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: sources.format,
+                        blend: blend.then_some(wgpu::BlendState::ALPHA_BLENDING),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                multiview_mask: None,
+                cache: None,
+            })
+        };
+        let model = |maps: bool| {
+            let constants = [("MAPS", flag(maps)), ("WATER_CLIP", clip_value)];
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("model"),
+                layout: Some(&sources.model_layout),
+                vertex: wgpu::VertexState {
+                    module: &sources.model_shader,
+                    entry_point: Some("vs_model"),
+                    compilation_options: Default::default(),
+                    buffers: &model_buffers,
+                },
+                primitive,
+                depth_stencil: Some(depth_stencil(true)),
+                multisample: Default::default(),
+                fragment: Some(wgpu::FragmentState {
+                    module: &sources.model_shader,
+                    entry_point: Some("fs_model"),
+                    compilation_options: wgpu::PipelineCompilationOptions {
+                        constants: &constants,
+                        ..Default::default()
+                    },
+                    targets: &[Some(sources.format.into())],
+                }),
+                multiview_mask: None,
+                cache: None,
+            })
+        };
+        ScenePipelines {
+            terrain: [false, true]
+                .map(|maps| [false, true].map(|triplanar| ground(false, maps, triplanar))),
+            blend: [false, true]
+                .map(|maps| [false, true].map(|triplanar| ground(true, maps, triplanar))),
+            model: [false, true].map(model),
+        }
     }
 }
 

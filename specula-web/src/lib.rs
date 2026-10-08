@@ -113,6 +113,8 @@ const DOF_SETTINGS_KEY: &str = "specula.dof";
 const FOG_SETTINGS_KEY: &str = "specula.fog";
 const WATER_SETTINGS_KEY: &str = "specula.water";
 const SKY_SETTINGS_KEY: &str = "specula.sky";
+const REFRACTION_SETTINGS_KEY: &str = "specula.waterrefraction";
+const REAL_DEPTH_SETTINGS_KEY: &str = "specula.waterrealdepth";
 /// localStorage key of when the storage notice was last shown, in ms since
 /// the epoch.
 const STORAGE_NOTICE_KEY: &str = "specula.storage-notice";
@@ -179,6 +181,10 @@ trait View {
     fn set_water_effects(&mut self, _on: bool) {}
     /// Whether the map's sky is drawn behind everything, likewise.
     fn set_sky(&mut self, _on: bool) {}
+    /// Whether the water refracts what is under it, and takes its depth
+    /// from that, likewise.
+    fn set_water_refraction(&mut self, _on: bool) {}
+    fn set_water_real_depth(&mut self, _on: bool) {}
     /// The highest texture quality the device is given.
     fn max_texture_tiers(&self) -> usize {
         TEXTURE_TIER_SIDES.len()
@@ -885,13 +891,31 @@ async fn run(page: Page, glue_url: String, wasm_url: String) -> Result<(), Strin
             |view, on| view.set_fog(on),
             Vec::new(),
         );
+        let water: HtmlSelectElement = element(&document, "water")?;
+        let refraction: HtmlSelectElement = element(&document, "waterrefraction")?;
+        let real_depth: HtmlSelectElement = element(&document, "waterrealdepth")?;
         wire_switch(
             &app,
-            element(&document, "water")?,
+            water.clone(),
             WATER_SETTINGS_KEY,
             |view, on| view.set_water_effects(on),
+            vec![refraction.clone()],
+        );
+        wire_switch(
+            &app,
+            refraction.clone(),
+            REFRACTION_SETTINGS_KEY,
+            |view, on| view.set_water_refraction(on),
             Vec::new(),
         );
+        wire_switch(
+            &app,
+            real_depth.clone(),
+            REAL_DEPTH_SETTINGS_KEY,
+            |view, on| view.set_water_real_depth(on),
+            Vec::new(),
+        );
+        wire_depends_on_all(&real_depth, vec![water, refraction]);
         wire_switch(
             &app,
             element(&document, "sky")?,
@@ -1109,6 +1133,24 @@ fn wire_switch(
         app.dirty = true;
     });
     select.set_onchange(Some(on_change.as_ref().unchecked_ref()));
+    // The controls live as long as the page, so their handlers do too.
+    on_change.forget();
+}
+
+/// Disables `select` while any of `parents` is off, as the game's options
+/// page does for an option with several dependencies.
+fn wire_depends_on_all(select: &HtmlSelectElement, parents: Vec<HtmlSelectElement>) {
+    let update = {
+        let select = select.clone();
+        let parents = parents.clone();
+        move || select.set_disabled(parents.iter().any(|parent| parent.value() != "1"))
+    };
+    update();
+    let on_change = Closure::<dyn FnMut()>::new(update);
+    for parent in &parents {
+        let _ =
+            parent.add_event_listener_with_callback("change", on_change.as_ref().unchecked_ref());
+    }
     // The controls live as long as the page, so their handlers do too.
     on_change.forget();
 }

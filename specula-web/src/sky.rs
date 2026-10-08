@@ -13,12 +13,21 @@ use crate::assets::Store;
 /// sky.wgsl's `SkyView`.
 const VIEW_SIZE: u64 = 64;
 
+#[derive(Clone)]
+struct Cube {
+    view: wgpu::TextureView,
+    group: wgpu::BindGroup,
+}
+
 pub struct Sky {
-    pub layout: wgpu::BindGroupLayout,
+    layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
-    black: wgpu::BindGroup,
-    /// The set asked for, and its cube once its layers are in.
-    set: Option<(String, Option<wgpu::BindGroup>)>,
+    black: Cube,
+    /// The set asked for, and its cube once its layers are in or black if
+    /// they will not come.
+    set: Option<(String, Option<Cube>)>,
+    /// Counts the changes of the cube `view` gives.
+    generation: u64,
     pipeline: wgpu::RenderPipeline,
     view_buffer: wgpu::Buffer,
     view_group: wgpu::BindGroup,
@@ -54,8 +63,11 @@ impl Sky {
             min_filter: wgpu::FilterMode::Linear,
             ..Default::default()
         });
-        let black = cube(device, queue, 1, &[&[0, 0, 0, 255]; 6]);
-        let black = bind_group(device, &layout, &black, &sampler);
+        let view = cube(device, queue, 1, &[&[0, 0, 0, 255]; 6]);
+        let black = Cube {
+            group: bind_group(device, &layout, &view, &sampler),
+            view,
+        };
 
         let view_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("sky view"),
@@ -127,18 +139,29 @@ impl Sky {
             sampler,
             black,
             set: None,
+            generation: 0,
             pipeline,
             view_buffer,
             view_group,
         }
     }
 
-    /// The cube to bind: the map's once it is in, else black.
-    pub fn group(&self) -> &wgpu::BindGroup {
+    fn cube(&self) -> &Cube {
         self.set
             .as_ref()
-            .and_then(|(_, group)| group.as_ref())
+            .and_then(|(_, cube)| cube.as_ref())
             .unwrap_or(&self.black)
+    }
+
+    /// The cube, the map's once it is in, else black, and how to sample
+    /// it.
+    pub fn view(&self) -> (&wgpu::TextureView, &wgpu::Sampler) {
+        (&self.cube().view, &self.sampler)
+    }
+
+    /// Changes whenever `view` gives another cube.
+    pub fn generation(&self) -> u64 {
+        self.generation
     }
 
     /// Asks for `name`'s layers, and makes its cube once all are in. An
@@ -152,8 +175,9 @@ impl Sky {
     ) {
         if self.set.as_ref().is_none_or(|(set, _)| set != name) {
             self.set = Some((name.to_string(), None));
+            self.generation += 1;
         }
-        if name.is_empty() || self.set.as_ref().is_some_and(|(_, group)| group.is_some()) {
+        if name.is_empty() || self.set.as_ref().is_some_and(|(_, cube)| cube.is_some()) {
             return;
         }
         let files = match store.borrow().sky(name) {
@@ -193,7 +217,8 @@ impl Sky {
         let pixels: [&[u8]; 6] = std::array::from_fn(|layer| layers[layer].levels[0].as_slice());
         let view = cube(device, queue, side, &pixels);
         let group = bind_group(device, &self.layout, &view, &self.sampler);
-        self.set = Some((name.to_string(), Some(group)));
+        self.set = Some((name.to_string(), Some(Cube { view, group })));
+        self.generation += 1;
     }
 
     /// The camera's axes for this frame: `right` and `up` scaled to the
@@ -221,7 +246,7 @@ impl Sky {
     pub fn draw(&self, pass: &mut wgpu::RenderPass) {
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, &self.view_group, &[]);
-        pass.set_bind_group(1, self.group(), &[]);
+        pass.set_bind_group(1, &self.cube().group, &[]);
         pass.draw(0..3, 0..1);
     }
 }

@@ -9,6 +9,7 @@
 //! `RecomputeWaterData` runs before it stores the new height), so in the
 //! game they depend on the map played before. This takes the map's own.
 
+use std::collections::HashMap;
 use std::rc::Rc;
 
 use specula_assets::files::FileRef;
@@ -26,7 +27,7 @@ const FRAME_PERIOD: f64 = 8.0;
 /// f32 x 3 position, f32 x 2 wind strength and depth.
 pub const VERTEX_SIZE: usize = 20;
 /// water.wgsl's `Water`.
-const UNIFORM_SIZE: u64 = 96;
+const UNIFORM_SIZE: u64 = 224;
 
 /// The water surface's vertices and indices.
 pub struct Surface {
@@ -187,8 +188,28 @@ fn frames(time: f64) -> (usize, usize) {
     (current, (current + 1) % FRAMES)
 }
 
+/// The camera the refraction is drawn from: the view's, as
+/// `ComputeRefractionCamera` makes it.
+pub struct WaterCamera {
+    /// Its view-projection, to project the water onto its texture.
+    pub view_proj: [[f32; 4]; 4],
+    /// The view's axes and where it is, and its projection's x and y
+    /// scale, to rebuild a world position from the texture's depth.
+    pub right: [f32; 3],
+    pub up: [f32; 3],
+    pub forward: [f32; 3],
+    pub scale: [f32; 2],
+    pub near: f32,
+    pub far: f32,
+}
+
 /// The uniform for water.wgsl's `Water`.
-pub fn uniform(image: &TerrainImage, time: f64, sky_rotation: f32) -> Vec<u8> {
+pub fn uniform(
+    image: &TerrainImage,
+    time: f64,
+    sky_rotation: f32,
+    refraction: &WaterCamera,
+) -> Vec<u8> {
     let water = &image.water;
     let [wave1, wave2] = wave_params(&water.kind);
     let (current, next) = frames(time);
@@ -196,7 +217,7 @@ pub fn uniform(image: &TerrainImage, time: f64, sky_rotation: f32) -> Vec<u8> {
     let (sky_sin, sky_cos) = (std::f32::consts::PI + sky_rotation).sin_cos();
     let [r, g, b] = water.color;
     let [tint_r, tint_g, tint_b] = water.tint;
-    let values: [f32; (UNIFORM_SIZE / 4) as usize] = [
+    let values = [
         r,
         g,
         b,
@@ -223,10 +244,40 @@ pub fn uniform(image: &TerrainImage, time: f64, sky_rotation: f32) -> Vec<u8> {
         sky_cos,
         sky_sin,
     ];
-    values
+    let mut bytes: Vec<u8> = values
         .iter()
         .flat_map(|value| value.to_le_bytes())
-        .collect()
+        .collect();
+    // WGSL matrices are column-major.
+    for column in 0..4 {
+        for row in &refraction.view_proj {
+            bytes.extend_from_slice(&row[column].to_le_bytes());
+        }
+    }
+    let [right_x, right_y, right_z] = refraction.right;
+    let [up_x, up_y, up_z] = refraction.up;
+    let [forward_x, forward_y, forward_z] = refraction.forward;
+    for value in [
+        right_x,
+        right_y,
+        right_z,
+        refraction.scale[0],
+        up_x,
+        up_y,
+        up_z,
+        refraction.scale[1],
+        forward_x,
+        forward_y,
+        forward_z,
+        0.0,
+        refraction.near,
+        refraction.far,
+        0.0,
+        0.0,
+    ] {
+        bytes.extend_from_slice(&value.to_le_bytes());
+    }
+    bytes
 }
 
 /// A water type's frames as one array texture, uploaded as they arrive;
@@ -309,27 +360,104 @@ impl Normals {
     }
 }
 
-/// What the water pipeline binds that does not change with the map.
+/// Which of water_high's options a pipeline is compiled with, as the
+/// game's water settings choose them.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Options {
+    pub refraction: bool,
+    pub real_depth: bool,
+}
+
+/// The textures the refraction pass draws into, as `WaterManager` makes
+/// them: square, the screen's height rounded up to a power of two.
+pub struct Targets {
+    pub side: u32,
+    pub refraction: wgpu::TextureView,
+    pub refraction_depth: wgpu::TextureView,
+}
+
+impl Targets {
+    /// Their side for a screen `screen_height` high.
+    pub fn side(device: &wgpu::Device, screen_height: u32) -> u32 {
+        screen_height
+            .max(1)
+            .next_power_of_two()
+            .min(device.limits().max_texture_dimension_2d)
+    }
+
+    pub fn new(device: &wgpu::Device, format: wgpu::TextureFormat, screen_height: u32) -> Self {
+        let side = Self::side(device, screen_height);
+        let target = |label: &str, format: wgpu::TextureFormat| {
+            device
+                .create_texture(&wgpu::TextureDescriptor {
+                    label: Some(label),
+                    size: wgpu::Extent3d {
+                        width: side,
+                        height: side,
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format,
+                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                        | wgpu::TextureUsages::TEXTURE_BINDING,
+                    view_formats: &[],
+                })
+                .create_view(&Default::default())
+        };
+        Targets {
+            side,
+            refraction: target("water refraction", format),
+            refraction_depth: target("water refraction depth", crate::unit::DEPTH_FORMAT),
+        }
+    }
+}
+
+/// The water's pipelines, made as the options are first asked for, and
+/// what they bind that does not change with the map.
 pub struct Water {
-    pub pipeline: wgpu::RenderPipeline,
+    shader: wgpu::ShaderModule,
+    pipeline_layout: wgpu::PipelineLayout,
+    format: wgpu::TextureFormat,
+    pipelines: HashMap<Options, wgpu::RenderPipeline>,
     pub layout: wgpu::BindGroupLayout,
+    pub environment_layout: wgpu::BindGroupLayout,
     pub buffer: wgpu::Buffer,
-    pub sampler: wgpu::Sampler,
+    sampler: wgpu::Sampler,
+    refraction_sampler: wgpu::Sampler,
+    /// Bound for the refraction while it is not drawn, as the shader then
+    /// reads none; never a target of the view's pass.
+    stand_in: wgpu::TextureView,
 }
 
 impl Water {
     pub fn new(
         device: &wgpu::Device,
         format: wgpu::TextureFormat,
-        depth_format: wgpu::TextureFormat,
         view_layout: &wgpu::BindGroupLayout,
-        sky_layout: &wgpu::BindGroupLayout,
         light_layout: &wgpu::BindGroupLayout,
     ) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("water"),
             source: wgpu::ShaderSource::Wgsl(include_str!("water.wgsl").into()),
         });
+        let texture_entry = |binding, view_dimension, filterable| wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable },
+                view_dimension,
+                multisampled: false,
+            },
+            count: None,
+        };
+        let sampler_entry = |binding| wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+            count: None,
+        };
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("water"),
             entries: &[
@@ -343,24 +471,23 @@ impl Water {
                     },
                     count: None,
                 },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2Array,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 2,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                    count: None,
-                },
+                texture_entry(1, wgpu::TextureViewDimension::D2Array, true),
+                sampler_entry(2),
             ],
         });
+        // The refraction's depth is fetched as unfilterable float, which
+        // WebGL2 can do with a depth texture, as the DOF pass does.
+        let environment_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("water environment"),
+                entries: &[
+                    texture_entry(0, wgpu::TextureViewDimension::Cube, true),
+                    sampler_entry(1),
+                    texture_entry(2, wgpu::TextureViewDimension::D2, true),
+                    texture_entry(3, wgpu::TextureViewDimension::D2, false),
+                    sampler_entry(4),
+                ],
+            });
         let buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("water"),
             size: UNIFORM_SIZE,
@@ -379,21 +506,71 @@ impl Water {
             anisotropy_clamp: 16,
             ..Default::default()
         });
+        // Linear and mirrored, as WaterManager makes the refraction texture.
+        let refraction_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("water refraction"),
+            address_mode_u: wgpu::AddressMode::MirrorRepeat,
+            address_mode_v: wgpu::AddressMode::MirrorRepeat,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("water"),
             bind_group_layouts: &[
                 Some(view_layout),
                 Some(&layout),
-                Some(sky_layout),
+                Some(&environment_layout),
                 Some(light_layout),
             ],
             immediate_size: 0,
         });
+        let stand_in = device
+            .create_texture(&wgpu::TextureDescriptor {
+                label: Some("water stand-in"),
+                size: wgpu::Extent3d {
+                    width: 1,
+                    height: 1,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            })
+            .create_view(&Default::default());
+        Water {
+            shader,
+            pipeline_layout,
+            format,
+            pipelines: HashMap::new(),
+            layout,
+            environment_layout,
+            buffer,
+            sampler,
+            refraction_sampler,
+            stand_in,
+        }
+    }
+
+    /// Makes the pipeline for `options` if it is not yet; WebGL2 compiles
+    /// each, so only those drawn are made.
+    pub fn prepare(&mut self, device: &wgpu::Device, options: Options) {
+        if self.pipelines.contains_key(&options) {
+            return;
+        }
+        let flag = |on: bool| if on { 1.0 } else { 0.0 };
+        let constants = [
+            ("REFRACTION", flag(options.refraction)),
+            ("REAL_DEPTH", flag(options.refraction && options.real_depth)),
+        ];
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("water"),
-            layout: Some(&pipeline_layout),
+            layout: Some(&self.pipeline_layout),
             vertex: wgpu::VertexState {
-                module: &shader,
+                module: &self.shader,
                 entry_point: Some("vs_water"),
                 compilation_options: Default::default(),
                 buffers: &[Some(wgpu::VertexBufferLayout {
@@ -405,7 +582,7 @@ impl Water {
             primitive: wgpu::PrimitiveState::default(),
             // water_high.xml tests and writes depth.
             depth_stencil: Some(wgpu::DepthStencilState {
-                format: depth_format,
+                format: crate::unit::DEPTH_FORMAT,
                 depth_write_enabled: Some(true),
                 depth_compare: Some(wgpu::CompareFunction::Less),
                 stencil: Default::default(),
@@ -413,11 +590,14 @@ impl Water {
             }),
             multisample: Default::default(),
             fragment: Some(wgpu::FragmentState {
-                module: &shader,
+                module: &self.shader,
                 entry_point: Some("fs_water"),
-                compilation_options: Default::default(),
+                compilation_options: wgpu::PipelineCompilationOptions {
+                    constants: &constants,
+                    ..Default::default()
+                },
                 targets: &[Some(wgpu::ColorTargetState {
-                    format,
+                    format: self.format,
                     blend: Some(wgpu::BlendState::ALPHA_BLENDING),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
@@ -425,12 +605,12 @@ impl Water {
             multiview_mask: None,
             cache: None,
         });
-        Water {
-            pipeline,
-            layout,
-            buffer,
-            sampler,
-        }
+        self.pipelines.insert(options, pipeline);
+    }
+
+    /// The pipeline `prepare` made for `options`.
+    pub fn pipeline(&self, options: Options) -> Option<&wgpu::RenderPipeline> {
+        self.pipelines.get(&options)
     }
 
     pub fn bind_group(
@@ -453,6 +633,45 @@ impl Water {
                 wgpu::BindGroupEntry {
                     binding: 2,
                     resource: wgpu::BindingResource::Sampler(&self.sampler),
+                },
+            ],
+        })
+    }
+
+    /// The sky cube and the refraction pass's textures, while it is drawn.
+    pub fn environment_group(
+        &self,
+        device: &wgpu::Device,
+        sky: (&wgpu::TextureView, &wgpu::Sampler),
+        targets: Option<&Targets>,
+    ) -> wgpu::BindGroup {
+        let (refraction, refraction_depth) = match targets {
+            Some(targets) => (&targets.refraction, &targets.refraction_depth),
+            None => (&self.stand_in, &self.stand_in),
+        };
+        device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("water environment"),
+            layout: &self.environment_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(sky.0),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(sky.1),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(refraction),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::TextureView(refraction_depth),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::Sampler(&self.refraction_sampler),
                 },
             ],
         })

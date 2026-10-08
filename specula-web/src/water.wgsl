@@ -1,8 +1,12 @@
 // The water as the engine's water_high effect draws it (water_high.vs and
 // water_high.fs): two animated normal maps bent by the wind, the sky's
 // reflection weighted by fresnel, the sun's glint, and the map's colour
-// and tint by depth and murkiness. Without the LOS, as an observer sees
+// and tint by depth and murkiness, over the refraction of what is under
+// it where that is drawn. Without the LOS, as an observer sees
 // everything.
+//
+// The engine samples its refraction texture with GL's texture coordinates,
+// v up; `gl_uv` and `refraction_texel` turn them into WebGPU's.
 
 struct View {
     view_proj: mat4x4<f32>,
@@ -28,6 +32,16 @@ struct Water {
     // The current and next normal map frame, cos and sin of the sky's
     // rotation (skyBoxRot).
     frames: vec4<f32>,
+    // refractionMatrix: the refraction camera's view-projection.
+    refraction: mat4x4<f32>,
+    // Its right, up and forward, then the projection's x and y scale, to
+    // rebuild a position from its depth as projInvTransform and
+    // viewInvTransform do.
+    camera_right: vec4<f32>,
+    camera_up: vec4<f32>,
+    camera_forward: vec4<f32>,
+    // Its near and far planes.
+    planes: vec4<f32>,
 }
 
 struct Light {
@@ -54,10 +68,21 @@ struct Light {
 // SkyManager's cube, black while it has none.
 @group(2) @binding(0) var sky_cube: texture_cube<f32>;
 @group(2) @binding(1) var sky_sampler: sampler;
+// The refraction pass's colour and depth.
+@group(2) @binding(2) var refraction_map: texture_2d<f32>;
+@group(2) @binding(3) var refraction_depth: texture_2d<f32>;
+@group(2) @binding(4) var refraction_sampler: sampler;
 
 @group(3) @binding(0) var<uniform> light: Light;
 @group(3) @binding(1) var shadow_map: texture_depth_2d;
 @group(3) @binding(2) var shadow_sampler: sampler_comparison;
+
+// waterrefraction: the refraction texture rather than the water's colour
+// under the surface.
+override REFRACTION: bool = false;
+// waterrealdepth: the depth under the surface from the refraction's depth
+// rather than from the vertex depth.
+override REAL_DEPTH: bool = false;
 
 // WaterManager's m_RepeatPeriod.
 const REPEAT_SCALE: f32 = 1.0 / 16.0;
@@ -69,6 +94,8 @@ struct Varyings {
     @location(1) water_info: vec2<f32>,
     @location(2) normal_coords: vec2<f32>,
     @location(3) waviness: f32,
+    // refractionCoords: clip x, y and w in the refraction camera.
+    @location(4) refraction_coords: vec3<f32>,
 }
 
 @vertex
@@ -86,6 +113,8 @@ fn vs_water(
         position.x * wind.y + position.z * wind.x,
     ) * REPEAT_SCALE;
     out.waviness = water.color.w * (0.15 + water_info.x / 1.15);
+    let refraction = water.refraction * vec4<f32>(position, 1.0);
+    out.refraction_coords = refraction.xyw;
     return out;
 }
 
@@ -170,6 +199,83 @@ fn sky(direction: vec3<f32>) -> vec3<f32> {
     return textureSampleLevel(sky_cube, sky_sampler, turned, 0.0).rgb;
 }
 
+// The refraction's colour at GL texture coordinates.
+fn sample_refraction(gl_uv: vec2<f32>) -> vec4<f32> {
+    return textureSampleLevel(refraction_map, refraction_sampler, vec2<f32>(gl_uv.x, 1.0 - gl_uv.y), 0.0);
+}
+
+// getWorldPositionFromRefractionDepth: the position the refraction's depth
+// holds at GL texture coordinates, nearest texel, no higher than the
+// water.
+fn refraction_position(gl_uv: vec2<f32>, water_position: vec3<f32>) -> vec3<f32> {
+    let size = vec2<f32>(textureDimensions(refraction_depth));
+    let texel = clamp(vec2<i32>(vec2<f32>(gl_uv.x, 1.0 - gl_uv.y) * size), vec2<i32>(0), vec2<i32>(size) - 1);
+    let depth = textureLoad(refraction_depth, texel, 0).x;
+    let near = water.planes.x;
+    let far = water.planes.y;
+    let view_z = near * far / (far - depth * (far - near));
+    let ndc = gl_uv * 2.0 - 1.0;
+    let view_x = ndc.x * view_z / water.camera_right.w;
+    let view_y = ndc.y * view_z / water.camera_up.w;
+    var position = light.eye.xyz + view_x * water.camera_right.xyz + view_y * water.camera_up.xyz
+        + view_z * water.camera_forward.xyz;
+    position.y = min(position.y, water_position.y);
+    return position;
+}
+
+// getRefraction without the fancy effects: the colour under the surface
+// and the water's alpha.
+fn refracted(in: Varyings, normal: vec3<f32>, eye: vec3<f32>) -> vec4<f32> {
+    let color = water.color.rgb;
+    let coords = in.refraction_coords;
+    var depth: f32;
+    if REFRACTION && REAL_DEPTH {
+        let position = refraction_position(0.5 * coords.xy / coords.z + 0.5, in.world);
+        depth = distance(position, in.world);
+    } else {
+        depth = in.water_info.y / (min(0.5, eye.y) * 1.5 * min(0.5, eye.y) * 2.0);
+    }
+    var under = color;
+    if REFRACTION {
+        var distortion = 0.5 + clamp(depth / 2.0, 0.0, 7.0);
+        if REAL_DEPTH {
+            let shifted = (0.5 * coords.xy - normal.xz * distortion) / coords.z + 0.5;
+            let new_depth = distance(refraction_position(shifted, in.world), in.world);
+            if depth > new_depth + 3.0 {
+                distortion /= 2.0;
+            } else {
+                depth = new_depth;
+            }
+        }
+        let uv = (0.5 * coords.xy - normal.xz * distortion) / coords.z + 0.5;
+        under = sample_refraction(uv).rgb;
+        let blur = (0.1 + clamp(normal.x, -0.1, 0.1)) / coords.z;
+        // Taps on what the pass left clear weigh nothing.
+        var blurred = vec4<f32>(under, 1.0);
+        var tap = sample_refraction(uv + vec2<f32>(blur + normal.x, blur + normal.z));
+        blurred += vec4<f32>(tap.rgb * tap.a, tap.a);
+        tap = sample_refraction(uv + vec2<f32>(-blur, blur + normal.z));
+        blurred += vec4<f32>(tap.rgb * tap.a, tap.a);
+        tap = sample_refraction(uv + vec2<f32>(-blur, -blur + normal.x));
+        blurred += vec4<f32>(tap.rgb * tap.a, tap.a);
+        tap = sample_refraction(uv + vec2<f32>(blur + normal.z, -blur));
+        blurred += vec4<f32>(tap.rgb * tap.a, tap.a);
+        blurred /= blurred.a;
+        let blur_factor = distortion / 7.0;
+        under = (under + blurred.rgb * blur_factor) / (1.0 + blur_factor);
+    }
+    let murkiness = water.tint.w;
+    let fixed_vy = max(eye.y, 0.01);
+    let murky = mix(200.0, 0.1, pow(murkiness, 0.25));
+    let extinction = max(0.0, 1.0 - depth * fixed_vy / murky);
+    let tinted = mix(under * water.tint.rgb, under, extinction);
+    var alpha = clamp(depth, 0.0, 1.0);
+    if !REFRACTION {
+        alpha = (1.4 - extinction) * alpha;
+    }
+    return vec4<f32>(mix(color, tinted, extinction), alpha);
+}
+
 @fragment
 fn fs_water(in: Varyings) -> @location(0) vec4<f32> {
     // Sampled before the discard: WGSL wants textureSample in uniform
@@ -181,16 +287,8 @@ fn fs_water(in: Varyings) -> @location(0) vec4<f32> {
     }
     let eye = normalize(light.eye.xyz - in.world);
 
-    // getRefraction without refraction: the depth along the view from the
-    // vertex depth, and the extinction by murkiness.
-    let color = water.color.rgb;
     let murkiness = water.tint.w;
-    let depth = in.water_info.y / (min(0.5, eye.y) * 1.5 * min(0.5, eye.y) * 2.0);
-    let fixed_vy = max(eye.y, 0.01);
-    let murky = mix(200.0, 0.1, pow(murkiness, 0.25));
-    let extinction = max(0.0, 1.0 - depth * fixed_vy / murky);
-    let refracted = mix(color, mix(color * water.tint.rgb, color, extinction), extinction);
-    let alpha = (1.4 - extinction) * clamp(depth, 0.0, 1.0);
+    let refraction = refracted(in, normal, eye);
 
     // getReflection without the reflection texture.
     let reflected = sky(reflect(eye, normal));
@@ -207,8 +305,8 @@ fn fs_water(in: Varyings) -> @location(0) vec4<f32> {
     let shadow = shadow_at(in.world, light.shadow.y);
     fresnel = mix(fresnel, fresnel * shadow, 0.05 + murkiness * 0.2);
 
-    var out = mix(refracted, reflected, fresnel * reflection_weight);
+    var out = mix(refraction.rgb, reflected, fresnel * reflection_weight);
     out += shadow * specular;
     out = clamp(out, vec3<f32>(0.0), vec3<f32>(1.0));
-    return vec4<f32>(apply_fog(out, in.world), alpha);
+    return vec4<f32>(apply_fog(out, in.world), refraction.a);
 }
