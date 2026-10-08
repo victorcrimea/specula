@@ -115,6 +115,7 @@ const WATER_SETTINGS_KEY: &str = "specula.water";
 const SKY_SETTINGS_KEY: &str = "specula.sky";
 const REFRACTION_SETTINGS_KEY: &str = "specula.waterrefraction";
 const REAL_DEPTH_SETTINGS_KEY: &str = "specula.waterrealdepth";
+const REFLECTION_SETTINGS_KEY: &str = "specula.waterreflection";
 /// localStorage key of when the storage notice was last shown, in ms since
 /// the epoch.
 const STORAGE_NOTICE_KEY: &str = "specula.storage-notice";
@@ -185,6 +186,8 @@ trait View {
     /// from that, likewise.
     fn set_water_refraction(&mut self, _on: bool) {}
     fn set_water_real_depth(&mut self, _on: bool) {}
+    /// Whether the water mirrors what is over it, likewise.
+    fn set_water_reflection(&mut self, _on: bool) {}
     /// The highest texture quality the device is given.
     fn max_texture_tiers(&self) -> usize {
         TEXTURE_TIER_SIDES.len()
@@ -892,6 +895,7 @@ async fn run(page: Page, glue_url: String, wasm_url: String) -> Result<(), Strin
             Vec::new(),
         );
         let water: HtmlSelectElement = element(&document, "water")?;
+        let reflection: HtmlSelectElement = element(&document, "waterreflection")?;
         let refraction: HtmlSelectElement = element(&document, "waterrefraction")?;
         let real_depth: HtmlSelectElement = element(&document, "waterrealdepth")?;
         wire_switch(
@@ -899,7 +903,14 @@ async fn run(page: Page, glue_url: String, wasm_url: String) -> Result<(), Strin
             water.clone(),
             WATER_SETTINGS_KEY,
             |view, on| view.set_water_effects(on),
-            vec![refraction.clone()],
+            vec![reflection.clone(), refraction.clone()],
+        );
+        wire_switch(
+            &app,
+            reflection,
+            REFLECTION_SETTINGS_KEY,
+            |view, on| view.set_water_reflection(on),
+            Vec::new(),
         );
         wire_switch(
             &app,

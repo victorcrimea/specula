@@ -5,8 +5,9 @@
 // it where that is drawn. Without the LOS, as an observer sees
 // everything.
 //
-// The engine samples its refraction texture with GL's texture coordinates,
-// v up; `gl_uv` and `refraction_texel` turn them into WebGPU's.
+// The engine samples its refraction and reflection textures with GL's
+// texture coordinates, v up; `sample_refraction`, `refraction_position`
+// and `sample_reflection` turn them into WebGPU's.
 
 struct View {
     view_proj: mat4x4<f32>,
@@ -42,6 +43,8 @@ struct Water {
     camera_forward: vec4<f32>,
     // Its near and far planes.
     planes: vec4<f32>,
+    // reflectionMatrix: the mirrored reflection camera's view-projection.
+    reflection: mat4x4<f32>,
 }
 
 struct Light {
@@ -72,6 +75,8 @@ struct Light {
 @group(2) @binding(2) var refraction_map: texture_2d<f32>;
 @group(2) @binding(3) var refraction_depth: texture_2d<f32>;
 @group(2) @binding(4) var refraction_sampler: sampler;
+// The reflection pass's colour, sampled as the refraction's.
+@group(2) @binding(5) var reflection_map: texture_2d<f32>;
 
 @group(3) @binding(0) var<uniform> light: Light;
 @group(3) @binding(1) var shadow_map: texture_depth_2d;
@@ -83,6 +88,10 @@ override REFRACTION: bool = false;
 // waterrealdepth: the depth under the surface from the refraction's depth
 // rather than from the vertex depth.
 override REAL_DEPTH: bool = false;
+
+// waterreflection: the reflection texture of what is over the water, the
+// sky where it holds nothing, rather than the sky alone.
+override REFLECTION: bool = false;
 
 // WaterManager's m_RepeatPeriod.
 const REPEAT_SCALE: f32 = 1.0 / 16.0;
@@ -96,6 +105,8 @@ struct Varyings {
     @location(3) waviness: f32,
     // refractionCoords: clip x, y and w in the refraction camera.
     @location(4) refraction_coords: vec3<f32>,
+    // reflectionCoords, likewise in the reflection camera.
+    @location(5) reflection_coords: vec3<f32>,
 }
 
 @vertex
@@ -115,6 +126,8 @@ fn vs_water(
     out.waviness = water.color.w * (0.15 + water_info.x / 1.15);
     let refraction = water.refraction * vec4<f32>(position, 1.0);
     out.refraction_coords = refraction.xyw;
+    let reflection = water.reflection * vec4<f32>(position, 1.0);
+    out.reflection_coords = reflection.xyw;
     return out;
 }
 
@@ -276,6 +289,24 @@ fn refracted(in: Varyings, normal: vec3<f32>, eye: vec3<f32>) -> vec4<f32> {
     return vec4<f32>(mix(color, tinted, extinction), alpha);
 }
 
+// getReflection: what the water mirrors, and how much of it the fresnel
+// term may take.
+fn reflected(in: Varyings, normal: vec3<f32>, eye: vec3<f32>) -> vec4<f32> {
+    let sky_color = sky(reflect(eye, normal));
+    if !REFLECTION {
+        return vec4<f32>(sky_color, 0.75);
+    }
+    let vy = clamp(eye.y * 2.0, 0.05, 1.0);
+    let coords = in.reflection_coords;
+    let uv = (0.5 * coords.xy - 15.0 * normal.zx / vy) / coords.z + 0.5;
+    let texel = textureSampleLevel(reflection_map, refraction_sampler, vec2<f32>(uv.x, 1.0 - uv.y), 0.0);
+    var color = texel.rgb;
+    if texel.a < 0.4 {
+        color = mix(sky_color, texel.rgb, texel.a);
+    }
+    return vec4<f32>(color, max(texel.a, 0.75));
+}
+
 @fragment
 fn fs_water(in: Varyings) -> @location(0) vec4<f32> {
     // Sampled before the discard: WGSL wants textureSample in uniform
@@ -290,9 +321,7 @@ fn fs_water(in: Varyings) -> @location(0) vec4<f32> {
     let murkiness = water.tint.w;
     let refraction = refracted(in, normal, eye);
 
-    // getReflection without the reflection texture.
-    let reflected = sky(reflect(eye, normal));
-    let reflection_weight = 0.75;
+    let reflection = reflected(in, normal, eye);
 
     let ndotv = clamp(dot(normal, eye), 0.0, 1.0);
     var fresnel = clamp(pow(1.1 - ndotv, 2.0) * 1.5, 0.1, 0.75);
@@ -305,7 +334,7 @@ fn fs_water(in: Varyings) -> @location(0) vec4<f32> {
     let shadow = shadow_at(in.world, light.shadow.y);
     fresnel = mix(fresnel, fresnel * shadow, 0.05 + murkiness * 0.2);
 
-    var out = mix(refraction.rgb, reflected, fresnel * reflection_weight);
+    var out = mix(refraction.rgb, reflection.rgb, fresnel * reflection.a);
     out += shadow * specular;
     out = clamp(out, vec3<f32>(0.0), vec3<f32>(1.0));
     return vec4<f32>(apply_fog(out, in.world), refraction.a);

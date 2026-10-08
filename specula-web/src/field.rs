@@ -364,16 +364,19 @@ pub struct Field {
     /// where off keeps the plain background.
     sky_visible: bool,
     sky: Sky,
-    /// The viewer's water refraction and real water depth settings, under
-    /// the water effects.
+    /// The viewer's water refraction, real water depth and water
+    /// reflections settings, under the water effects.
     refraction: bool,
     real_depth: bool,
-    /// The ground's and models' pipelines for the refraction pass, made
-    /// when it is first drawn.
+    reflection: bool,
+    /// The ground's and models' pipelines for the refraction and the
+    /// reflection passes, made when each is first drawn.
     refraction_scene: Option<ScenePipelines>,
-    /// The refraction pass's view.
+    reflection_scene: Option<ScenePipelines>,
+    /// The refraction and the reflection passes' views.
     refraction_view: (wgpu::Buffer, wgpu::BindGroup),
-    /// The refraction pass's textures while it is drawn, and a count of
+    reflection_view: (wgpu::Buffer, wgpu::BindGroup),
+    /// Those passes' textures while either is drawn, and a count of
     /// their changes.
     water_targets: Option<water::Targets>,
     water_targets_generation: u64,
@@ -534,6 +537,20 @@ impl Field {
             entries: &[wgpu::BindGroupEntry {
                 binding: 0,
                 resource: refraction_buffer.as_entire_binding(),
+            }],
+        });
+        let reflection_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("water reflection view"),
+            size: VIEW_SIZE,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let reflection_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("water reflection view"),
+            layout: &view_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: reflection_buffer.as_entire_binding(),
             }],
         });
         // Read with textureLoad, so it needs no filtering.
@@ -945,8 +962,11 @@ impl Field {
             sky,
             refraction: false,
             real_depth: false,
+            reflection: false,
             refraction_scene: None,
+            reflection_scene: None,
             refraction_view: (refraction_buffer, refraction_group),
+            reflection_view: (reflection_buffer, reflection_group),
             water_targets: None,
             water_targets_generation: 0,
             water_environment: None,
@@ -1049,14 +1069,28 @@ impl Field {
             [0.0, 0.0, FAR / (FAR - NEAR), -NEAR * FAR / (FAR - NEAR)],
             [0.0, 0.0, 1.0, 0.0],
         ];
+        let level = self
+            .ground
+            .as_ref()
+            .map_or(0.0, |ground| ground.image.water_level);
+        // The mirror in the water, y to 2 level - y, which the reflection
+        // camera's orientation takes on.
+        let mirror = [
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, -1.0, 0.0, 2.0 * level],
+            [0.0, 0.0, 1.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ];
+        let view_proj = multiply(&projection, &view);
         water::WaterCamera {
-            view_proj: multiply(&projection, &view),
+            view_proj,
             right,
             up,
             forward: cross(right, up),
             scale: [f * stretch, f],
             near: NEAR,
             far: FAR,
+            reflection: multiply(&view_proj, &mirror),
         }
     }
 
@@ -2669,11 +2703,18 @@ impl Field {
         };
         self.water.prepare(&self.device, options);
 
-        if options.refraction != self.water_targets.is_some() {
-            self.water_targets = options
-                .refraction
+        let targets = options.refraction || options.reflection;
+        if targets != self.water_targets.is_some() {
+            self.water_targets = targets
                 .then(|| water::Targets::new(&self.device, self.config.format, self.config.height));
             self.water_targets_generation += 1;
+        }
+        if options.reflection && self.reflection_scene.is_none() {
+            self.reflection_scene = Some(ScenePipelines::new(
+                &self.device,
+                &self.scene_sources,
+                WaterClip::Above,
+            ));
         }
         if options.refraction && self.refraction_scene.is_none() {
             self.refraction_scene = Some(ScenePipelines::new(
@@ -2697,9 +2738,16 @@ impl Field {
         }
 
         let camera = self.refraction_camera();
+        let (_, eye, right, up) = self.camera_view();
         if options.refraction {
-            let (_, eye, right, up) = self.camera_view();
             self.write_view(&self.refraction_view.0, &camera.view_proj, [right, up, eye]);
+        }
+        if options.reflection {
+            self.write_view(
+                &self.reflection_view.0,
+                &camera.reflection,
+                [right, up, eye],
+            );
         }
         let Some(ground) = &self.ground else {
             return;
@@ -2723,6 +2771,7 @@ impl Field {
         drawn.then_some(water::Options {
             refraction: self.refraction,
             real_depth: self.refraction && self.real_depth,
+            reflection: self.reflection,
         })
     }
 }
@@ -2813,6 +2862,10 @@ impl View for Field {
 
     fn set_water_real_depth(&mut self, on: bool) {
         self.real_depth = on;
+    }
+
+    fn set_water_reflection(&mut self, on: bool) {
+        self.reflection = on;
     }
 
     fn progress(&self) -> Progress {
@@ -3204,6 +3257,41 @@ impl View for Field {
                 ..Default::default()
             });
             pass.set_bind_group(0, &self.refraction_view.1, &[]);
+            self.draw_ground(&mut pass, scene);
+            self.draw_scene_models(&mut pass, scene, &draws);
+        }
+        if water_options.is_some_and(|options| options.reflection)
+            && let (Some(targets), Some(scene)) = (&self.water_targets, &self.reflection_scene)
+        {
+            // RenderReflections: what is over the water, mirrored, cleared
+            // to an alpha of 0 where nothing is, which the sky fills.
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("water reflection"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &targets.reflection,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color {
+                            r: 0.5,
+                            g: 0.5,
+                            b: 1.0,
+                            a: 0.0,
+                        }),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &targets.reflection_depth,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Discard,
+                    }),
+                    stencil_ops: None,
+                }),
+                ..Default::default()
+            });
+            pass.set_bind_group(0, &self.reflection_view.1, &[]);
             self.draw_ground(&mut pass, scene);
             self.draw_scene_models(&mut pass, scene, &draws);
         }
@@ -3830,13 +3918,10 @@ impl ScenePipelines {
             bias: Default::default(),
         };
         // The engine draws models double-sided where the material asks,
-        // and without culling every model looks right. The mirrored
-        // reflection culls front faces, as the engine's reflection pass
-        // flips its culling, for its mirror turns the winding round.
-        let primitive = wgpu::PrimitiveState {
-            cull_mode: (clip == WaterClip::Above).then_some(wgpu::Face::Front),
-            ..Default::default()
-        };
+        // and without culling every model looks right; so does every
+        // pass here, the mirrored reflection too, whose mirror turns the
+        // winding round.
+        let primitive = wgpu::PrimitiveState::default();
         let terrain_buffers = [Some(wgpu::VertexBufferLayout {
             array_stride: blend::VERTEX_SIZE as u64,
             step_mode: wgpu::VertexStepMode::Vertex,
