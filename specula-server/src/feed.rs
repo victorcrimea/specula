@@ -1,4 +1,4 @@
-//! Decoder for the observer hook's feed, format v11. The writer is
+//! Decoder for the observer hook's feed, format v12. The writer is
 //! `source/network/SpeculaFeed.cpp` in the `specula` branch of 0ad-specula.
 
 use std::io;
@@ -6,7 +6,7 @@ use std::io::ErrorKind;
 use std::io::Read;
 
 const MAGIC: [u8; 4] = *b"SPCF";
-const VERSION: u32 = 11;
+const VERSION: u32 = 12;
 const RECORD_TEMPLATE: u8 = 1;
 const RECORD_TURN: u8 = 2;
 const RECORD_MAP: u8 = 3;
@@ -224,6 +224,35 @@ pub struct Light {
     pub rotation: f32,
     pub sun_color: [f32; 3],
     pub ambient_color: [f32; 3],
+    pub fog_color: [f32; 3],
+    pub fog_factor: f32,
+    pub fog_max: f32,
+    pub brightness: f32,
+    pub contrast: f32,
+    pub saturation: f32,
+    pub bloom: f32,
+    pub post_effect: PostEffect,
+}
+
+/// The map's post effect, which the engine loads from
+/// `shaders/effects/postproc/<name>.xml`.
+#[derive(Clone, Copy)]
+pub enum PostEffect {
+    Default = 0,
+    Hdr = 1,
+    Dof = 2,
+}
+
+impl PostEffect {
+    /// The engine has no other effect files, and draws none for a name it
+    /// cannot load.
+    fn from_name(name: &[u8]) -> Self {
+        match name {
+            b"hdr" => Self::Hdr,
+            b"DOF" => Self::Dof,
+            _ => Self::Default,
+        }
+    }
 }
 
 pub fn read_header(reader: &mut impl Read) -> io::Result<()> {
@@ -362,7 +391,7 @@ fn decode_terrain(payload: &[u8]) -> io::Result<Record> {
     let water_level = cursor.i32()?;
     let shallow_depth = f32::from_bits(cursor.u32()?);
     let circular = cursor.u8()? != 0;
-    let mut floats = [0.0; 8];
+    let mut floats = [0.0; 17];
     for value in &mut floats {
         *value = f32::from_bits(cursor.u32()?);
     }
@@ -375,12 +404,30 @@ fn decode_terrain(payload: &[u8]) -> io::Result<Record> {
         ambient_r,
         ambient_g,
         ambient_b,
+        fog_r,
+        fog_g,
+        fog_b,
+        fog_factor,
+        fog_max,
+        brightness,
+        contrast,
+        saturation,
+        bloom,
     ] = floats;
+    let length = cursor.u16()? as usize;
     let light = Light {
         elevation,
         rotation,
         sun_color: [sun_r, sun_g, sun_b],
         ambient_color: [ambient_r, ambient_g, ambient_b],
+        fog_color: [fog_r, fog_g, fog_b],
+        fog_factor,
+        fog_max,
+        brightness,
+        contrast,
+        saturation,
+        bloom,
+        post_effect: PostEffect::from_name(cursor.bytes(length)?),
     };
     let vertices = (tiles_per_side as usize + 1).pow(2);
     let heights = (0..vertices)

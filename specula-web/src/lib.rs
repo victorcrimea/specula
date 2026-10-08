@@ -11,6 +11,7 @@ mod march;
 mod minimap;
 mod opfs;
 mod pose;
+mod postproc;
 mod projectile;
 mod render;
 mod shadow;
@@ -102,6 +103,12 @@ const TEXTURE_SETTINGS_KEY: &str = "specula.textures";
 const MAP_SETTINGS_KEY: &str = "specula.maps";
 /// localStorage key of the triplanar setting: 0 off, 1 on.
 const TRIPLANAR_SETTINGS_KEY: &str = "specula.triplanar";
+/// localStorage keys of the post-processing, bloom, depth of field and fog
+/// settings: 0 off, 1 on.
+const POSTPROC_SETTINGS_KEY: &str = "specula.postproc";
+const BLOOM_SETTINGS_KEY: &str = "specula.bloom";
+const DOF_SETTINGS_KEY: &str = "specula.dof";
+const FOG_SETTINGS_KEY: &str = "specula.fog";
 /// localStorage key of when the storage notice was last shown, in ms since
 /// the epoch.
 const STORAGE_NOTICE_KEY: &str = "specula.storage-notice";
@@ -156,6 +163,14 @@ trait View {
     /// Whether the terrains whose material asks for it are mapped
     /// triplanar, where it draws terrain textures.
     fn set_triplanar(&mut self, _on: bool) {}
+    /// Whether the map's post effect runs, where it draws the match.
+    fn set_postproc(&mut self, _on: bool) {}
+    /// Whether the post effect blooms, likewise.
+    fn set_bloom(&mut self, _on: bool) {}
+    /// Whether a map's DOF effect blurs by depth, likewise.
+    fn set_dof(&mut self, _on: bool) {}
+    /// Whether the map's fog is drawn, likewise.
+    fn set_fog(&mut self, _on: bool) {}
     /// The highest texture quality the device is given.
     fn max_texture_tiers(&self) -> usize {
         TEXTURE_TIER_SIDES.len()
@@ -832,6 +847,36 @@ async fn run(page: Page, glue_url: String, wasm_url: String) -> Result<(), Strin
         wire_textures(&app, element(&document, "textures")?);
         wire_maps(&app, element(&document, "maps")?);
         wire_triplanar(&app, element(&document, "triplanar")?);
+        let bloom: HtmlSelectElement = element(&document, "bloom")?;
+        let dof: HtmlSelectElement = element(&document, "dof")?;
+        wire_switch(
+            &app,
+            element(&document, "postproc")?,
+            POSTPROC_SETTINGS_KEY,
+            |view, on| view.set_postproc(on),
+            vec![bloom.clone(), dof.clone()],
+        );
+        wire_switch(
+            &app,
+            bloom,
+            BLOOM_SETTINGS_KEY,
+            |view, on| view.set_bloom(on),
+            Vec::new(),
+        );
+        wire_switch(
+            &app,
+            dof,
+            DOF_SETTINGS_KEY,
+            |view, on| view.set_dof(on),
+            Vec::new(),
+        );
+        wire_switch(
+            &app,
+            element(&document, "fog")?,
+            FOG_SETTINGS_KEY,
+            |view, on| view.set_fog(on),
+            Vec::new(),
+        );
     }
     wire_sound(&app, &window);
     wire_warmup(&app);
@@ -996,6 +1041,49 @@ fn wire_maps(app: &Rc<RefCell<App>>, select: HtmlSelectElement) {
         }
         let app = &mut *target.borrow_mut();
         app.renderer.set_material_maps(on);
+        app.dirty = true;
+    });
+    select.set_onchange(Some(on_change.as_ref().unchecked_ref()));
+    // The controls live as long as the page, so their handlers do too.
+    on_change.forget();
+}
+
+/// An off/on list, kept across visits under `key`; off unless chosen, as
+/// the game's own defaults for these are. `dependents` are the lists that
+/// only apply while it is on, disabled while it is off, as the game's
+/// options page does.
+fn wire_switch(
+    app: &Rc<RefCell<App>>,
+    select: HtmlSelectElement,
+    key: &'static str,
+    apply: fn(&mut dyn View, bool),
+    dependents: Vec<HtmlSelectElement>,
+) {
+    let saved = web_sys::window()
+        .and_then(|window| window.local_storage().ok().flatten())
+        .and_then(|storage| storage.get_item(key).ok().flatten())
+        .is_some_and(|text| text == "1");
+    select.set_value(if saved { "1" } else { "0" });
+    apply(&mut *app.borrow_mut().renderer, saved);
+    for dependent in &dependents {
+        dependent.set_disabled(!saved);
+    }
+
+    let target = Rc::clone(app);
+    let list = select.clone();
+    let on_change = Closure::<dyn FnMut()>::new(move || {
+        let on = list.value() == "1";
+        // Best effort: without storage the choice lasts only this visit.
+        if let Some(storage) =
+            web_sys::window().and_then(|window| window.local_storage().ok().flatten())
+        {
+            let _ = storage.set_item(key, if on { "1" } else { "0" });
+        }
+        for dependent in &dependents {
+            dependent.set_disabled(!on);
+        }
+        let app = &mut *target.borrow_mut();
+        apply(&mut *app.renderer, on);
         app.dirty = true;
     });
     select.set_onchange(Some(on_change.as_ref().unchecked_ref()));

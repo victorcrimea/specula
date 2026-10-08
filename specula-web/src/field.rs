@@ -65,6 +65,8 @@ use crate::far::Request;
 use crate::gpu;
 use crate::impostor;
 use crate::pose;
+use crate::postproc;
+use crate::postproc::Post;
 use crate::projectile;
 use crate::projectile::Flight;
 use crate::shadow;
@@ -81,7 +83,6 @@ use crate::territory;
 use crate::territory::Borders;
 use crate::unit::DEPTH_FORMAT;
 use crate::unit::create_buffer;
-use crate::unit::create_depth;
 use crate::unit::frustum_planes;
 use crate::unit::look_at;
 use crate::unit::multiply;
@@ -335,7 +336,8 @@ pub struct Field {
     device: wgpu::Device,
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
-    depth: wgpu::TextureView,
+    /// The scene's target and depth when post-processing, and the passes.
+    post: Post,
     bc: bool,
     /// Without and with the material maps.
     model_pipelines: [wgpu::RenderPipeline; 2],
@@ -348,6 +350,13 @@ pub struct Field {
     /// The viewer's triplanar setting: the terrains whose material asks
     /// for it mapped triplanar rather than planar.
     triplanar: bool,
+    /// The viewer's post-processing settings: the map's effect at all,
+    /// then its bloom and depth of field.
+    postproc: bool,
+    bloom: bool,
+    dof: bool,
+    /// The viewer's fog setting.
+    fog: bool,
     water_pipeline: wgpu::RenderPipeline,
     decal_pipeline: wgpu::RenderPipeline,
     shadow: Shadow,
@@ -769,7 +778,7 @@ impl Field {
         });
         let water_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("water"),
-            bind_group_layouts: &[Some(&view_layout)],
+            bind_group_layouts: &[Some(&view_layout), None, None, Some(light_layout)],
             immediate_size: 0,
         });
         let water_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -896,7 +905,7 @@ impl Field {
             [0.0; 4],
             false,
         );
-        let depth = create_depth(&device, config.width, config.height);
+        let post = Post::new(&device, config.format, config.width, config.height);
         let instances = create_buffer(
             &device,
             &queue,
@@ -961,7 +970,7 @@ impl Field {
             device,
             queue,
             config,
-            depth,
+            post,
             bc,
             texture_tiers: max_texture_tiers(bc),
             model_pipelines,
@@ -969,6 +978,10 @@ impl Field {
             blend_pipelines,
             material_maps: false,
             triplanar: true,
+            postproc: false,
+            bloom: false,
+            dof: false,
+            fog: false,
             water_pipeline,
             decal_pipeline,
             shadow,
@@ -1056,11 +1069,7 @@ impl Field {
             Some(ground) => ground.image.light,
             None => {
                 let sun = Vec3::new(0.4, 0.8, -0.45).normalized();
-                Light {
-                    sun: [sun.x, sun.y, sun.z],
-                    sun_color: [SUN_STRENGTH; 3],
-                    ambient_color: [AMBIENT; 3],
-                }
+                Light::plain([sun.x, sun.y, sun.z], [SUN_STRENGTH; 3], [AMBIENT; 3])
             }
         }
     }
@@ -2596,7 +2605,8 @@ impl View for Field {
         self.config.width = width.max(1);
         self.config.height = height.max(1);
         self.surface.configure(&self.device, &self.config);
-        self.depth = create_depth(&self.device, self.config.width, self.config.height);
+        self.post
+            .resize(&self.device, self.config.width, self.config.height);
     }
 
     fn animating(&self) -> bool {
@@ -2629,6 +2639,22 @@ impl View for Field {
 
     fn set_triplanar(&mut self, on: bool) {
         self.triplanar = on;
+    }
+
+    fn set_postproc(&mut self, on: bool) {
+        self.postproc = on;
+    }
+
+    fn set_bloom(&mut self, on: bool) {
+        self.bloom = on;
+    }
+
+    fn set_dof(&mut self, on: bool) {
+        self.dof = on;
+    }
+
+    fn set_fog(&mut self, on: bool) {
+        self.fog = on;
     }
 
     fn progress(&self) -> Progress {
@@ -2796,9 +2822,15 @@ impl View for Field {
             low: ground.low,
             high: ground.high,
         });
+        let light = self.light();
+        let post = postproc::Plan::new(&light, self.postproc, self.bloom, self.dof);
+        if post.is_some() {
+            self.post.prepare(&self.queue, &light, NEAR, FAR);
+        }
         let casters = self.shadow.prepare(
             &self.queue,
-            &self.light(),
+            &light,
+            self.fog,
             &shadow::Eye {
                 position: eye,
                 forward: [
@@ -2940,7 +2972,12 @@ impl View for Field {
             self.device_pixel_ratio,
             territory::blink_seconds(now()),
         );
-        let target = frame.texture.create_view(&Default::default());
+        let screen = frame.texture.create_view(&Default::default());
+        let target = if post.is_some() {
+            self.post.scene()
+        } else {
+            &screen
+        };
         let mut encoder = self.device.create_command_encoder(&Default::default());
         if casters.is_some()
             && let Some(mut pass) = self.shadow.begin(&mut encoder)
@@ -2962,7 +2999,7 @@ impl View for Field {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("field"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &target,
+                    view: target,
                     depth_slice: None,
                     resolve_target: None,
                     ops: wgpu::Operations {
@@ -2971,10 +3008,14 @@ impl View for Field {
                     },
                 })],
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: &self.depth,
+                    view: self.post.depth(),
                     depth_ops: Some(wgpu::Operations {
                         load: wgpu::LoadOp::Clear(1.0),
-                        store: wgpu::StoreOp::Discard,
+                        store: if post.is_some_and(|plan| plan.reads_depth()) {
+                            wgpu::StoreOp::Store
+                        } else {
+                            wgpu::StoreOp::Discard
+                        },
                     }),
                     stencil_ops: None,
                 }),
@@ -3046,11 +3087,15 @@ impl View for Field {
             }
             if self.ground.is_some() {
                 pass.set_pipeline(&self.water_pipeline);
+                pass.set_bind_group(3, &self.shadow.bind_group, &[]);
                 pass.draw(0..4, 0..1);
                 // After the water, as the engine draws overlays, so a line
                 // floating on it shows.
                 self.borders.draw(&mut pass);
             }
+        }
+        if let Some(plan) = post {
+            self.post.draw(&mut encoder, plan, &screen);
         }
         self.queue.submit([encoder.finish()]);
         self.queue.present(frame);

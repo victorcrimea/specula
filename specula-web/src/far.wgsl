@@ -32,9 +32,26 @@ struct Light {
     forward: vec4<f32>,
     // Depth bias for models, for the ground, then 1 when shadows are on.
     shadow: vec4<f32>,
+    // CLightEnv::m_FogColor.
+    fog_color: vec4<f32>,
+    // The engine's fogParams: factor, then max, which is 1 with fog off.
+    fog: vec4<f32>,
 }
 
 @group(2) @binding(0) var<uniform> light: Light;
+
+// common/fog.h applyFog. Its depth, gl_FragCoord.z / gl_FragCoord.w, is
+// the GL window depth times clip w under the engine's default planes (2
+// and 4096 m), rebuilt here from the view depth so a map's fog factor
+// reaches as far as in the game.
+fn apply_fog(color: vec3<f32>, world: vec3<f32>) -> vec3<f32> {
+    let w = dot(world - light.eye.xyz, light.forward.xyz);
+    let z = 4096.0 * (w - 2.0) / (4096.0 - 2.0);
+    let density = light.fog.x;
+    let max_fog = light.fog.y;
+    let factor = exp2(-density * density * z * z * 1.442695) * (1.0 - max_fog) + max_fog;
+    return mix(light.fog_color.rgb, color, clamp(factor, 0.0, 1.0));
+}
 
 // shading.h calculateShading, without specular and ambient occlusion, and
 // unshadowed: an impostor is too small on screen for a shadow on it to
@@ -63,6 +80,7 @@ struct ImpostorVaryings {
     // Sine and cosine of the model's turn.
     @location(1) @interpolate(flat) turn: vec2<f32>,
     @location(2) @interpolate(flat) color: vec3<f32>,
+    @location(3) world: vec3<f32>,
 }
 
 // The y rotation of the model transform, as impostor.wgsl `turn`.
@@ -98,6 +116,7 @@ fn vs_impostor(
     let inside = vec2<f32>(square.x + 1.0, 1.0 - square.y) * 0.5;
     var out: ImpostorVaryings;
     out.position = view.view_proj * vec4<f32>(world, 1.0);
+    out.world = world;
     out.uv = (origin + inside) / grid.zw;
     out.turn = grid.xy;
     let rgb = vec3<f32>(f32(cell.y & 255u), f32((cell.y >> 8u) & 255u), f32((cell.y >> 16u) & 255u));
@@ -114,5 +133,5 @@ fn fs_impostor(in: ImpostorVaryings) -> @location(0) vec4<f32> {
     }
     let normal = turn(from_octahedral(packed.xy), in.turn.x, in.turn.y);
     let diffuse = albedo.rgb * mix(vec3<f32>(1.0), in.color, packed.z);
-    return vec4<f32>(lit(diffuse, normal), 1.0);
+    return vec4<f32>(apply_fog(lit(diffuse, normal), in.world), 1.0);
 }

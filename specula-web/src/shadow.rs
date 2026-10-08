@@ -8,8 +8,9 @@ use crate::unit::frustum_planes;
 use crate::unit::multiply;
 
 /// The `Light` uniform of field.wgsl, model.wgsl, decal.wgsl and far.wgsl:
-/// sun colour, ambient colour, shadow matrix, eye, forward, shadow.
-const LIGHT_SIZE: u64 = 144;
+/// sun colour, ambient colour, shadow matrix, eye, forward, shadow, fog
+/// colour, fog.
+const LIGHT_SIZE: u64 = 176;
 const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 /// `DEFAULT_SHADOWS_CUTOFF_DISTANCE`, in metres along the view.
 const CUTOFF: f32 = 300.0;
@@ -231,13 +232,14 @@ impl Shadow {
         self.target = (size > 0).then_some(map);
     }
 
-    /// Fits the map to this frame's camera and writes the light uniform;
-    /// the planes of the box casters must touch, `None` when there is no
-    /// shadow to draw.
+    /// Fits the map to this frame's camera and writes the light uniform,
+    /// with the map's fog when `fog`; the planes of the box casters must
+    /// touch, `None` when there is no shadow to draw.
     pub fn prepare(
         &self,
         queue: &wgpu::Queue,
         light: &Light,
+        fog: bool,
         eye: &Eye,
         bounds: Option<&Bounds>,
     ) -> Option<[[f32; 4]; 6]> {
@@ -278,6 +280,11 @@ impl Shadow {
             if fitted.is_some() { 1.0 } else { 0.0 },
             0.0,
         ]);
+        let [r, g, b] = light.fog_color;
+        uniform.extend_from_slice(&[r, g, b, 0.0]);
+        // CLightEnv::Bind: a max of 1 keeps every fragment clear.
+        let fog_max = if fog { light.fog_max } else { 1.0 };
+        uniform.extend_from_slice(&[light.fog_factor, fog_max, 0.0, 0.0]);
         let bytes: Vec<u8> = uniform
             .iter()
             .flat_map(|value| value.to_le_bytes())

@@ -140,8 +140,9 @@ impl Ground {
             return Err("unknown terrain version");
         }
         let tiles = cursor.u32()?;
-        // Water level, shallow depth, circular and the light's eight f32.
-        cursor.take(9 + 8 * 4)?;
+        // Water level, shallow depth, circular, the light's seventeen f32
+        // and the post effect.
+        cursor.take(9 + 17 * 4 + 1)?;
         for _ in 0..cursor.u32()? {
             cursor.take(4)?;
             let length = cursor.take(2)?;

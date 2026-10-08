@@ -46,11 +46,28 @@ struct Light {
     forward: vec4<f32>,
     // Depth bias for models, for the ground, then 1 when shadows are on.
     shadow: vec4<f32>,
+    // CLightEnv::m_FogColor.
+    fog_color: vec4<f32>,
+    // The engine's fogParams: factor, then max, which is 1 with fog off.
+    fog: vec4<f32>,
 }
 
 @group(3) @binding(0) var<uniform> light: Light;
 @group(3) @binding(1) var shadow_map: texture_depth_2d;
 @group(3) @binding(2) var shadow_sampler: sampler_comparison;
+
+// common/fog.h applyFog. Its depth, gl_FragCoord.z / gl_FragCoord.w, is
+// the GL window depth times clip w under the engine's default planes (2
+// and 4096 m), rebuilt here from the view depth so a map's fog factor
+// reaches as far as in the game.
+fn apply_fog(color: vec3<f32>, world: vec3<f32>) -> vec3<f32> {
+    let w = dot(world - light.eye.xyz, light.forward.xyz);
+    let z = 4096.0 * (w - 2.0) / (4096.0 - 2.0);
+    let density = light.fog.x;
+    let max_fog = light.fog.y;
+    let factor = exp2(-density * density * z * z * 1.442695) * (1.0 - max_fog) + max_fog;
+    return mix(light.fog_color.rgb, color, clamp(factor, 0.0, 1.0));
+}
 
 // shadows_fragment.h getShadowWithFade with its PCF: four bilinear
 // comparisons weighted into a tent over 3x3 texels, faded out over the
@@ -268,7 +285,7 @@ fn fs_model(in: ModelVaryings) -> @location(0) vec4<f32> {
     // calculateShading.
     let shadow = shadow_at(in.world, light.shadow.x);
     let color = (diffuse * sun_diffuse + specular) * shadow + diffuse * light.ambient.rgb * ao;
-    return vec4<f32>(color, 1.0);
+    return vec4<f32>(apply_fog(color, in.world), 1.0);
 }
 
 // The shadow map's depth pass: only the alpha test, so leaves cast

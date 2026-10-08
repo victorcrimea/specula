@@ -1,8 +1,8 @@
-//! Decoder for specula-server's terrain resource, format v2 (layout in
+//! Decoder for specula-server's terrain resource, format v3 (layout in
 //! `specula-server/src/terrain.rs`), and the minimap-style picture made
 //! from it.
 
-pub const VERSION: u8 = 2;
+pub const VERSION: u8 = 3;
 /// Engine heights are u16 in these units (HEIGHT_UNITS_PER_METRE).
 const HEIGHT_UNITS_PER_METRE: f32 = 92.0;
 const NO_TEXTURE: u16 = 0xFFFF;
@@ -33,29 +33,62 @@ pub struct TerrainImage {
     pub priorities: Vec<u32>,
 }
 
-/// The map's `CLightEnv`.
+/// The map's `CLightEnv`, and its post effect.
 #[derive(Clone, Copy)]
 pub struct Light {
     /// Unit vector towards the sun.
     pub sun: [f32; 3],
     pub sun_color: [f32; 3],
     pub ambient_color: [f32; 3],
+    pub fog_color: [f32; 3],
+    pub fog_factor: f32,
+    pub fog_max: f32,
+    pub brightness: f32,
+    pub contrast: f32,
+    pub saturation: f32,
+    pub bloom: f32,
+    pub effect: PostEffect,
+}
+
+/// The map's post effect, `shaders/effects/postproc/<name>.xml`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum PostEffect {
+    Default,
+    Hdr,
+    Dof,
 }
 
 impl Light {
-    /// `CLightEnv::CalculateSunDirection`, negated: the engine's points
-    /// from the sun.
-    fn new(elevation: f32, rotation: f32, sun_color: [f32; 3], ambient_color: [f32; 3]) -> Self {
-        let y = -elevation.sin();
-        let scale = 1.0 + y;
-        let dir = [scale * rotation.sin(), y, scale * rotation.cos()];
-        let length = dir.iter().map(|v| v * v).sum::<f32>().sqrt();
+    /// `CLightEnv`'s defaults, with the given sun.
+    pub fn plain(sun: [f32; 3], sun_color: [f32; 3], ambient_color: [f32; 3]) -> Self {
         Light {
-            sun: dir.map(|v| -v / length),
+            sun,
             sun_color,
             ambient_color,
+            fog_color: [
+                0xCC as f32 / 255.0,
+                0xCC as f32 / 255.0,
+                0xE5 as f32 / 255.0,
+            ],
+            fog_factor: 0.0,
+            fog_max: 0.5,
+            brightness: 0.0,
+            contrast: 1.0,
+            saturation: 0.99,
+            bloom: 0.1999,
+            effect: PostEffect::Default,
         }
     }
+}
+
+/// `CLightEnv::CalculateSunDirection`, negated: the engine's points from
+/// the sun.
+fn sun_direction(elevation: f32, rotation: f32) -> [f32; 3] {
+    let y = -elevation.sin();
+    let scale = 1.0 + y;
+    let dir = [scale * rotation.sin(), y, scale * rotation.cos()];
+    let length = dir.iter().map(|v| v * v).sum::<f32>().sqrt();
+    dir.map(|v| -v / length)
 }
 
 /// `TERRAIN_TILE_SIZE`, in metres.
@@ -160,7 +193,7 @@ pub fn build(resource: &[u8]) -> Result<TerrainImage, &'static str> {
     let water_level = f32::from_bits(cursor.u32()?);
     let shallow_depth = f32::from_bits(cursor.u32()?);
     let circular = cursor.u8()? != 0;
-    let mut floats = [0.0; 8];
+    let mut floats = [0.0; 17];
     for value in &mut floats {
         *value = f32::from_bits(cursor.u32()?);
     }
@@ -173,13 +206,33 @@ pub fn build(resource: &[u8]) -> Result<TerrainImage, &'static str> {
         ambient_r,
         ambient_g,
         ambient_b,
+        fog_r,
+        fog_g,
+        fog_b,
+        fog_factor,
+        fog_max,
+        brightness,
+        contrast,
+        saturation,
+        bloom,
     ] = floats;
-    let light = Light::new(
-        elevation,
-        rotation,
-        [sun_r, sun_g, sun_b],
-        [ambient_r, ambient_g, ambient_b],
-    );
+    let light = Light {
+        sun: sun_direction(elevation, rotation),
+        sun_color: [sun_r, sun_g, sun_b],
+        ambient_color: [ambient_r, ambient_g, ambient_b],
+        fog_color: [fog_r, fog_g, fog_b],
+        fog_factor,
+        fog_max,
+        brightness,
+        contrast,
+        saturation,
+        bloom,
+        effect: match cursor.u8()? {
+            1 => PostEffect::Hdr,
+            2 => PostEffect::Dof,
+            _ => PostEffect::Default,
+        },
+    };
     let palette_size = cursor.u32()? as usize;
     let mut palette = Vec::with_capacity(palette_size);
     let mut names = Vec::with_capacity(palette_size);
