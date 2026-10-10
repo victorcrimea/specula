@@ -267,6 +267,7 @@ fn run() -> Result<(), String> {
         music: Vec::new(),
         ambient: None,
         civs: Vec::new(),
+        sinking: Vec::new(),
     };
     let mut skipped = Vec::new();
     for name in &names {
@@ -444,8 +445,18 @@ fn write_sounds(mod_dir: &Path, index: &mut Index, output: &mut Output) -> Resul
 
 /// Each civ's actors and sound groups into `index`, those that were baked.
 fn add_civs(mod_dir: &Path, index: &mut Index) {
-    let (civs, errors) = templates::load(mod_dir);
-    println!("{} civs, {} templates unresolved", civs.len(), errors.len());
+    let templates::Templates {
+        civs,
+        sinking,
+        errors,
+    } = templates::load(mod_dir);
+    println!(
+        "{} civs, {} templates that decay, {} templates unresolved",
+        civs.len(),
+        sinking.len(),
+        errors.len()
+    );
+    index.sinking = sinking;
     for error in &errors {
         println!("  {error}");
     }

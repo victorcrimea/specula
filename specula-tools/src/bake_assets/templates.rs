@@ -14,6 +14,8 @@ use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
 
+use specula_assets::files::Sinking;
+
 const TEMPLATE_ROOT: &str = "simulation/templates";
 const CIV_DIR: &str = "simulation/data/civs";
 /// `LoadTemplateFile`'s guard against inheritance loops.
@@ -198,9 +200,17 @@ fn element_text(element: roxmltree::Node) -> String {
     text.trim().to_string()
 }
 
-/// Civ code -> what its templates use, and the templates that could not
-/// be resolved.
-pub fn load(mod_dir: &Path) -> (BTreeMap<String, CivRefs>, Vec<String>) {
+/// What the templates give the bake.
+pub struct Templates {
+    /// Civ code -> what its templates use.
+    pub civs: BTreeMap<String, CivRefs>,
+    /// Every template's `Decay`.
+    pub sinking: Vec<(String, Sinking)>,
+    /// The templates that could not be resolved.
+    pub errors: Vec<String>,
+}
+
+pub fn load(mod_dir: &Path) -> Templates {
     let mut errors = Vec::new();
     let mut civs: BTreeMap<String, CivRefs> = BTreeMap::new();
     match fs::read_dir(mod_dir.join(CIV_DIR)) {
@@ -225,6 +235,7 @@ pub fn load(mod_dir: &Path) -> (BTreeMap<String, CivRefs>, Vec<String>) {
     let mut names = Vec::new();
     list_templates(&loader.root.clone(), "", &mut names);
     names.sort();
+    let mut sinking = Vec::new();
     for name in &names {
         let template = match loader.resolve(name) {
             Ok(template) => template,
@@ -233,6 +244,26 @@ pub fn load(mod_dir: &Path) -> (BTreeMap<String, CivRefs>, Vec<String>) {
                 continue;
             }
         };
+        if let Some(decay) = template.get("Decay") {
+            // `CParamNode::ToFixed` and `ToBool`: 0 and false when absent.
+            let number = |name: &str| {
+                decay
+                    .text(name)
+                    .and_then(|value| value.trim().parse().ok())
+                    .unwrap_or(0.0)
+            };
+            sinking.push((
+                name.clone(),
+                Sinking {
+                    delay: number("DelayTime"),
+                    rate: number("SinkRate"),
+                    acceleration: number("SinkAccel"),
+                    ship: decay
+                        .text("SinkingAnim")
+                        .is_some_and(|value| value.trim() == "true"),
+                },
+            ));
+        }
         let Some(refs) = template
             .text("Identity/Civ")
             .and_then(|civ| civs.get_mut(civ))
@@ -250,7 +281,11 @@ pub fn load(mod_dir: &Path) -> (BTreeMap<String, CivRefs>, Vec<String>) {
     }
     errors.sort();
     errors.dedup();
-    (civs, errors)
+    Templates {
+        civs,
+        sinking,
+        errors,
+    }
 }
 
 /// The template's actors with `{civ}` and `{phenotype}` filled as

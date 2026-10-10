@@ -25,6 +25,7 @@ use specula_assets::files::Manifest;
 use specula_assets::files::Mesh;
 use specula_assets::files::MeshDetail;
 use specula_assets::files::MusicKind;
+use specula_assets::files::Sinking;
 use specula_assets::files::Skeleton;
 use specula_assets::files::SoundGroup;
 use specula_assets::files::TEXTURE_TIER_SIDES;
@@ -120,6 +121,8 @@ pub struct Store {
     ambient: Option<FileRef>,
     /// Civ code -> what its templates can show and play.
     civs: HashMap<String, CivAssets>,
+    /// Template name -> how its corpse or rubble sinks.
+    sinking: HashMap<String, Sinking>,
     index_failed: bool,
     /// The index's path, `assets/index-<hash>.bin`, once loaded.
     index_name: Option<String>,
@@ -315,6 +318,13 @@ impl Store {
     pub fn music(&self, civ: &str) -> Option<&[(MusicKind, FileRef)]> {
         self.index.as_ref()?;
         Some(self.music.get(civ).map_or(&[], Vec::as_slice))
+    }
+
+    /// How a local entity of `template` sinks, its filters left out;
+    /// `None` before the index or for a template without `Decay`.
+    pub fn sinking(&self, template: &str) -> Option<Sinking> {
+        let name = template.rsplit('|').next().unwrap_or(template);
+        self.sinking.get(name).copied()
     }
 
     /// The session's ambient loop, `None` before the index or without one.
@@ -680,6 +690,7 @@ async fn load_index(store: Rc<RefCell<Store>>) {
                 store.music = index.music.into_iter().collect();
                 store.ambient = index.ambient;
                 store.civs = index.civs.into_iter().collect();
+                store.sinking = index.sinking.into_iter().collect();
                 store.index_name = Some(name.clone());
             }
             crate::stored::prune(&name).await;

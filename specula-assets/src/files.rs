@@ -1,4 +1,4 @@
-//! The split asset files, format v9. Little-endian; every file starts with
+//! The split asset files, format v10. Little-endian; every file starts with
 //! a 4-byte magic and a u8 version. Strings are u16 length and UTF-8,
 //! counts are u32. A file is served as `assets/<kind>-<16 hex>.bin`, the
 //! hex being a hash of its content, so a cached copy is never stale and
@@ -34,7 +34,10 @@
 //!   the session's ambient loop. Then count x {civ code, count x actor
 //!   path, count x sound group path}: the actors and sound groups the
 //!   civ's templates can show or play, keys of the lists above, so a
-//!   viewer can fetch a match's assets ahead of time.
+//!   viewer can fetch a match's assets ahead of time. Then count x
+//!   {template name, f32 delay in seconds, f32 sink rate in m/s, f32 sink
+//!   acceleration in m/s^2, u8 1 when it sinks like a ship}: every
+//!   template's `Decay`, how its corpse or rubble sinks and goes.
 //! - actor manifest "SPCA": count x object. Object 0 is the actor, the rest
 //!   every actor it can prop, transitively, so one fetch resolves an
 //!   entity. An object is {name, count x definition, count x {u8 quality,
@@ -100,7 +103,7 @@
 use crate::half::f16_bits;
 use crate::half::f16_to_f32;
 
-pub const VERSION: u8 = 9;
+pub const VERSION: u8 = 10;
 /// The largest side of each texture detail tier, which a viewer's
 /// texture quality picks from: low, medium and the whole chain as the
 /// engine uploads it at its default quality.
@@ -233,6 +236,20 @@ pub struct Index {
     pub music: Vec<(String, Vec<(MusicKind, FileRef)>)>,
     pub ambient: Option<FileRef>,
     pub civs: Vec<(String, CivAssets)>,
+    /// By template name, without filters.
+    pub sinking: Vec<(String, Sinking)>,
+}
+
+/// A template's `Decay`, as `CCmpDecay` sinks a local entity of it.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct Sinking {
+    /// Seconds before it starts to sink.
+    pub delay: f32,
+    /// m/s, and m/s^2.
+    pub rate: f32,
+    pub acceleration: f32,
+    /// `SinkingAnim`: sinks tilting, as a ship.
+    pub ship: bool,
 }
 
 /// What a civ's templates can show and play, as keys of the index's
@@ -549,6 +566,12 @@ impl Index {
                 out.string(group);
             }
         }
+        out.count(self.sinking.len());
+        for (template, sinking) in &self.sinking {
+            out.string(template);
+            out.f32s(&[sinking.delay, sinking.rate, sinking.acceleration]);
+            out.u8(u8::from(sinking.ship));
+        }
         out.0
     }
 
@@ -636,6 +659,22 @@ impl Index {
                 ))
             })
             .collect::<Result<_, &'static str>>()?;
+        let sinking = (0..input.count()?)
+            .map(|_| {
+                let template = input.string()?;
+                let [delay, rate, acceleration] = input.f32s()?;
+                let ship = input.u8()? != 0;
+                Ok((
+                    template,
+                    Sinking {
+                        delay,
+                        rate,
+                        acceleration,
+                        ship,
+                    },
+                ))
+            })
+            .collect::<Result<_, &'static str>>()?;
         input.finish()?;
         Ok(Index {
             actors,
@@ -649,6 +688,7 @@ impl Index {
             music,
             ambient,
             civs,
+            sinking,
         })
     }
 }

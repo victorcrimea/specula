@@ -28,6 +28,7 @@ use specula_assets::files::FileRef;
 use specula_assets::files::Mesh;
 use specula_assets::files::NO_BONE;
 use specula_assets::files::PropPoint;
+use specula_assets::files::Sinking;
 use specula_assets::files::TEXTURE_TIER_SIDES;
 use specula_assets::files::TerrainTexture;
 use specula_assets::files::Texture;
@@ -373,6 +374,7 @@ struct Entities {
     match_id: u64,
     map_size: u32,
     dots: Vec<(u32, Dot)>,
+    templates: Vec<String>,
     strings: Vec<String>,
     variant_sets: Vec<VariantSet>,
     variable_sets: Vec<VariableSet>,
@@ -1361,22 +1363,55 @@ impl Field {
         let height = root_mesh.max[1] - root_mesh.min[1];
         // CCmpPosition::GetConstructionProgressOffset, with the root
         // mesh's height for the selection box's.
-        let sink = if dot.construction == 0 {
+        let mut sink = if dot.construction == 0 {
             0.0
         } else {
             (f32::from(dot.construction) / 255.0 - 1.0) * height
         };
-        transform.translate(Vec3::new(x, y + sink, z));
 
         // The ground under the entity, in the root's space.
-        let floor = self
-            .ground
-            .as_ref()
-            .map_or(f32::MIN, |ground| ground.image.ground(x, z) - (y + sink));
+        let ground = self.ground.as_ref().map(|ground| ground.image.ground(x, z));
+        let floor = ground.map_or(f32::MIN, |ground| ground - (y + sink));
         let (low, high) = self.tree_bounds(key, &model, floor).unwrap_or((
             Vec3::new(root_mesh.min[0], root_mesh.min[1], root_mesh.min[2]),
             Vec3::new(root_mesh.max[0], root_mesh.max[1], root_mesh.max[2]),
         ));
+        if let Some(sinking) = self.sinking(dot) {
+            let since = self.entities.turn.saturating_sub(dot.animation_turn) as f32 + progress;
+            let Some((depth, tilt)) = decay(
+                &sinking,
+                since * TURN_MS as f32 / 1000.0,
+                high.y - low.y,
+                ground.map_or(0.0, |ground| y - ground),
+                [x, z],
+            ) else {
+                return;
+            };
+            sink -= depth;
+            // CCmpPosition::GetInterpolatedTransform: the x and z
+            // rotations, then the turn.
+            if let Some([rot_x, rot_z]) = tilt {
+                transform = Mat4::from_quat(Quat {
+                    x: (rot_x / 2.0).sin(),
+                    y: 0.0,
+                    z: 0.0,
+                    w: (rot_x / 2.0).cos(),
+                });
+                transform.rotate_by(Quat {
+                    x: 0.0,
+                    y: 0.0,
+                    z: (rot_z / 2.0).sin(),
+                    w: (rot_z / 2.0).cos(),
+                });
+                transform.rotate_by(Quat {
+                    x: 0.0,
+                    y: half.sin(),
+                    z: 0.0,
+                    w: half.cos(),
+                });
+            }
+        }
+        transform.translate(Vec3::new(x, y + sink, z));
         // Around the entity's position, holding the bounds at any turn.
         let reach = [low.x, high.x]
             .into_iter()
@@ -1421,6 +1456,16 @@ impl Field {
         if self.placed > placed {
             self.stats.levels[level.min(COARSE_LEVEL)] += 1;
         }
+    }
+
+    /// How a corpse or rubble sinks: the `Decay` of the template of a
+    /// local entity `Health.js` leaves, whose filters make it active.
+    fn sinking(&self, dot: &Dot) -> Option<Sinking> {
+        let template = self.entities.templates.get(dot.template as usize)?;
+        if !(template.starts_with("corpse|") || template.starts_with("decay|")) {
+            return None;
+        }
+        self.store.borrow().sinking(template)
     }
 
     /// How `place_model` draws the entity at `level`.
@@ -3156,6 +3201,7 @@ impl View for Field {
             self.shot_models.clear();
             self.impact_models.clear();
             entities.match_id = scene.match_id;
+            entities.templates.clear();
             entities.strings.clear();
             entities.variant_sets.clear();
             entities.variable_sets.clear();
@@ -3163,6 +3209,13 @@ impl View for Field {
             self.camera.borrow_mut().placed = false;
         }
         // The tables only grow within a match, so only the tail is new.
+        if scene.templates.len() < entities.templates.len() {
+            entities.templates.clear();
+        }
+        let known = entities.templates.len();
+        entities
+            .templates
+            .extend(scene.templates[known..].iter().cloned());
         if scene.strings.len() < entities.strings.len() {
             entities.strings.clear();
         }
@@ -4509,6 +4562,44 @@ pub fn write_levels(
             },
         );
     }
+}
+
+/// `CCmpDecay::Interpolate`: how far a corpse or rubble has sunk `time`
+/// seconds after it appeared, and its x and z rotations when it sinks like
+/// a ship; `None` once it is under, where the engine destroys it.
+/// `height` is its model's, `above` how far it stands over the ground,
+/// `at` its x and z. The engine sinks at random frames, which only makes
+/// its steps uneven; this sinks every frame.
+fn decay(
+    sinking: &Sinking,
+    time: f32,
+    height: f32,
+    above: f32,
+    at: [f32; 2],
+) -> Option<(f32, Option<[f32; 2]>)> {
+    if time < sinking.delay {
+        return Some((0.0, None));
+    }
+    let mut total = height.max(1.0) + above.max(0.0);
+    let t = time - sinking.delay;
+    let (depth, tilt) = if sinking.ship {
+        // Further, as it turns over.
+        total += 10.0;
+        let tilt_time = t.min(5.0);
+        let tilt_sink = tilt_time * tilt_time / 5.0;
+        // The engine's stand-in for randomness, from the position.
+        let angle_x = ((at[0].round() as i32) % 30 - 15) as f32 / 15.0;
+        let angle_z = ((at[1].round() as i32) % 30) as f32 / 40.0;
+        let depth = sinking.rate * ((t - 1.0).exp() - 0.548_811_6)
+            + (sinking.acceleration * (t - 4.0).exp() - 0.018_315_64);
+        (
+            depth.max(0.0),
+            Some([angle_x * tilt_sink / 5.0, angle_z * tilt_time / 3.0]),
+        )
+    } else {
+        (sinking.rate * t + sinking.acceleration * t * t, None)
+    };
+    (depth <= total).then_some((depth, tilt))
 }
 
 /// Where the camera starts: the first player's civic centre, else the
