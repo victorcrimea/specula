@@ -107,6 +107,10 @@ body:not(.debug) #stats, body:not(.debug) #errors { display: none; }
 #settings .pane[hidden] { display: none; }
 #settings .pane label { display: flex; align-items: center;
   justify-content: space-between; gap: 8px; }
+#settings .pane h3 { margin: 6px 0 0; font-size: 11px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 0.05em; color: #8fa3b0; }
+#settings .presets { display: flex; gap: 6px; }
+#settings .presets button { flex: 1; }
 @media (prefers-reduced-motion: reduce) { #settings, #settings.open { transition: none; } }
 </style>
 </head>
@@ -115,7 +119,6 @@ body:not(.debug) #stats, body:not(.debug) #errors { display: none; }
 <div id="controls">
 <button id="settings-open" type="button" aria-expanded="false" aria-controls="settings">Graphics</button>
 <button id="diplomacy" type="button" aria-pressed="false">Diplomacy colours</button>
-<button id="projectiles" type="button" aria-pressed="true" title="Projectiles (P)">Projectiles on</button>
 <select id="perspective" aria-label="Perspective">
 <option value="0">Observer</option>
 </select>
@@ -159,15 +162,11 @@ body:not(.debug) #stats, body:not(.debug) #errors { display: none; }
 <button type="button" role="tab" id="tab-quality" aria-controls="pane-quality" aria-selected="true">Quality</button>
 </div>
 <div class="pane" role="tabpanel" id="pane-quality" aria-labelledby="tab-quality">
-<label>Shadows <select id="shadows">
-<option value="0">Off</option>
-<option value="1024">Low</option>
-<option value="2048">Medium</option>
-<option value="4096">High</option>
-<option value="8192">Very High</option>
-</select></label>
-<label>Cutoff distance <span><input id="shadowscutoff" type="range" min="100" max="1500" step="10" value="300">
-<span id="shadowscutoff-value">300 m</span></span></label>
+<div class="presets">
+<button id="preset-min" type="button">Min</button>
+<button id="preset-max" type="button">Max</button>
+</div>
+<h3>Textures</h3>
 <label>Textures <select id="textures">
 <option value="1">Low</option>
 <option value="2">Medium</option>
@@ -181,10 +180,17 @@ body:not(.debug) #stats, body:not(.debug) #errors { display: none; }
 <option value="0">Off</option>
 <option value="1">On</option>
 </select></label>
-<label>Fog <select id="fog">
+<h3>Shadows</h3>
+<label>Shadows <select id="shadows">
 <option value="0">Off</option>
-<option value="1">On</option>
+<option value="1024">Low</option>
+<option value="2048">Medium</option>
+<option value="4096">High</option>
+<option value="8192">Very High</option>
 </select></label>
+<label>Cutoff distance <span><input id="shadowscutoff" type="range" min="100" max="1500" step="10" value="300">
+<span id="shadowscutoff-value">300 m</span></span></label>
+<h3>Water</h3>
 <label>Water effects <select id="water">
 <option value="0">Off</option>
 <option value="1">On</option>
@@ -205,14 +211,25 @@ body:not(.debug) #stats, body:not(.debug) #errors { display: none; }
 <option value="0">Off</option>
 <option value="1">On</option>
 </select></label>
+<h3>Scene</h3>
 <label>Sky <select id="sky">
 <option value="0">Off</option>
 <option value="1">On</option>
 </select></label>
+<label>Fog <select id="fog">
+<option value="0">Off</option>
+<option value="1">On</option>
+</select></label>
+<h3>Effects</h3>
 <label>Particles <select id="particles">
 <option value="0">Off</option>
 <option value="1">On</option>
 </select></label>
+<label>Projectiles <select id="projectiles">
+<option value="0">Off</option>
+<option value="1" selected>On</option>
+</select></label>
+<h3>Post-processing</h3>
 <label>Post-processing <select id="postproc">
 <option value="0">Off</option>
 <option value="1">On</option>
@@ -315,6 +332,31 @@ settings.</p>
       }
     });
   }
+  // Each control's own change handler applies and saves it, so a preset
+  // only sets values. Document order puts a parent before its dependents,
+  // so Max enables them before it reaches them. Projectiles show what
+  // happens rather than how well it is drawn, so no preset touches them.
+  // Fog hides the far side of the map, which a maximalist wants to see.
+  const applyPreset = (max) => {
+    const pane = document.getElementById("pane-quality");
+    for (const control of pane.querySelectorAll("select, input[type=range]")) {
+      if (control.id === "projectiles") continue;
+      if (control.id === "fog") {
+        control.value = "0";
+      } else if (control.tagName === "SELECT") {
+        const options = [...control.options].filter((option) => !option.disabled);
+        const option = max ? options[options.length - 1] : control.options[0];
+        if (!option) continue;
+        control.value = option.value;
+      } else {
+        control.value = max ? control.max : control.min;
+        control.dispatchEvent(new Event("input"));
+      }
+      control.dispatchEvent(new Event("change"));
+    }
+  };
+  document.getElementById("preset-min").addEventListener("click", () => applyPreset(false));
+  document.getElementById("preset-max").addEventListener("click", () => applyPreset(true));
 })();
 </script>
 <script type="module">

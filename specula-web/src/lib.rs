@@ -34,12 +34,10 @@ use std::rc::Rc;
 use specula_assets::files::MusicKind;
 use specula_assets::files::TEXTURE_TIER_SIDES;
 use wasm_bindgen::JsCast;
-use wasm_bindgen::JsValue;
 use wasm_bindgen::closure::Closure;
 use wasm_bindgen::prelude::wasm_bindgen;
 use wasm_bindgen_futures::JsFuture;
 use web_sys::Document;
-use web_sys::Event;
 use web_sys::HtmlButtonElement;
 use web_sys::HtmlCanvasElement;
 use web_sys::HtmlElement;
@@ -117,6 +115,7 @@ const FOG_SETTINGS_KEY: &str = "specula.fog";
 const WATER_SETTINGS_KEY: &str = "specula.water";
 const SKY_SETTINGS_KEY: &str = "specula.sky";
 const PARTICLES_SETTINGS_KEY: &str = "specula.particles";
+const PROJECTILES_SETTINGS_KEY: &str = "specula.projectiles";
 const REFRACTION_SETTINGS_KEY: &str = "specula.waterrefraction";
 const REAL_DEPTH_SETTINGS_KEY: &str = "specula.waterrealdepth";
 const REFLECTION_SETTINGS_KEY: &str = "specula.waterreflection";
@@ -342,9 +341,6 @@ struct App {
     palette: Vec<u32>,
     diplomacy_button: HtmlButtonElement,
     perspective_select: HtmlSelectElement,
-    projectiles: bool,
-    /// Only the 3D view draws projectiles.
-    projectiles_button: Option<HtmlButtonElement>,
     /// The players the perspective list was built for, gaia excluded.
     player_names: Vec<String>,
     worker: Worker,
@@ -634,22 +630,6 @@ impl App {
             "false"
         };
         let _ = self.diplomacy_button.set_attribute("aria-pressed", pressed);
-        if let Some(button) = &self.projectiles_button {
-            let pressed = if self.projectiles { "true" } else { "false" };
-            let _ = button.set_attribute("aria-pressed", pressed);
-            button.set_text_content(Some(if self.projectiles {
-                "Projectiles on"
-            } else {
-                "Projectiles off"
-            }));
-        }
-    }
-
-    fn toggle_projectiles(&mut self) {
-        self.projectiles = !self.projectiles;
-        self.renderer.set_projectiles(self.projectiles);
-        self.show_controls();
-        self.dirty = true;
     }
 
     fn command(&self, command: u8, value: f64) {
@@ -789,10 +769,6 @@ async fn run(page: Page, glue_url: String, wasm_url: String) -> Result<(), Strin
     };
     let diplomacy_button = element(&document, "diplomacy")?;
     let perspective_select = element(&document, "perspective")?;
-    let projectiles_button = match page {
-        Page::Map => None,
-        Page::Observer => Some(element(&document, "projectiles")?),
-    };
     let sound = match (page, renderer.asset_store()) {
         (Page::Observer, Some(store)) => Some(SoundControls {
             audio: Audio::new(store, load_sound_settings()),
@@ -838,8 +814,6 @@ async fn run(page: Page, glue_url: String, wasm_url: String) -> Result<(), Strin
         palette: Vec::new(),
         diplomacy_button,
         perspective_select,
-        projectiles: true,
-        projectiles_button,
         player_names: Vec::new(),
         worker,
         clock: element(&document, "clock")?,
@@ -869,7 +843,6 @@ async fn run(page: Page, glue_url: String, wasm_url: String) -> Result<(), Strin
         warmup,
     }));
     wire_controls(&app);
-    wire_projectiles(&app, &window);
     if page == Page::Observer {
         let shadows: HtmlSelectElement = element(&document, "shadows")?;
         wire_shadows(&app, shadows.clone());
@@ -967,6 +940,7 @@ async fn run(page: Page, glue_url: String, wasm_url: String) -> Result<(), Strin
             |view, on| view.set_particles(on),
             Vec::new(),
         );
+        wire_projectiles(&app, element(&document, "projectiles")?);
     }
     wire_sound(&app, &window);
     wire_warmup(&app);
@@ -1020,48 +994,33 @@ fn wire_controls(app: &Rc<RefCell<App>>) {
 }
 
 /// The button and the P key, which the game itself leaves free.
-fn wire_projectiles(app: &Rc<RefCell<App>>, window: &web_sys::Window) {
-    let Some(button) = app.borrow().projectiles_button.clone() else {
-        return;
-    };
-    let target = Rc::clone(app);
-    let on_click = Closure::<dyn FnMut()>::new(move || {
-        target.borrow_mut().toggle_projectiles();
-    });
-    button.set_onclick(Some(on_click.as_ref().unchecked_ref()));
-    // The controls live as long as the page, so their handlers do too.
-    on_click.forget();
+/// The projectiles list, kept across visits; on unless turned off, as the
+/// game draws them.
+fn wire_projectiles(app: &Rc<RefCell<App>>, select: HtmlSelectElement) {
+    let saved = web_sys::window()
+        .and_then(|window| window.local_storage().ok().flatten())
+        .and_then(|storage| storage.get_item(PROJECTILES_SETTINGS_KEY).ok().flatten())
+        .is_none_or(|text| text != "0");
+    select.set_value(if saved { "1" } else { "0" });
+    app.borrow_mut().renderer.set_projectiles(saved);
 
     let target = Rc::clone(app);
-    let on_key = Closure::<dyn FnMut(Event)>::new(move |event: Event| {
-        let text = |object: &JsValue, name: &str| {
-            js_sys::Reflect::get(object, &name.into())
-                .ok()
-                .and_then(|value| value.as_string())
-                .unwrap_or_default()
-        };
-        let flag = |name: &str| {
-            js_sys::Reflect::get(&event, &name.into()).is_ok_and(|value| value.is_truthy())
-        };
-        if text(&event, "code") != "KeyP" || flag("repeat") {
-            return;
+    let list = select.clone();
+    let on_change = Closure::<dyn FnMut()>::new(move || {
+        let on = list.value() == "1";
+        // Best effort: without storage the choice lasts only this visit.
+        if let Some(storage) =
+            web_sys::window().and_then(|window| window.local_storage().ok().flatten())
+        {
+            let _ = storage.set_item(PROJECTILES_SETTINGS_KEY, if on { "1" } else { "0" });
         }
-        // As the camera keys: not while a control has the focus, nor as
-        // part of a browser shortcut.
-        let control = event.target().is_some_and(|element| {
-            matches!(
-                text(&element, "tagName").as_str(),
-                "INPUT" | "SELECT" | "TEXTAREA"
-            )
-        });
-        if control || flag("ctrlKey") || flag("metaKey") || flag("altKey") {
-            return;
-        }
-        event.prevent_default();
-        target.borrow_mut().toggle_projectiles();
+        let app = &mut *target.borrow_mut();
+        app.renderer.set_projectiles(on);
+        app.dirty = true;
     });
-    let _ = window.add_event_listener_with_callback("keydown", on_key.as_ref().unchecked_ref());
-    on_key.forget();
+    select.set_onchange(Some(on_change.as_ref().unchecked_ref()));
+    // The controls live as long as the page, so their handlers do too.
+    on_change.forget();
 }
 
 /// The texture quality list, kept across visits. A device that is not
