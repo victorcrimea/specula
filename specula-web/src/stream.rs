@@ -1,5 +1,5 @@
 //! Decoder for specula-server's viewer stream and match segments, wire
-//! format v12; the layout is documented in `specula-server/src/view.rs`.
+//! format v13; the layout is documented in `specula-server/src/view.rs`.
 
 use std::collections::BTreeMap;
 use std::rc::Rc;
@@ -18,6 +18,7 @@ pub const ENVELOPE_ENDED: u8 = 4;
 const MESSAGE_KEYFRAME: u8 = 1;
 const MESSAGE_DELTA: u8 = 2;
 const MESSAGE_ENDED: u8 = 3;
+const WIRE_VERSION: u8 = 13;
 const CHANGED_POSITION: u64 = 1;
 const CHANGED_COLOR: u64 = 2;
 const CHANGED_ICON: u64 = 4;
@@ -477,6 +478,9 @@ impl Scene {
 
     fn apply_keyframe(&mut self, cursor: &mut Cursor) -> Result<(), &'static str> {
         self.turn = cursor.varint_u32()?;
+        if cursor.u8()? != WIRE_VERSION {
+            return Err("unknown wire version, reload the page");
+        }
         self.match_id = cursor.u64()?;
         self.game_speed = f32::from_bits(cursor.u32()?);
         self.first_turn = cursor.varint_u32()?;
@@ -797,6 +801,7 @@ impl Scene {
         let mut out = Writer::default();
         out.u8(MESSAGE_KEYFRAME);
         out.varint(u64::from(self.turn));
+        out.u8(WIRE_VERSION);
         out.u64(self.match_id);
         out.u32(self.game_speed.to_bits());
         out.varint(u64::from(self.first_turn));
@@ -1127,8 +1132,10 @@ pub fn message_turn(message: &[u8]) -> Result<u32, &'static str> {
 pub fn keyframe_terrain(message: &[u8]) -> Result<u64, &'static str> {
     let (_, body) = message.split_first().ok_or("empty message")?;
     let mut cursor = Cursor(body);
-    // Turn, match id, game speed, first turn, turns per segment, map size.
+    // Turn, wire version, match id, game speed, first turn, turns per
+    // segment, map size.
     cursor.varint()?;
+    cursor.u8()?;
     cursor.u64()?;
     cursor.u32()?;
     cursor.varint()?;

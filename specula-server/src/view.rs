@@ -1,8 +1,9 @@
-//! The viewer stream, wire format v12: messages for each keyframe, turn or
+//! The viewer stream, wire format v13: messages for each keyframe, turn or
 //! match end, varints and zigzag as in `wire.rs`, positions and heights in
 //! 1/16 m, carried brotli-compressed as below.
 //!
-//! - kind 1 keyframe: varint turn, u64 match id, f32 game speed (the
+//! - kind 1 keyframe: varint turn, u8 wire version (13; a viewer stops
+//!   at any other, since nothing after it would read right), u64 match id, f32 game speed (the
 //!   match's sim rate), varint first turn of the match's history, varint
 //!   turns per segment, varint map size in metres, u64 terrain id (0: none
 //!   yet, else fetch `/terrain/<id as 16 hex digits>`), icon table, player
@@ -268,6 +269,8 @@ use crate::wire::quantize_position;
 const MESSAGE_KEYFRAME: u8 = 1;
 const MESSAGE_DELTA: u8 = 2;
 const MESSAGE_ENDED: u8 = 3;
+/// In every keyframe; deltas follow one, so they need none.
+const WIRE_VERSION: u8 = 13;
 const CHANGED_POSITION: u64 = 1;
 const CHANGED_COLOR: u64 = 2;
 const CHANGED_ICON: u64 = 4;
@@ -1261,6 +1264,7 @@ fn encode_keyframe(
     let mut out = Writer::default();
     out.u8(MESSAGE_KEYFRAME);
     out.varint(u64::from(turn));
+    out.u8(WIRE_VERSION);
     out.u64(state.match_id);
     out.f32(state.game_speed);
     out.varint(u64::from(state.first_turn));
