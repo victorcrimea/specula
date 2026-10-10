@@ -1,8 +1,8 @@
 //! The observer page's map post-processing, as `CPostprocManager` runs it
 //! with `postproc` on: the scene is drawn to a texture, blurred into three
-//! levels, then the map's effect (`hdr`, or `DOF` then `hdr`) draws it to
-//! the screen. The targets are 8-bit like the engine's, so every pass
-//! clamps as there.
+//! levels, then the map's effect (`hdr`, or `DOF` then `hdr`), FXAA and
+//! CAS run in turn, the last of them drawing to the screen. The targets
+//! are 8-bit like the engine's, so every pass clamps as there.
 
 use crate::terrain::Light;
 use crate::terrain::PostEffect;
@@ -10,30 +10,48 @@ use crate::unit::DEPTH_FORMAT;
 
 /// The `Post` uniform of postproc.wgsl.
 const UNIFORM_SIZE: u64 = 32;
+/// The `sharpness` config's default, CAS's strength.
+pub const DEFAULT_SHARPNESS: f32 = 0.3;
 /// Each blur level's divisor of the scene size, `m_BlurScales`.
 const LEVEL_DIVISORS: [u32; 3] = [2, 4, 8];
 
 /// The passes one frame runs.
 #[derive(Clone, Copy)]
 pub struct Plan {
+    /// The map's effect runs: it is not "default".
+    effect: bool,
     blur: bool,
     bloom: bool,
     dof: bool,
+    fxaa: bool,
+    cas: bool,
 }
 
 impl Plan {
     /// `None` when the scene goes straight to the screen: post-processing
-    /// off, or the map's effect is "default", for which the engine skips
-    /// it all.
-    pub fn new(light: &Light, enabled: bool, bloom: bool, dof: bool) -> Option<Self> {
-        if !enabled || light.effect == PostEffect::Default {
+    /// off, or the map's effect is "default" with neither FXAA nor CAS
+    /// on, for which the engine skips it all.
+    pub fn new(
+        light: &Light,
+        enabled: bool,
+        bloom: bool,
+        dof: bool,
+        fxaa: bool,
+        cas: bool,
+    ) -> Option<Self> {
+        let effect = light.effect != PostEffect::Default;
+        if !enabled || !(effect || fxaa || cas) {
             return None;
         }
+        let bloom = bloom && effect;
         let dof = dof && light.effect == PostEffect::Dof;
         Some(Plan {
+            effect,
             blur: bloom || dof,
             bloom,
             dof,
+            fxaa,
+            cas,
         })
     }
 
@@ -53,9 +71,10 @@ struct Targets {
     downscale_group: wgpu::BindGroup,
     /// Each level's result and scratch, as the blur passes read them.
     level_groups: [[wgpu::BindGroup; 2]; 3],
-    /// The effect inputs with the scene, and with the DOF pass's output.
+    /// The effect inputs with the scene, and with the ping texture, which
+    /// the passes after the scene's take turns writing.
     scene_group: wgpu::BindGroup,
-    dof_group: wgpu::BindGroup,
+    ping_group: wgpu::BindGroup,
     ping: wgpu::TextureView,
 }
 
@@ -71,6 +90,8 @@ pub struct Post {
     dof: wgpu::RenderPipeline,
     /// Without and with the bloom term.
     hdr: [wgpu::RenderPipeline; 2],
+    fxaa: wgpu::RenderPipeline,
+    cas: wgpu::RenderPipeline,
     targets: Targets,
 }
 
@@ -183,6 +204,8 @@ impl Post {
                 &[("BLOOM", bloom)],
             )
         });
+        let fxaa = pipeline("postproc fxaa", &effect_pipeline_layout, "fs_fxaa", &[]);
+        let cas = pipeline("postproc cas", &effect_pipeline_layout, "fs_cas", &[]);
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("postproc"),
             mag_filter: wgpu::FilterMode::Linear,
@@ -216,6 +239,8 @@ impl Post {
             blur_v,
             dof,
             hdr,
+            fxaa,
+            cas,
             targets,
         }
     }
@@ -243,8 +268,9 @@ impl Post {
         &self.targets.scene
     }
 
-    /// Writes the map's values; `near` and `far` are the view's planes.
-    pub fn prepare(&self, queue: &wgpu::Queue, light: &Light, near: f32, far: f32) {
+    /// Writes the map's values and the viewer's sharpness; `near` and
+    /// `far` are the view's planes.
+    pub fn prepare(&self, queue: &wgpu::Queue, light: &Light, sharpness: f32, near: f32, far: f32) {
         let values = [
             light.brightness,
             light.contrast,
@@ -252,7 +278,7 @@ impl Post {
             light.bloom,
             near,
             far,
-            0.0,
+            sharpness,
             0.0,
         ];
         let bytes: Vec<u8> = values
@@ -278,18 +304,31 @@ impl Post {
                 fullscreen(encoder, &level[0], &self.blur_v, 1, &groups[1]);
             }
         }
-        let mut group = &targets.scene_group;
+        // The image so far is in the scene texture or in ping; each pass
+        // writes the other, as the engine's m_WhichBuffer swaps, and the
+        // last one the screen.
+        let mut in_scene = true;
         if plan.dof {
-            fullscreen(encoder, &targets.ping, &self.dof, 0, group);
-            group = &targets.dof_group;
+            fullscreen(encoder, &targets.ping, &self.dof, 0, &targets.scene_group);
+            in_scene = false;
         }
-        fullscreen(
-            encoder,
-            target,
-            &self.hdr[usize::from(plan.bloom)],
-            0,
-            group,
-        );
+        let passes = [
+            (plan.effect, &self.hdr[usize::from(plan.bloom)]),
+            (plan.fxaa, &self.fxaa),
+            (plan.cas, &self.cas),
+        ];
+        let mut left = passes.iter().filter(|(on, _)| *on).count();
+        for (_, pipeline) in passes.iter().filter(|(on, _)| *on) {
+            left -= 1;
+            let (group, next) = if in_scene {
+                (&targets.scene_group, &targets.ping)
+            } else {
+                (&targets.ping_group, &targets.scene)
+            };
+            let output = if left == 0 { target } else { next };
+            fullscreen(encoder, output, pipeline, 0, group);
+            in_scene = !in_scene;
+        }
     }
 }
 
@@ -412,7 +451,7 @@ fn create_targets(
     let downscale_group = source_group(&scene);
     let level_groups = [0, 1, 2].map(|level| [0, 1].map(|step| source_group(&levels[level][step])));
     let scene_group = effect_group(&scene);
-    let dof_group = effect_group(&ping);
+    let ping_group = effect_group(&ping);
     Targets {
         depth,
         scene,
@@ -420,7 +459,7 @@ fn create_targets(
         downscale_group,
         level_groups,
         scene_group,
-        dof_group,
+        ping_group,
         ping,
     }
 }

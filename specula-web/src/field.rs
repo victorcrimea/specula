@@ -401,10 +401,14 @@ pub struct Field {
     /// The viewer's wind setting: `USE_WIND` materials sway.
     wind: bool,
     /// The viewer's post-processing settings: the map's effect at all,
-    /// then its bloom and depth of field.
+    /// then its bloom and depth of field, FXAA, and CAS with its
+    /// sharpness.
     postproc: bool,
     bloom: bool,
     dof: bool,
+    antialiasing: bool,
+    sharpening: bool,
+    sharpness: f32,
     /// The viewer's fog setting.
     fog: bool,
     /// The viewer's water effects setting: the engine's fancy water,
@@ -1057,6 +1061,9 @@ impl Field {
             postproc: false,
             bloom: false,
             dof: false,
+            antialiasing: false,
+            sharpening: false,
+            sharpness: postproc::DEFAULT_SHARPNESS,
             fog: false,
             water_effects: false,
             water_pipeline,
@@ -3191,6 +3198,18 @@ impl View for Field {
         self.dof = on;
     }
 
+    fn set_antialiasing(&mut self, on: bool) {
+        self.antialiasing = on;
+    }
+
+    fn set_sharpening(&mut self, on: bool) {
+        self.sharpening = on;
+    }
+
+    fn set_sharpness(&mut self, sharpness: f32) {
+        self.sharpness = sharpness;
+    }
+
     fn set_fog(&mut self, on: bool) {
         self.fog = on;
     }
@@ -3410,9 +3429,17 @@ impl View for Field {
             high: ground.high,
         });
         let light = self.light();
-        let post = postproc::Plan::new(&light, self.postproc, self.bloom, self.dof);
+        let post = postproc::Plan::new(
+            &light,
+            self.postproc,
+            self.bloom,
+            self.dof,
+            self.antialiasing,
+            self.sharpening,
+        );
         if post.is_some() {
-            self.post.prepare(&self.queue, &light, NEAR, FAR);
+            self.post
+                .prepare(&self.queue, &light, self.sharpness, NEAR, FAR);
         }
         let casters = self.shadow.prepare(
             &self.queue,

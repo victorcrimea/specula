@@ -113,6 +113,11 @@ const WIND_SETTINGS_KEY: &str = "specula.wind";
 const POSTPROC_SETTINGS_KEY: &str = "specula.postproc";
 const BLOOM_SETTINGS_KEY: &str = "specula.bloom";
 const DOF_SETTINGS_KEY: &str = "specula.dof";
+/// localStorage keys of the antialiasing and sharpening settings, 0 off
+/// and 1 FXAA or CAS, and of the sharpness factor, from 0 to 1.
+const ANTIALIASING_SETTINGS_KEY: &str = "specula.antialiasing";
+const SHARPENING_SETTINGS_KEY: &str = "specula.sharpening";
+const SHARPNESS_SETTINGS_KEY: &str = "specula.sharpness";
 const FOG_SETTINGS_KEY: &str = "specula.fog";
 const WATER_SETTINGS_KEY: &str = "specula.water";
 const SKY_SETTINGS_KEY: &str = "specula.sky";
@@ -187,6 +192,12 @@ trait View {
     fn set_bloom(&mut self, _on: bool) {}
     /// Whether a map's DOF effect blurs by depth, likewise.
     fn set_dof(&mut self, _on: bool) {}
+    /// Whether FXAA runs after the map's effect, likewise.
+    fn set_antialiasing(&mut self, _on: bool) {}
+    /// Whether CAS sharpens after FXAA, likewise.
+    fn set_sharpening(&mut self, _on: bool) {}
+    /// CAS's strength, from 0 to 1, likewise.
+    fn set_sharpness(&mut self, _sharpness: f32) {}
     /// Whether the map's fog is drawn, likewise.
     fn set_fog(&mut self, _on: bool) {}
     /// Whether the water is drawn as the engine's fancy water, likewise.
@@ -861,14 +872,42 @@ async fn run(page: Page, glue_url: String, wasm_url: String) -> Result<(), Strin
         wire_maps(&app, element(&document, "maps")?);
         wire_triplanar(&app, element(&document, "triplanar")?);
         wire_wind(&app, element(&document, "wind")?);
+        let postproc: HtmlSelectElement = element(&document, "postproc")?;
         let bloom: HtmlSelectElement = element(&document, "bloom")?;
         let dof: HtmlSelectElement = element(&document, "dof")?;
+        let antialiasing: HtmlSelectElement = element(&document, "antialiasing")?;
+        let sharpening: HtmlSelectElement = element(&document, "sharpening")?;
         wire_switch(
             &app,
-            element(&document, "postproc")?,
+            postproc.clone(),
             POSTPROC_SETTINGS_KEY,
             |view, on| view.set_postproc(on),
-            vec![bloom.clone(), dof.clone()],
+            vec![
+                bloom.clone(),
+                dof.clone(),
+                antialiasing.clone(),
+                sharpening.clone(),
+            ],
+        );
+        wire_switch(
+            &app,
+            antialiasing,
+            ANTIALIASING_SETTINGS_KEY,
+            |view, on| view.set_antialiasing(on),
+            Vec::new(),
+        );
+        wire_switch(
+            &app,
+            sharpening.clone(),
+            SHARPENING_SETTINGS_KEY,
+            |view, on| view.set_sharpening(on),
+            Vec::new(),
+        );
+        wire_sharpness(
+            &app,
+            element(&document, "sharpness")?,
+            element(&document, "sharpness-value")?,
+            vec![postproc, sharpening],
         );
         wire_switch(
             &app,
@@ -1315,6 +1354,70 @@ fn wire_shadow_cutoff(
     let on_shadows = Closure::<dyn FnMut()>::new(update);
     let _ = shadows.add_event_listener_with_callback("change", on_shadows.as_ref().unchecked_ref());
     on_shadows.forget();
+}
+
+/// The sharpness slider, kept across visits; usable only while all of
+/// `parents` are on, as the game's slider depends on post-processing and
+/// sharpening.
+fn wire_sharpness(
+    app: &Rc<RefCell<App>>,
+    slider: HtmlInputElement,
+    readout: HtmlElement,
+    parents: Vec<HtmlSelectElement>,
+) {
+    let in_range = |sharpness: &f32| (0.0..=1.0).contains(sharpness);
+    let saved = web_sys::window()
+        .and_then(|window| window.local_storage().ok().flatten())
+        .and_then(|storage| storage.get_item(SHARPNESS_SETTINGS_KEY).ok().flatten())
+        .and_then(|text| text.parse::<f32>().ok())
+        .filter(in_range)
+        .unwrap_or(postproc::DEFAULT_SHARPNESS);
+    slider.set_value(&saved.to_string());
+    readout.set_text_content(Some(&format!("{saved:.2}")));
+    app.borrow_mut().renderer.set_sharpness(saved);
+
+    let target = Rc::clone(app);
+    let input = slider.clone();
+    let on_input = Closure::<dyn FnMut()>::new(move || {
+        let sharpness = input
+            .value()
+            .parse::<f32>()
+            .ok()
+            .filter(in_range)
+            .unwrap_or(postproc::DEFAULT_SHARPNESS);
+        readout.set_text_content(Some(&format!("{sharpness:.2}")));
+        let app = &mut *target.borrow_mut();
+        app.renderer.set_sharpness(sharpness);
+        app.dirty = true;
+    });
+    slider.set_oninput(Some(on_input.as_ref().unchecked_ref()));
+    // The controls live as long as the page, so their handlers do too.
+    on_input.forget();
+
+    // Saved on release only, so a drag does not write storage per step.
+    let input = slider.clone();
+    let on_change = Closure::<dyn FnMut()>::new(move || {
+        // Best effort: without storage the choice lasts only this visit.
+        if let Some(storage) =
+            web_sys::window().and_then(|window| window.local_storage().ok().flatten())
+        {
+            let _ = storage.set_item(SHARPNESS_SETTINGS_KEY, &input.value());
+        }
+    });
+    slider.set_onchange(Some(on_change.as_ref().unchecked_ref()));
+    on_change.forget();
+
+    let update = {
+        let parents = parents.clone();
+        move || slider.set_disabled(parents.iter().any(|parent| parent.value() != "1"))
+    };
+    update();
+    let on_parent = Closure::<dyn FnMut()>::new(update);
+    for parent in &parents {
+        let _ =
+            parent.add_event_listener_with_callback("change", on_parent.as_ref().unchecked_ref());
+    }
+    on_parent.forget();
 }
 
 fn wire_warmup(app: &Rc<RefCell<App>>) {
