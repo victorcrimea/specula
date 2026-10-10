@@ -513,10 +513,16 @@ pub struct Field {
     camera: Rc<RefCell<Camera>>,
     instances: wgpu::Buffer,
     groups: HashMap<GroupKey, Vec<u8>>,
-    /// Shadow casters out of view or drawn as impostors, at the coarse
-    /// level; those drawn as meshes cast from `groups`.
-    shadow_instances: wgpu::Buffer,
-    shadow_groups: HashMap<GroupKey, Vec<u8>>,
+    /// Each cascade's shadow casters, as `CULL_SHADOWS_CASCADE_0` and on
+    /// gather them: the models drawn whose bounds touch its box, at their
+    /// level, and those out of view or drawn as impostors, at the coarse
+    /// one.
+    shadow_instances: [wgpu::Buffer; shadow::CASCADES],
+    shadow_groups: [HashMap<GroupKey, Vec<u8>>; shadow::CASCADES],
+    /// This frame's planes of each cascade's box, empty without shadows.
+    shadow_planes: Vec<[[f32; 4]; 6]>,
+    /// A bit per cascade the model being placed casts into.
+    casting: u8,
     /// Model instances placed this frame, captures included.
     placed: u32,
     far: Far,
@@ -1027,13 +1033,15 @@ impl Field {
             &[],
             wgpu::BufferUsages::INDEX,
         );
-        let shadow_instances = create_buffer(
-            &device,
-            &queue,
-            "shadow caster instances",
-            &[],
-            wgpu::BufferUsages::VERTEX,
-        );
+        let shadow_instances = std::array::from_fn(|_| {
+            create_buffer(
+                &device,
+                &queue,
+                "shadow caster instances",
+                &[],
+                wgpu::BufferUsages::VERTEX,
+            )
+        });
         let camera = Rc::new(RefCell::new(Camera {
             target: [0.0, 0.0],
             yaw: START_YAW,
@@ -1149,7 +1157,9 @@ impl Field {
             instances,
             groups: HashMap::new(),
             shadow_instances,
-            shadow_groups: HashMap::new(),
+            shadow_groups: Default::default(),
+            shadow_planes: Vec::new(),
+            casting: 0,
             placed: 0,
             far,
             far_instances,
@@ -1304,22 +1314,23 @@ impl Field {
     }
 
     /// Fills `groups` and `far_groups` with this frame's instances, and
-    /// `shadow_groups` with the other casters inside `casters`, the shadow
-    /// map's planes.
+    /// `shadow_groups` with each cascade's casters, inside `casters`, the
+    /// planes of each cascade's box.
     fn place_entities(
         &mut self,
         progress: f32,
         view_proj: &[[f32; 4]; 4],
-        casters: Option<&[[f32; 4]; 6]>,
+        casters: Option<Vec<[[f32; 4]; 6]>>,
     ) {
         let mut groups = std::mem::take(&mut self.groups);
         for group in groups
             .values_mut()
             .chain(self.far_groups.values_mut())
-            .chain(self.shadow_groups.values_mut())
+            .chain(self.shadow_groups.iter_mut().flat_map(HashMap::values_mut))
         {
             group.clear();
         }
+        self.shadow_planes = casters.unwrap_or_default();
         self.placed = 0;
         self.decals.clear();
         self.stats.levels = [0; LEVELS];
@@ -1338,7 +1349,6 @@ impl Field {
                 progress,
                 view_proj,
                 &planes,
-                casters,
                 pixel_scale,
                 &mut groups,
             );
@@ -1370,7 +1380,6 @@ impl Field {
         progress: f32,
         view_proj: &[[f32; 4]; 4],
         planes: &[[f32; 4]; 6],
-        casters: Option<&[[f32; 4]; 6]>,
         pixel_scale: f32,
         groups: &mut HashMap<GroupKey, Vec<u8>>,
     ) {
@@ -1477,10 +1486,10 @@ impl Field {
         let radius = reach.hypot((high.y - low.y) / 2.0) * REACH_MARGIN + 1.0;
         let centre_y = (low.y + high.y) / 2.0;
         let centre = [x, y + sink + centre_y, z];
-        let caster = casters.is_some_and(|casters| !outside(casters, centre, radius));
+        let casting = self.casting_into(centre, radius);
         let Some(level) = screen_level(centre, radius, view_proj, planes, pixel_scale) else {
-            if caster {
-                self.place_caster(id, dot, progress, &model, &transform);
+            if casting != 0 {
+                self.place_caster(id, dot, progress, &model, &transform, casting);
             }
             return;
         };
@@ -1500,14 +1509,16 @@ impl Field {
             )
         {
             self.stats.levels[FAR_LEVEL] += 1;
-            if caster {
-                self.place_caster(id, dot, progress, &model, &transform);
+            if casting != 0 {
+                self.place_caster(id, dot, progress, &model, &transform, casting);
             }
             return;
         }
         let placed = self.placed;
         self.emitting = self.particles_visible.then_some(Owner::Entity(id));
-        self.place_model(&model, &transform, &entity, None, 0, groups);
+        self.casting = casting;
+        self.place_model(&model, &transform, &entity, None, 0, Some(groups));
+        self.casting = 0;
         self.emitting = None;
         // Counted once something of it is drawn, not while it loads.
         if self.placed > placed {
@@ -1543,16 +1554,35 @@ impl Field {
         }
     }
 
-    /// Places an entity that is not drawn as a mesh into `shadow_groups`,
-    /// at the coarse level: its shadow can fall in view all the same.
-    fn place_caster(&mut self, id: u32, dot: &Dot, progress: f32, model: &Model, transform: &Mat4) {
+    /// Places an entity that is not drawn as a mesh into the
+    /// `shadow_groups` of the cascades in `casting`, at the coarse level:
+    /// its shadow can fall in view all the same.
+    #[allow(clippy::too_many_arguments)]
+    fn place_caster(
+        &mut self,
+        id: u32,
+        dot: &Dot,
+        progress: f32,
+        model: &Model,
+        transform: &Mat4,
+        casting: u8,
+    ) {
         let entity = self.entity_state(id, dot, progress, COARSE_LEVEL);
-        let mut groups = std::mem::take(&mut self.shadow_groups);
         // Not counted among the models drawn.
         let placed = self.placed;
-        self.place_model(model, transform, &entity, None, 0, &mut groups);
+        self.casting = casting;
+        self.place_model(model, transform, &entity, None, 0, None);
+        self.casting = 0;
         self.placed = placed;
-        self.shadow_groups = groups;
+    }
+
+    /// A bit per cascade whose box a sphere touches.
+    fn casting_into(&self, centre: [f32; 3], radius: f32) -> u8 {
+        self.shadow_planes
+            .iter()
+            .enumerate()
+            .filter(|(_, planes)| !outside(planes, centre, radius))
+            .fold(0, |casting, (cascade, _)| casting | 1 << cascade)
     }
 
     /// Where the entity is drawn this frame, in metres.
@@ -1852,7 +1882,14 @@ impl Field {
                 time: Some(position * frame_ms),
             };
             let mut groups = HashMap::new();
-            if !self.place_model(&model, &Mat4::identity(), &entity, None, 0, &mut groups) {
+            if !self.place_model(
+                &model,
+                &Mat4::identity(),
+                &entity,
+                None,
+                0,
+                Some(&mut groups),
+            ) {
                 return None;
             }
             for (key, bytes) in groups {
@@ -2012,7 +2049,8 @@ impl Field {
         entity: &EntityState,
         root_id: Option<&str>,
         depth: usize,
-        groups: &mut HashMap<GroupKey, Vec<u8>>,
+        // `None` for a shadow caster only, which goes to the cascades.
+        mut groups: Option<&mut HashMap<GroupKey, Vec<u8>>>,
     ) -> bool {
         let file = match &model.shape {
             Shape::Mesh(file) => *file,
@@ -2070,7 +2108,15 @@ impl Field {
             }
         }
         self.add_instance(
-            file.hash, &mesh, model, transform, entity, pose, blend, material, groups,
+            file.hash,
+            &mesh,
+            model,
+            transform,
+            entity,
+            pose,
+            blend,
+            material,
+            groups.as_deref_mut(),
         );
 
         if depth >= 8 {
@@ -2100,7 +2146,14 @@ impl Field {
                 placed = placed.mul(&bone);
             }
             placed = placed.mul(&point_matrix(point));
-            complete &= self.place_model(prop, &placed, entity, root_id, depth + 1, groups);
+            complete &= self.place_model(
+                prop,
+                &placed,
+                entity,
+                root_id,
+                depth + 1,
+                groups.as_deref_mut(),
+            );
         }
         complete
     }
@@ -2116,7 +2169,7 @@ impl Field {
         pose: [u32; 3],
         blend: f32,
         material: u64,
-        groups: &mut HashMap<GroupKey, Vec<u8>>,
+        groups: Option<&mut HashMap<GroupKey, Vec<u8>>>,
     ) {
         let complete = mesh.detail.is_none();
         let current = self
@@ -2150,18 +2203,28 @@ impl Field {
         }
         self.placed += 1;
         let level = entity.level.min(mesh.levels.len() - 1);
-        let bytes = groups.entry((mesh_hash, level, material)).or_default();
-        for row in &transform.m[..3] {
-            for value in row {
-                bytes.extend_from_slice(&value.to_le_bytes());
-            }
-        }
-        for value in [pose[0], pose[1], pose[2], entity.color] {
-            bytes.extend_from_slice(&value.to_le_bytes());
-        }
+        let key = (mesh_hash, level, material);
+        let mut instance = [0u8; INSTANCE_SIZE];
         let tinted = if model.player_color { 1.0 } else { 0.0 };
-        for value in [blend, tinted, model.alpha_ref, 0.0f32] {
-            bytes.extend_from_slice(&value.to_le_bytes());
+        let values = transform.m[..3]
+            .iter()
+            .flatten()
+            .map(|value| value.to_le_bytes())
+            .chain([pose[0], pose[1], pose[2], entity.color].map(|value| value.to_le_bytes()))
+            .chain([blend, tinted, model.alpha_ref, 0.0f32].map(|value| value.to_le_bytes()));
+        for (slot, bytes) in instance.chunks_exact_mut(4).zip(values) {
+            slot.copy_from_slice(&bytes);
+        }
+        if let Some(groups) = groups {
+            groups.entry(key).or_default().extend_from_slice(&instance);
+        }
+        for (cascade, cascade_groups) in self.shadow_groups.iter_mut().enumerate() {
+            if self.casting & 1 << cascade != 0 {
+                cascade_groups
+                    .entry(key)
+                    .or_default()
+                    .extend_from_slice(&instance);
+            }
         }
     }
 
@@ -2705,7 +2768,9 @@ impl Field {
             time: Some(place.time),
         };
         self.emitting = self.particles_visible.then_some(place.emitter);
-        self.place_model(model, transform, &entity, None, 0, groups);
+        self.casting = self.casting_into([centre.x, centre.y, centre.z], radius);
+        self.place_model(model, transform, &entity, None, 0, Some(groups));
+        self.casting = 0;
         self.emitting = None;
     }
 
@@ -3565,7 +3630,8 @@ impl View for Field {
             self.far.open_storage(bake);
         }
         self.far.begin_frame(&self.device);
-        self.place_entities(progress, &view_proj, casters.as_ref());
+        let shadowed = casters.is_some();
+        self.place_entities(progress, &view_proj, casters);
         self.far.take_loaded(&self.device, &self.queue);
         let mut prepared = Vec::new();
         for (key, request) in self.far.next_bakes(&self.device) {
@@ -3603,16 +3669,13 @@ impl View for Field {
         self.bake(prepared);
 
         let draws = upload_groups(&self.device, &self.queue, &self.groups, &mut self.instances);
-        let shadow_draws = if casters.is_some() {
-            upload_groups(
-                &self.device,
-                &self.queue,
-                &self.shadow_groups,
-                &mut self.shadow_instances,
-            )
-        } else {
-            Vec::new()
-        };
+        let shadow_draws: Vec<_> = self
+            .shadow_groups
+            .iter()
+            .zip(&mut self.shadow_instances)
+            .take(if shadowed { self.shadow.cascades() } else { 0 })
+            .map(|(groups, instances)| upload_groups(&self.device, &self.queue, groups, instances))
+            .collect();
         let mut far_bytes = Vec::new();
         let mut far_draws = Vec::new();
         for (key, group) in &self.far_groups {
@@ -3741,14 +3804,14 @@ impl View for Field {
         let mut encoder = self.device.create_command_encoder(&Default::default());
         self.timer.begin();
         self.draw_calls.set(0);
-        if casters.is_some()
+        if shadowed
             && let Some(mut pass) = self
                 .shadow
                 .begin(&mut encoder, self.timer.writes(timing::SHADOW, true, true))
         {
-            // Every caster into every cascade: the viewport clips each to
-            // its quarter.
-            for cascade in 0..self.shadow.cascades() {
+            // Each cascade's own casters; the viewport clips them to its
+            // quarter.
+            for (cascade, draws) in shadow_draws.iter().enumerate() {
                 self.shadow.select(&mut pass, cascade);
                 if let Some(ground) = &self.ground {
                     pass.set_pipeline(&self.shadow.terrain_pipeline);
@@ -3761,8 +3824,7 @@ impl View for Field {
                 }
                 pass.set_pipeline(&self.shadow.model_pipeline);
                 pass.set_bind_group(1, &self.pose_bind_group, &[]);
-                self.draw_models(&mut pass, &draws, &self.instances);
-                self.draw_models(&mut pass, &shadow_draws, &self.shadow_instances);
+                self.draw_models(&mut pass, draws, &self.shadow_instances[cascade]);
             }
         }
         let water_options = self.water_options();

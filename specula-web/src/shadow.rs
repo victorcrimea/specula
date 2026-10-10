@@ -45,7 +45,7 @@ pub const DEFAULT_SIZE: u32 = 2048;
 /// sharp with a long cutoff.
 const VERY_HIGH: u32 = 8192;
 /// `MAX_CASCADE_COUNT`, and the count the shaders loop over.
-const CASCADES: usize = 4;
+pub const CASCADES: usize = 4;
 /// `DEFAULT_CASCADE_DISTANCE_RATIO`: each cascade ends this many times
 /// nearer than the next.
 const CASCADE_RATIO: f32 = 1.7;
@@ -268,8 +268,9 @@ impl Shadow {
 
     /// Fits the map to this frame's camera and writes the light uniform,
     /// with the map's fog when `fog`, and the view's `wind` into each
-    /// cascade's; the planes of the box casters must touch, `None` when
-    /// there is no shadow to draw.
+    /// cascade's; per cascade, the planes of the box its casters must
+    /// touch, `GetShadowCasterCullFrustum`, `None` when there is no shadow
+    /// to draw.
     pub fn prepare(
         &self,
         queue: &wgpu::Queue,
@@ -278,7 +279,7 @@ impl Shadow {
         eye: &Eye,
         bounds: Option<&Bounds>,
         wind: [f32; 2],
-    ) -> Option<[[f32; 4]; 6]> {
+    ) -> Option<Vec<[[f32; 4]; 6]>> {
         let fitted = match bounds {
             Some(bounds) if self.size > 0 => fit(
                 light.sun,
@@ -354,7 +355,13 @@ impl Shadow {
                 .collect();
             queue.write_buffer(buffer, 0, &bytes);
         }
-        Some(frustum_planes(&fitted.casters))
+        Some(
+            fitted
+                .cascades
+                .iter()
+                .map(|cascade| frustum_planes(&cascade.view_proj))
+                .collect(),
+        )
     }
 
     /// How many times the casters are drawn, each after `select`.
@@ -459,8 +466,6 @@ struct Fit {
     cascades: Vec<Cascade>,
     /// Where each cascade ends, in metres along the view.
     ends: [f32; CASCADES],
-    /// A view-projection over every cascade's square, for picking casters.
-    casters: [[f32; 4]; 4],
     /// The depth range in metres.
     range: f32,
 }
@@ -537,8 +542,6 @@ fn fit(
     } else {
         quarter_side(size)
     };
-    let mut low = [f32::MAX; 2];
-    let mut high = [f32::MIN; 2];
     let mut cascades = Vec::with_capacity(count);
     for (cascade, &end) in ends[..count].iter().enumerate() {
         let start = if cascade == 0 {
@@ -561,8 +564,6 @@ fn fit(
         let texel = 2.0 * half / side;
         let snap = |value: f32| (value / texel).round() * texel;
         let (cx, cy) = (snap(dot(x, centre)), snap(dot(y, centre)));
-        low = [low[0].min(cx - half), low[1].min(cy - half)];
-        high = [high[0].max(cx + half), high[1].max(cy + half)];
 
         let view_proj = ortho(cx, cy, half, half);
         let origin = if count == 1 {
@@ -575,16 +576,9 @@ fn fit(
             texels: to_texels(&view_proj, origin, side),
         });
     }
-    let casters = ortho(
-        (low[0] + high[0]) / 2.0,
-        (low[1] + high[1]) / 2.0,
-        (high[0] - low[0]) / 2.0,
-        (high[1] - low[1]) / 2.0,
-    );
     Some(Fit {
         cascades,
         ends,
-        casters,
         range,
     })
 }
