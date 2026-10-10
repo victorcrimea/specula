@@ -3525,6 +3525,12 @@ impl View for Field {
                     None if water_options.is_some() => {}
                     None => {
                         pass.set_pipeline(&self.water_pipeline);
+                        // WebGL2 numbers uniform slots across groups, so
+                        // the light's slot here differs from the models'
+                        // (no uniforms in groups 1 and 2), yet wgpu keeps
+                        // group 3 bound as compatible and drops a repeat
+                        // of the same group; clearing it forces a rebind.
+                        pass.set_bind_group(3, None, &[]);
                         pass.set_bind_group(3, &self.shadow.bind_group, &[]);
                         pass.draw(0..4, 0..1);
                     }

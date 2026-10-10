@@ -725,7 +725,10 @@ impl Normals {
                 size: wgpu::Extent3d {
                     width: texture.width,
                     height: texture.height,
-                    depth_or_array_layers: FRAMES as u32,
+                    // A spare layer: wgpu's GL backend makes a square
+                    // array of a multiple of 6 layers a cube map array,
+                    // which WebGL2 does not have.
+                    depth_or_array_layers: FRAMES as u32 + 1,
                 },
                 mip_level_count: texture.levels.len() as u32,
                 sample_count: 1,

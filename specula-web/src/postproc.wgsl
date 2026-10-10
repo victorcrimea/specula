@@ -15,6 +15,8 @@ struct Post {
     // The view's planes, in metres.
     near: f32,
     far: f32,
+    // WebGL2 needs uniform structs sized in multiples of 16 bytes.
+    _pad: vec2<f32>,
 }
 
 // The blur passes' input, in its own group: an entry point may not see
