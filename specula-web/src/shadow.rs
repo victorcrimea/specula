@@ -1,16 +1,18 @@
 //! The observer page's light: the map's sun and ambient colours, and a
 //! shadow map from its sun as `ShadowMap.cpp` draws one with the engine's
 //! defaults: a single cascade around the camera frustum up to
-//! `shadowscutoffdistance`, filtered with `shadowpcf`.
+//! `shadowscutoffdistance`, filtered with `shadowpcf`. Very High splits it
+//! into four cascades, as `shadowscascadecount = 4` does.
 
 use crate::terrain::Light;
 use crate::unit::frustum_planes;
 use crate::unit::multiply;
 
-/// The `Light` uniform of field.wgsl, model.wgsl, decal.wgsl and far.wgsl:
-/// sun colour, ambient colour, shadow matrix, eye, forward, shadow, fog
-/// colour, fog.
-const LIGHT_SIZE: u64 = 176;
+/// The `Light` uniform of field.wgsl, model.wgsl, decal.wgsl, water.wgsl
+/// and far.wgsl: sun colour, ambient colour, shadow matrix, eye, forward,
+/// shadow, fog colour, fog, the cascades' matrices and their ends; far.wgsl
+/// declares only the part before the cascades.
+const LIGHT_SIZE: u64 = 448;
 const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 /// `DEFAULT_SHADOWS_CUTOFF_DISTANCE`, in metres along the view.
 pub const DEFAULT_CUTOFF: f32 = 300.0;
@@ -29,12 +31,24 @@ const DEPTH_MARGIN: f32 = 2.0;
 const MODEL_BIAS: f32 = 0.3;
 const TERRAIN_BIAS: f32 = 0.05;
 /// Without it the ground's own slopes shade themselves in stripes where the
-/// sun grazes them; polygon offset on WebGL2.
+/// sun grazes them; polygon offset on WebGL2. The ground only: a model's
+/// outline is edge-on to the sun, where the slope is unbounded, so the bias
+/// pushed it back past the ground it shades and small units lost their
+/// shadows. The engine biases no caster.
 const SLOPE_BIAS: f32 = 2.0;
 
 /// Shadow map sizes the page offers; 0 is off.
-pub const SIZES: [u32; 4] = [0, 1024, 2048, 4096];
+pub const SIZES: [u32; 5] = [0, 1024, 2048, 4096, VERY_HIGH];
 pub const DEFAULT_SIZE: u32 = 2048;
+/// The size that is split into cascades, one per quarter of the map as
+/// `ShadowMap::SetupFrame` lays them out, so shadows near the camera stay
+/// sharp with a long cutoff.
+const VERY_HIGH: u32 = 8192;
+/// `MAX_CASCADE_COUNT`, and the count the shaders loop over.
+const CASCADES: usize = 4;
+/// `DEFAULT_CASCADE_DISTANCE_RATIO`: each cascade ends this many times
+/// nearer than the next.
+const CASCADE_RATIO: f32 = 1.7;
 
 /// The camera as the fit needs it.
 pub struct Eye {
@@ -58,17 +72,18 @@ pub struct Shadow {
     pub bind_group: wgpu::BindGroup,
     buffer: wgpu::Buffer,
     sampler: wgpu::Sampler,
-    /// The shadow pass's view uniform, laid out as the page's, with the
-    /// light's matrix.
-    view_buffer: wgpu::Buffer,
-    view_bind_group: wgpu::BindGroup,
+    /// The shadow pass's view uniform for each cascade, laid out as the
+    /// page's, with the light's matrix.
+    views: Vec<(wgpu::Buffer, wgpu::BindGroup)>,
     /// Depth only, with vs_terrain and vs_model; the view at group 0
-    /// is set by `begin`.
+    /// is set by `select`.
     pub terrain_pipeline: wgpu::RenderPipeline,
     pub model_pipeline: wgpu::RenderPipeline,
     /// The map, when shadows are on.
     target: Option<wgpu::TextureView>,
     size: u32,
+    /// 1, or `CASCADES` at Very High.
+    cascades: usize,
     /// In metres along the view.
     cutoff: f32,
 }
@@ -134,31 +149,32 @@ impl Shadow {
             compare: Some(wgpu::CompareFunction::LessEqual),
             ..Default::default()
         });
-        let view_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("shadow view"),
-            size: view_size,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let view_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("shadow view"),
-            layout: view_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: view_buffer.as_entire_binding(),
-            }],
-        });
+        let views = (0..CASCADES)
+            .map(|_| {
+                let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("shadow view"),
+                    size: view_size,
+                    usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                });
+                let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("shadow view"),
+                    layout: view_layout,
+                    entries: &[wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: buffer.as_entire_binding(),
+                    }],
+                });
+                (buffer, bind_group)
+            })
+            .collect();
 
         let depth_stencil = wgpu::DepthStencilState {
             format: FORMAT,
             depth_write_enabled: Some(true),
             depth_compare: Some(wgpu::CompareFunction::Less),
             stencil: Default::default(),
-            bias: wgpu::DepthBiasState {
-                constant: 0,
-                slope_scale: SLOPE_BIAS,
-                clamp: 0.0,
-            },
+            bias: Default::default(),
         };
         let terrain_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("terrain shadow"),
@@ -175,7 +191,14 @@ impl Shadow {
                 buffers: terrain_buffers,
             },
             primitive: wgpu::PrimitiveState::default(),
-            depth_stencil: Some(depth_stencil.clone()),
+            depth_stencil: Some(wgpu::DepthStencilState {
+                bias: wgpu::DepthBiasState {
+                    constant: 0,
+                    slope_scale: SLOPE_BIAS,
+                    clamp: 0.0,
+                },
+                ..depth_stencil.clone()
+            }),
             multisample: Default::default(),
             fragment: None,
             multiview_mask: None,
@@ -216,18 +239,19 @@ impl Shadow {
             bind_group,
             buffer,
             sampler,
-            view_buffer,
-            view_bind_group,
+            views,
             terrain_pipeline,
             model_pipeline,
             target: None,
             size: 0,
+            cascades: 1,
             cutoff: DEFAULT_CUTOFF,
         }
     }
 
     /// 0 turns shadows off.
     pub fn set_size(&mut self, device: &wgpu::Device, size: u32) {
+        self.cascades = if size == VERY_HIGH { CASCADES } else { 1 };
         let size = size.min(device.limits().max_texture_dimension_2d);
         if size == self.size {
             return;
@@ -254,7 +278,14 @@ impl Shadow {
         bounds: Option<&Bounds>,
     ) -> Option<[[f32; 4]; 6]> {
         let fitted = match bounds {
-            Some(bounds) if self.size > 0 => fit(light.sun, eye, bounds, self.size, self.cutoff),
+            Some(bounds) if self.size > 0 => fit(
+                light.sun,
+                eye,
+                bounds,
+                self.size,
+                self.cutoff,
+                self.cascades,
+            ),
             _ => None,
         };
         let mut uniform: Vec<f32> = Vec::with_capacity((LIGHT_SIZE / 4) as usize);
@@ -270,16 +301,14 @@ impl Shadow {
             light.ambient_color[2],
             0.0,
         ]);
-        let (matrix, depth_range) = match &fitted {
-            Some((view_proj, depth_range)) => (to_texels(view_proj, self.size), *depth_range),
-            None => ([[0.0; 4]; 4], 1.0),
+        let depth_range = fitted.as_ref().map_or(1.0, |fitted| fitted.range);
+        let matrix = |cascade: usize| {
+            fitted
+                .as_ref()
+                .and_then(|fitted| fitted.cascades.get(cascade))
+                .map_or([[0.0; 4]; 4], |cascade| cascade.texels)
         };
-        // WGSL matrices are column-major.
-        for column in 0..4 {
-            for row in &matrix {
-                uniform.push(row[column]);
-            }
-        }
+        push_matrix(&mut uniform, &matrix(0));
         let [x, y, z] = eye.position;
         uniform.extend_from_slice(&[x, y, z, self.cutoff]);
         let [x, y, z] = eye.forward;
@@ -288,36 +317,62 @@ impl Shadow {
             MODEL_BIAS / depth_range,
             TERRAIN_BIAS / depth_range,
             if fitted.is_some() { 1.0 } else { 0.0 },
-            0.0,
+            self.cascades as f32,
         ]);
         let [r, g, b] = light.fog_color;
         uniform.extend_from_slice(&[r, g, b, 0.0]);
         // CLightEnv::Bind: a max of 1 keeps every fragment clear.
         let fog_max = if fog { light.fog_max } else { 1.0 };
         uniform.extend_from_slice(&[light.fog_factor, fog_max, 0.0, 0.0]);
+        for cascade in 0..CASCADES {
+            push_matrix(&mut uniform, &matrix(cascade));
+        }
+        uniform.extend_from_slice(
+            &fitted
+                .as_ref()
+                .map_or([0.0; CASCADES], |fitted| fitted.ends),
+        );
         let bytes: Vec<u8> = uniform
             .iter()
             .flat_map(|value| value.to_le_bytes())
             .collect();
         queue.write_buffer(&self.buffer, 0, &bytes);
 
-        let (view_proj, _) = fitted?;
-        // Only the matrix: the shadow pass's shaders read nothing else.
-        let mut bytes = Vec::with_capacity(64);
-        for column in 0..4 {
-            for row in &view_proj {
-                bytes.extend_from_slice(&row[column].to_le_bytes());
-            }
+        let fitted = fitted?;
+        for (cascade, (buffer, _)) in fitted.cascades.iter().zip(&self.views) {
+            // Only the matrix: the shadow pass's shaders read nothing else.
+            let mut matrix = Vec::with_capacity(16);
+            push_matrix(&mut matrix, &cascade.view_proj);
+            let bytes: Vec<u8> = matrix
+                .iter()
+                .flat_map(|value| value.to_le_bytes())
+                .collect();
+            queue.write_buffer(buffer, 0, &bytes);
         }
-        queue.write_buffer(&self.view_buffer, 0, &bytes);
-        Some(frustum_planes(&view_proj))
+        Some(frustum_planes(&fitted.casters))
     }
 
-    /// Starts the depth-only pass, cleared to "lit everywhere"; `None`
-    /// when shadows are off.
+    /// How many times the casters are drawn, each after `select`.
+    pub fn cascades(&self) -> usize {
+        self.cascades
+    }
+
+    /// Points the pass at one cascade's view and its quarter of the map.
+    pub fn select(&self, pass: &mut wgpu::RenderPass, cascade: usize) {
+        pass.set_bind_group(0, &self.views[cascade].1, &[]);
+        if self.cascades > 1 {
+            let [x, y] = quarter_origin(self.size, cascade);
+            let side = quarter_side(self.size);
+            pass.set_viewport(x, y, side, side, 0.0, 1.0);
+        }
+    }
+
+    /// Starts the depth-only pass, cleared to "lit everywhere", which the
+    /// texel between the cascades' quarters keeps; `None` when shadows are
+    /// off.
     pub fn begin<'e>(&self, encoder: &'e mut wgpu::CommandEncoder) -> Option<wgpu::RenderPass<'e>> {
         let target = self.target.as_ref()?;
-        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        let pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("shadow"),
             color_attachments: &[],
             depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
@@ -330,7 +385,6 @@ impl Shadow {
             }),
             ..Default::default()
         });
-        pass.set_bind_group(0, &self.view_bind_group, &[]);
         Some(pass)
     }
 }
@@ -381,20 +435,42 @@ fn light_bind_group(
     })
 }
 
+/// One cascade of a fit.
+struct Cascade {
+    /// The light's orthographic view-projection onto the cascade's square,
+    /// row-major.
+    view_proj: [[f32; 4]; 4],
+    /// The world to the map's texels in the cascade's quarter, x right and
+    /// y down as textures run, depth kept.
+    texels: [[f32; 4]; 4],
+}
+
+struct Fit {
+    cascades: Vec<Cascade>,
+    /// Where each cascade ends, in metres along the view.
+    ends: [f32; CASCADES],
+    /// A view-projection over every cascade's square, for picking casters.
+    casters: [[f32; 4]; 4],
+    /// The depth range in metres.
+    range: f32,
+}
+
 /// `ShadowMap::SetupFrame`, `CalculateBoundsForCascade` and
-/// `CalculateShadowMatrices` for one cascade: the light's orthographic
-/// view-projection, row-major, and its depth range in metres. The box is
-/// the sphere around the camera frustum up to the cutoff, so it keeps its
-/// size as the camera turns, and moves in whole texels, so shadows do not
-/// shimmer as it pans. `None` when the camera is so high above the ground
-/// that all of it lies past the cutoff, which the engine's camera never is.
+/// `CalculateShadowMatrices`: per cascade, the light's orthographic
+/// projection of the sphere around its slice of the camera frustum, so it
+/// keeps its size as the camera turns, moved in whole texels, so shadows do
+/// not shimmer as it pans. Each cascade has its own quarter of the map,
+/// inset by a texel so filtering does not read the next. `None` when the
+/// camera is so high above the ground that all of it lies past the cutoff,
+/// which the engine's camera never is.
 fn fit(
     sun: [f32; 3],
     eye: &Eye,
     bounds: &Bounds,
     size: u32,
     cutoff: f32,
-) -> Option<([[f32; 4]; 4], f32)> {
+    count: usize,
+) -> Option<Fit> {
     let spread = (eye.field_of_view / 2.0).tan() * (1.0 + eye.aspect * eye.aspect).sqrt();
     // A point in view is at least its distance times the cosine of the
     // frustum's corner angle ahead of the eye.
@@ -410,21 +486,6 @@ fn fit(
     }
     let x = normalize(x);
     let y = cross(z, x);
-
-    // CalculateBoundsForCascade: the frustum is symmetric, so one corner
-    // of the near and of the far quad gives the circumscribed sphere.
-    let first_base = eye.near * spread;
-    let second_base = cutoff * spread;
-    let height = cutoff - eye.near;
-    let to_centre =
-        (height * height + second_base * second_base - first_base * first_base) * 0.5 / height;
-    let centre: [f32; 3] =
-        std::array::from_fn(|i| eye.position[i] + eye.forward[i] * (eye.near + to_centre));
-    let half = to_centre.hypot(first_base) + INSETS;
-
-    let texel = 2.0 * half / size as f32;
-    let snap = |value: f32| (value / texel).round() * texel;
-    let (cx, cy) = (snap(dot(x, centre)), snap(dot(y, centre)));
 
     // The whole map's depth: the box's own would clip casters between it
     // and the sun.
@@ -447,27 +508,110 @@ fn fit(
     near -= DEPTH_MARGIN;
     far += DEPTH_MARGIN;
     let range = far - near;
+    let ortho = |cx: f32, cy: f32, half_x: f32, half_y: f32| {
+        [
+            [x[0] / half_x, x[1] / half_x, x[2] / half_x, -cx / half_x],
+            [y[0] / half_y, y[1] / half_y, y[2] / half_y, -cy / half_y],
+            [z[0] / range, z[1] / range, z[2] / range, -near / range],
+            [0.0, 0.0, 0.0, 1.0],
+        ]
+    };
 
-    let view_proj = [
-        [x[0] / half, x[1] / half, x[2] / half, -cx / half],
-        [y[0] / half, y[1] / half, y[2] / half, -cy / half],
-        [z[0] / range, z[1] / range, z[2] / range, -near / range],
-        [0.0, 0.0, 0.0, 1.0],
-    ];
-    Some((view_proj, range))
+    let mut ends = [0.0; CASCADES];
+    ends[count - 1] = cutoff;
+    for cascade in (0..count - 1).rev() {
+        ends[cascade] = ends[cascade + 1] / CASCADE_RATIO;
+    }
+    let side = if count == 1 {
+        size as f32
+    } else {
+        quarter_side(size)
+    };
+    let mut low = [f32::MAX; 2];
+    let mut high = [f32::MIN; 2];
+    let mut cascades = Vec::with_capacity(count);
+    for (cascade, &end) in ends[..count].iter().enumerate() {
+        let start = if cascade == 0 {
+            eye.near
+        } else {
+            ends[cascade - 1]
+        };
+        // CalculateBoundsForCascade: the frustum is symmetric, so one
+        // corner of the near and of the far quad gives the circumscribed
+        // sphere.
+        let first_base = start * spread;
+        let second_base = end * spread;
+        let height = end - start;
+        let to_centre =
+            (height * height + second_base * second_base - first_base * first_base) * 0.5 / height;
+        let centre: [f32; 3] =
+            std::array::from_fn(|i| eye.position[i] + eye.forward[i] * (start + to_centre));
+        let half = to_centre.hypot(first_base) + INSETS;
+
+        let texel = 2.0 * half / side;
+        let snap = |value: f32| (value / texel).round() * texel;
+        let (cx, cy) = (snap(dot(x, centre)), snap(dot(y, centre)));
+        low = [low[0].min(cx - half), low[1].min(cy - half)];
+        high = [high[0].max(cx + half), high[1].max(cy + half)];
+
+        let view_proj = ortho(cx, cy, half, half);
+        let origin = if count == 1 {
+            [0.0; 2]
+        } else {
+            quarter_origin(size, cascade)
+        };
+        cascades.push(Cascade {
+            view_proj,
+            texels: to_texels(&view_proj, origin, side),
+        });
+    }
+    let casters = ortho(
+        (low[0] + high[0]) / 2.0,
+        (low[1] + high[1]) / 2.0,
+        (high[0] - low[0]) / 2.0,
+        (high[1] - low[1]) / 2.0,
+    );
+    Some(Fit {
+        cascades,
+        ends,
+        casters,
+        range,
+    })
 }
 
-/// The light's clip space to the map's texels, x right and y down as
-/// textures run, depth kept.
-fn to_texels(view_proj: &[[f32; 4]; 4], size: u32) -> [[f32; 4]; 4] {
-    let half = size as f32 / 2.0;
+/// The top left texel of a cascade's square, `SetupFrame`'s viewport.
+fn quarter_origin(size: u32, cascade: usize) -> [f32; 2] {
+    let half = (size / 2) as f32;
+    [
+        if cascade & 1 == 0 { 0.0 } else { half } + 1.0,
+        if cascade & 2 == 0 { 0.0 } else { half } + 1.0,
+    ]
+}
+
+fn quarter_side(size: u32) -> f32 {
+    (size / 2 - 2) as f32
+}
+
+/// The light's clip space to the `side` texels square at `origin`, x right
+/// and y down as textures run, depth kept.
+fn to_texels(view_proj: &[[f32; 4]; 4], origin: [f32; 2], side: f32) -> [[f32; 4]; 4] {
+    let half = side / 2.0;
     let texels = [
-        [half, 0.0, 0.0, half],
-        [0.0, -half, 0.0, half],
+        [half, 0.0, 0.0, origin[0] + half],
+        [0.0, -half, 0.0, origin[1] + half],
         [0.0, 0.0, 1.0, 0.0],
         [0.0, 0.0, 0.0, 1.0],
     ];
     multiply(&texels, view_proj)
+}
+
+/// WGSL matrices are column-major.
+fn push_matrix(out: &mut Vec<f32>, matrix: &[[f32; 4]; 4]) {
+    for column in 0..4 {
+        for row in matrix {
+            out.push(row[column]);
+        }
+    }
 }
 
 fn sub(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {

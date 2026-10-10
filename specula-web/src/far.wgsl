@@ -30,7 +30,8 @@ struct Light {
     eye: vec4<f32>,
     // The camera's forward, then one over the shadow map's size.
     forward: vec4<f32>,
-    // Depth bias for models, for the ground, then 1 when shadows are on.
+    // Depth bias for models, for the ground, 1 when shadows are on, then
+    // the number of cascades.
     shadow: vec4<f32>,
     // CLightEnv::m_FogColor.
     fog_color: vec4<f32>,

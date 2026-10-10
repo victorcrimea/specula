@@ -3351,18 +3351,23 @@ impl View for Field {
         if casters.is_some()
             && let Some(mut pass) = self.shadow.begin(&mut encoder)
         {
-            if let Some(ground) = &self.ground {
-                pass.set_pipeline(&self.shadow.terrain_pipeline);
-                pass.set_vertex_buffer(0, ground.vertices.slice(..));
-                pass.set_index_buffer(ground.indices.slice(..), wgpu::IndexFormat::Uint32);
-                for splat in &ground.base {
-                    pass.draw_indexed(splat.first..splat.first + splat.count, 0, 0..1);
+            // Every caster into every cascade: the viewport clips each to
+            // its quarter.
+            for cascade in 0..self.shadow.cascades() {
+                self.shadow.select(&mut pass, cascade);
+                if let Some(ground) = &self.ground {
+                    pass.set_pipeline(&self.shadow.terrain_pipeline);
+                    pass.set_vertex_buffer(0, ground.vertices.slice(..));
+                    pass.set_index_buffer(ground.indices.slice(..), wgpu::IndexFormat::Uint32);
+                    for splat in &ground.base {
+                        pass.draw_indexed(splat.first..splat.first + splat.count, 0, 0..1);
+                    }
                 }
+                pass.set_pipeline(&self.shadow.model_pipeline);
+                pass.set_bind_group(1, &self.pose_bind_group, &[]);
+                self.draw_models(&mut pass, &draws, &self.instances);
+                self.draw_models(&mut pass, &shadow_draws, &self.shadow_instances);
             }
-            pass.set_pipeline(&self.shadow.model_pipeline);
-            pass.set_bind_group(1, &self.pose_bind_group, &[]);
-            self.draw_models(&mut pass, &draws, &self.instances);
-            self.draw_models(&mut pass, &shadow_draws, &self.shadow_instances);
         }
         let water_options = self.water_options();
         if water_options.is_some_and(|options| options.refraction)
