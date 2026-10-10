@@ -12,6 +12,7 @@ mod march;
 mod minimap;
 mod opfs;
 mod particles;
+mod pick;
 mod pose;
 mod postproc;
 mod projectile;

@@ -940,11 +940,11 @@ pub fn frustum_planes(m: &[[f32; 4]; 4]) -> [[f32; 4]; 6] {
     })
 }
 
-fn sub(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+pub fn sub(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
     [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
 }
 
-fn dot(a: [f32; 3], b: [f32; 3]) -> f32 {
+pub fn dot(a: [f32; 3], b: [f32; 3]) -> f32 {
     a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
 }
 
@@ -956,7 +956,7 @@ pub fn cross(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
     ]
 }
 
-fn normalize(v: [f32; 3]) -> [f32; 3] {
+pub fn normalize(v: [f32; 3]) -> [f32; 3] {
     let length = dot(v, v).sqrt();
     [v[0] / length, v[1] / length, v[2] / length]
 }

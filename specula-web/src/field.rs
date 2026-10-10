@@ -72,6 +72,9 @@ use crate::impostor;
 use crate::particles;
 use crate::particles::Owner;
 use crate::particles::Particles;
+use crate::pick;
+use crate::pick::OrientedBox;
+use crate::pick::Pickable;
 use crate::pose;
 use crate::postproc;
 use crate::postproc::Post;
@@ -84,6 +87,7 @@ use crate::sky::Sky;
 use crate::stream::Dot;
 use crate::stream::Scene;
 use crate::stream::Shot;
+use crate::stream::TemplateDetails;
 use crate::stream::VariableSet;
 use crate::stream::VariantSet;
 use crate::stream::turn_towards;
@@ -343,7 +347,23 @@ struct Camera {
     keys: u8,
     /// When `step` last ran, in page milliseconds.
     last_step: f64,
+    /// The left button's press, its pointer id and client point, and the
+    /// canvas's client offset then.
+    press: Option<(i32, [f32; 2], [f32; 2])>,
+    /// Left clicks and drags yet to be picked from.
+    picks: Vec<PickInput>,
 }
+
+/// A left click or drag on the canvas, points 0..1 across it from its top
+/// left. Logged for now; C13 makes a selection of them.
+enum PickInput {
+    Click { at: [f32; 2], count: u32 },
+    Rect { from: [f32; 2], to: [f32; 2] },
+}
+
+/// `gui.session.dragdelta`: how far, in pixels, a press may move and still
+/// be a click.
+const DRAG_DELTA: f32 = 4.0;
 
 const KEY_FORWARD: u8 = 1;
 const KEY_BACK: u8 = 2;
@@ -382,6 +402,8 @@ struct Entities {
     map_size: u32,
     dots: Vec<(u32, Dot)>,
     templates: Vec<String>,
+    /// By template, as `templates`.
+    template_details: Vec<Option<TemplateDetails>>,
     strings: Vec<String>,
     variant_sets: Vec<VariantSet>,
     variable_sets: Vec<VariableSet>,
@@ -534,6 +556,8 @@ pub struct Field {
     decal_indices: wgpu::Buffer,
     /// Where the camera is this frame, which impostor cells depend on.
     eye: [f32; 3],
+    /// The selectable entities drawn this frame.
+    pickables: Vec<Pickable>,
     /// The animation time each entity's sound was last checked at.
     sound_clocks: HashMap<u32, SoundClock>,
     shots: HashMap<u32, Flying>,
@@ -1055,6 +1079,8 @@ impl Field {
             placed: false,
             keys: 0,
             last_step: now(),
+            press: None,
+            picks: Vec::new(),
         }));
         wire_camera(&canvas, &camera)?;
         let document = web_sys::window()
@@ -1168,6 +1194,7 @@ impl Field {
             decal_instances,
             decal_indices,
             eye: [0.0; 3],
+            pickables: Vec::new(),
             sound_clocks: HashMap::new(),
             shots: HashMap::new(),
             shot_models: HashMap::new(),
@@ -1333,6 +1360,7 @@ impl Field {
         self.shadow_planes = casters.unwrap_or_default();
         self.placed = 0;
         self.decals.clear();
+        self.pickables.clear();
         self.stats.levels = [0; LEVELS];
         let planes = frustum_planes(view_proj);
         let pixel_scale = self.config.height as f32 / (FIELD_OF_VIEW / 2.0).tan();
@@ -1410,6 +1438,7 @@ impl Field {
                     return;
                 };
                 transform.translate(Vec3::new(x, y, z));
+                self.add_pickable(id, dot, None, &transform);
                 self.place_decal(&model, decal, &transform, level < COARSE_LEVEL);
                 return;
             }
@@ -1493,6 +1522,7 @@ impl Field {
             }
             return;
         };
+        self.add_pickable(id, dot, Some((low, high)), &transform);
         if has_decal(&model) {
             self.place_decals(&model, &transform, level < COARSE_LEVEL, 0);
         }
@@ -1524,6 +1554,111 @@ impl Field {
         if self.placed > placed {
             self.stats.levels[level.min(COARSE_LEVEL)] += 1;
         }
+    }
+
+    /// Records a drawn entity for picking, by its template's box under
+    /// `transform`, the one it is drawn with; `bounds` as `pick::local_box`.
+    fn add_pickable(&mut self, id: u32, dot: &Dot, bounds: Option<(Vec3, Vec3)>, transform: &Mat4) {
+        let details = self
+            .entities
+            .template_details
+            .get(dot.template as usize)
+            .and_then(Option::as_ref);
+        let Some((low, high)) = pick::local_box(details, bounds) else {
+            return;
+        };
+        self.pickables.push(Pickable {
+            id,
+            position: [transform.m[0][3], transform.m[1][3], transform.m[2][3]],
+            bounds: OrientedBox::new(low, high, transform),
+        });
+    }
+
+    /// Logs what the clicks and drags since the last frame pick. C13 makes
+    /// a selection of them instead.
+    fn log_picks(&self, view_proj: &[[f32; 4]; 4], eye: [f32; 3], right: [f32; 3], up: [f32; 3]) {
+        let picks = std::mem::take(&mut self.camera.borrow_mut().picks);
+        let aspect = self.config.width as f32 / self.config.height.max(1) as f32;
+        let tan_half = (FIELD_OF_VIEW / 2.0).tan();
+        for input in picks {
+            let (what, ids) = match input {
+                PickInput::Click { at, count } => {
+                    let ray =
+                        pick::camera_ray(eye, right, up, cross(right, up), tan_half, aspect, at);
+                    let ids = match pick::pick_at_point(&self.pickables, &ray) {
+                        Some(id) if count >= 2 => self.similar(id, count >= 3, view_proj),
+                        Some(id) => vec![id],
+                        None => Vec::new(),
+                    };
+                    (format!("click x{count}"), ids)
+                }
+                PickInput::Rect { from, to } => {
+                    let ids = pick::pick_in_rect(&self.pickables, view_proj, from, to);
+                    let ids = pick::preferred(ids, |id, class| {
+                        self.dot_details(id).is_some_and(|(_, details)| {
+                            pick::has_class(details, &self.entities.strings, class)
+                        })
+                    });
+                    ("box".to_string(), ids)
+                }
+            };
+            let named: Vec<String> = ids
+                .iter()
+                .map(|id| {
+                    let template = self.entity_dot(*id).and_then(|dot| {
+                        self.entities
+                            .templates
+                            .get(dot.template as usize)
+                            .map(|name| (name.as_str(), dot.owner))
+                    });
+                    match template {
+                        Some((name, owner)) => format!("{id} {name} p{owner}"),
+                        None => id.to_string(),
+                    }
+                })
+                .collect();
+            web_sys::console::log_1(
+                &format!("pick {what}: {} [{}]", named.len(), named.join(", ")).into(),
+            );
+        }
+    }
+
+    /// `PickSimilarEntities` for a double click, or with `exact` a triple
+    /// one: on screen, of the clicked entity's owner only (CONTROL.md 5),
+    /// of its selection group, or of its template when it has none or
+    /// `exact`.
+    fn similar(&self, clicked: u32, exact: bool, view_proj: &[[f32; 4]; 4]) -> Vec<u32> {
+        let Some((dot, details)) = self.dot_details(clicked) else {
+            return vec![clicked];
+        };
+        let (owner, template) = (dot.owner, dot.template);
+        let group = if exact { 0 } else { details.group_name };
+        pick::pick_similar(&self.pickables, view_proj, |id| {
+            self.dot_details(id).is_some_and(|(other, other_details)| {
+                other.owner == owner
+                    && if group != 0 {
+                        other_details.group_name == group
+                    } else {
+                        other.template == template
+                    }
+            })
+        })
+    }
+
+    fn entity_dot(&self, id: u32) -> Option<&Dot> {
+        let dots = &self.entities.dots;
+        let index = dots.binary_search_by_key(&id, |(id, _)| *id).ok()?;
+        Some(&dots[index].1)
+    }
+
+    fn dot_details(&self, id: u32) -> Option<(&Dot, &TemplateDetails)> {
+        let dot = self.entity_dot(id)?;
+        let details = self
+            .entities
+            .template_details
+            .get(dot.template as usize)?
+            .as_ref()?;
+        Some((dot, details))
     }
 
     /// How a corpse or rubble sinks: the `Decay` of the template of a
@@ -3388,6 +3523,7 @@ impl View for Field {
             self.impact_models.clear();
             entities.match_id = scene.match_id;
             entities.templates.clear();
+            entities.template_details.clear();
             entities.strings.clear();
             entities.variant_sets.clear();
             entities.variable_sets.clear();
@@ -3397,11 +3533,15 @@ impl View for Field {
         // The tables only grow within a match, so only the tail is new.
         if scene.templates.len() < entities.templates.len() {
             entities.templates.clear();
+            entities.template_details.clear();
         }
         let known = entities.templates.len();
         entities
             .templates
             .extend(scene.templates[known..].iter().cloned());
+        entities
+            .template_details
+            .extend(scene.template_details[known..].iter().copied());
         if scene.strings.len() < entities.strings.len() {
             entities.strings.clear();
         }
@@ -3632,6 +3772,7 @@ impl View for Field {
         self.far.begin_frame(&self.device);
         let shadowed = casters.is_some();
         self.place_entities(progress, &view_proj, casters);
+        self.log_picks(&view_proj, eye, right, up);
         self.far.take_loaded(&self.device, &self.queue);
         let mut prepared = Vec::new();
         for (key, request) in self.far.next_bakes(&self.device) {
@@ -5178,6 +5319,19 @@ impl Camera {
     }
 }
 
+/// Whether a press moved far enough to be a drag.
+fn dragged(from: [f32; 2], to: [f32; 2]) -> bool {
+    (to[0] - from[0]).hypot(to[1] - from[1]) >= DRAG_DELTA
+}
+
+/// A client point 0..1 across the canvas, whose client offset is `offset`.
+fn on_canvas(canvas: &HtmlCanvasElement, at: [f32; 2], offset: [f32; 2]) -> [f32; 2] {
+    [
+        (at[0] - offset[0]) / canvas.client_width().max(1) as f32,
+        (at[1] - offset[1]) / canvas.client_height().max(1) as f32,
+    ]
+}
+
 /// `pointerId`, read through the base `MouseEvent` a `PointerEvent` is.
 pub fn pointer_id(event: &MouseEvent) -> i32 {
     js_sys::Reflect::get(event, &"pointerId".into())
@@ -5216,6 +5370,62 @@ fn wire_camera(canvas: &HtmlCanvasElement, camera: &Rc<RefCell<Camera>>) -> Resu
                 mouse,
                 x: event.client_x() as f32,
                 y: event.client_y() as f32,
+            });
+            if mouse && event.button() == 0 {
+                let at = [event.client_x() as f32, event.client_y() as f32];
+                let offset = [
+                    at[0] - event.offset_x() as f32,
+                    at[1] - event.offset_y() as f32,
+                ];
+                camera.press = Some((id, at, offset));
+            }
+        }),
+    );
+
+    // A drag ends on pointerup, on the window as it may leave the canvas;
+    // a click ends on click, which counts the clicks.
+    let target = Rc::clone(camera);
+    let up_canvas = canvas.clone();
+    listen(
+        &window,
+        "pointerup",
+        Closure::new(move |event: MouseEvent| {
+            let camera = &mut *target.borrow_mut();
+            let Some((id, from, offset)) = camera.press else {
+                return;
+            };
+            let to = [event.client_x() as f32, event.client_y() as f32];
+            if id != pointer_id(&event) || !dragged(from, to) {
+                return;
+            }
+            camera.press = None;
+            camera.picks.push(PickInput::Rect {
+                from: on_canvas(&up_canvas, from, offset),
+                to: on_canvas(&up_canvas, to, offset),
+            });
+        }),
+    );
+    let target = Rc::clone(camera);
+    let click_canvas = canvas.clone();
+    listen(
+        canvas,
+        "click",
+        Closure::new(move |event: MouseEvent| {
+            let camera = &mut *target.borrow_mut();
+            let Some((_, from, offset)) = camera.press.take() else {
+                return;
+            };
+            let at = [event.client_x() as f32, event.client_y() as f32];
+            if dragged(from, at) {
+                return;
+            }
+            let count = js_sys::Reflect::get(&event, &"detail".into())
+                .ok()
+                .and_then(|detail| detail.as_f64())
+                .map_or(1, |detail| detail as u32);
+            camera.picks.push(PickInput::Click {
+                at: on_canvas(&click_canvas, at, offset),
+                count,
             });
         }),
     );
