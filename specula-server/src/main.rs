@@ -220,6 +220,7 @@ fn serve(stream: UnixStream, hub: &Hub) -> io::Result<()> {
     let mut reader = BufReader::new(stream);
     feed::read_header(&mut reader)?;
     let mut templates = HashMap::new();
+    let mut details = feed::Details::default();
     let mut classifier = Classifier::default();
     let mut meter = DeltaMeter::new();
     while let Some(record) = feed::read_record(&mut reader)? {
@@ -247,6 +248,14 @@ fn serve(stream: UnixStream, hub: &Hub) -> io::Result<()> {
             Record::String { index, text } => hub.add_string(index, text)?,
             Record::VariantSet { index, pairs } => hub.add_variant_set(index, pairs)?,
             Record::VariableSet { index, pairs } => hub.add_variable_set(index, pairs)?,
+            Record::TemplateDetails {
+                index,
+                details: template,
+            } => details.set_template(index, *template),
+            Record::Details { changed, gone } => details.apply(changed, gone),
+            Record::StringList { index, strings } => details.add_string_list(index, strings),
+            Record::Renames(renames) => details.set_renames(renames),
+            Record::Economy(economy) => details.set_economy(economy),
             Record::Terrain(terrain) => {
                 let resource = terrain::encode(&terrain);
                 println!(
@@ -261,6 +270,7 @@ fn serve(stream: UnixStream, hub: &Hub) -> io::Result<()> {
             }
             Record::Turn { turn, entities } => {
                 hub.publish(turn, &entities)?;
+                details.end_turn();
                 if let Some(summary) = classifier.observe(turn, &entities) {
                     println!("{summary}, {} templates", templates.len());
                 }

@@ -1,6 +1,7 @@
-//! Decoder for the observer hook's feed, format v13. The writer is
+//! Decoder for the observer hook's feed, format v14. The writer is
 //! `source/network/SpeculaFeed.cpp` in the `specula` branch of 0ad-specula.
 
+use std::collections::HashMap;
 use std::io;
 use std::io::ErrorKind;
 use std::io::Read;
@@ -17,6 +18,11 @@ const RECORD_VARIANT_SET: u8 = 7;
 const RECORD_TERRITORY: u8 = 8;
 const RECORD_SOUNDS: u8 = 9;
 const RECORD_PROJECTILES: u8 = 10;
+const RECORD_TEMPLATE_DETAILS: u8 = 11;
+const RECORD_DETAILS: u8 = 12;
+const RECORD_STRING_LIST: u8 = 13;
+const RECORD_RENAMES: u8 = 14;
+const RECORD_ECONOMY: u8 = 15;
 const RECORD_VARIABLE_SET: u8 = 16;
 const ENTITY_SIZE: usize = 74;
 const SOUND_SIZE: usize = 27;
@@ -29,6 +35,24 @@ const TEMPLATE_PLAYER_COLOR: u8 = 1;
 const SOUND_ENTITY: u8 = 0;
 const SOUND_POSITION: u8 = 1;
 const SOUND_PLAYER: u8 = 2;
+const DETAIL_HEALTH: u32 = 1;
+const DETAIL_CAPTURE: u32 = 2;
+const DETAIL_SUPPLY: u32 = 4;
+const DETAIL_GATHERERS: u32 = 8;
+const DETAIL_CARRYING: u32 = 16;
+const DETAIL_EXPERIENCE: u32 = 32;
+const DETAIL_QUEUE: u32 = 64;
+const DETAIL_GARRISON: u32 = 128;
+const DETAIL_FOUNDATION: u32 = 256;
+const DETAIL_REPAIR: u32 = 512;
+const DETAIL_UNIT_AI: u32 = 1024;
+const DETAIL_TRAINABLE: u32 = 2048;
+const DETAIL_RESEARCHABLE: u32 = 4096;
+const DETAIL_PROGRESS: u32 = 8192;
+const DETAIL_HOLDER: u32 = 16384;
+const DETAIL_TRADER: u32 = 32768;
+const QUEUE_UNIT: u8 = 0;
+const QUEUE_TECHNOLOGY: u8 = 1;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct Entity {
@@ -150,6 +174,241 @@ pub struct Player {
     pub battle: bool,
 }
 
+/// What a template gives the selection overlay, the status bars and the
+/// panels, read from the template as is. Strings are string record indices.
+#[expect(dead_code, reason = "the wire carries them from C6 on")]
+pub struct TemplateDetails {
+    /// The template flag bits of `SpeculaFeed.h`, kind 11.
+    pub flags: u16,
+    /// Relative to art/textures/selection/.
+    pub overlay_texture: Option<u32>,
+    pub overlay_mask: Option<u32>,
+    pub line_thickness: f32,
+    /// A circle's radius in both.
+    pub overlay_width: f32,
+    pub overlay_depth: f32,
+    pub footprint_width: f32,
+    pub footprint_depth: f32,
+    pub footprint_height: f32,
+    pub bar_width: f32,
+    pub bar_height: f32,
+    pub bar_offset: f32,
+    pub generic_name: Option<u32>,
+    pub specific_name: Option<u32>,
+    /// Relative to art/textures/ui/session/portraits/.
+    pub icon: Option<u32>,
+    pub group_name: Option<u32>,
+    pub rank: Option<u32>,
+    /// Token lists, as the template writes them.
+    pub classes: Option<u32>,
+    pub visible_classes: Option<u32>,
+    /// Relative to audio/.
+    pub select_sound: Option<u32>,
+    /// Bit i for the i-th of Health, Capturable, ResourceSupply,
+    /// ProductionQueue, GarrisonHolder, Promotion, ResourceGatherer,
+    /// Foundation, Repairable, UnitAI, Trainer, Researcher, Pack, Upgrade,
+    /// Trader, Garrisonable, Turretable.
+    pub components: u32,
+}
+
+/// An entity's kind 12 groups; `None` is a group it does not have, or, in
+/// a record, one that did not change.
+#[derive(Default)]
+pub struct EntityDetails {
+    /// Hitpoints, max.
+    pub health: Option<(f32, f32)>,
+    pub capture: Option<Capture>,
+    /// Amount, max.
+    pub supply: Option<(f32, f32)>,
+    /// Gatherers, max.
+    pub gatherers: Option<(u8, u8)>,
+    pub carrying: Option<Vec<Carried>>,
+    /// Experience, required.
+    pub experience: Option<(f32, f32)>,
+    pub queue: Option<Queue>,
+    pub garrison: Option<Garrison>,
+    pub foundation: Option<Building>,
+    pub repair: Option<Building>,
+    pub unit_ai: Option<UnitAi>,
+    /// String list indices.
+    pub trainable: Option<u32>,
+    pub researchable: Option<u32>,
+    pub progress: Option<Progress>,
+    /// The entity it is garrisoned in or a turret on, 0 for none.
+    pub holder: Option<u32>,
+    pub trader: Option<Trader>,
+}
+
+impl EntityDetails {
+    /// Takes the groups `changed` carries.
+    fn merge(&mut self, changed: Self) {
+        fn take<T>(slot: &mut Option<T>, value: Option<T>) {
+            if value.is_some() {
+                *slot = value;
+            }
+        }
+        take(&mut self.health, changed.health);
+        take(&mut self.capture, changed.capture);
+        take(&mut self.supply, changed.supply);
+        take(&mut self.gatherers, changed.gatherers);
+        take(&mut self.carrying, changed.carrying);
+        take(&mut self.experience, changed.experience);
+        take(&mut self.queue, changed.queue);
+        take(&mut self.garrison, changed.garrison);
+        take(&mut self.foundation, changed.foundation);
+        take(&mut self.repair, changed.repair);
+        take(&mut self.unit_ai, changed.unit_ai);
+        take(&mut self.trainable, changed.trainable);
+        take(&mut self.researchable, changed.researchable);
+        take(&mut self.progress, changed.progress);
+        take(&mut self.holder, changed.holder);
+        take(&mut self.trader, changed.trader);
+    }
+}
+
+#[expect(dead_code, reason = "the wire carries them from C7 on")]
+pub struct Capture {
+    /// By player index.
+    pub points: Vec<f32>,
+    pub max: f32,
+}
+
+#[expect(dead_code, reason = "the wire carries them from C20 on")]
+pub struct Carried {
+    /// String record index.
+    pub kind: Option<u32>,
+    pub amount: f32,
+    pub capacity: f32,
+}
+
+#[expect(dead_code, reason = "the wire carries them from C20 on")]
+pub struct Queue {
+    pub autoqueue: bool,
+    pub items: Vec<QueueItem>,
+}
+
+#[expect(dead_code, reason = "the wire carries them from C20 on")]
+pub struct QueueItem {
+    pub id: u32,
+    pub technology: bool,
+    /// String record index: the unit template or the technology.
+    pub name: Option<u32>,
+    pub count: u16,
+    /// 0..=1.
+    pub progress: f32,
+    /// In milliseconds.
+    pub time_remaining: f32,
+    pub paused: bool,
+    pub missing_population: u16,
+}
+
+#[expect(dead_code, reason = "the wire carries them from C20 on")]
+pub struct Garrison {
+    pub capacity: u16,
+    pub occupied: u16,
+    /// (id, template index).
+    pub entities: Vec<(u32, u32)>,
+}
+
+/// A foundation or a repair.
+#[expect(dead_code, reason = "the wire carries them from C20 on")]
+pub struct Building {
+    pub builders: u8,
+    pub seconds_remaining: f32,
+}
+
+#[expect(dead_code, reason = "the wire carries them from C20 on")]
+pub struct UnitAi {
+    /// String record indices.
+    pub state: Option<u32>,
+    pub idle: bool,
+    pub stance: Option<u32>,
+    pub formation_controller: u32,
+}
+
+#[expect(dead_code, reason = "the wire carries them from C20 on")]
+pub struct Progress {
+    /// -1 when not packing or upgrading.
+    pub pack: f32,
+    pub upgrade: f32,
+    /// String record index.
+    pub upgrade_target: Option<u32>,
+}
+
+#[expect(dead_code, reason = "the wire carries them from C20 on")]
+pub struct Trader {
+    /// String record index.
+    pub goods: Option<u32>,
+    pub gain: f32,
+}
+
+/// A player's top panel numbers; index 0 is gaia.
+#[expect(dead_code, reason = "the wire carries them from C7 on")]
+pub struct Economy {
+    pub population: i32,
+    pub population_limit: i32,
+    pub population_max: i32,
+    /// Sorted by code.
+    pub resources: Vec<Resource>,
+    /// String record index.
+    pub phase: Option<u32>,
+    /// Heroes and the like, as `panelEntities`.
+    pub panel_entities: Vec<u32>,
+}
+
+#[expect(dead_code, reason = "the wire carries them from C7 on")]
+pub struct Resource {
+    /// String record index.
+    pub code: Option<u32>,
+    pub amount: f32,
+    pub gatherers: u16,
+}
+
+/// The kind 11 to 15 state of one feed. Kind 12 carries only the groups
+/// that changed, so the rest must be kept here.
+#[derive(Default)]
+pub struct Details {
+    pub templates: HashMap<u32, TemplateDetails>,
+    pub entities: HashMap<u32, EntityDetails>,
+    /// String list records by index, each a list of string indices.
+    pub string_lists: HashMap<u32, Vec<Option<u32>>>,
+    /// (old id, new id) of the next turn record.
+    pub renames: Vec<(u32, u32)>,
+    pub economy: Vec<Economy>,
+}
+
+impl Details {
+    pub fn set_template(&mut self, index: u32, details: TemplateDetails) {
+        self.templates.insert(index, details);
+    }
+
+    pub fn apply(&mut self, changed: Vec<(u32, EntityDetails)>, gone: Vec<u32>) {
+        for (id, groups) in changed {
+            self.entities.entry(id).or_default().merge(groups);
+        }
+        for id in gone {
+            self.entities.remove(&id);
+        }
+    }
+
+    pub fn add_string_list(&mut self, index: u32, strings: Vec<Option<u32>>) {
+        self.string_lists.insert(index, strings);
+    }
+
+    pub fn set_renames(&mut self, renames: Vec<(u32, u32)>) {
+        self.renames = renames;
+    }
+
+    pub fn set_economy(&mut self, economy: Vec<Economy>) {
+        self.economy = economy;
+    }
+
+    /// The renames belong to the turn just read.
+    pub fn end_turn(&mut self) {
+        self.renames.clear();
+    }
+}
+
 pub enum Record {
     Template {
         index: u32,
@@ -194,6 +453,24 @@ pub enum Record {
         index: u32,
         pairs: Vec<(u32, f32)>,
     },
+    /// Right after the template record of the same index.
+    TemplateDetails {
+        index: u32,
+        details: Box<TemplateDetails>,
+    },
+    /// Before the turn record: the groups that changed, by entity id, and
+    /// the ids that no longer have any.
+    Details {
+        changed: Vec<(u32, EntityDetails)>,
+        gone: Vec<u32>,
+    },
+    StringList {
+        index: u32,
+        strings: Vec<Option<u32>>,
+    },
+    /// (old id, new id) of the next turn record.
+    Renames(Vec<(u32, u32)>),
+    Economy(Vec<Economy>),
 }
 
 /// `ICmpTerritoryManager`'s grid, whenever it changes: row-major, x
@@ -328,6 +605,11 @@ pub fn read_record(reader: &mut impl Read) -> io::Result<Option<Record>> {
             RECORD_SOUNDS => return decode_sounds(&payload).map(Some),
             RECORD_PROJECTILES => return decode_projectiles(&payload).map(Some),
             RECORD_VARIABLE_SET => return decode_variable_set(&payload).map(Some),
+            RECORD_TEMPLATE_DETAILS => return decode_template_details(&payload).map(Some),
+            RECORD_DETAILS => return decode_details(&payload).map(Some),
+            RECORD_STRING_LIST => return decode_string_list(&payload).map(Some),
+            RECORD_RENAMES => return decode_renames(&payload).map(Some),
+            RECORD_ECONOMY => return decode_economy(&payload).map(Some),
             // Newer hooks may add kinds; the length prefix lets them be skipped.
             _ => continue,
         }
@@ -650,6 +932,251 @@ fn decode_variable_set(payload: &[u8]) -> io::Result<Record> {
     Ok(Record::VariableSet { index, pairs })
 }
 
+fn decode_template_details(payload: &[u8]) -> io::Result<Record> {
+    let mut cursor = Cursor(payload);
+    let index = cursor.u32()?;
+    let details = TemplateDetails {
+        flags: cursor.u16()?,
+        overlay_texture: optional(cursor.u32()?),
+        overlay_mask: optional(cursor.u32()?),
+        line_thickness: cursor.f32()?,
+        overlay_width: cursor.f32()?,
+        overlay_depth: cursor.f32()?,
+        footprint_width: cursor.f32()?,
+        footprint_depth: cursor.f32()?,
+        footprint_height: cursor.f32()?,
+        bar_width: cursor.f32()?,
+        bar_height: cursor.f32()?,
+        bar_offset: cursor.f32()?,
+        generic_name: optional(cursor.u32()?),
+        specific_name: optional(cursor.u32()?),
+        icon: optional(cursor.u32()?),
+        group_name: optional(cursor.u32()?),
+        rank: optional(cursor.u32()?),
+        classes: optional(cursor.u32()?),
+        visible_classes: optional(cursor.u32()?),
+        select_sound: optional(cursor.u32()?),
+        components: cursor.u32()?,
+    };
+    if !cursor.0.is_empty() {
+        return Err(invalid("template details record longer than its contents"));
+    }
+    Ok(Record::TemplateDetails {
+        index,
+        details: Box::new(details),
+    })
+}
+
+fn decode_details(payload: &[u8]) -> io::Result<Record> {
+    let mut cursor = Cursor(payload);
+    let count = cursor.u32()? as usize;
+    // At least an id and a mask each; a bad count must not reserve gigabytes.
+    if cursor.0.len() < count * 8 {
+        return Err(invalid("details record shorter than its entities"));
+    }
+    let mut changed = Vec::with_capacity(count);
+    for _ in 0..count {
+        let id = cursor.u32()?;
+        let mask = cursor.u32()?;
+        changed.push((id, decode_groups(&mut cursor, mask)?));
+    }
+    let count = cursor.u32()? as usize;
+    if cursor.0.len() != count * 4 {
+        return Err(invalid("details record length does not match its counts"));
+    }
+    let gone = (0..count)
+        .map(|_| cursor.u32())
+        .collect::<io::Result<_>>()?;
+    Ok(Record::Details { changed, gone })
+}
+
+/// The groups follow each other in the order of their bits.
+fn decode_groups(cursor: &mut Cursor, mask: u32) -> io::Result<EntityDetails> {
+    let mut details = EntityDetails::default();
+    if mask & DETAIL_HEALTH != 0 {
+        details.health = Some((cursor.f32()?, cursor.f32()?));
+    }
+    if mask & DETAIL_CAPTURE != 0 {
+        let count = cursor.u8()?;
+        let points = (0..count)
+            .map(|_| cursor.f32())
+            .collect::<io::Result<_>>()?;
+        details.capture = Some(Capture {
+            points,
+            max: cursor.f32()?,
+        });
+    }
+    if mask & DETAIL_SUPPLY != 0 {
+        details.supply = Some((cursor.f32()?, cursor.f32()?));
+    }
+    if mask & DETAIL_GATHERERS != 0 {
+        details.gatherers = Some((cursor.u8()?, cursor.u8()?));
+    }
+    if mask & DETAIL_CARRYING != 0 {
+        let count = cursor.u8()?;
+        let carrying = (0..count)
+            .map(|_| {
+                Ok(Carried {
+                    kind: optional(cursor.u32()?),
+                    amount: cursor.f32()?,
+                    capacity: cursor.f32()?,
+                })
+            })
+            .collect::<io::Result<_>>()?;
+        details.carrying = Some(carrying);
+    }
+    if mask & DETAIL_EXPERIENCE != 0 {
+        details.experience = Some((cursor.f32()?, cursor.f32()?));
+    }
+    if mask & DETAIL_QUEUE != 0 {
+        let autoqueue = cursor.u8()? != 0;
+        let count = cursor.u8()?;
+        let items = (0..count)
+            .map(|_| {
+                let id = cursor.u32()?;
+                let technology = match cursor.u8()? {
+                    QUEUE_UNIT => false,
+                    QUEUE_TECHNOLOGY => true,
+                    _ => return Err(invalid("unknown production queue item kind")),
+                };
+                Ok(QueueItem {
+                    id,
+                    technology,
+                    name: optional(cursor.u32()?),
+                    count: cursor.u16()?,
+                    progress: cursor.f32()?,
+                    time_remaining: cursor.f32()?,
+                    paused: cursor.u8()? != 0,
+                    missing_population: cursor.u16()?,
+                })
+            })
+            .collect::<io::Result<_>>()?;
+        details.queue = Some(Queue { autoqueue, items });
+    }
+    if mask & DETAIL_GARRISON != 0 {
+        let capacity = cursor.u16()?;
+        let occupied = cursor.u16()?;
+        let count = cursor.u16()?;
+        let entities = (0..count)
+            .map(|_| Ok((cursor.u32()?, cursor.u32()?)))
+            .collect::<io::Result<_>>()?;
+        details.garrison = Some(Garrison {
+            capacity,
+            occupied,
+            entities,
+        });
+    }
+    if mask & DETAIL_FOUNDATION != 0 {
+        details.foundation = Some(decode_building(cursor)?);
+    }
+    if mask & DETAIL_REPAIR != 0 {
+        details.repair = Some(decode_building(cursor)?);
+    }
+    if mask & DETAIL_UNIT_AI != 0 {
+        details.unit_ai = Some(UnitAi {
+            state: optional(cursor.u32()?),
+            idle: cursor.u8()? != 0,
+            stance: optional(cursor.u32()?),
+            formation_controller: cursor.u32()?,
+        });
+    }
+    if mask & DETAIL_TRAINABLE != 0 {
+        details.trainable = Some(cursor.u32()?);
+    }
+    if mask & DETAIL_RESEARCHABLE != 0 {
+        details.researchable = Some(cursor.u32()?);
+    }
+    if mask & DETAIL_PROGRESS != 0 {
+        details.progress = Some(Progress {
+            pack: cursor.f32()?,
+            upgrade: cursor.f32()?,
+            upgrade_target: optional(cursor.u32()?),
+        });
+    }
+    if mask & DETAIL_HOLDER != 0 {
+        details.holder = Some(cursor.u32()?);
+    }
+    if mask & DETAIL_TRADER != 0 {
+        details.trader = Some(Trader {
+            goods: optional(cursor.u32()?),
+            gain: cursor.f32()?,
+        });
+    }
+    Ok(details)
+}
+
+fn decode_building(cursor: &mut Cursor) -> io::Result<Building> {
+    Ok(Building {
+        builders: cursor.u8()?,
+        seconds_remaining: cursor.f32()?,
+    })
+}
+
+fn decode_string_list(payload: &[u8]) -> io::Result<Record> {
+    let mut cursor = Cursor(payload);
+    let index = cursor.u32()?;
+    let count = cursor.u32()? as usize;
+    if cursor.0.len() != count * 4 {
+        return Err(invalid(
+            "string list record length does not match its count",
+        ));
+    }
+    let strings = (0..count)
+        .map(|_| cursor.u32().map(optional))
+        .collect::<io::Result<_>>()?;
+    Ok(Record::StringList { index, strings })
+}
+
+fn decode_renames(payload: &[u8]) -> io::Result<Record> {
+    let mut cursor = Cursor(payload);
+    let count = cursor.u32()? as usize;
+    if cursor.0.len() != count * 8 {
+        return Err(invalid("renames record length does not match its count"));
+    }
+    let renames = (0..count)
+        .map(|_| Ok((cursor.u32()?, cursor.u32()?)))
+        .collect::<io::Result<_>>()?;
+    Ok(Record::Renames(renames))
+}
+
+fn decode_economy(payload: &[u8]) -> io::Result<Record> {
+    let mut cursor = Cursor(payload);
+    let count = cursor.u32()?;
+    let mut players = Vec::new();
+    for _ in 0..count {
+        let population = cursor.i32()?;
+        let population_limit = cursor.i32()?;
+        let population_max = cursor.i32()?;
+        let count = cursor.u8()?;
+        let resources = (0..count)
+            .map(|_| {
+                Ok(Resource {
+                    code: optional(cursor.u32()?),
+                    amount: cursor.f32()?,
+                    gatherers: cursor.u16()?,
+                })
+            })
+            .collect::<io::Result<_>>()?;
+        let phase = optional(cursor.u32()?);
+        let count = cursor.u16()?;
+        let panel_entities = (0..count)
+            .map(|_| cursor.u32())
+            .collect::<io::Result<_>>()?;
+        players.push(Economy {
+            population,
+            population_limit,
+            population_max,
+            resources,
+            phase,
+            panel_entities,
+        });
+    }
+    if !cursor.0.is_empty() {
+        return Err(invalid("economy record longer than its contents"));
+    }
+    Ok(Record::Economy(players))
+}
+
 fn optional(index: u32) -> Option<u32> {
     (index != NONE).then_some(index)
 }
@@ -694,6 +1221,10 @@ impl<'a> Cursor<'a> {
 
     fn i32(&mut self) -> io::Result<i32> {
         self.u32().map(|value| value as i32)
+    }
+
+    fn f32(&mut self) -> io::Result<f32> {
+        self.u32().map(f32::from_bits)
     }
 
     /// u16 length and UTF-8.
