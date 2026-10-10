@@ -14,6 +14,8 @@ use specula_assets::files::Decal;
 
 use crate::material;
 use crate::material::Material;
+use crate::particle;
+use crate::particle::ParticleType;
 
 const MAX_QUALITY: u8 = 255;
 /// `MAX_LEVELS_PER_ACTOR_DEF`.
@@ -47,6 +49,7 @@ pub struct Variant {
     pub specular_texture: Option<String>,
     pub ao_texture: Option<String>,
     pub decal: Option<Decal>,
+    pub particles: Option<Rc<ParticleType>>,
     /// (attach point, actor); an empty actor only removes.
     pub props: Vec<(String, String)>,
     pub animations: Vec<Animation>,
@@ -73,6 +76,8 @@ pub struct Loader<'a> {
     /// Actors being loaded, so a prop cycle fails instead of recursing.
     loading: HashSet<String>,
     materials: BTreeMap<String, Material>,
+    /// By path, as `CParticleManager::LoadEmitterType` caches them.
+    particles: BTreeMap<String, Rc<ParticleType>>,
 }
 
 impl<'a> Loader<'a> {
@@ -82,6 +87,7 @@ impl<'a> Loader<'a> {
             actors: BTreeMap::new(),
             loading: HashSet::new(),
             materials: BTreeMap::new(),
+            particles: BTreeMap::new(),
         }
     }
 
@@ -311,6 +317,18 @@ impl<'a> Loader<'a> {
                         offset_z: number("offsetz"),
                     });
                 }
+                "particles" => {
+                    let path = format!(
+                        "art/particles/{}",
+                        option.attribute("file").unwrap_or_default()
+                    );
+                    let mod_dir = self.mod_dir;
+                    let loaded = self
+                        .particles
+                        .entry(path.clone())
+                        .or_insert_with(|| Rc::new(particle::load(mod_dir, &path)));
+                    variant.particles = Some(Rc::clone(loaded));
+                }
                 "textures" => {
                     for texture in option.children().filter(Node::is_element) {
                         if !texture.has_tag_name("texture") {
@@ -420,7 +438,7 @@ fn to_int(value: &str) -> i32 {
 }
 
 /// `CStr::ToFloat`: the leading number, 0 if there is none.
-fn to_float(value: &str) -> f32 {
+pub fn to_float(value: &str) -> f32 {
     let value = value.trim_start();
     (1..=value.len())
         .rev()

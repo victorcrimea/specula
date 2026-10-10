@@ -23,6 +23,7 @@ use std::rc::Rc;
 use specula_assets::bc;
 use specula_assets::files::AnimationData;
 use specula_assets::files::Decal;
+use specula_assets::files::Emitter;
 use specula_assets::files::FileRef;
 use specula_assets::files::Mesh;
 use specula_assets::files::NO_BONE;
@@ -64,6 +65,9 @@ use crate::far::LookKey;
 use crate::far::Request;
 use crate::gpu;
 use crate::impostor;
+use crate::particles;
+use crate::particles::Owner;
+use crate::particles::Particles;
 use crate::pose;
 use crate::postproc;
 use crate::postproc::Post;
@@ -75,6 +79,7 @@ use crate::sky::Sky;
 use crate::stream::Dot;
 use crate::stream::Scene;
 use crate::stream::Shot;
+use crate::stream::VariableSet;
 use crate::stream::VariantSet;
 use crate::stream::turn_towards;
 use crate::terrain::Light;
@@ -370,6 +375,7 @@ struct Entities {
     dots: Vec<(u32, Dot)>,
     strings: Vec<String>,
     variant_sets: Vec<VariantSet>,
+    variable_sets: Vec<VariableSet>,
 }
 
 pub struct Field {
@@ -410,6 +416,16 @@ pub struct Field {
     /// where off keeps the plain background.
     sky_visible: bool,
     sky: Sky,
+    /// The viewer's particles setting, the emitters, the pipelines for
+    /// the view and for the water reflection, and this frame's instances.
+    particles_visible: bool,
+    particles: Particles,
+    particle_pipelines: particles::Pipelines,
+    reflection_particles: particles::Pipelines,
+    particle_instances: wgpu::Buffer,
+    /// What `place_model` places the particle props it meets for: the
+    /// entity or projectile being drawn, not a caster or a capture.
+    emitting: Option<Owner>,
     /// The viewer's water refraction, real water depth and water
     /// reflections settings, under the water effects.
     refraction: bool,
@@ -891,6 +907,29 @@ impl Field {
 
         let borders = Borders::new(&device, &queue, config.format, &view_layout)?;
         let sky = Sky::new(&device, &queue, config.format);
+        let particle_pipelines = particles::Pipelines::new(
+            &device,
+            config.format,
+            &view_layout,
+            &texture_layout,
+            light_layout,
+            false,
+        );
+        let particle_instances = create_buffer(
+            &device,
+            &queue,
+            "particle instances",
+            &[0; 4096],
+            wgpu::BufferUsages::VERTEX,
+        );
+        let reflection_particles = particles::Pipelines::new(
+            &device,
+            config.format,
+            &view_layout,
+            &texture_layout,
+            light_layout,
+            true,
+        );
         let water = Water::new(&device, config.format, &view_layout, light_layout);
         let waves = water::Waves::new(&device, &view_layout);
         let far = Far::new(
@@ -1019,6 +1058,12 @@ impl Field {
             water_group: None,
             sky_visible: false,
             sky,
+            particles_visible: false,
+            particles: Particles::new(),
+            particle_pipelines,
+            reflection_particles,
+            particle_instances,
+            emitting: None,
             refraction: false,
             real_depth: false,
             reflection: false,
@@ -1220,6 +1265,12 @@ impl Field {
         self.stats.levels = [0; LEVELS];
         let planes = frustum_planes(view_proj);
         let pixel_scale = self.config.height as f32 / (FIELD_OF_VIEW / 2.0).tan();
+        if self.particles_visible {
+            // CParticleManager's time, which CCmpParticleManager advances
+            // by the sim time.
+            let time = (f64::from(self.entities.turn) + f64::from(progress)) * TURN_MS / 1000.0;
+            self.particles.begin(time);
+        }
         let dots = std::mem::take(&mut self.entities.dots);
         for (id, dot) in &dots {
             self.place_entity(
@@ -1236,6 +1287,17 @@ impl Field {
         self.entities.dots = dots;
         if self.projectiles {
             self.place_shots(progress, view_proj, &planes, pixel_scale, &mut groups);
+        }
+        if self.particles_visible {
+            let dots = &self.entities.dots;
+            let shots = &self.shots;
+            self.particles.finish(
+                |position, reach| !outside(&planes, [position.x, position.y, position.z], reach),
+                |owner| match owner {
+                    Owner::Entity(id) => dots.binary_search_by_key(&id, |(id, _)| *id).is_ok(),
+                    Owner::Shot(id) | Owner::Impact(id) => shots.contains_key(&id),
+                },
+            );
         }
         self.groups = groups;
         self.stats.models = self.placed;
@@ -1270,8 +1332,8 @@ impl Field {
             w: half.cos(),
         });
 
-        let root_file = match model.shape {
-            Shape::Mesh(file) => file,
+        let root_file = match &model.shape {
+            Shape::Mesh(file) => *file,
             Shape::Decal(decal) => {
                 let radius =
                     decal.size_x.hypot(decal.size_z) / 2.0 + decal.offset_x.hypot(decal.offset_z);
@@ -1280,7 +1342,15 @@ impl Field {
                     return;
                 };
                 transform.translate(Vec3::new(x, y, z));
-                self.place_decal(&model, &decal, &transform, level < COARSE_LEVEL);
+                self.place_decal(&model, decal, &transform, level < COARSE_LEVEL);
+                return;
+            }
+            // Culled with the emitters, by their own reach.
+            Shape::Particles(emitter) => {
+                if self.particles_visible {
+                    transform.translate(Vec3::new(x, y, z));
+                    self.place_emitter(Owner::Entity(id), &model, emitter, &transform, dot);
+                }
                 return;
             }
         };
@@ -1344,7 +1414,9 @@ impl Field {
             return;
         }
         let placed = self.placed;
+        self.emitting = self.particles_visible.then_some(Owner::Entity(id));
         self.place_model(&model, &transform, &entity, None, 0, groups);
+        self.emitting = None;
         // Counted once something of it is drawn, not while it loads.
         if self.placed > placed {
             self.stats.levels[level.min(COARSE_LEVEL)] += 1;
@@ -1840,9 +1912,16 @@ impl Field {
         depth: usize,
         groups: &mut HashMap<GroupKey, Vec<u8>>,
     ) -> bool {
-        // place_decals lays decals, whatever the level of detail.
-        let Shape::Mesh(file) = model.shape else {
-            return true;
+        let file = match &model.shape {
+            Shape::Mesh(file) => *file,
+            // place_decals lays decals, whatever the level of detail.
+            Shape::Decal(_) => return true,
+            Shape::Particles(emitter) => {
+                if let Some(owner) = self.emitting {
+                    self.place_emitter(owner, model, emitter, transform, &entity.dot);
+                }
+                return true;
+            }
         };
         let detail = entity.level < COARSE_LEVEL;
         let mesh = match self.store.borrow_mut().mesh(file, detail) {
@@ -1987,12 +2066,13 @@ impl Field {
     /// Lays the decals of `model`'s tree on the ground. Apart from
     /// `place_model`, as an impostor leaves out the ground under it.
     fn place_decals(&mut self, model: &Model, transform: &Mat4, detail: bool, depth: usize) {
-        let file = match model.shape {
-            Shape::Mesh(file) => file,
+        let file = match &model.shape {
+            Shape::Mesh(file) => *file,
             Shape::Decal(decal) => {
-                self.place_decal(model, &decal, transform, detail);
+                self.place_decal(model, decal, transform, detail);
                 return;
             }
+            Shape::Particles(_) => return,
         };
         if depth >= 8 {
             return;
@@ -2386,7 +2466,7 @@ impl Field {
         };
         let mut shots = std::mem::take(&mut self.shots);
         let mut placing = Vec::new();
-        for flying in shots.values_mut() {
+        for (id, flying) in shots.iter_mut() {
             let shot = &flying.shot;
             let flight = *flying.flight.get_or_insert_with(|| {
                 let origin = flying.origin.unwrap_or_else(|| metres(shot.launch));
@@ -2407,17 +2487,18 @@ impl Field {
             };
             let since = self.entities.turn.saturating_sub(shot.launch_turn) as f32 + progress;
             let t = since * TURN_MS as f32 / 1000.0;
-            placing.push((*shot, flight, stop, rest, t));
+            placing.push((*id, *shot, flight, stop, rest, t));
         }
         self.shots = shots;
 
-        for (shot, flight, stop, rest, t) in placing {
+        for (id, shot, flight, stop, rest, t) in placing {
             if t - flight.time_hit() <= projectile::DECAY_SECS
                 && let Some(model) = self.shot_model(&shot)
             {
                 let transform = flight.transform(t, stop, rest);
                 let place = ShotPlace {
                     owner: shot.owner,
+                    emitter: Owner::Shot(id),
                     time: t * 1000.0,
                     progress,
                 };
@@ -2442,6 +2523,7 @@ impl Field {
                 transform.translate(Vec3::new(at.x, rest, at.z));
                 let place = ShotPlace {
                     owner: shot.owner,
+                    emitter: Owner::Impact(id),
                     time: (t - stop) * 1000.0,
                     progress,
                 };
@@ -2469,10 +2551,16 @@ impl Field {
         pixel_scale: f32,
         groups: &mut HashMap<GroupKey, Vec<u8>>,
     ) {
-        let file = match model.shape {
-            Shape::Mesh(file) => file,
+        let file = match &model.shape {
+            Shape::Mesh(file) => *file,
             Shape::Decal(decal) => {
-                self.place_decal(model, &decal, transform, true);
+                self.place_decal(model, decal, transform, true);
+                return;
+            }
+            Shape::Particles(emitter) => {
+                if self.particles_visible {
+                    self.place_emitter(place.emitter, model, emitter, transform, &Dot::default());
+                }
                 return;
             }
         };
@@ -2510,7 +2598,39 @@ impl Field {
             level: level.min(COARSE_LEVEL),
             time: Some(place.time),
         };
+        self.emitting = self.particles_visible.then_some(place.emitter);
         self.place_model(model, transform, &entity, None, 0, groups);
+        self.emitting = None;
+    }
+
+    /// Hands the particle model `model` of `owner` to the emitters, with
+    /// `dot`'s entity variables.
+    fn place_emitter(
+        &mut self,
+        owner: Owner,
+        model: &Model,
+        emitter: &Rc<Emitter>,
+        transform: &Mat4,
+        dot: &Dot,
+    ) {
+        let strings = &self.entities.strings;
+        let variables = (dot.variables as usize)
+            .checked_sub(1)
+            .and_then(|index| self.entities.variable_sets.get(index))
+            .map_or_else(Vec::new, |set| {
+                set.iter()
+                    .filter_map(|(name, value)| {
+                        Some((strings.get(*name as usize)?.clone(), *value))
+                    })
+                    .collect()
+            });
+        self.particles.place(
+            owner,
+            std::ptr::from_ref(model) as usize,
+            emitter,
+            transform,
+            variables,
+        );
     }
 
     fn upload_ground(&mut self, image: &TerrainImage) {
@@ -2994,6 +3114,13 @@ impl View for Field {
         self.sky_visible = on;
     }
 
+    fn set_particles(&mut self, on: bool) {
+        self.particles_visible = on;
+        if !on {
+            self.particles.clear();
+        }
+    }
+
     fn set_water_refraction(&mut self, on: bool) {
         self.refraction = on;
     }
@@ -3031,6 +3158,8 @@ impl View for Field {
             entities.match_id = scene.match_id;
             entities.strings.clear();
             entities.variant_sets.clear();
+            entities.variable_sets.clear();
+            self.particles.clear();
             self.camera.borrow_mut().placed = false;
         }
         // The tables only grow within a match, so only the tail is new.
@@ -3048,6 +3177,13 @@ impl View for Field {
         entities
             .variant_sets
             .extend(scene.variant_sets[known..].iter().cloned());
+        if scene.variable_sets.len() < entities.variable_sets.len() {
+            entities.variable_sets.clear();
+        }
+        let known = entities.variable_sets.len();
+        entities
+            .variable_sets
+            .extend(scene.variable_sets[known..].iter().cloned());
         entities.turn = scene.turn;
         entities.map_size = scene.map_size;
         entities.dots.clear();
@@ -3335,6 +3471,31 @@ impl View for Field {
                 .write_buffer(&self.decal_indices, 0, &decal_index_bytes);
         }
 
+        let (particle_bytes, particle_draws) = if self.particles_visible {
+            self.particles.instances(eye)
+        } else {
+            (Vec::new(), Vec::new())
+        };
+        for draw in &particle_draws {
+            // Uploads it once it is in; until then the emitter is skipped.
+            let _ = self.texture(draw.texture, true);
+        }
+        if particle_bytes.len() as u64 > self.particle_instances.size() {
+            self.particle_instances = create_buffer(
+                &self.device,
+                &self.queue,
+                "particle instances",
+                &vec![0; (particle_bytes.len() as u64).next_power_of_two() as usize],
+                wgpu::BufferUsages::VERTEX,
+            );
+        }
+        if !particle_bytes.is_empty() {
+            self.queue
+                .write_buffer(&self.particle_instances, 0, &particle_bytes);
+        }
+        let particle_texture =
+            |file: FileRef| self.textures.get(&file.hash).map(|texture| &texture.group);
+
         self.borders.prepare(
             &self.device,
             &self.queue,
@@ -3483,6 +3644,15 @@ impl View for Field {
             pass.set_bind_group(0, &self.reflection_view.1, &[]);
             self.draw_ground(&mut pass, scene);
             self.draw_scene_models(&mut pass, scene, &draws);
+            // The engine draws them into the reflection, not the
+            // refraction.
+            self.reflection_particles.draw(
+                &mut pass,
+                &particle_draws,
+                &self.particle_instances,
+                &self.shadow.bind_group,
+                particle_texture,
+            );
         }
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -3593,6 +3763,16 @@ impl View for Field {
                 // floating on it shows.
                 self.borders.draw(&mut pass);
             }
+            // Last, as the engine draws them after the water and the
+            // overlays.
+            pass.set_bind_group(0, &self.view_bind_group, &[]);
+            self.particle_pipelines.draw(
+                &mut pass,
+                &particle_draws,
+                &self.particle_instances,
+                &self.shadow.bind_group,
+                particle_texture,
+            );
         }
         if let Some(plan) = post {
             self.post.draw(&mut encoder, plan, &screen);
@@ -3851,6 +4031,8 @@ fn now() -> f64 {
 /// in ms.
 struct ShotPlace {
     owner: i32,
+    /// What its particle props are kept by.
+    emitter: Owner,
     time: f32,
     progress: f32,
 }

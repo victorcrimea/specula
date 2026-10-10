@@ -29,6 +29,7 @@ mod actor;
 mod environment;
 mod material;
 mod mesh;
+mod particle;
 mod sound;
 mod templates;
 mod terrain;
@@ -594,6 +595,12 @@ fn collect_sources(
                     .iter()
                     .filter_map(|animation| animation.file.clone()),
             );
+            sources.extend(
+                variant
+                    .particles
+                    .iter()
+                    .filter_map(|particles| particles.texture.clone()),
+            );
         }
     }
     // Missing sources would fail the staging copy; a missing mesh or
@@ -918,6 +925,13 @@ fn manifest(
                         specular_texture,
                         ao_texture,
                         decal: variant.decal,
+                        particles: variant.particles.as_ref().map(|particles| files::Emitter {
+                            texture: particles
+                                .texture
+                                .as_ref()
+                                .and_then(|path| pieces.textures.get(path).copied().flatten()),
+                            ..particles.emitter.clone()
+                        }),
                         props,
                         animations,
                     });

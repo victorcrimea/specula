@@ -9,9 +9,11 @@
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
+use std::rc::Rc;
 
 use specula_assets::files::Decal;
 use specula_assets::files::Definition;
+use specula_assets::files::Emitter;
 use specula_assets::files::FLAG_PLAYER_COLOR;
 use specula_assets::files::FileRef;
 use specula_assets::files::Manifest;
@@ -55,12 +57,14 @@ pub struct Model {
 }
 
 /// What `CObjectEntry::BuildVariation` makes of a variation.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub enum Shape {
     Mesh(FileRef),
     /// `CModelDecal`: the texture laid on the terrain; it has no props
     /// and no animations.
     Decal(Decal),
+    /// `CModelParticleEmitter`; likewise.
+    Particles(Rc<Emitter>),
 }
 
 pub struct ModelAnimation {
@@ -75,8 +79,7 @@ pub struct ModelAnimation {
 }
 
 /// The model tree an entity shows, or `None` when its variation has
-/// neither a decal nor a mesh (particles or nothing), which this client
-/// does not draw.
+/// no decal, particles or mesh, which the engine makes a dummy model of.
 /// `entity` holds the entity's selections, lower case.
 pub fn resolve(manifest: &Manifest, entity: &Selections, seed: u32) -> Option<Model> {
     resolve_object(manifest, 0, entity, seed)
@@ -238,6 +241,7 @@ fn build(
     let (level, definition) = base(&manifest.objects[object], quality);
     let mut mesh = None;
     let mut decal = None;
+    let mut particles = None;
     let mut texture = None;
     let mut maps = [None; 3];
     let mut props: BTreeMap<String, Vec<u32>> = BTreeMap::new();
@@ -258,6 +262,9 @@ fn build(
             && found.size_z != 0.0
         {
             decal = Some(found);
+        }
+        if variant.particles.is_some() {
+            particles = variant.particles.as_ref();
         }
         if variant.texture.is_some() {
             texture = variant.texture;
@@ -302,6 +309,21 @@ fn build(
             effect: definition.effect,
             player_color: definition.flags & FLAG_PLAYER_COLOR != 0,
             alpha_ref: definition.alpha_ref,
+            animations: Vec::new(),
+            props: Vec::new(),
+            projectile: None,
+            ammo_points: Vec::new(),
+        });
+    }
+    // Then particles, which replace the mesh and its props.
+    if let Some(emitter) = particles {
+        return Some(Model {
+            shape: Shape::Particles(Rc::new(emitter.clone())),
+            texture: None,
+            maps: [None; 3],
+            effect: definition.effect,
+            player_color: false,
+            alpha_ref: 0.0,
             animations: Vec::new(),
             props: Vec::new(),
             projectile: None,
@@ -366,13 +388,13 @@ fn build(
 }
 
 /// `std::mt19937`.
-struct Mt19937 {
+pub struct Mt19937 {
     state: [u32; 624],
     index: usize,
 }
 
 impl Mt19937 {
-    fn new(seed: u32) -> Self {
+    pub fn new(seed: u32) -> Self {
         let mut state = [0u32; 624];
         state[0] = seed;
         for i in 1..624 {
@@ -424,5 +446,12 @@ impl Mt19937 {
             }
         }
         low.wrapping_add((product >> 32) as i32)
+    }
+
+    /// `std::uniform_real_distribution<float>(low, high)` in libstdc++:
+    /// `generate_canonical<float, 24>` takes one 32-bit draw, kept below 1.
+    pub fn uniform_real(&mut self, low: f32, high: f32) -> f32 {
+        let canonical = (self.next() as f32 / 4_294_967_296.0).min(1.0 - f32::EPSILON / 2.0);
+        canonical * (high - low) + low
     }
 }

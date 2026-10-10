@@ -1,5 +1,5 @@
 //! Decoder for specula-server's viewer stream and match segments, wire
-//! format v11; the layout is documented in `specula-server/src/view.rs`.
+//! format v12; the layout is documented in `specula-server/src/view.rs`.
 
 use std::collections::BTreeMap;
 use std::rc::Rc;
@@ -33,6 +33,7 @@ const CHANGED_CONSTRUCTION: u64 = 2048;
 const CHANGED_VISIBILITY: u64 = 4096;
 const CHANGED_GROUNDED: u64 = 8192;
 const CHANGED_HEIGHT: u64 = 16384;
+const CHANGED_VARIABLES: u64 = 32768;
 const MOTION_GROUNDED: u8 = 1;
 const SOUND_ENTITY: u8 = 0;
 const SOUND_POSITION: u8 = 1;
@@ -83,6 +84,8 @@ pub struct Dot {
     pub seed: u32,
     /// 1-based index into `Scene::variant_sets`, or 0 for no selections.
     pub variants: u32,
+    /// 1-based index into `Scene::variable_sets`, or 0 for none.
+    pub variables: u32,
     /// 1-based index into `Scene::strings`, or 0 for none.
     pub animation: u32,
     /// Plays once rather than loops.
@@ -283,6 +286,10 @@ impl Shot {
 /// (key, selection) indices into `Scene::strings`, sorted by key.
 pub type VariantSet = Vec<(u32, u32)>;
 
+/// (name index into `Scene::strings`, value), sorted by name: the entity
+/// variables particle emitters read.
+pub type VariableSet = Vec<(u32, f32)>;
+
 #[derive(Default)]
 pub struct Scene {
     pub turn: u32,
@@ -310,6 +317,7 @@ pub struct Scene {
     /// Actor file names, animation names, variant keys and selections.
     pub strings: Vec<String>,
     pub variant_sets: Vec<VariantSet>,
+    pub variable_sets: Vec<VariableSet>,
     pub dots: BTreeMap<u32, Dot>,
     /// The sounds of the last delta applied; a keyframe has none.
     pub sounds: Vec<Sound>,
@@ -410,6 +418,7 @@ impl Scene {
         self.templates.clear();
         self.strings.clear();
         self.variant_sets.clear();
+        self.variable_sets.clear();
         self.read_tables(cursor)?;
         self.dots.clear();
         let count = cursor.varint_u32()?;
@@ -536,7 +545,7 @@ impl Scene {
         Ok(())
     }
 
-    /// Templates, strings and variant sets, appended to what the scene has.
+    /// Templates, strings, variant and variable sets, appended to what the scene has.
     fn read_tables(&mut self, cursor: &mut Cursor) -> Result<(), &'static str> {
         for table in [&mut self.templates, &mut self.strings] {
             let count = cursor.varint_u32()?;
@@ -554,6 +563,14 @@ impl Scene {
                 .map(|_| Ok((cursor.varint_u32()?, cursor.varint_u32()?)))
                 .collect::<Result<_, &'static str>>()?;
             self.variant_sets.push(set);
+        }
+        let count = cursor.varint_u32()?;
+        for _ in 0..count {
+            let pairs = cursor.varint_u32()?;
+            let set = (0..pairs)
+                .map(|_| Ok((cursor.varint_u32()?, f32::from_bits(cursor.u32()?))))
+                .collect::<Result<_, &'static str>>()?;
+            self.variable_sets.push(set);
         }
         Ok(())
     }
@@ -702,6 +719,14 @@ impl Scene {
                 out.varint(u64::from(*selection));
             }
         }
+        out.varint(self.variable_sets.len() as u64);
+        for set in &self.variable_sets {
+            out.varint(set.len() as u64);
+            for (name, value) in set {
+                out.varint(u64::from(*name));
+                out.u32(value.to_bits());
+            }
+        }
         out.varint(self.dots.len() as u64);
         let mut last_id = 0;
         for (id, dot) in &self.dots {
@@ -719,6 +744,7 @@ impl Scene {
             out.varint(u64::from(dot.actor));
             out.zigzag_i64(i64::from(dot.seed) - i64::from(*id));
             out.varint(u64::from(dot.variants));
+            out.varint(u64::from(dot.variables));
             out.varint(u64::from(dot.animation));
             out.u8(if dot.once { ANIMATION_ONCE } else { 0 });
             out.varint(u64::from(dot.sound_group));
@@ -838,6 +864,9 @@ fn advance(dot: &mut Dot, change: Option<&Change>, ground: Option<&Ground>, turn
         }
         if mask & CHANGED_VISIBILITY != 0 {
             dot.visibility = values.visibility;
+        }
+        if mask & CHANGED_VARIABLES != 0 {
+            dot.variables = values.variables;
         }
     }
     if mask & CHANGED_ANIMATION != 0 {
@@ -1152,6 +1181,7 @@ impl<'a> Cursor<'a> {
             actor: self.varint_u32()?,
             seed: self.seed(id)?,
             variants: self.varint_u32()?,
+            variables: self.varint_u32()?,
             animation: self.varint_u32()?,
             once: self.u8()? & ANIMATION_ONCE != 0,
             sound_group: self.varint_u32()?,
@@ -1231,6 +1261,9 @@ impl<'a> Cursor<'a> {
         }
         if mask & CHANGED_VISIBILITY != 0 {
             values.visibility = self.varint_u32()? as u16;
+        }
+        if mask & CHANGED_VARIABLES != 0 {
+            values.variables = self.varint_u32()?;
         }
         Ok(change)
     }

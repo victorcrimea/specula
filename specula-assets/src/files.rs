@@ -1,4 +1,4 @@
-//! The split asset files, format v8. Little-endian; every file starts with
+//! The split asset files, format v9. Little-endian; every file starts with
 //! a 4-byte magic and a u8 version. Strings are u16 length and UTF-8,
 //! counts are u32. A file is served as `assets/<kind>-<16 hex>.bin`, the
 //! hex being a hash of its content, so a cached copy is never stale and
@@ -46,11 +46,18 @@
 //!   count x group}; a group is count x variant; a variant is {name (lower
 //!   case), i32 frequency, optional mesh, optional baseTex, normTex,
 //!   specTex and aoTex textures, optional decal {f32 width, f32 depth,
-//!   f32 angle in radians, f32 offset x, f32 offset z}, count x {prop
-//!   point, u32 object (NONE: removes the point's props)}, count x {animation name, id, i32
-//!   frequency, f32 speed, f32 event, f32 load and f32 sound (fractions,
-//!   -1: none), optional animation file}}. Mesh and texture refs name
-//!   coarse files.
+//!   f32 angle in radians, f32 offset x, f32 offset z}, optional particle
+//!   emitter, count x {prop point, u32 object (NONE: removes the point's
+//!   props)}, count x {animation name, id, i32 frequency, f32 speed, f32
+//!   event, f32 load and f32 sound (fractions, -1: none), optional
+//!   animation file}}. Mesh and texture refs name coarse files.
+//!   A particle emitter is `CParticleEmitterType` as loaded from
+//!   art/particles: {optional texture, u8 blend (`BLEND_*`), u8 flags (1
+//!   start full, 2 relative velocity), `PARTICLE_VARIABLES` x variable in
+//!   `CParticleEmitterType`'s `VAR_*` order, f32x3 the summed force}; a
+//!   variable is u8 kind and then 0 constant: f32 value; 1 uniform: f32
+//!   min, f32 max; 2 copy: u8 variable; 3 expr: entity variable name, f32
+//!   mul, f32 max.
 //! - mesh "SPCM", the coarsest level of detail: u32 vertex count, vertices
 //!   of `VERTEX_SIZE` bytes (f32x3 position, f32x3 normal, f32x2 uv, f32x2
 //!   second uv (the first again where the PMD has one set), snorm8x4
@@ -93,7 +100,7 @@
 use crate::half::f16_bits;
 use crate::half::f16_to_f32;
 
-pub const VERSION: u8 = 8;
+pub const VERSION: u8 = 9;
 /// The largest side of each texture detail tier, which a viewer's
 /// texture quality picks from: low, medium and the whole chain as the
 /// engine uploads it at its default quality.
@@ -108,6 +115,33 @@ pub const FLAG_PLAYER_COLOR: u8 = 1;
 pub const FLAG_NORMAL_MAP: u8 = 2;
 pub const FLAG_SPECULAR_MAP: u8 = 4;
 pub const FLAG_AO_MAP: u8 = 8;
+pub const BLEND_ADD: u8 = 0;
+pub const BLEND_SUBTRACT: u8 = 1;
+pub const BLEND_OVER: u8 = 2;
+pub const BLEND_MULTIPLY: u8 = 3;
+/// `CParticleEmitterType::VAR__MAX`.
+pub const PARTICLE_VARIABLES: usize = 15;
+pub const VAR_EMISSION_RATE: usize = 0;
+pub const VAR_LIFETIME: usize = 1;
+pub const VAR_POSITION_X: usize = 2;
+pub const VAR_POSITION_Y: usize = 3;
+pub const VAR_POSITION_Z: usize = 4;
+pub const VAR_ANGLE: usize = 5;
+pub const VAR_VELOCITY_X: usize = 6;
+pub const VAR_VELOCITY_Y: usize = 7;
+pub const VAR_VELOCITY_Z: usize = 8;
+pub const VAR_VELOCITY_ANGLE: usize = 9;
+pub const VAR_SIZE: usize = 10;
+pub const VAR_SIZE_GROWTH_RATE: usize = 11;
+pub const VAR_COLOR_R: usize = 12;
+pub const VAR_COLOR_G: usize = 13;
+pub const VAR_COLOR_B: usize = 14;
+const EMITTER_START_FULL: u8 = 1;
+const EMITTER_RELATIVE_VELOCITY: u8 = 2;
+const VARIABLE_CONSTANT: u8 = 0;
+const VARIABLE_UNIFORM: u8 = 1;
+const VARIABLE_COPY: u8 = 2;
+const VARIABLE_EXPR: u8 = 3;
 pub const SOUND_OMNIPRESENT: u8 = 1;
 pub const SOUND_DISTANCELESS: u8 = 2;
 pub const SOUND_OWNER_ONLY: u8 = 4;
@@ -300,8 +334,42 @@ pub struct Variant {
     pub specular_texture: Option<FileRef>,
     pub ao_texture: Option<FileRef>,
     pub decal: Option<Decal>,
+    pub particles: Option<Emitter>,
     pub props: Vec<Prop>,
     pub animations: Vec<Animation>,
+}
+
+/// `CParticleEmitterType`: what an actor variant's `<particles>` emits.
+#[derive(Clone, PartialEq, Debug)]
+pub struct Emitter {
+    /// `None` where the engine would draw its error texture.
+    pub texture: Option<FileRef>,
+    /// `BLEND_*`.
+    pub blend: u8,
+    /// Created as if it had been emitting for its longest lifetime.
+    pub start_full: bool,
+    /// The velocity turns with the emitter.
+    pub relative_velocity: bool,
+    /// By `VAR_*`.
+    pub variables: [ParticleVariable; PARTICLE_VARIABLES],
+    /// Every `<force>`, summed: an acceleration in m/s^2.
+    pub force: [f32; 3],
+}
+
+/// How a particle variable is evaluated for each new particle.
+#[derive(Clone, PartialEq, Debug)]
+pub enum ParticleVariable {
+    Constant(f32),
+    /// `[min, max)`; min below max.
+    Uniform(f32, f32),
+    /// The value another variable gave this particle; a `VAR_*`.
+    Copy(u8),
+    /// `min(max, entity variable * mul)`.
+    Expr {
+        from: String,
+        mul: f32,
+        max: f32,
+    },
 }
 
 /// `CObjectBase::Decal`: a texture laid on the terrain under the object.
@@ -1227,6 +1295,13 @@ impl Writer {
             }
             None => self.u8(0),
         }
+        match &variant.particles {
+            Some(emitter) => {
+                self.u8(1);
+                self.emitter(emitter);
+            }
+            None => self.u8(0),
+        }
         self.count(variant.props.len());
         for prop in &variant.props {
             self.string(&prop.point);
@@ -1243,6 +1318,41 @@ impl Writer {
             self.f32(animation.sound);
             self.optional_file(animation.file);
         }
+    }
+
+    fn emitter(&mut self, emitter: &Emitter) {
+        self.optional_file(emitter.texture);
+        self.u8(emitter.blend);
+        let flags = [
+            (emitter.start_full, EMITTER_START_FULL),
+            (emitter.relative_velocity, EMITTER_RELATIVE_VELOCITY),
+        ]
+        .iter()
+        .filter(|(set, _)| *set)
+        .fold(0, |flags, (_, flag)| flags | flag);
+        self.u8(flags);
+        for variable in &emitter.variables {
+            match variable {
+                ParticleVariable::Constant(value) => {
+                    self.u8(VARIABLE_CONSTANT);
+                    self.f32(*value);
+                }
+                ParticleVariable::Uniform(min, max) => {
+                    self.u8(VARIABLE_UNIFORM);
+                    self.f32s(&[*min, *max]);
+                }
+                ParticleVariable::Copy(from) => {
+                    self.u8(VARIABLE_COPY);
+                    self.u8(*from);
+                }
+                ParticleVariable::Expr { from, mul, max } => {
+                    self.u8(VARIABLE_EXPR);
+                    self.string(from);
+                    self.f32s(&[*mul, *max]);
+                }
+            }
+        }
+        self.f32s(&emitter.force);
     }
 }
 
@@ -1411,6 +1521,11 @@ impl<'a> Reader<'a> {
             }
             _ => return Err("bad decal flag"),
         };
+        let particles = match self.u8()? {
+            0 => None,
+            1 => Some(self.emitter()?),
+            _ => return Err("bad particles flag"),
+        };
         let props = (0..self.count()?)
             .map(|_| {
                 Ok(Prop {
@@ -1442,8 +1557,49 @@ impl<'a> Reader<'a> {
             specular_texture,
             ao_texture,
             decal,
+            particles,
             props,
             animations,
+        })
+    }
+
+    fn emitter(&mut self) -> Result<Emitter, &'static str> {
+        let texture = self.optional_file()?;
+        let blend = self.u8()?;
+        if blend > BLEND_MULTIPLY {
+            return Err("bad particle blend mode");
+        }
+        let flags = self.u8()?;
+        let mut variables = Vec::with_capacity(PARTICLE_VARIABLES);
+        for _ in 0..PARTICLE_VARIABLES {
+            variables.push(match self.u8()? {
+                VARIABLE_CONSTANT => ParticleVariable::Constant(self.f32()?),
+                VARIABLE_UNIFORM => {
+                    let [min, max] = self.f32s()?;
+                    ParticleVariable::Uniform(min, max)
+                }
+                VARIABLE_COPY => {
+                    let from = self.u8()?;
+                    if usize::from(from) >= PARTICLE_VARIABLES {
+                        return Err("particle variable copies out of range");
+                    }
+                    ParticleVariable::Copy(from)
+                }
+                VARIABLE_EXPR => {
+                    let from = self.string()?;
+                    let [mul, max] = self.f32s()?;
+                    ParticleVariable::Expr { from, mul, max }
+                }
+                _ => return Err("bad particle variable kind"),
+            });
+        }
+        Ok(Emitter {
+            texture,
+            blend,
+            start_full: flags & EMITTER_START_FULL != 0,
+            relative_velocity: flags & EMITTER_RELATIVE_VELOCITY != 0,
+            variables: variables.try_into().map_err(|_| "particle variables")?,
+            force: self.f32s()?,
         })
     }
 }

@@ -10,6 +10,7 @@ mod impostor;
 mod march;
 mod minimap;
 mod opfs;
+mod particles;
 mod pose;
 mod postproc;
 mod projectile;
@@ -115,6 +116,7 @@ const DOF_SETTINGS_KEY: &str = "specula.dof";
 const FOG_SETTINGS_KEY: &str = "specula.fog";
 const WATER_SETTINGS_KEY: &str = "specula.water";
 const SKY_SETTINGS_KEY: &str = "specula.sky";
+const PARTICLES_SETTINGS_KEY: &str = "specula.particles";
 const REFRACTION_SETTINGS_KEY: &str = "specula.waterrefraction";
 const REAL_DEPTH_SETTINGS_KEY: &str = "specula.waterrealdepth";
 const REFLECTION_SETTINGS_KEY: &str = "specula.waterreflection";
@@ -187,6 +189,8 @@ trait View {
     fn set_water_effects(&mut self, _on: bool) {}
     /// Whether the map's sky is drawn behind everything, likewise.
     fn set_sky(&mut self, _on: bool) {}
+    /// Whether the actors' particles are drawn, likewise.
+    fn set_particles(&mut self, _on: bool) {}
     /// Whether the water refracts what is under it, and takes its depth
     /// from that, likewise.
     fn set_water_refraction(&mut self, _on: bool) {}
@@ -954,6 +958,13 @@ async fn run(page: Page, glue_url: String, wasm_url: String) -> Result<(), Strin
             element(&document, "sky")?,
             SKY_SETTINGS_KEY,
             |view, on| view.set_sky(on),
+            Vec::new(),
+        );
+        wire_switch(
+            &app,
+            element(&document, "particles")?,
+            PARTICLES_SETTINGS_KEY,
+            |view, on| view.set_particles(on),
             Vec::new(),
         );
     }

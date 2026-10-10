@@ -6,7 +6,7 @@ use std::io::ErrorKind;
 use std::io::Read;
 
 const MAGIC: [u8; 4] = *b"SPCF";
-const VERSION: u32 = 13;
+const VERSION: u32 = 14;
 const RECORD_TEMPLATE: u8 = 1;
 const RECORD_TURN: u8 = 2;
 const RECORD_MAP: u8 = 3;
@@ -17,7 +17,8 @@ const RECORD_VARIANT_SET: u8 = 7;
 const RECORD_TERRITORY: u8 = 8;
 const RECORD_SOUNDS: u8 = 9;
 const RECORD_PROJECTILES: u8 = 10;
-const ENTITY_SIZE: usize = 70;
+const RECORD_VARIABLE_SET: u8 = 16;
+const ENTITY_SIZE: usize = 74;
 const SOUND_SIZE: usize = 27;
 const LAUNCH_SIZE: usize = 52;
 const COLOR_MINIMAP: u8 = 1;
@@ -60,6 +61,8 @@ pub struct Visual {
     pub seed: u32,
     /// Index of a variant set record; `None` for no selections.
     pub variants: Option<u32>,
+    /// Index of a variable set record; `None` for no variables.
+    pub variables: Option<u32>,
     /// Index of a string record.
     pub animation: Option<u32>,
     /// Plays once rather than loops.
@@ -185,6 +188,11 @@ pub enum Record {
     VariantSet {
         index: u32,
         pairs: Vec<(u32, u32)>,
+    },
+    /// (name string index, value), sorted by name.
+    VariableSet {
+        index: u32,
+        pairs: Vec<(u32, f32)>,
     },
 }
 
@@ -319,6 +327,7 @@ pub fn read_record(reader: &mut impl Read) -> io::Result<Option<Record>> {
             RECORD_TERRITORY => return decode_territory(&payload).map(Some),
             RECORD_SOUNDS => return decode_sounds(&payload).map(Some),
             RECORD_PROJECTILES => return decode_projectiles(&payload).map(Some),
+            RECORD_VARIABLE_SET => return decode_variable_set(&payload).map(Some),
             // Newer hooks may add kinds; the length prefix lets them be skipped.
             _ => continue,
         }
@@ -371,6 +380,7 @@ fn decode_turn(payload: &[u8]) -> io::Result<Record> {
             actor: optional(cursor.u32()?),
             seed: cursor.u32()?,
             variants: optional(cursor.u32()?),
+            variables: optional(cursor.u32()?),
             animation: optional(cursor.u32()?),
             once: flags & ANIMATION_ONCE != 0,
             speed: cursor.i32()?,
@@ -623,6 +633,21 @@ fn decode_variant_set(payload: &[u8]) -> io::Result<Record> {
         .map(|_| Ok((cursor.u32()?, cursor.u32()?)))
         .collect::<io::Result<_>>()?;
     Ok(Record::VariantSet { index, pairs })
+}
+
+fn decode_variable_set(payload: &[u8]) -> io::Result<Record> {
+    let mut cursor = Cursor(payload);
+    let index = cursor.u32()?;
+    let count = cursor.u32()? as usize;
+    if cursor.0.len() != count * 8 {
+        return Err(invalid(
+            "variable set record length does not match its count",
+        ));
+    }
+    let pairs = (0..count)
+        .map(|_| Ok((cursor.u32()?, f32::from_bits(cursor.u32()?))))
+        .collect::<io::Result<_>>()?;
+    Ok(Record::VariableSet { index, pairs })
 }
 
 fn optional(index: u32) -> Option<u32> {

@@ -1,4 +1,4 @@
-//! The viewer stream, wire format v11: messages for each keyframe, turn or
+//! The viewer stream, wire format v12: messages for each keyframe, turn or
 //! match end, varints and zigzag as in `wire.rs`, positions and heights in
 //! 1/16 m, carried brotli-compressed as below.
 //!
@@ -7,13 +7,14 @@
 //!   turns per segment, varint map size in metres, u64 terrain id (0: none
 //!   yet, else fetch `/terrain/<id as 16 hex digits>`), icon table, player
 //!   table, territory, template table, string table, variant set table,
-//!   varint count, then count x {varint id delta, entity}, then the
+//!   variable set table, varint count, then count x {varint id delta, entity}, then the
 //!   projectiles in flight or lying on the ground: varint count, count x
 //!   {varint id delta, projectile, varint turns since the launch}.
 //! - kind 2 delta: varint turn, icons added to the table, u8 1 if a new
 //!   player table follows (it replaces the old one) else 0, u8 1 if a new
 //!   territory follows (likewise) else 0, templates,
-//!   strings and variant sets added to their tables, varint spawned,
+//!   strings, variant sets and variable sets added to their tables,
+//!   varint spawned,
 //!   destroyed and changed counts. Spawned entries are keyframe entries,
 //!   destroyed entries are id deltas, changed entries are {varint id delta,
 //!   varint mask, then for each bit set, in this order: 1 zigzag x, z
@@ -22,7 +23,8 @@
 //!   varint sound group; 64 varint animation speed; 128 varint sync
 //!   repeat, zigzag sync offset; 256 zigzag owner; 512 varint template,
 //!   varint actor, zigzag seed - id; 1024 varint variant set; 2048 u8
-//!   construction; 4096 varint visibility; 8192 nothing}, then the sounds
+//!   construction; 4096 varint visibility; 8192 nothing; 32768 varint
+//!   variable set}, then the sounds
 //!   of the turn: varint count, count x sound, in the order the simulation
 //!   played them, then the projectiles launched in the turn: varint count,
 //!   count x {varint id delta, launch}, then the ids of the projectiles
@@ -57,7 +59,8 @@
 //!
 //! An entity is {zigzag x, zigzag z, zigzag y, u8 angle, u32 colour, varint
 //! icon, varint player, zigzag owner, varint template, varint actor, zigzag
-//! seed - id, varint variant set, varint animation, u8 animation flags,
+//! seed - id, varint variant set, varint variable set, varint animation,
+//! u8 animation flags,
 //! varint sound group, varint animation speed, varint turns since the
 //! animation started, varint sync repeat, zigzag sync offset, varint turns
 //! since the sync was set, u8 construction, varint visibility, zigzag step
@@ -74,6 +77,8 @@
 //!   actor's variation seed, meaningless without an actor;
 //! - variant set is a 1-based index into the variant set table, 0 for no
 //!   selections;
+//! - variable set is a 1-based index into the variable set table, 0 for
+//!   no entity variables;
 //! - animation flags: 1 plays once rather than loops;
 //! - sound group is a 1-based index into the string table, 0 for none: the
 //!   group, relative to audio/, the animation plays at its sound or event
@@ -146,12 +151,17 @@
 //! UTF-8 text}. Template names are as the simulation knows them, e.g.
 //! `units/athen/infantry_spearman_b` or `foundation|structures/athen/house`;
 //! a foundation's rising building is an entity of its own with a
-//! `construction|` template. Strings are actor file names, animation names,
+//! `construction|` template, and corpses (`corpse|`) and what a dying
+//! entity spawns (`decay|`, rubble) are entities too. Strings are actor file names, animation names,
 //! variant keys and selections and sound group paths.
 //! A variant set table is varint count, count x {varint n, n x {varint key,
 //! varint selection}}, 0-based string indices, sorted by key. The set holds
 //! the VisualActor's variant selections except the `animation` key, which
 //! always holds the animation name.
+//! A variable set table is varint count, count x {varint n, n x {varint
+//! name, f32 value}}, 0-based string indices, sorted by name: the entity
+//! variables the simulation gave `ICmpVisual::SetVariable` (Foundation.js
+//! sets "numbuilders"), which particle emitters read.
 //! Tables only grow during a match, so an index once sent stays valid.
 //! Ids in each list are sorted and delta-coded from 0.
 //!
@@ -231,6 +241,7 @@ const CHANGED_CONSTRUCTION: u64 = 2048;
 const CHANGED_VISIBILITY: u64 = 4096;
 const CHANGED_GROUNDED: u64 = 8192;
 const CHANGED_HEIGHT: u64 = 16384;
+const CHANGED_VARIABLES: u64 = 32768;
 const MOTION_GROUNDED: u8 = 1;
 /// How far a reckoned animation speed may be off, in 1/256 of the
 /// simulation's: 5%, as `DATA_OPTIMIZATION.md` measured.
@@ -268,6 +279,9 @@ pub type Message = Arc<[u8]>;
 /// (key, selection) string indices, sorted by key.
 pub type VariantSet = Vec<(u32, u32)>;
 
+/// (name string index, value), sorted by name.
+pub type VariableSet = Vec<(u32, f32)>;
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct Dot {
     x: i32,
@@ -282,6 +296,7 @@ struct Dot {
     actor: u32,
     seed: u32,
     variants: u32,
+    variables: u32,
     animation: u32,
     once: bool,
     speed: u32,
@@ -323,6 +338,7 @@ impl Dot {
             actor: one_based(visual.and_then(|visual| visual.actor)),
             seed: visual.map_or(entity.id, |visual| visual.seed),
             variants: one_based(visual.and_then(|visual| visual.variants)),
+            variables: one_based(visual.and_then(|visual| visual.variables)),
             animation: one_based(visual.and_then(|visual| visual.animation)),
             once: visual.is_some_and(|visual| visual.once),
             speed: visual.map_or(0, |visual| quantize_speed(visual.speed)),
@@ -460,6 +476,7 @@ struct Tables<'a> {
     templates: &'a [String],
     strings: &'a [String],
     variant_sets: &'a [VariantSet],
+    variable_sets: &'a [VariableSet],
 }
 
 pub struct Hub {
@@ -518,6 +535,7 @@ struct State {
     templates: Table<String>,
     strings: Table<String>,
     variant_sets: Table<VariantSet>,
+    variable_sets: Table<VariableSet>,
     /// Template index to 1-based icon index.
     template_icons: HashMap<u32, u32>,
     /// Templates whose minimap colour is the owner's.
@@ -564,6 +582,7 @@ impl State {
             templates: sent(&self.templates, with_unsent),
             strings: sent(&self.strings, with_unsent),
             variant_sets: sent(&self.variant_sets, with_unsent),
+            variable_sets: sent(&self.variable_sets, with_unsent),
         }
     }
 }
@@ -587,6 +606,7 @@ impl Hub {
                 templates: Table::new(),
                 strings: Table::new(),
                 variant_sets: Table::new(),
+                variable_sets: Table::new(),
                 template_icons: HashMap::new(),
                 player_color_templates: HashSet::new(),
                 players: Vec::new(),
@@ -617,6 +637,7 @@ impl Hub {
         state.templates.clear();
         state.strings.clear();
         state.variant_sets.clear();
+        state.variable_sets.clear();
         state.template_icons.clear();
         state.player_color_templates.clear();
         state.players.clear();
@@ -648,6 +669,14 @@ impl Hub {
             .unwrap()
             .variant_sets
             .insert(index, pairs, "variant set")
+    }
+
+    pub fn add_variable_set(&self, index: u32, pairs: VariableSet) -> io::Result<()> {
+        self.state
+            .lock()
+            .unwrap()
+            .variable_sets
+            .insert(index, pairs, "variable set")
     }
 
     pub fn set_template_player_color(&self, template: u32) {
@@ -858,6 +887,7 @@ impl Hub {
                     templates: state.templates.unsent(),
                     strings: state.strings.unsent(),
                     variant_sets: state.variant_sets.unsent(),
+                    variable_sets: state.variable_sets.unsent(),
                 },
                 state.players_changed.then_some(&state.players[..]),
                 state
@@ -902,6 +932,7 @@ impl Hub {
         state.templates.sent = state.templates.items.len();
         state.strings.sent = state.strings.items.len();
         state.variant_sets.sent = state.variant_sets.items.len();
+        state.variable_sets.sent = state.variable_sets.items.len();
         state.players_changed = false;
         state.territory_changed = false;
         // A keyframe carries no sounds, so a new match's first turn drops
@@ -1060,6 +1091,7 @@ fn encode_keyframe(
     write_strings(&mut out, tables.templates);
     write_strings(&mut out, tables.strings);
     write_variant_sets(&mut out, tables.variant_sets);
+    write_variable_sets(&mut out, tables.variable_sets);
     out.varint(dots.len() as u64);
     let mut last_id = 0;
     for (id, dot) in dots {
@@ -1137,6 +1169,7 @@ fn encode_delta(
     write_strings(&mut out, new_tables.templates);
     write_strings(&mut out, new_tables.strings);
     write_variant_sets(&mut out, new_tables.variant_sets);
+    write_variable_sets(&mut out, new_tables.variable_sets);
     out.varint(spawned.len() as u64);
     out.varint(destroyed.len() as u64);
     out.varint(changed.len() as u64);
@@ -1351,6 +1384,7 @@ fn exact_changes(before: &Dot, now: &Dot) -> u64 {
             before.construction != now.construction,
         ),
         (CHANGED_VISIBILITY, before.visibility != now.visibility),
+        (CHANGED_VARIABLES, before.variables != now.variables),
     ];
     changes
         .iter()
@@ -1484,6 +1518,9 @@ fn write_change(out: &mut Writer, id: u32, change: &Change, now: &Dot) {
     if mask & CHANGED_VISIBILITY != 0 {
         out.varint(u64::from(now.visibility));
     }
+    if mask & CHANGED_VARIABLES != 0 {
+        out.varint(u64::from(now.variables));
+    }
 }
 
 fn animation_flags(dot: &Dot) -> u8 {
@@ -1548,6 +1585,17 @@ fn write_variant_sets(out: &mut Writer, sets: &[VariantSet]) {
     }
 }
 
+fn write_variable_sets(out: &mut Writer, sets: &[VariableSet]) {
+    out.varint(sets.len() as u64);
+    for set in sets {
+        out.varint(set.len() as u64);
+        for (name, value) in set {
+            out.varint(u64::from(*name));
+            out.f32(*value);
+        }
+    }
+}
+
 /// `turn` is the message's turn, which the animation and sync turns are
 /// counted back from.
 fn write_dot(out: &mut Writer, id: u32, turn: u32, dot: &Dot) {
@@ -1563,6 +1611,7 @@ fn write_dot(out: &mut Writer, id: u32, turn: u32, dot: &Dot) {
     out.varint(u64::from(dot.actor));
     out.zigzag(i64::from(dot.seed) - i64::from(id));
     out.varint(u64::from(dot.variants));
+    out.varint(u64::from(dot.variables));
     out.varint(u64::from(dot.animation));
     out.u8(animation_flags(dot));
     out.varint(u64::from(dot.sound_group));
