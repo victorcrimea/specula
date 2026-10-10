@@ -121,22 +121,42 @@ const FPS_INTERVAL_MS: f64 = 500.0;
 /// The light until the map's arrives.
 const AMBIENT: f32 = 0.45;
 const SUN_STRENGTH: f32 = 0.75;
-const FIELD_OF_VIEW: f32 = 0.7;
+/// Vertical, the engine's view.fov of 45 degrees.
+const FIELD_OF_VIEW: f32 = 45.0 * std::f32::consts::PI / 180.0;
 const NEAR: f32 = 1.0;
 const FAR: f32 = 4000.0;
 const MIN_DISTANCE: f32 = 10.0;
 const MAX_DISTANCE: f32 = 1500.0;
+/// The engine's view.zoom.default. Its FocusHeight keeps the eye this far
+/// along the view from the ground, as here on level ground.
 const START_DISTANCE: f32 = 120.0;
-const START_PITCH: f32 = 0.85;
+/// The engine's view.rotate.x.default of 35 degrees.
+const START_PITCH: f32 = 35.0 * std::f32::consts::PI / 180.0;
+const MIN_PITCH: f32 = 0.2;
+const MAX_PITCH: f32 = 1.5;
+/// The engine's bird's eye view looks straight down; `look_at` has no
+/// right for that, so a hair short of it, which keeps the yaw.
+const BIRDS_EYE_PITCH: f32 = std::f32::consts::FRAC_PI_2 - 0.001;
 /// The eye south of the target, looking north (+z) as the engine's camera
 /// does at its default view.rotate.y.default of 0.
 const START_YAW: f32 = std::f32::consts::PI;
-/// Radians per CSS pixel of drag.
-const ROTATE_SPEED: f32 = 0.006;
 /// Ground crossed per second by the pan keys, in camera distances.
 const KEY_PAN_SPEED: f32 = 1.0;
 /// Radians per second by the turn keys, the engine's view.rotate.y.speed.
 const KEY_ROTATE_SPEED: f32 = 2.0;
+/// Radians per second by the tilt keys, the engine's view.rotate.x.speed.
+const KEY_TILT_SPEED: f32 = 1.2;
+/// Radians per Shift+wheel step or X1/X2 press, the engine's
+/// view.rotate.y.speed.wheel.
+const WHEEL_ROTATE_STEP: f32 = 0.45;
+/// The engine's view.rotate.y.smoothness, view.rotate.x.smoothness and
+/// view.zoom.smoothness: the share of a stepped change still to go after a
+/// tenth of a second, as `CSmoothedValue::Update`.
+const YAW_SMOOTHNESS: f32 = 0.3;
+const PITCH_SMOOTHNESS: f32 = 0.5;
+const DISTANCE_SMOOTHNESS: f32 = 0.4;
+/// `MouseEvent.buttons` bit of the middle button, the engine's camera.pan.
+const BUTTONS_MIDDLE: u16 = 4;
 /// A longer frame is a hidden tab or a stall; the camera should not leap.
 const KEY_STEP_MAX_S: f32 = 0.1;
 /// Zooming at a point near the horizon would throw the camera far off;
@@ -278,7 +298,9 @@ struct Ground {
 
 struct Pointer {
     id: i32,
-    button: i16,
+    /// A mouse pans only with the middle button held, as the left and
+    /// right ones select and give orders.
+    mouse: bool,
     /// In CSS pixels.
     x: f32,
     y: f32,
@@ -290,6 +312,16 @@ struct Camera {
     yaw: f32,
     pitch: f32,
     distance: f32,
+    /// The engine's m_BirdsEyeView: looking straight down, the tilt keys
+    /// idle.
+    birds_eye: bool,
+    /// What the stepped controls (Shift+wheel, X1/X2, reset, bird's eye)
+    /// have yet to add to `yaw`, `pitch` and `distance`; apart from them, so
+    /// held keys and drags still act at once, as the engine's `Add` beside
+    /// its `AddSmoothly`.
+    yaw_ahead: f32,
+    pitch_ahead: f32,
+    distance_ahead: f32,
     /// Mice, fingers and pens down on the canvas.
     pointers: Vec<Pointer>,
     /// Set over the map's centre once the first keyframe tells its size.
@@ -306,11 +338,18 @@ const KEY_LEFT: u8 = 4;
 const KEY_RIGHT: u8 = 8;
 const KEY_TURN_CW: u8 = 16;
 const KEY_TURN_CCW: u8 = 32;
+const KEY_TILT_UP: u8 = 64;
+const KEY_TILT_DOWN: u8 = 128;
 
 /// The camera key bit of a `KeyboardEvent.code`: by position, so WASD sits under
 /// the same fingers on any layout.
-fn key_bit(code: &str) -> u8 {
+fn key_bit(code: &str, ctrl: bool) -> u8 {
     match code {
+        // The engine's camera.rotate.up and camera.rotate.down; its Ctrl+W
+        // would close the tab.
+        "ArrowUp" if ctrl => KEY_TILT_UP,
+        "ArrowDown" if ctrl => KEY_TILT_DOWN,
+        _ if ctrl => 0,
         "KeyW" | "ArrowUp" => KEY_FORWARD,
         "KeyS" | "ArrowDown" => KEY_BACK,
         "KeyA" | "ArrowLeft" => KEY_LEFT,
@@ -934,6 +973,10 @@ impl Field {
             yaw: START_YAW,
             pitch: START_PITCH,
             distance: START_DISTANCE,
+            birds_eye: false,
+            yaw_ahead: 0.0,
+            pitch_ahead: 0.0,
+            distance_ahead: 0.0,
             pointers: Vec::new(),
             placed: false,
             keys: 0,
@@ -4377,10 +4420,46 @@ impl Camera {
         self.target[1] += point[1] * moved;
     }
 
+    /// The engine's camera.reset, `ResetCameraAngleZoom`: the default zoom,
+    /// tilt and turn over the same ground point.
+    fn reset_angle_zoom(&mut self) {
+        self.distance_ahead = START_DISTANCE - self.distance;
+        self.pitch_ahead = START_PITCH - self.pitch;
+        // The short way round.
+        let turn = std::f32::consts::TAU;
+        self.yaw_ahead = (START_YAW - self.yaw + turn / 2.0).rem_euclid(turn) - turn / 2.0;
+        self.birds_eye = false;
+    }
+
+    /// The engine's camera.togglebirdseyeview, `ToggleBirdsEyeView`; back
+    /// at the default tilt, not the one left.
+    fn toggle_birds_eye(&mut self) {
+        self.birds_eye = !self.birds_eye;
+        let goal = if self.birds_eye {
+            BIRDS_EYE_PITCH
+        } else {
+            START_PITCH
+        };
+        self.pitch_ahead = goal - self.pitch;
+    }
+
     /// Moves and turns the camera by the keys held since the last frame.
     fn step(&mut self, now: f64) {
         let seconds = (((now - self.last_step) / 1000.0) as f32).clamp(0.0, KEY_STEP_MAX_S);
         self.last_step = now;
+        let ease = |ahead: &mut f32, smoothness: f32| {
+            let share = if ahead.abs() < 1e-4 {
+                1.0
+            } else {
+                1.0 - smoothness.powf(10.0 * seconds)
+            };
+            let delta = *ahead * share;
+            *ahead -= delta;
+            delta
+        };
+        self.yaw += ease(&mut self.yaw_ahead, YAW_SMOOTHNESS);
+        self.pitch += ease(&mut self.pitch_ahead, PITCH_SMOOTHNESS);
+        self.distance += ease(&mut self.distance_ahead, DISTANCE_SMOOTHNESS);
         if self.keys == 0 {
             return;
         }
@@ -4391,6 +4470,11 @@ impl Camera {
         // The camera orbits clockwise seen from above, so the ground turns
         // anticlockwise on screen, as the yaw going up does.
         self.yaw += axis(KEY_TURN_CW, KEY_TURN_CCW) * KEY_ROTATE_SPEED * seconds;
+        // Looking up lowers the eye towards the horizon.
+        if !self.birds_eye {
+            self.pitch = (self.pitch - axis(KEY_TILT_UP, KEY_TILT_DOWN) * KEY_TILT_SPEED * seconds)
+                .clamp(MIN_PITCH, MAX_PITCH);
+        }
         let metres = self.distance * KEY_PAN_SPEED * seconds;
         let (sin, cos) = self.yaw.sin_cos();
         // As `pan`: forward over the ground is (-sin, -cos), right (-cos, sin).
@@ -4398,15 +4482,24 @@ impl Camera {
         self.target[1] += (-ahead * cos + side * sin) * metres;
     }
 
-    /// One pointer pans (or, with a mouse's other buttons, turns and tilts);
-    /// two pan by their midpoint and pinch to zoom. They do not turn: no
-    /// pinch is free of twist, so every zoom would turn the view a little.
-    fn pointer_moved(&mut self, id: i32, x: f32, y: f32) {
+    /// A finger or pen pans, as does a mouse with the middle button held
+    /// (`buttons`, the event's); two fingers pan by their midpoint and
+    /// pinch to zoom. They do not turn: no pinch is free of twist, so
+    /// every zoom would turn the view a little.
+    fn pointer_moved(&mut self, id: i32, buttons: u16, x: f32, y: f32) {
         let Some(index) = self.pointers.iter().position(|pointer| pointer.id == id) else {
             return;
         };
-        if self.pointers.len() >= 2 {
-            let other = &self.pointers[if index == 0 { 1 } else { 0 }];
+        let touches: Vec<usize> = (0..self.pointers.len())
+            .filter(|&i| !self.pointers[i].mouse)
+            .collect();
+        let pointer = &self.pointers[index];
+        if !pointer.mouse && touches.len() >= 2 {
+            let other = &self.pointers[if touches[0] == index {
+                touches[1]
+            } else {
+                touches[0]
+            }];
             let (ox, oy) = (other.x, other.y);
             let before = &self.pointers[index];
             let span = |ax: f32, ay: f32| (ax - ox).hypot(ay - oy).max(1.0);
@@ -4416,13 +4509,9 @@ impl Camera {
             self.zoom(zoom);
             self.pan(dx, dy);
         } else {
-            let pointer = &self.pointers[index];
             let (dx, dy) = (x - pointer.x, y - pointer.y);
-            if pointer.button == 0 {
+            if !pointer.mouse || buttons & BUTTONS_MIDDLE != 0 {
                 self.pan(dx, dy);
-            } else {
-                self.yaw -= dx * ROTATE_SPEED;
-                self.pitch = (self.pitch + dy * ROTATE_SPEED).clamp(0.2, 1.5);
             }
         }
         let pointer = &mut self.pointers[index];
@@ -4439,8 +4528,11 @@ pub fn pointer_id(event: &MouseEvent) -> i32 {
         .map_or(0, |id| id as i32)
 }
 
-/// Mouse, touch and pen through pointer events: drag to pan, the right
-/// mouse button to turn and tilt, two fingers to pinch, the wheel to zoom. The handlers live as long as the page.
+/// Mouse, touch and pen through pointer events, with the engine's mouse
+/// bindings: middle drag to pan, the wheel to zoom, Shift+wheel and X1/X2
+/// to turn; the left and right buttons are left to selection and orders.
+/// Fingers and pens drag to pan and pinch to zoom. The handlers live as
+/// long as the page.
 fn wire_camera(canvas: &HtmlCanvasElement, camera: &Rc<RefCell<Camera>>) -> Result<(), String> {
     let window = web_sys::window().ok_or("no window")?;
     let listen =
@@ -4457,21 +4549,55 @@ fn wire_camera(canvas: &HtmlCanvasElement, camera: &Rc<RefCell<Camera>>) -> Resu
             let camera = &mut *target.borrow_mut();
             let id = pointer_id(&event);
             camera.pointers.retain(|pointer| pointer.id != id);
+            let mouse = js_sys::Reflect::get(&event, &"pointerType".into())
+                .ok()
+                .and_then(|kind| kind.as_string())
+                .is_none_or(|kind| kind == "mouse");
             camera.pointers.push(Pointer {
                 id,
-                button: event.button(),
+                mouse,
                 x: event.client_x() as f32,
                 y: event.client_y() as f32,
             });
         }),
     );
 
-    // The right button turns the camera rather than open a menu.
+    // The right button gives orders rather than open a menu.
     listen(
         canvas,
         "contextmenu",
         Closure::new(|event: MouseEvent| event.prevent_default()),
     );
+
+    // On mousedown, which fires for every button, where pointerdown fires
+    // only for the first one held. The middle button would start the
+    // browser's autoscroll, X1/X2 would go back and forward (on release).
+    let target = Rc::clone(camera);
+    listen(
+        canvas,
+        "mousedown",
+        Closure::new(move |event: MouseEvent| {
+            let turn = match event.button() {
+                1 => 0.0,
+                3 => WHEEL_ROTATE_STEP,
+                4 => -WHEEL_ROTATE_STEP,
+                _ => return,
+            };
+            event.prevent_default();
+            target.borrow_mut().yaw_ahead += turn;
+        }),
+    );
+    for name in ["mouseup", "auxclick"] {
+        listen(
+            canvas,
+            name,
+            Closure::new(|event: MouseEvent| {
+                if matches!(event.button(), 1 | 3 | 4) {
+                    event.prevent_default();
+                }
+            }),
+        );
+    }
 
     // On the window, so a drag that leaves the canvas still ends.
     let target = Rc::clone(camera);
@@ -4481,6 +4607,7 @@ fn wire_camera(canvas: &HtmlCanvasElement, camera: &Rc<RefCell<Camera>>) -> Resu
         Closure::new(move |event: MouseEvent| {
             target.borrow_mut().pointer_moved(
                 pointer_id(&event),
+                event.buttons(),
                 event.client_x() as f32,
                 event.client_y() as f32,
             );
@@ -4509,6 +4636,20 @@ fn wire_camera(canvas: &HtmlCanvasElement, camera: &Rc<RefCell<Camera>>) -> Resu
             wheel_canvas.client_width().max(1) as f32,
             wheel_canvas.client_height().max(1) as f32,
         );
+        // Turning clockwise on the wheel going up, as Q. Some browsers turn
+        // Shift+wheel into a sideways scroll.
+        if event.shift_key() {
+            let delta = if event.delta_y() != 0.0 {
+                event.delta_y()
+            } else {
+                event.delta_x()
+            };
+            if delta != 0.0 {
+                let step = -delta.signum() as f32;
+                target.borrow_mut().yaw_ahead += step * WHEEL_ROTATE_STEP;
+            }
+            return;
+        }
         let nx = event.offset_x() as f32 / width * 2.0 - 1.0;
         let ny = 1.0 - event.offset_y() as f32 / height * 2.0;
         target.borrow_mut().zoom_at(
@@ -4535,22 +4676,46 @@ fn wire_camera(canvas: &HtmlCanvasElement, camera: &Rc<RefCell<Camera>>) -> Resu
             let flag = |name: &str| {
                 js_sys::Reflect::get(&event, &name.into()).is_ok_and(|value| value.is_truthy())
             };
-            let bit = key_bit(&text(&event, "code"));
-            if bit == 0 {
-                return;
-            }
+            let code = text(&event, "code");
             let camera = &mut *target.borrow_mut();
+            // Ctrl may be let go before the arrow, or after.
             if !down {
-                camera.keys &= !bit;
+                camera.keys &= !(key_bit(&code, false) | key_bit(&code, true));
                 return;
             }
-            let control = event.target().is_some_and(|element| {
-                matches!(
-                    text(&element, "tagName").as_str(),
-                    "INPUT" | "SELECT" | "TEXTAREA"
-                )
-            });
-            if control || flag("ctrlKey") || flag("metaKey") || flag("altKey") {
+            let tag = event
+                .target()
+                .map(|element| text(&element, "tagName"))
+                .unwrap_or_default();
+            let control = matches!(tag.as_str(), "INPUT" | "SELECT" | "TEXTAREA");
+            if control || flag("metaKey") || flag("altKey") {
+                return;
+            }
+            let ctrl = flag("ctrlKey");
+            let shift = flag("shiftKey");
+            // Once, as the engine's hotkey press, not on each repeat.
+            let press = !flag("repeat");
+            match code.as_str() {
+                "KeyR" if !ctrl && !shift => {
+                    event.prevent_default();
+                    if press {
+                        camera.reset_angle_zoom();
+                    }
+                    return;
+                }
+                // Shift+Tab still steps back through the page's controls
+                // once one has the focus.
+                "Tab" if !ctrl && shift && tag != "BUTTON" => {
+                    event.prevent_default();
+                    if press {
+                        camera.toggle_birds_eye();
+                    }
+                    return;
+                }
+                _ => {}
+            }
+            let bit = key_bit(&code, ctrl);
+            if bit == 0 {
                 return;
             }
             event.prevent_default();
