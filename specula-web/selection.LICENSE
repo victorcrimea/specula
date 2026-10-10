@@ -1,0 +1,8 @@
+selection.bin and selection.bin.br pack the selection overlay textures of
+0 A.D. (binaries/data/mods/public/art/textures/selection/, except auras/),
+made by Wildfire Games, http://www.wildfiregames.com/
+
+They are licensed under Creative Commons Attribution-Share Alike 3.0,
+http://creativecommons.org/licenses/by-sa/3.0/, and so are selection.bin
+and selection.bin.br.
+Rebuild them with: cargo run -p specula-tools --release --bin selection-atlas
