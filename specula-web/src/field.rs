@@ -187,7 +187,8 @@ const MESH_ATTRIBUTES: [wgpu::VertexAttribute; 7] = wgpu::vertex_attr_array![
     4 => Unorm8x4,
 ];
 /// A model material's uniform: `effectSettings`, then 1 when it has a
-/// normal map; model.wgsl `Material`.
+/// normal map, 1 when the wind sways it and its `windData`; model.wgsl
+/// `Material`.
 const MATERIAL_SIZE: usize = 32;
 const INSTANCE_ATTRIBUTES: [wgpu::VertexAttribute; 5] = wgpu::vertex_attr_array![
     5 => Float32x4,
@@ -397,6 +398,8 @@ pub struct Field {
     /// The viewer's triplanar setting: the terrains whose material asks
     /// for it mapped triplanar rather than planar.
     triplanar: bool,
+    /// The viewer's wind setting: `USE_WIND` materials sway.
+    wind: bool,
     /// The viewer's post-processing settings: the map's effect at all,
     /// then its bloom and depth of field.
     postproc: bool,
@@ -696,7 +699,8 @@ impl Field {
                 material_texture(4),
                 wgpu::BindGroupLayoutEntry {
                     binding: 5,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    // The wind sways the vertices.
+                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
                         has_dynamic_offset: false,
@@ -971,7 +975,7 @@ impl Field {
             [0, 1, 2, 3].map(|slot| &default_maps[slot]),
             &sampler,
             [0.0; 4],
-            false,
+            [0.0; 4],
         );
         let post = Post::new(&device, config.format, config.width, config.height);
         let instances = create_buffer(
@@ -1049,6 +1053,7 @@ impl Field {
             scene,
             material_maps: false,
             triplanar: true,
+            wind: true,
             postproc: false,
             bloom: false,
             dof: false,
@@ -1215,7 +1220,28 @@ impl Field {
         }
     }
 
-    fn write_view(&self, buffer: &wgpu::Buffer, view_proj: &[[f32; 4]; 4], camera: [[f32; 3]; 3]) {
+    /// The sim time since the match began, in seconds, which the engine's
+    /// `CTimeManager` and the timers that follow the sim keep.
+    fn sim_time(&self, progress: f32) -> f64 {
+        (f64::from(self.entities.turn) + f64::from(progress)) * TURN_MS / 1000.0
+    }
+
+    /// The view's wind: model_common.vs' `sim_time`, then 1 when the
+    /// viewer's wind setting sways the models.
+    fn wind(&self, progress: f32) -> [f32; 2] {
+        [
+            self.sim_time(progress) as f32,
+            if self.wind { 1.0 } else { 0.0 },
+        ]
+    }
+
+    fn write_view(
+        &self,
+        buffer: &wgpu::Buffer,
+        view_proj: &[[f32; 4]; 4],
+        camera: [[f32; 3]; 3],
+        [time, wind]: [f32; 2],
+    ) {
         let [x, y, z] = self.light().sun;
         let (size, circular, water) = match &self.ground {
             Some(ground) => (
@@ -1233,7 +1259,7 @@ impl Field {
             }
         }
         uniform.extend_from_slice(&[x, y, z, 0.0]);
-        uniform.extend_from_slice(&[0.0, 0.0, size, circular]);
+        uniform.extend_from_slice(&[time, wind, size, circular]);
         uniform.extend_from_slice(&[water, 0.0, 0.0, 0.0]);
         for [x, y, z] in camera {
             uniform.extend_from_slice(&[x, y, z, 0.0]);
@@ -1270,8 +1296,7 @@ impl Field {
         if self.particles_visible {
             // CParticleManager's time, which CCmpParticleManager advances
             // by the sim time.
-            let time = (f64::from(self.entities.turn) + f64::from(progress)) * TURN_MS / 1000.0;
-            self.particles.begin(time);
+            self.particles.begin(self.sim_time(progress));
         }
         let dots = std::mem::take(&mut self.entities.dots);
         for (id, dot) in &dots {
@@ -2240,6 +2265,10 @@ impl Field {
         let mut hasher = DefaultHasher::new();
         hashes.hash(&mut hasher);
         model.effect.map(f32::to_bits).hash(&mut hasher);
+        model
+            .wind
+            .map(|wind| wind.map(f32::to_bits))
+            .hash(&mut hasher);
         let key = hasher.finish();
         let textures = hashes.map(|hash| hash.and_then(|hash| self.textures.get(&hash)));
         let uploads = textures.map(|texture| texture.map_or(0, |texture| texture.upload));
@@ -2258,7 +2287,7 @@ impl Field {
                 views,
                 &self.sampler,
                 model.effect,
-                maps[0].is_some(),
+                material_flags(maps[0].is_some(), model.wind),
             );
             self.materials.insert(key, (group, uploads));
         }
@@ -3037,22 +3066,33 @@ impl Field {
 
         let camera = self.refraction_camera();
         let (_, eye, right, up) = self.camera_view();
+        let wind = self.wind(progress);
         if options.refraction {
-            self.write_view(&self.refraction_view.0, &camera.view_proj, [right, up, eye]);
+            self.write_view(
+                &self.refraction_view.0,
+                &camera.view_proj,
+                [right, up, eye],
+                wind,
+            );
         }
         if options.reflection {
             self.write_view(
                 &self.reflection_view.0,
                 &camera.reflection,
                 [right, up, eye],
+                wind,
             );
         }
         let Some(ground) = &self.ground else {
             return;
         };
         // m_WaterTexTimer: the sim time since the match began.
-        let time = (f64::from(self.entities.turn) + f64::from(progress)) * TURN_MS / 1000.0;
-        let uniform = water::uniform(&ground.image, time, self.light().rotation, &camera);
+        let uniform = water::uniform(
+            &ground.image,
+            self.sim_time(progress),
+            self.light().rotation,
+            &camera,
+        );
         self.queue.write_buffer(&self.water.buffer, 0, &uniform);
     }
 
@@ -3133,6 +3173,10 @@ impl View for Field {
 
     fn set_triplanar(&mut self, on: bool) {
         self.triplanar = on;
+    }
+
+    fn set_wind(&mut self, on: bool) {
+        self.wind = on;
     }
 
     fn set_postproc(&mut self, on: bool) {
@@ -3357,7 +3401,8 @@ impl View for Field {
         };
         self.camera.borrow_mut().step(now());
         let (view_proj, eye, right, up) = self.view_projection();
-        self.write_view(&self.view_buffer, &view_proj, [right, up, eye]);
+        let wind = self.wind(progress);
+        self.write_view(&self.view_buffer, &view_proj, [right, up, eye], wind);
         self.eye = eye;
         let bounds = self.ground.as_ref().map(|ground| shadow::Bounds {
             size: ground.image.size as f32 * TILE_SIZE,
@@ -3385,6 +3430,7 @@ impl View for Field {
                 aspect: self.config.width as f32 / self.config.height.max(1) as f32,
             },
             bounds.as_ref(),
+            wind,
         );
         if let Some(bake) = self.store.borrow().index_name() {
             self.far.open_storage(bake);
@@ -4231,6 +4277,17 @@ fn pose_bind_group(
     })
 }
 
+/// The second half of `MATERIAL_SIZE`.
+fn material_flags(normal_map: bool, wind: Option<[f32; 2]>) -> [f32; 4] {
+    let [x, z] = wind.unwrap_or_default();
+    [
+        if normal_map { 1.0 } else { 0.0 },
+        if wind.is_some() { 1.0 } else { 0.0 },
+        x,
+        z,
+    ]
+}
+
 fn material_bind_group(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
@@ -4238,10 +4295,9 @@ fn material_bind_group(
     views: [&wgpu::TextureView; 4],
     sampler: &wgpu::Sampler,
     effect: [f32; 4],
-    normal_map: bool,
+    flags: [f32; 4],
 ) -> wgpu::BindGroup {
     let mut bytes = Vec::with_capacity(MATERIAL_SIZE);
-    let flags = [if normal_map { 1.0f32 } else { 0.0 }, 0.0, 0.0, 0.0];
     for value in effect.iter().chain(&flags) {
         bytes.extend_from_slice(&value.to_le_bytes());
     }

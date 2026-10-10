@@ -267,8 +267,9 @@ impl Shadow {
     }
 
     /// Fits the map to this frame's camera and writes the light uniform,
-    /// with the map's fog when `fog`; the planes of the box casters must
-    /// touch, `None` when there is no shadow to draw.
+    /// with the map's fog when `fog`, and the view's `wind` into each
+    /// cascade's; the planes of the box casters must touch, `None` when
+    /// there is no shadow to draw.
     pub fn prepare(
         &self,
         queue: &wgpu::Queue,
@@ -276,6 +277,7 @@ impl Shadow {
         fog: bool,
         eye: &Eye,
         bounds: Option<&Bounds>,
+        wind: [f32; 2],
     ) -> Option<[[f32; 4]; 6]> {
         let fitted = match bounds {
             Some(bounds) if self.size > 0 => fit(
@@ -340,9 +342,12 @@ impl Shadow {
 
         let fitted = fitted?;
         for (cascade, (buffer, _)) in fitted.cascades.iter().zip(&self.views) {
-            // Only the matrix: the shadow pass's shaders read nothing else.
-            let mut matrix = Vec::with_capacity(16);
+            // The matrix, and the wind after the sun's slot, so that the
+            // shadows sway with the leaves; the shadow pass's shaders read
+            // nothing else.
+            let mut matrix = Vec::with_capacity(24);
             push_matrix(&mut matrix, &cascade.view_proj);
+            matrix.extend_from_slice(&[0.0, 0.0, 0.0, 0.0, wind[0], wind[1], 0.0, 0.0]);
             let bytes: Vec<u8> = matrix
                 .iter()
                 .flat_map(|value| value.to_le_bytes())

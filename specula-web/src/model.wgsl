@@ -7,7 +7,8 @@ struct View {
     view_proj: mat4x4<f32>,
     // xyz towards the sun.
     sun: vec4<f32>,
-    // Unused, unused, map size in metres, 1 on a circular map.
+    // model_common.vs' sim_time in seconds, 1 when the wind sways the
+    // models, map size in metres, 1 on a circular map.
     misc: vec4<f32>,
     // Water level in metres.
     water: vec4<f32>,
@@ -25,7 +26,8 @@ struct Material {
     // effectSettings: normal strength, specular power, parallax scale,
     // the vertex lighting's share of the sun.
     effect: vec4<f32>,
-    // 1 when the material has a normal map.
+    // 1 when the material has a normal map, 1 when it sways in the wind
+    // (USE_WIND), then its windData.
     flags: vec4<f32>,
 }
 
@@ -200,6 +202,35 @@ fn bone_pose(a: u32, b: u32, blend: f32, bone: u32) -> mat4x3<f32> {
     );
 }
 
+// model_common.vs fakeCos: a smoothed triangle wave.
+fn fake_cos(x: vec3<f32>) -> vec3<f32> {
+    let tri = abs(fract(x + 0.5) * 2.0 - 1.0);
+    return tri * tri * (3.0 - 2.0 * tri);
+}
+
+// model_common.vs USE_WIND: `world` is the vertex after the instance
+// transform, `local` the mesh's own vertex (a_vertex), `translation` the
+// instance's. Each instance's fractional position offsets its phase, so
+// a forest does not sway in step.
+fn sway(world: vec3<f32>, local: vec3<f32>, translation: vec3<f32>) -> vec3<f32> {
+    let wind = material.flags.zw;
+    let time = view.misc.x;
+    let model_pos = clamp(fract(translation), vec3<f32>(0.4), vec3<f32>(1.0));
+    let abs_wind = abs(wind.x) + abs(wind.y);
+    let cos_vec = fake_cos(vec3<f32>(
+        time * model_pos.x + world.x,
+        time * model_pos.z / 3.0 + translation.x,
+        time * abs_wind / 4.0 + world.z,
+    ));
+    let limit = clamp(local.x * local.z * local.y / 3000.0, 0.0, 0.2);
+    let diff = cos_vec.x * limit;
+    let diff2 = cos_vec.y * clamp(local.y / 60.0, 0.0, 0.25);
+    var swayed = world + cos_vec.z * limit * clamp(abs_wind, 1.2, 1.7);
+    swayed.x += diff + diff2 * wind.x;
+    swayed.z += diff + diff2 * wind.y;
+    return swayed;
+}
+
 @vertex
 fn vs_model(
     @location(0) position: vec3<f32>,
@@ -246,11 +277,14 @@ fn vs_model(
             local_tangent += (m * vec4<f32>(tangent.xyz, 0.0)) * weight;
         }
     }
-    let world = vec3<f32>(
+    var world = vec3<f32>(
         dot(row0, vec4<f32>(local, 1.0)),
         dot(row1, vec4<f32>(local, 1.0)),
         dot(row2, vec4<f32>(local, 1.0)),
     );
+    if material.flags.y > 0.5 && view.misc.y > 0.5 {
+        world = sway(world, position, vec3<f32>(row0.w, row1.w, row2.w));
+    }
     let world_normal = vec3<f32>(
         dot(row0.xyz, local_normal),
         dot(row1.xyz, local_normal),

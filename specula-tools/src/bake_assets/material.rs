@@ -1,6 +1,6 @@
 //! The parts of a material (`CMaterialManager::LoadMaterial`) the client
 //! follows: its shader defines, those its required textures add, and its
-//! `effectSettings` uniform.
+//! `effectSettings` and `windData` uniforms.
 
 use std::fs;
 use std::path::Path;
@@ -15,6 +15,8 @@ pub struct Material {
     pub triplanar: bool,
     /// Components the uniform does not name stay 0, as an unset uniform.
     pub effect: [f32; 4],
+    /// `windData` x and y when `USE_WIND` sways the model.
+    pub wind: Option<[f32; 2]>,
 }
 
 /// The engine mod that `public` is mounted over; the terrain materials
@@ -51,18 +53,24 @@ pub fn load(mod_dir: &Path, name: &str) -> Material {
                     && node.attribute("define") == Some(define))
         })
     };
-    let mut effect = [0.0; 4];
-    if let Some(value) = root
-        .children()
-        .find(|node| {
-            node.has_tag_name("uniform") && node.attribute("name") == Some("effectSettings")
-        })
-        .and_then(|node| node.attribute("value"))
-    {
-        for (slot, number) in effect.iter_mut().zip(value.split_whitespace()) {
-            *slot = number.parse().unwrap_or(0.0);
+    let uniform = |name: &str, values: &mut [f32]| {
+        if let Some(value) = root
+            .children()
+            .find(|node| node.has_tag_name("uniform") && node.attribute("name") == Some(name))
+            .and_then(|node| node.attribute("value"))
+        {
+            for (slot, number) in values.iter_mut().zip(value.split_whitespace()) {
+                *slot = number.parse().unwrap_or(0.0);
+            }
         }
-    }
+    };
+    let mut effect = [0.0; 4];
+    uniform("effectSettings", &mut effect);
+    let wind = defined("USE_WIND").then(|| {
+        let mut wind = [0.0; 2];
+        uniform("windData", &mut wind);
+        wind
+    });
     Material {
         player_color: defined("USE_PLAYERCOLOR"),
         transparent: defined("USE_TRANSPARENT"),
@@ -71,5 +79,6 @@ pub fn load(mod_dir: &Path, name: &str) -> Material {
         ao_map: defined("USE_AO"),
         triplanar: defined("USE_TRIPLANAR"),
         effect,
+        wind,
     }
 }

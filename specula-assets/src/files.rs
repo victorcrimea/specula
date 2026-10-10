@@ -1,4 +1,4 @@
-//! The split asset files, format v10. Little-endian; every file starts with
+//! The split asset files, format v11. Little-endian; every file starts with
 //! a 4-byte magic and a u8 version. Strings are u16 length and UTF-8,
 //! counts are u32. A file is served as `assets/<kind>-<16 hex>.bin`, the
 //! hex being a hash of its content, so a cached copy is never stale and
@@ -44,9 +44,10 @@
 //!   u32 definition}}, its bases in rising quality as `CActorDef` keeps
 //!   them, the last at 255. A definition is {u8 flags (1: player colour,
 //!   2: normal map, 4: specular map, 8: ambient occlusion map, as its
-//!   material's required textures define them), f32 alpha reference (0:
-//!   none), f32x4 the material's `effectSettings` (0 where it names none),
-//!   count x group}; a group is count x variant; a variant is {name (lower
+//!   material's required textures define them, 16: swayed by `USE_WIND`),
+//!   f32 alpha reference (0: none), f32x4 the material's `effectSettings`
+//!   (0 where it names none), f32x2 its `windData` (0 where it names none
+//!   or does not sway), count x group}; a group is count x variant; a variant is {name (lower
 //!   case), i32 frequency, optional mesh, optional baseTex, normTex,
 //!   specTex and aoTex textures, optional decal {f32 width, f32 depth,
 //!   f32 angle in radians, f32 offset x, f32 offset z}, optional particle
@@ -103,7 +104,7 @@
 use crate::half::f16_bits;
 use crate::half::f16_to_f32;
 
-pub const VERSION: u8 = 10;
+pub const VERSION: u8 = 11;
 /// The largest side of each texture detail tier, which a viewer's
 /// texture quality picks from: low, medium and the whole chain as the
 /// engine uploads it at its default quality.
@@ -118,6 +119,7 @@ pub const FLAG_PLAYER_COLOR: u8 = 1;
 pub const FLAG_NORMAL_MAP: u8 = 2;
 pub const FLAG_SPECULAR_MAP: u8 = 4;
 pub const FLAG_AO_MAP: u8 = 8;
+pub const FLAG_WIND: u8 = 16;
 pub const BLEND_ADD: u8 = 0;
 pub const BLEND_SUBTRACT: u8 = 1;
 pub const BLEND_OVER: u8 = 2;
@@ -339,6 +341,8 @@ pub struct Definition {
     /// `effectSettings`: normal strength, specular power, parallax scale,
     /// and how much of the vertex lighting replaces the per-pixel one.
     pub effect: [f32; 4],
+    /// `windData`, which `FLAG_WIND` sways the model by.
+    pub wind: [f32; 2],
     pub groups: Vec<Vec<Variant>>,
 }
 
@@ -751,6 +755,7 @@ impl Manifest {
                 out.u8(definition.flags);
                 out.f32(definition.alpha_ref);
                 out.f32s(&definition.effect);
+                out.f32s(&definition.wind);
                 out.count(definition.groups.len());
                 for group in &definition.groups {
                     out.count(group.len());
@@ -778,6 +783,7 @@ impl Manifest {
                 let flags = input.u8()?;
                 let alpha_ref = input.f32()?;
                 let effect = input.f32s()?;
+                let wind = input.f32s()?;
                 let mut groups = Vec::new();
                 for _ in 0..input.count()? {
                     let group = (0..input.count()?)
@@ -789,6 +795,7 @@ impl Manifest {
                     flags,
                     alpha_ref,
                     effect,
+                    wind,
                     groups,
                 });
             }

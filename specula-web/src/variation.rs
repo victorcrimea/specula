@@ -15,6 +15,7 @@ use specula_assets::files::Decal;
 use specula_assets::files::Definition;
 use specula_assets::files::Emitter;
 use specula_assets::files::FLAG_PLAYER_COLOR;
+use specula_assets::files::FLAG_WIND;
 use specula_assets::files::FileRef;
 use specula_assets::files::Manifest;
 use specula_assets::files::NONE;
@@ -42,6 +43,8 @@ pub struct Model {
     pub maps: [Option<FileRef>; 3],
     /// The material's `effectSettings`.
     pub effect: [f32; 4],
+    /// The material's `windData`, when `USE_WIND` sways the mesh.
+    pub wind: Option<[f32; 2]>,
     pub player_color: bool,
     pub alpha_ref: f32,
     /// By lower-case name, as `CObjectEntry::m_Animations`.
@@ -307,6 +310,7 @@ fn build(
             texture,
             maps,
             effect: definition.effect,
+            wind: None,
             player_color: definition.flags & FLAG_PLAYER_COLOR != 0,
             alpha_ref: definition.alpha_ref,
             animations: Vec::new(),
@@ -322,6 +326,7 @@ fn build(
             texture: None,
             maps: [None; 3],
             effect: definition.effect,
+            wind: None,
             player_color: false,
             alpha_ref: 0.0,
             animations: Vec::new(),
@@ -378,6 +383,7 @@ fn build(
         texture,
         maps,
         effect: definition.effect,
+        wind: (definition.flags & FLAG_WIND != 0).then_some(definition.wind),
         player_color: definition.flags & FLAG_PLAYER_COLOR != 0,
         alpha_ref: definition.alpha_ref,
         animations: model_animations,

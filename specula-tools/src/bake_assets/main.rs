@@ -955,6 +955,7 @@ fn manifest(
                 (material.normal_map, files::FLAG_NORMAL_MAP),
                 (material.specular_map, files::FLAG_SPECULAR_MAP),
                 (material.ao_map, files::FLAG_AO_MAP),
+                (material.wind.is_some(), files::FLAG_WIND),
             ]
             .iter()
             .filter(|(set, _)| *set)
@@ -962,6 +963,7 @@ fn manifest(
             definitions.push(files::Definition {
                 flags,
                 effect: material.effect,
+                wind: material.wind.unwrap_or_default(),
                 alpha_ref: if definition.material.transparent {
                     // `REQUIRE_ALPHA_GEQUAL` of the opaque pass in
                     // shaders/effects/model_transparent.xml.

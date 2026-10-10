@@ -106,6 +106,8 @@ const TEXTURE_SETTINGS_KEY: &str = "specula.textures";
 const MAP_SETTINGS_KEY: &str = "specula.maps";
 /// localStorage key of the triplanar setting: 0 off, 1 on.
 const TRIPLANAR_SETTINGS_KEY: &str = "specula.triplanar";
+/// localStorage key of the wind setting: 0 off, 1 on.
+const WIND_SETTINGS_KEY: &str = "specula.wind";
 /// localStorage keys of the post-processing, bloom, depth of field and fog
 /// settings: 0 off, 1 on.
 const POSTPROC_SETTINGS_KEY: &str = "specula.postproc";
@@ -176,6 +178,9 @@ trait View {
     /// Whether the terrains whose material asks for it are mapped
     /// triplanar, where it draws terrain textures.
     fn set_triplanar(&mut self, _on: bool) {}
+    /// Whether the wind sways the models whose material asks for it,
+    /// where it draws models.
+    fn set_wind(&mut self, _on: bool) {}
     /// Whether the map's post effect runs, where it draws the match.
     fn set_postproc(&mut self, _on: bool) {}
     /// Whether the post effect blooms, likewise.
@@ -855,6 +860,7 @@ async fn run(page: Page, glue_url: String, wasm_url: String) -> Result<(), Strin
         wire_textures(&app, element(&document, "textures")?);
         wire_maps(&app, element(&document, "maps")?);
         wire_triplanar(&app, element(&document, "triplanar")?);
+        wire_wind(&app, element(&document, "wind")?);
         let bloom: HtmlSelectElement = element(&document, "bloom")?;
         let dof: HtmlSelectElement = element(&document, "dof")?;
         wire_switch(
@@ -1180,6 +1186,35 @@ fn wire_triplanar(app: &Rc<RefCell<App>>, select: HtmlSelectElement) {
         }
         let app = &mut *target.borrow_mut();
         app.renderer.set_triplanar(on);
+        app.dirty = true;
+    });
+    select.set_onchange(Some(on_change.as_ref().unchecked_ref()));
+    // The controls live as long as the page, so their handlers do too.
+    on_change.forget();
+}
+
+/// The wind list, kept across visits; on unless turned off, as the game
+/// always sways at its highest material quality.
+fn wire_wind(app: &Rc<RefCell<App>>, select: HtmlSelectElement) {
+    let saved = web_sys::window()
+        .and_then(|window| window.local_storage().ok().flatten())
+        .and_then(|storage| storage.get_item(WIND_SETTINGS_KEY).ok().flatten())
+        .is_none_or(|text| text != "0");
+    select.set_value(if saved { "1" } else { "0" });
+    app.borrow_mut().renderer.set_wind(saved);
+
+    let target = Rc::clone(app);
+    let list = select.clone();
+    let on_change = Closure::<dyn FnMut()>::new(move || {
+        let on = list.value() == "1";
+        // Best effort: without storage the choice lasts only this visit.
+        if let Some(storage) =
+            web_sys::window().and_then(|window| window.local_storage().ok().flatten())
+        {
+            let _ = storage.set_item(WIND_SETTINGS_KEY, if on { "1" } else { "0" });
+        }
+        let app = &mut *target.borrow_mut();
+        app.renderer.set_wind(on);
         app.dirty = true;
     });
     select.set_onchange(Some(on_change.as_ref().unchecked_ref()));
