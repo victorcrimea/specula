@@ -176,7 +176,6 @@ pub struct Player {
 
 /// What a template gives the selection overlay, the status bars and the
 /// panels, read from the template as is. Strings are string record indices.
-#[expect(dead_code, reason = "the wire carries them from C6 on")]
 pub struct TemplateDetails {
     /// The template flag bits of `SpeculaFeed.h`, kind 11.
     pub flags: u16,
@@ -364,11 +363,10 @@ pub struct Resource {
     pub gatherers: u16,
 }
 
-/// The kind 11 to 15 state of one feed. Kind 12 carries only the groups
+/// The kind 12 to 15 state of one feed. Kind 12 carries only the groups
 /// that changed, so the rest must be kept here.
 #[derive(Default)]
 pub struct Details {
-    pub templates: HashMap<u32, TemplateDetails>,
     pub entities: HashMap<u32, EntityDetails>,
     /// String list records by index, each a list of string indices.
     pub string_lists: HashMap<u32, Vec<Option<u32>>>,
@@ -378,10 +376,6 @@ pub struct Details {
 }
 
 impl Details {
-    pub fn set_template(&mut self, index: u32, details: TemplateDetails) {
-        self.templates.insert(index, details);
-    }
-
     pub fn apply(&mut self, changed: Vec<(u32, EntityDetails)>, gone: Vec<u32>) {
         for (id, groups) in changed {
             self.entities.entry(id).or_default().merge(groups);

@@ -147,13 +147,28 @@
 //! runs of {varint length, u8 tile} covering width * height tiles,
 //! row-major, x fastest. A tile is 8 m square, as `ICmpTerritoryManager`'s
 //! grid: owner in 0x1F, connected 0x20, blinking 0x40.
-//! Template and string tables are varint count, count x {varint length,
-//! UTF-8 text}. Template names are as the simulation knows them, e.g.
+//! A template table is varint count, count x {varint length, UTF-8 name,
+//! u8 1 if details follow else 0, then the details: varint flags, varint
+//! overlay texture, varint overlay mask, f32 overlay line thickness, f32
+//! overlay shape width, f32 overlay shape depth, f32 footprint width, f32
+//! footprint depth, f32 footprint height, f32 status bar width, f32 status
+//! bar height, f32 status bar height offset, varint generic name, varint
+//! specific name, varint icon, varint selection group name, varint rank,
+//! varint classes, varint visible classes, varint select sound group,
+//! varint components}. The flags and component bits are those of the
+//! hook's template details (`SpeculaFeed.h`, kind 11), and so are the
+//! meanings of the strings, which are 1-based indices into the string
+//! table, 0 for none. A template the hook had no details for has none; the
+//! details arrive in the same message as the template's name, so before
+//! any entity uses it.
+//! A string table is varint count, count x {varint length, UTF-8 text}.
+//! Template names are as the simulation knows them, e.g.
 //! `units/athen/infantry_spearman_b` or `foundation|structures/athen/house`;
 //! a foundation's rising building is an entity of its own with a
 //! `construction|` template, and corpses (`corpse|`) and what a dying
 //! entity spawns (`decay|`, rubble) are entities too. Strings are actor file names, animation names,
-//! variant keys and selections and sound group paths.
+//! variant keys and selections, sound group paths and the template
+//! details' strings.
 //! A variant set table is varint count, count x {varint n, n x {varint key,
 //! varint selection}}, 0-based string indices, sorted by key. The set holds
 //! the VisualActor's variant selections except the `animation` key, which
@@ -216,6 +231,7 @@ use crate::feed::Launch;
 use crate::feed::Player;
 use crate::feed::Sound;
 use crate::feed::SoundTarget;
+use crate::feed::TemplateDetails;
 use crate::feed::Territory;
 use crate::terrain::Ground;
 use crate::web;
@@ -432,6 +448,13 @@ fn quantize_construction(raw: i32) -> u8 {
     ((i64::from(raw) * 255 + 0xFFFF) >> 16).clamp(1, 255) as u8
 }
 
+/// A template as the template table sends it.
+struct Template {
+    name: String,
+    /// `None` when the hook had no template node to read them from.
+    details: Option<TemplateDetails>,
+}
+
 /// An append-only table: indices already sent stay valid, and entries added
 /// since the last turn go out with the next one.
 struct Table<T> {
@@ -473,7 +496,7 @@ impl<T> Table<T> {
 /// The tables a keyframe carries.
 struct Tables<'a> {
     icons: &'a [Icon],
-    templates: &'a [String],
+    templates: &'a [Template],
     strings: &'a [String],
     variant_sets: &'a [VariantSet],
     variable_sets: &'a [VariableSet],
@@ -532,7 +555,7 @@ struct State {
     /// on; near the simulation's state, not equal to it.
     dots: BTreeMap<u32, Dot>,
     icons: Table<Icon>,
-    templates: Table<String>,
+    templates: Table<Template>,
     strings: Table<String>,
     variant_sets: Table<VariantSet>,
     variable_sets: Table<VariableSet>,
@@ -648,11 +671,33 @@ impl Hub {
     }
 
     pub fn add_template(&self, index: u32, name: String) -> io::Result<()> {
-        self.state
-            .lock()
-            .unwrap()
+        self.state.lock().unwrap().templates.insert(
+            index,
+            Template {
+                name,
+                details: None,
+            },
+            "template",
+        )
+    }
+
+    /// The hook sends them right after the template, before any turn uses
+    /// it, so the entry is still unsent.
+    pub fn set_template_details(&self, index: u32, details: TemplateDetails) -> io::Result<()> {
+        let state = &mut *self.state.lock().unwrap();
+        let template = state
             .templates
-            .insert(index, name, "template")
+            .items
+            .get_mut(index as usize)
+            .filter(|_| index as usize >= state.templates.sent)
+            .ok_or_else(|| {
+                io::Error::new(
+                    ErrorKind::InvalidData,
+                    format!("details of template {index}, not the last one sent"),
+                )
+            })?;
+        template.details = Some(details);
+        Ok(())
     }
 
     pub fn add_string(&self, index: u32, text: String) -> io::Result<()> {
@@ -1088,7 +1133,7 @@ fn encode_keyframe(
     write_icons(&mut out, tables.icons);
     write_players(&mut out, &state.players);
     write_territory(&mut out, state.territory.as_ref());
-    write_strings(&mut out, tables.templates);
+    write_templates(&mut out, tables.templates);
     write_strings(&mut out, tables.strings);
     write_variant_sets(&mut out, tables.variant_sets);
     write_variable_sets(&mut out, tables.variable_sets);
@@ -1166,7 +1211,7 @@ fn encode_delta(
         }
         None => out.u8(0),
     }
-    write_strings(&mut out, new_tables.templates);
+    write_templates(&mut out, new_tables.templates);
     write_strings(&mut out, new_tables.strings);
     write_variant_sets(&mut out, new_tables.variant_sets);
     write_variable_sets(&mut out, new_tables.variable_sets);
@@ -1563,6 +1608,49 @@ fn write_territory(out: &mut Writer, territory: Option<&Territory>) {
     for run in territory.tiles.chunk_by(|a, b| a == b) {
         out.varint(run.len() as u64);
         out.u8(run[0]);
+    }
+}
+
+fn write_templates(out: &mut Writer, templates: &[Template]) {
+    out.varint(templates.len() as u64);
+    for template in templates {
+        out.varint(template.name.len() as u64);
+        out.0.extend_from_slice(template.name.as_bytes());
+        let Some(details) = &template.details else {
+            out.u8(0);
+            continue;
+        };
+        out.u8(1);
+        let one_based = |index: Option<u32>| u64::from(index.map_or(0, |index| index + 1));
+        out.varint(u64::from(details.flags));
+        out.varint(one_based(details.overlay_texture));
+        out.varint(one_based(details.overlay_mask));
+        for value in [
+            details.line_thickness,
+            details.overlay_width,
+            details.overlay_depth,
+            details.footprint_width,
+            details.footprint_depth,
+            details.footprint_height,
+            details.bar_width,
+            details.bar_height,
+            details.bar_offset,
+        ] {
+            out.f32(value);
+        }
+        for string in [
+            details.generic_name,
+            details.specific_name,
+            details.icon,
+            details.group_name,
+            details.rank,
+            details.classes,
+            details.visible_classes,
+            details.select_sound,
+        ] {
+            out.varint(one_based(string));
+        }
+        out.varint(u64::from(details.components));
     }
 }
 

@@ -251,7 +251,7 @@ fn serve(stream: UnixStream, hub: &Hub) -> io::Result<()> {
             Record::TemplateDetails {
                 index,
                 details: template,
-            } => details.set_template(index, *template),
+            } => hub.set_template_details(index, *template)?,
             Record::Details { changed, gone } => details.apply(changed, gone),
             Record::StringList { index, strings } => details.add_string_list(index, strings),
             Record::Renames(renames) => details.set_renames(renames),

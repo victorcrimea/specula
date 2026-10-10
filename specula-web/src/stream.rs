@@ -290,6 +290,41 @@ pub type VariantSet = Vec<(u32, u32)>;
 /// variables particle emitters read.
 pub type VariableSet = Vec<(u32, f32)>;
 
+/// What a template gives the selection overlay, the status bars and the
+/// panels, as the hook reads it from the template (`SpeculaFeed.h`, kind
+/// 11). Strings are 1-based indices into `Scene::strings`, 0 for none.
+#[derive(Clone, Copy)]
+pub struct TemplateDetails {
+    /// The hook's template flag bits.
+    pub flags: u32,
+    /// Relative to art/textures/selection/.
+    pub overlay_texture: u32,
+    pub overlay_mask: u32,
+    pub line_thickness: f32,
+    /// A circle's radius in both.
+    pub overlay_width: f32,
+    pub overlay_depth: f32,
+    pub footprint_width: f32,
+    pub footprint_depth: f32,
+    pub footprint_height: f32,
+    pub bar_width: f32,
+    pub bar_height: f32,
+    pub bar_offset: f32,
+    pub generic_name: u32,
+    pub specific_name: u32,
+    /// Relative to art/textures/ui/session/portraits/.
+    pub icon: u32,
+    pub group_name: u32,
+    pub rank: u32,
+    /// Token lists, as the template writes them.
+    pub classes: u32,
+    pub visible_classes: u32,
+    /// Relative to audio/.
+    pub select_sound: u32,
+    /// Bit i for the i-th of the hook's detail components, Health first.
+    pub components: u32,
+}
+
 #[derive(Default)]
 pub struct Scene {
     pub turn: u32,
@@ -314,7 +349,10 @@ pub struct Scene {
     /// own whether it has drawn the current one.
     pub territory_generation: u32,
     pub templates: Vec<String>,
-    /// Actor file names, animation names, variant keys and selections.
+    /// By template index; `None` for a template the hook had none for.
+    pub template_details: Vec<Option<TemplateDetails>>,
+    /// Actor file names, animation names, variant keys and selections, and
+    /// the template details' strings.
     pub strings: Vec<String>,
     pub variant_sets: Vec<VariantSet>,
     pub variable_sets: Vec<VariableSet>,
@@ -416,6 +454,7 @@ impl Scene {
         self.read_players(cursor)?;
         self.read_territory(cursor)?;
         self.templates.clear();
+        self.template_details.clear();
         self.strings.clear();
         self.variant_sets.clear();
         self.variable_sets.clear();
@@ -547,14 +586,19 @@ impl Scene {
 
     /// Templates, strings, variant and variable sets, appended to what the scene has.
     fn read_tables(&mut self, cursor: &mut Cursor) -> Result<(), &'static str> {
-        for table in [&mut self.templates, &mut self.strings] {
-            let count = cursor.varint_u32()?;
-            for _ in 0..count {
-                let length = cursor.varint()? as usize;
-                let text =
-                    std::str::from_utf8(cursor.take(length)?).map_err(|_| "string not UTF-8")?;
-                table.push(text.to_string());
-            }
+        let count = cursor.varint_u32()?;
+        for _ in 0..count {
+            self.templates.push(cursor.text()?);
+            let details = match cursor.u8()? {
+                0 => None,
+                1 => Some(cursor.template_details()?),
+                _ => return Err("unknown template details flag"),
+            };
+            self.template_details.push(details);
+        }
+        let count = cursor.varint_u32()?;
+        for _ in 0..count {
+            self.strings.push(cursor.text()?);
         }
         let count = cursor.varint_u32()?;
         for _ in 0..count {
@@ -704,12 +748,47 @@ impl Scene {
             out.varint(run.len() as u64);
             out.u8(run[0]);
         }
-        for table in [&self.templates, &self.strings] {
-            out.varint(table.len() as u64);
-            for text in table {
-                out.varint(text.len() as u64);
-                out.0.extend_from_slice(text.as_bytes());
+        out.varint(self.templates.len() as u64);
+        for (name, details) in self.templates.iter().zip(&self.template_details) {
+            out.text(name);
+            let Some(details) = details else {
+                out.u8(0);
+                continue;
+            };
+            out.u8(1);
+            out.varint(u64::from(details.flags));
+            out.varint(u64::from(details.overlay_texture));
+            out.varint(u64::from(details.overlay_mask));
+            for value in [
+                details.line_thickness,
+                details.overlay_width,
+                details.overlay_depth,
+                details.footprint_width,
+                details.footprint_depth,
+                details.footprint_height,
+                details.bar_width,
+                details.bar_height,
+                details.bar_offset,
+            ] {
+                out.u32(value.to_bits());
             }
+            for string in [
+                details.generic_name,
+                details.specific_name,
+                details.icon,
+                details.group_name,
+                details.rank,
+                details.classes,
+                details.visible_classes,
+                details.select_sound,
+            ] {
+                out.varint(u64::from(string));
+            }
+            out.varint(u64::from(details.components));
+        }
+        out.varint(self.strings.len() as u64);
+        for text in &self.strings {
+            out.text(text);
         }
         out.varint(self.variant_sets.len() as u64);
         for set in &self.variant_sets {
@@ -1089,6 +1168,11 @@ impl Writer {
         self.zigzag_i64(i64::from(value));
     }
 
+    fn text(&mut self, text: &str) {
+        self.varint(text.len() as u64);
+        self.0.extend_from_slice(text.as_bytes());
+    }
+
     fn zigzag_i64(&mut self, value: i64) {
         self.varint(((value << 1) ^ (value >> 63)) as u64);
     }
@@ -1147,6 +1231,43 @@ impl<'a> Cursor<'a> {
 
     fn zigzag(&mut self) -> Result<i32, &'static str> {
         i32::try_from(self.zigzag_i64()?).map_err(|_| "zigzag out of range")
+    }
+
+    fn f32(&mut self) -> Result<f32, &'static str> {
+        self.u32().map(f32::from_bits)
+    }
+
+    /// varint length, UTF-8.
+    fn text(&mut self) -> Result<String, &'static str> {
+        let length = self.varint()? as usize;
+        let text = std::str::from_utf8(self.take(length)?).map_err(|_| "string not UTF-8")?;
+        Ok(text.to_string())
+    }
+
+    fn template_details(&mut self) -> Result<TemplateDetails, &'static str> {
+        Ok(TemplateDetails {
+            flags: self.varint_u32()?,
+            overlay_texture: self.varint_u32()?,
+            overlay_mask: self.varint_u32()?,
+            line_thickness: self.f32()?,
+            overlay_width: self.f32()?,
+            overlay_depth: self.f32()?,
+            footprint_width: self.f32()?,
+            footprint_depth: self.f32()?,
+            footprint_height: self.f32()?,
+            bar_width: self.f32()?,
+            bar_height: self.f32()?,
+            bar_offset: self.f32()?,
+            generic_name: self.varint_u32()?,
+            specific_name: self.varint_u32()?,
+            icon: self.varint_u32()?,
+            group_name: self.varint_u32()?,
+            rank: self.varint_u32()?,
+            classes: self.varint_u32()?,
+            visible_classes: self.varint_u32()?,
+            select_sound: self.varint_u32()?,
+            components: self.varint_u32()?,
+        })
     }
 
     /// Sent as the difference from the entity id, which is the default.
