@@ -91,6 +91,12 @@ pub struct Dot {
     pub speed: u32,
     /// The turn the animation was selected on.
     pub animation_turn: u32,
+    /// The turn `speed` was last changed on, and the animation time in ms
+    /// at a speed of 1 played up to it since `animation_turn`. The engine
+    /// adds up time * speed each frame, so a new speed applies from now
+    /// on, not to the time already played.
+    pub speed_turn: u32,
+    pub phase: f32,
     /// In ms; 0 when not synced.
     pub sync_repeat: u32,
     pub sync_offset: i32,
@@ -756,6 +762,7 @@ impl Scene {
 /// A delta's update of one entity, as specula-server reckons it.
 fn advance(dot: &mut Dot, change: Option<&Change>, ground: Option<&Ground>, turn: u32) {
     let mask = change.map_or(0, |change| change.mask);
+    let speed = dot.speed;
     if let Some(change) = change.filter(|_| mask & CHANGED_POSITION != 0) {
         dot.step[0] += change.step[0];
         dot.step[1] += change.step[1];
@@ -832,6 +839,14 @@ fn advance(dot: &mut Dot, change: Option<&Change>, ground: Option<&Ground>, turn
         if mask & CHANGED_VISIBILITY != 0 {
             dot.visibility = values.visibility;
         }
+    }
+    if mask & CHANGED_ANIMATION != 0 {
+        dot.speed_turn = turn;
+        dot.phase = 0.0;
+    } else if dot.speed != speed {
+        dot.phase +=
+            turn.saturating_sub(dot.speed_turn) as f32 * TURN_SECS * 1000.0 * speed as f32 / 256.0;
+        dot.speed_turn = turn;
     }
     if dot.angle != angle {
         // Keep the start within half a turn, so the heading turns the short
@@ -1122,7 +1137,7 @@ impl<'a> Cursor<'a> {
         let z = self.zigzag()?;
         let y = self.zigzag()?;
         let angle = self.u8()?;
-        Ok(Dot {
+        let dot = Dot {
             x,
             z,
             y,
@@ -1151,6 +1166,12 @@ impl<'a> Cursor<'a> {
             grounded: self.u8()? & MOTION_GROUNDED != 0,
             from_x: x as f32,
             from_z: z as f32,
+            speed_turn: 0,
+            phase: 0.0,
+        };
+        Ok(Dot {
+            speed_turn: dot.animation_turn,
+            ..dot
         })
     }
 

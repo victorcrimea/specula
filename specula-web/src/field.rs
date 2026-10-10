@@ -1523,6 +1523,8 @@ impl Field {
         };
         entity.turn = start_turn;
         entity.progress = 0.0;
+        entity.dot.speed_turn = dot.animation_turn;
+        entity.dot.phase = 0.0;
         let (start, _) = animation_clock(&entity, chosen, &data);
         let key = (
             dot.animation,
@@ -3956,8 +3958,8 @@ fn animation_clock(
         start + since(dot.sync_turn) * speed
     } else {
         // In 1/256: m/s for walk and run, else a multiplier.
-        let speed = dot.speed as f32 / 256.0 * chosen.speed;
-        since(dot.animation_turn) * speed
+        let played = dot.phase + since(dot.speed_turn) * dot.speed as f32 / 256.0;
+        played * chosen.speed
     };
     (time, duration)
 }
