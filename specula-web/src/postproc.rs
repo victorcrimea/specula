@@ -6,6 +6,8 @@
 
 use crate::terrain::Light;
 use crate::terrain::PostEffect;
+use crate::timing;
+use crate::timing::Timer;
 use crate::unit::DEPTH_FORMAT;
 
 /// The `Post` uniform of postproc.wgsl.
@@ -289,19 +291,21 @@ impl Post {
     }
 
     /// `ApplyPostproc` from the scene texture to `target`.
-    pub fn draw(&self, encoder: &mut wgpu::CommandEncoder, plan: Plan, target: &wgpu::TextureView) {
+    pub fn draw(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        plan: Plan,
+        target: &wgpu::TextureView,
+        timer: &Timer,
+    ) {
         let targets = &self.targets;
+        // Gathered first so the timer knows the first and the last pass.
+        let mut runs = Vec::new();
         if plan.blur {
             for (level, groups) in targets.levels.iter().zip(&targets.level_groups) {
-                fullscreen(
-                    encoder,
-                    &level[0],
-                    &self.downscale,
-                    1,
-                    &targets.downscale_group,
-                );
-                fullscreen(encoder, &level[1], &self.blur_h, 1, &groups[0]);
-                fullscreen(encoder, &level[0], &self.blur_v, 1, &groups[1]);
+                runs.push((&level[0], &self.downscale, 1, &targets.downscale_group));
+                runs.push((&level[1], &self.blur_h, 1, &groups[0]));
+                runs.push((&level[0], &self.blur_v, 1, &groups[1]));
             }
         }
         // The image so far is in the scene texture or in ping; each pass
@@ -309,7 +313,7 @@ impl Post {
         // last one the screen.
         let mut in_scene = true;
         if plan.dof {
-            fullscreen(encoder, &targets.ping, &self.dof, 0, &targets.scene_group);
+            runs.push((&targets.ping, &self.dof, 0, &targets.scene_group));
             in_scene = false;
         }
         let passes = [
@@ -326,8 +330,13 @@ impl Post {
                 (&targets.ping_group, &targets.scene)
             };
             let output = if left == 0 { target } else { next };
-            fullscreen(encoder, output, pipeline, 0, group);
+            runs.push((output, *pipeline, 0, group));
             in_scene = !in_scene;
+        }
+        let last = runs.len().saturating_sub(1);
+        for (run, (output, pipeline, index, group)) in runs.into_iter().enumerate() {
+            let writes = timer.writes(timing::POST, run == 0, run == last);
+            fullscreen(encoder, output, pipeline, index, group, writes);
         }
     }
 }
@@ -338,6 +347,7 @@ fn fullscreen(
     pipeline: &wgpu::RenderPipeline,
     index: u32,
     group: &wgpu::BindGroup,
+    timestamp_writes: Option<wgpu::RenderPassTimestampWrites>,
 ) {
     let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
         label: Some("postproc"),
@@ -350,6 +360,7 @@ fn fullscreen(
                 store: wgpu::StoreOp::Store,
             },
         })],
+        timestamp_writes,
         ..Default::default()
     });
     pass.set_pipeline(pipeline);

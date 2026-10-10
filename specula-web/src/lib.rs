@@ -21,6 +21,7 @@ mod stored;
 mod stream;
 mod terrain;
 mod territory;
+mod timing;
 mod unit;
 mod variation;
 mod warmup;
@@ -486,6 +487,8 @@ impl MatchOver {
 impl App {
     /// `now` is the requestAnimationFrame timestamp in milliseconds.
     fn frame(&mut self, now: f64) {
+        let start = page_now();
+        let mut drew = false;
         let (width, height, ratio) = canvas_size(&self.canvas, self.renderer.max_size());
         if width != self.canvas.width() || height != self.canvas.height() {
             self.canvas.set_width(width);
@@ -521,6 +524,7 @@ impl App {
         let progress = ((now - self.turn_start) / self.turn_interval).clamp(0.0, 1.0) as f32;
         if self.dirty || progress != self.progress || self.renderer.animating() {
             self.dirty = !self.renderer.draw(progress);
+            drew = !self.dirty;
             if !self.dirty {
                 self.progress = progress;
             }
@@ -540,6 +544,7 @@ impl App {
             }
         }
         self.play_sounds(now, progress);
+        timing::frame(page_now() - start, drew);
     }
 
     /// Covers the civs, the terrains and the entities on the map now.

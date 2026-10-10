@@ -36,11 +36,18 @@ pub async fn init(canvas: HtmlCanvasElement) -> Result<Gpu, String> {
     crate::log(&format!("graphics backend: {backend}"));
     // Lets the observer page upload the game's DXT textures as they are;
     // without it they are decoded in WASM.
-    let features = adapter.features() & wgpu::Features::TEXTURE_COMPRESSION_BC;
+    let bc = adapter.features() & wgpu::Features::TEXTURE_COMPRESSION_BC;
     crate::log(&format!(
         "BC textures: {}",
-        if features.is_empty() { "no" } else { "yes" }
+        if bc.is_empty() { "no" } else { "yes" }
     ));
+    // Times the passes for the stats box; WebGL never has it.
+    let timestamps = adapter.features() & wgpu::Features::TIMESTAMP_QUERY;
+    crate::log(&format!(
+        "GPU timestamps: {}",
+        if timestamps.is_empty() { "no" } else { "yes" }
+    ));
+    let features = bc | timestamps;
     let (device, queue) = adapter
         .request_device(&wgpu::DeviceDescriptor {
             label: None,

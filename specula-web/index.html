@@ -48,11 +48,16 @@ html, body { margin: 0; height: 100%; background: #0f1214; }
 #hud { position: fixed; top: 44px; right: 8px; display: flex;
   flex-direction: column; align-items: flex-end; gap: 6px;
   max-width: calc(100vw - 32px); }
-#fps, #stats { padding: 4px 8px; white-space: pre-wrap; text-align: right;
-  font: 600 13px system-ui, sans-serif; font-variant-numeric: tabular-nums;
+/* Monospace and padded columns, so the numbers do not jump as they change. */
+#fps, .stats { padding: 4px 8px; white-space: pre;
+  font: 600 12px ui-monospace, monospace;
   color: #e6e9eb; background: rgba(15, 18, 20, 0.85);
   border: 1px solid #3a4248; border-radius: 4px; }
-body:not(.debug) #stats, body:not(.debug) #errors { display: none; }
+.stats { margin: 0; max-width: 100%; overflow-x: auto; box-sizing: border-box; }
+body:not(.debug) #errors { display: none; }
+body:not([data-debug="network"]) #stats-network,
+body:not([data-debug="profiling"]) #stats-profiling,
+body:not([data-debug="storage"]) #stats-storage { display: none; }
 #clock { position: fixed; top: 8px; right: 8px; padding: 4px 8px;
   font: 600 15px system-ui, sans-serif; font-variant-numeric: tabular-nums;
   color: #e6e9eb; background: rgba(15, 18, 20, 0.85);
@@ -135,7 +140,9 @@ body:not(.debug) #stats, body:not(.debug) #errors { display: none; }
 <canvas id="minimap" aria-label="Minimap"></canvas>
 <div id="hud">
 <div id="fps" aria-label="Frames per second">- FPS</div>
-<div id="stats" aria-label="Renderer statistics"></div>
+<pre id="stats-network" class="stats" aria-label="Network statistics"></pre>
+<pre id="stats-profiling" class="stats" aria-label="Profiling statistics"></pre>
+<pre id="stats-storage" class="stats" aria-label="Memory and storage statistics"></pre>
 <pre id="errors" aria-live="polite"></pre>
 </div>
 <div id="loading" role="status">
@@ -305,7 +312,13 @@ settings.</p>
 // Debug info is for whoever works on the page, not for viewers. Phones
 // have no keyboard, so a four-finger tap stands in for I.
 (() => {
-  const toggle = () => document.body.classList.toggle("debug");
+  const panes = ["", "network", "profiling", "storage"];
+  let pane = 0;
+  const toggle = () => {
+    pane = (pane + 1) % panes.length;
+    document.body.dataset.debug = panes[pane];
+    document.body.classList.toggle("debug", pane !== 0);
+  };
   window.addEventListener("keydown", (event) => {
     if (event.code !== "KeyI" || event.repeat
         || event.ctrlKey || event.metaKey || event.altKey) return;

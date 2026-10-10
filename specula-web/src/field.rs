@@ -88,6 +88,8 @@ use crate::terrain::TILE_SIZE;
 use crate::terrain::TerrainImage;
 use crate::territory;
 use crate::territory::Borders;
+use crate::timing;
+use crate::timing::Timer;
 use crate::unit::DEPTH_FORMAT;
 use crate::unit::create_buffer;
 use crate::unit::cross;
@@ -528,6 +530,7 @@ pub struct Field {
     projectiles: bool,
     device_pixel_ratio: f32,
     stats: Stats,
+    timer: Timer,
 }
 
 /// Where an entity's animation was when its sound point was last looked
@@ -540,11 +543,13 @@ struct SoundClock {
     time: f32,
 }
 
-/// What the `#fps` box shows, as on the unit page, and the `#stats` box
-/// under it.
+/// What the `#fps` box shows, as on the unit page, and the debug panes
+/// under it, which the I key cycles through.
 struct Stats {
     element: HtmlElement,
-    detail: HtmlElement,
+    network: HtmlElement,
+    profiling: HtmlElement,
+    storage: HtmlElement,
     /// Frames drawn since `since`, in page milliseconds.
     frames: u32,
     since: f64,
@@ -1035,9 +1040,12 @@ impl Field {
         let document = web_sys::window()
             .and_then(|window| window.document())
             .ok_or("no document")?;
+        let timer = Timer::new(&device, &queue, backend == "WebGPU");
         let stats = Stats {
             element: crate::element(&document, "fps")?,
-            detail: crate::element(&document, "stats")?,
+            network: crate::element(&document, "stats-network")?,
+            profiling: crate::element(&document, "stats-profiling")?,
+            storage: crate::element(&document, "stats-storage")?,
             frames: 0,
             since: now(),
             models: 0,
@@ -1142,6 +1150,7 @@ impl Field {
             projectiles: true,
             device_pixel_ratio: 1.0,
             stats,
+            timer,
         })
     }
 
@@ -3409,6 +3418,7 @@ impl View for Field {
     }
 
     fn draw(&mut self, progress: f32) -> bool {
+        let start = now();
         let frame = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(frame)
             | wgpu::CurrentSurfaceTexture::Suboptimal(frame) => frame,
@@ -3637,8 +3647,11 @@ impl View for Field {
             &screen
         };
         let mut encoder = self.device.create_command_encoder(&Default::default());
+        self.timer.begin();
         if casters.is_some()
-            && let Some(mut pass) = self.shadow.begin(&mut encoder)
+            && let Some(mut pass) = self
+                .shadow
+                .begin(&mut encoder, self.timer.writes(timing::SHADOW, true, true))
         {
             // Every caster into every cascade: the viewport clips each to
             // its quarter.
@@ -3688,6 +3701,7 @@ impl View for Field {
                     }),
                     stencil_ops: None,
                 }),
+                timestamp_writes: self.timer.writes(timing::REFRACTION, true, true),
                 ..Default::default()
             });
             pass.set_bind_group(0, &self.refraction_view.1, &[]);
@@ -3717,6 +3731,7 @@ impl View for Field {
                     }),
                     stencil_ops: None,
                 }),
+                timestamp_writes: self.timer.writes(timing::WAVES, true, true),
                 ..Default::default()
             });
             pass.set_bind_group(0, &self.view_bind_group, &[]);
@@ -3765,6 +3780,7 @@ impl View for Field {
                     }),
                     stencil_ops: None,
                 }),
+                timestamp_writes: self.timer.writes(timing::REFLECTION, true, true),
                 ..Default::default()
             });
             pass.set_bind_group(0, &self.reflection_view.1, &[]);
@@ -3804,6 +3820,7 @@ impl View for Field {
                     }),
                     stencil_ops: None,
                 }),
+                timestamp_writes: self.timer.writes(timing::MAIN, true, true),
                 ..Default::default()
             });
             if self.sky_visible && self.ground.is_some() {
@@ -3901,10 +3918,14 @@ impl View for Field {
             );
         }
         if let Some(plan) = post {
-            self.post.draw(&mut encoder, plan, &screen);
+            self.post.draw(&mut encoder, plan, &screen, &self.timer);
         }
+        self.timer.resolve(&mut encoder);
+        let encoded = now();
         self.queue.submit([encoder.finish()]);
+        self.timer.submitted(&self.queue);
         self.queue.present(frame);
+        timing::draw(encoded - start, now() - encoded);
         self.show_stats(draws.len() + far_draws.len());
         true
     }
@@ -4009,34 +4030,125 @@ impl Field {
         let seconds = span / 1000.0;
         let uploads = f64::from(std::mem::take(&mut self.far.uploads)) / seconds;
         let bakes = f64::from(std::mem::take(&mut self.far.bakes)) / seconds;
-        stats
-            .element
-            .set_text_content(Some(&format!("{rate:.0} FPS, {}", stats.backend)));
-        stats.detail.set_text_content(Some(&format!(
-            "{} in view: meshes {high}/{medium}/{low}, impostors {impostors}, {} models, {draws} draws\n\
-             Impostor atlases: {held} held ({:.0}/{:.0} MB), {waiting} waiting for room; \
-             {} from storage, {} drawn; {uploads:.1} uploads/s, {bakes:.1} bakes/s\n\
-             Assets: {} files, {:.1} MB in memory; {:.1} MB downloaded, {:.1} MB from cache\n\
-             Stream: {:.2} MB (live {:.2}, history {:.2}, terrain {:.2}); \
-             live {average_kbps:.0} kbit/s average, {peak_kbps:.0} kbit/s peak ({} s)",
-            high + medium + low + impostors,
-            stats.models,
-            mb(held_bytes),
-            mb(self.far.budget()),
-            self.far.from_storage,
-            self.far.drawn,
-            assets.files,
-            mb(assets.bytes),
-            mb(assets.downloaded),
-            mb(assets.cached),
-            mb(stream.live + stream.segments + stream.terrain),
-            mb(stream.live),
-            mb(stream.segments),
-            mb(stream.terrain),
-            PEAK_WINDOW_S,
+        let times = timing::take();
+        let gpu_measured = self.timer.measures_gpu();
+        let done_measured = stats.backend == "WebGPU";
+        let ms = |span: timing::Span, measured: bool| {
+            if !measured {
+                "n/a".to_string()
+            } else {
+                span.average().map_or("-".into(), |ms| format!("{ms:.1}"))
+            }
+        };
+        stats.element.set_text_content(Some(&format!(
+            "FPS {rate:>8.0}\nCPU {:>5} ms\nGPU {:>5} ms\n{:>12}",
+            ms(times.frame, true),
+            ms(times.gpu, gpu_measured),
+            stats.backend,
         )));
+
+        let mut pane = Pane::new("Profiling, ms", "avg", "max");
+        pane.span("CPU frame", times.frame, true);
+        pane.span("  encode", times.encode, true);
+        pane.span("  submit", times.submit, true);
+        pane.row("  idle frames", times.idle, "");
+        pane.span("GPU frame", times.gpu, gpu_measured);
+        for (label, span) in ["  shadow", "  water", "  main", "  post"]
+            .into_iter()
+            .zip(times.groups)
+        {
+            pane.span(label, span, gpu_measured);
+        }
+        pane.span("Submit to done", times.done, done_measured);
+        pane.row("In view", high + medium + low + impostors, "");
+        pane.row("  mesh high", high, "");
+        pane.row("  mesh medium", medium, "");
+        pane.row("  mesh low", low, "");
+        pane.row("  impostors", impostors, "");
+        pane.row("Models", stats.models, "");
+        pane.row("Draws", draws, "");
+        pane.row("Impostor uploads", format!("{uploads:.1}"), "/s");
+        pane.row("Impostor bakes", format!("{bakes:.1}"), "/s");
+        stats.profiling.set_text_content(Some(&pane.0));
+
+        let mut pane = Pane::new("Network", "", "");
+        pane.row(
+            "Stream",
+            format!("{:.2}", mb(stream.live + stream.segments + stream.terrain)),
+            "MB",
+        );
+        pane.row("  live", format!("{:.2}", mb(stream.live)), "MB");
+        pane.row("  history", format!("{:.2}", mb(stream.segments)), "MB");
+        pane.row("  terrain", format!("{:.2}", mb(stream.terrain)), "MB");
+        pane.row("Live average", format!("{average_kbps:.0}"), "kbit/s");
+        pane.row(
+            &format!("Live peak, {PEAK_WINDOW_S} s"),
+            format!("{peak_kbps:.0}"),
+            "kbit/s",
+        );
+        pane.row(
+            "Assets downloaded",
+            format!("{:.1}", mb(assets.downloaded)),
+            "MB",
+        );
+        stats.network.set_text_content(Some(&pane.0));
+
+        let mut pane = Pane::new("Memory & storage", "", "");
+        pane.row("Asset files", assets.files, "");
+        pane.row("Assets in memory", format!("{:.1}", mb(assets.bytes)), "MB");
+        pane.row(
+            "Assets from cache",
+            format!("{:.1}", mb(assets.cached)),
+            "MB",
+        );
+        pane.row("Impostor atlases", held, "");
+        pane.row("  in memory", format!("{:.0}", mb(held_bytes)), "MB");
+        pane.row("  budget", format!("{:.0}", mb(self.far.budget())), "MB");
+        pane.row("  waiting for room", waiting, "");
+        pane.row("  from storage", self.far.from_storage, "");
+        pane.row("  drawn", self.far.drawn, "");
+        stats.storage.set_text_content(Some(&pane.0));
         stats.frames = 0;
         stats.since = now;
+    }
+}
+
+/// A debug pane's text in fixed columns, so the numbers stay put as they
+/// change in a monospace box.
+struct Pane(String);
+
+impl Pane {
+    const LABEL: usize = 20;
+    const VALUE: usize = 8;
+
+    fn new(title: &str, first: &str, second: &str) -> Self {
+        let mut text = format!("{title:<width$}", width = Self::LABEL);
+        if !first.is_empty() {
+            text += &format!("{first:>width$}{second:>width$}", width = Self::VALUE);
+        }
+        Pane(text)
+    }
+
+    fn row(&mut self, label: &str, value: impl std::fmt::Display, unit: &str) {
+        self.0 += &format!(
+            "\n{label:<label_width$}{value:>value_width$} {unit}",
+            label_width = Self::LABEL,
+            value_width = Self::VALUE,
+        );
+    }
+
+    /// Average and max, "n/a" where nothing measures it.
+    fn span(&mut self, label: &str, span: timing::Span, measured: bool) {
+        let (average, max) = match span.average() {
+            _ if !measured => ("n/a".to_string(), String::new()),
+            Some(average) => (format!("{average:.1}"), format!("{:.1}", span.max())),
+            None => ("-".into(), "-".into()),
+        };
+        self.0 += &format!(
+            "\n{label:<label_width$}{average:>value_width$}{max:>value_width$}",
+            label_width = Self::LABEL,
+            value_width = Self::VALUE,
+        );
     }
 }
 

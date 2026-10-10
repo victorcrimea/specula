@@ -375,7 +375,11 @@ impl Shadow {
     /// Starts the depth-only pass, cleared to "lit everywhere", which the
     /// texel between the cascades' quarters keeps; `None` when shadows are
     /// off.
-    pub fn begin<'e>(&self, encoder: &'e mut wgpu::CommandEncoder) -> Option<wgpu::RenderPass<'e>> {
+    pub fn begin<'e>(
+        &self,
+        encoder: &'e mut wgpu::CommandEncoder,
+        timestamp_writes: Option<wgpu::RenderPassTimestampWrites>,
+    ) -> Option<wgpu::RenderPass<'e>> {
         let target = self.target.as_ref()?;
         let pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("shadow"),
@@ -388,6 +392,7 @@ impl Shadow {
                 }),
                 stencil_ops: None,
             }),
+            timestamp_writes,
             ..Default::default()
         });
         Some(pass)
