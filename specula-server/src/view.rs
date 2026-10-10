@@ -7,14 +7,16 @@
 //!   turns per segment, varint map size in metres, u64 terrain id (0: none
 //!   yet, else fetch `/terrain/<id as 16 hex digits>`), icon table, player
 //!   table, territory, template table, string table, variant set table,
-//!   variable set table, varint count, then count x {varint id delta, entity}, then the
+//!   variable set table, varint n, n x economy (every player's, by index),
+//!   varint count, then count x {varint id delta, entity}, then the
 //!   projectiles in flight or lying on the ground: varint count, count x
 //!   {varint id delta, projectile, varint turns since the launch}.
 //! - kind 2 delta: varint turn, icons added to the table, u8 1 if a new
 //!   player table follows (it replaces the old one) else 0, u8 1 if a new
 //!   territory follows (likewise) else 0, templates,
-//!   strings, variant sets and variable sets added to their tables,
-//!   varint spawned,
+//!   strings, variant sets and variable sets added to their tables, u8 1
+//!   if economies follow else 0, then varint count, count x {varint player
+//!   index, economy} of the players whose economy changed, varint spawned,
 //!   destroyed and changed counts. Spawned entries are keyframe entries,
 //!   destroyed entries are id deltas, changed entries are {varint id delta,
 //!   varint mask, then for each bit set, in this order: 1 zigzag x, z
@@ -24,11 +26,13 @@
 //!   repeat, zigzag sync offset; 256 zigzag owner; 512 varint template,
 //!   varint actor, zigzag seed - id; 1024 varint variant set; 2048 u8
 //!   construction; 4096 varint visibility; 8192 nothing; 32768 varint
-//!   variable set}, then the sounds
+//!   variable set; 65536 u8 hitpoints; 131072 capture}, then the sounds
 //!   of the turn: varint count, count x sound, in the order the simulation
 //!   played them, then the projectiles launched in the turn: varint count,
 //!   count x {varint id delta, launch}, then the ids of the projectiles
-//!   that hit something and are gone: varint count, count x id delta. An
+//!   that hit something and are gone: varint count, count x id delta,
+//!   then the entities the turn renamed: varint count, count x {varint old
+//!   id delta, zigzag new id - old id}. An
 //!   animation (32) starts, and a sync (128) is set, at the delta's turn;
 //!   it is also sent when only its sound group changed.
 //! - kind 3 ended: u64 match id, varint ms since the match ended. No more
@@ -64,7 +68,8 @@
 //! varint sound group, varint animation speed, varint turns since the
 //! animation started, varint sync repeat, zigzag sync offset, varint turns
 //! since the sync was set, u8 construction, varint visibility, zigzag step
-//! x, zigzag step z, u8 motion flags}:
+//! x, zigzag step z, u8 motion flags, then u8 hitpoints if motion flag 2,
+//! then capture if motion flag 4}:
 //! - y is the absolute height, not the height above the ground;
 //! - angle is the heading in 1/256 turn, clockwise from +z;
 //! - colour is 0xFFRRGGBB, or 0 for an entity that is not on the minimap;
@@ -92,7 +97,26 @@
 //!   for p below 16;
 //! - step is how far it moves each turn until a delta changes it, in 1/16
 //!   m;
-//! - motion flags: 1 follows the ground.
+//! - motion flags: 1 follows the ground, 2 hitpoints follow, 4 capture
+//!   follows;
+//! - hitpoints are 0 without the Health component, else the hitpoints in
+//!   1/255 of the max, rounded up and at least 1. Without motion flag 2
+//!   they are 255 when the template's details have the Health component
+//!   bit, else 0;
+//! - capture is u8 n, n x u8 share of the max capture points by player
+//!   index, in 1/255, rounded; n is 0 without Capturable, and so it is
+//!   without motion flag 4.
+//!
+//! A rename is an entity replaced by another, as
+//! `GuiInterface.GetRenamedEntities` lists them (promotion, a finished
+//! foundation, an upgrade, packing); the new one spawns in the same delta.
+//!
+//! An economy is a player's top panel numbers: {zigzag population, zigzag
+//! population limit, zigzag population max, varint m, m x {varint resource
+//! code, varint amount rounded down, varint gatherers} sorted by code,
+//! varint phase, varint k, k x zigzag panel entity id minus the one before
+//! (from 0), in the order of `panelEntities`}. The code and phase are
+//! 1-based indices into the string table, 0 for none.
 //!
 //! A sound is {varint group, u8 target, then by target: 0 (an entity's)
 //! varint entity id, zigzag owner, zigzag x, zigzag z, zigzag y, varint
@@ -225,6 +249,8 @@ use std::time::UNIX_EPOCH;
 
 use rocket::tokio::sync::broadcast;
 
+use crate::feed::Details;
+use crate::feed::Economy;
 use crate::feed::Entity;
 use crate::feed::Icon;
 use crate::feed::Launch;
@@ -258,7 +284,13 @@ const CHANGED_VISIBILITY: u64 = 4096;
 const CHANGED_GROUNDED: u64 = 8192;
 const CHANGED_HEIGHT: u64 = 16384;
 const CHANGED_VARIABLES: u64 = 32768;
+const CHANGED_HITPOINTS: u64 = 65536;
+const CHANGED_CAPTURE: u64 = 131072;
 const MOTION_GROUNDED: u8 = 1;
+const MOTION_HITPOINTS: u8 = 2;
+const MOTION_CAPTURE: u8 = 4;
+/// The hook's template component bit for Health.
+const COMPONENT_HEALTH: u32 = 1;
 /// How far a reckoned animation speed may be off, in 1/256 of the
 /// simulation's: 5%, as `DATA_OPTIMIZATION.md` measured.
 const SPEED_TOLERANCE_256: u32 = 13;
@@ -325,6 +357,10 @@ struct Dot {
     construction: u8,
     sound_group: u32,
     visibility: u16,
+    /// 0 without Health, else the hitpoints in 1/255 of the max, rounded
+    /// up and at least 1, so that a scratch shows and a living entity
+    /// never reads as having none.
+    hitpoints: u8,
     /// What a viewer moves it by each turn; only in what viewers hold,
     /// zero in the simulation's state.
     step: [i32; 2],
@@ -333,7 +369,7 @@ struct Dot {
 }
 
 impl Dot {
-    fn new(entity: &Entity, icon: u32, player_color: bool, turn: u32) -> Self {
+    fn new(entity: &Entity, icon: u32, player_color: bool, turn: u32, hitpoints: u8) -> Self {
         // Gaia keeps its colour in every diplomacy mode, as in the game.
         let player = match u32::try_from(entity.owner) {
             Ok(owner) if player_color && owner > 0 && entity.color.is_some() => owner,
@@ -367,6 +403,7 @@ impl Dot {
             construction: quantize_construction(entity.construction),
             sound_group: one_based(visual.and_then(|visual| visual.sound_group)),
             visibility: entity.visibility,
+            hitpoints,
             step: [0, 0],
             grounded: false,
         }
@@ -425,6 +462,70 @@ impl Shot {
             projectile_actor: one_based(launch.actor),
             impact_actor: one_based(launch.impact_actor),
             impact_lifetime: (impact_secs * 1000.0).round() as u32,
+        }
+    }
+}
+
+fn quantize_hitpoints(health: Option<(f32, f32)>) -> u8 {
+    let Some((hitpoints, max)) = health else {
+        return 0;
+    };
+    let fraction = if max > 0.0 { hitpoints / max } else { 1.0 };
+    (fraction * 255.0).ceil().clamp(1.0, 255.0) as u8
+}
+
+/// Each player's share of the max capture points, in 1/255; empty without
+/// Capturable.
+fn quantize_capture(details: &Details, id: u32) -> Vec<u8> {
+    let Some(capture) = details
+        .entities
+        .get(&id)
+        .and_then(|groups| groups.capture.as_ref())
+        .filter(|capture| capture.max > 0.0)
+    else {
+        return Vec::new();
+    };
+    capture
+        .points
+        .iter()
+        .map(|points| (points / capture.max * 255.0).round().clamp(0.0, 255.0) as u8)
+        .collect()
+}
+
+/// A player's top panel numbers as viewers are sent them.
+#[derive(Clone, PartialEq, Eq)]
+struct Funds {
+    population: i32,
+    population_limit: i32,
+    population_max: i32,
+    /// (1-based code string, whole amount, gatherers), sorted by code.
+    resources: Vec<(u32, u32, u32)>,
+    /// 1-based string index, 0 for none.
+    phase: u32,
+    panel_entities: Vec<u32>,
+}
+
+impl Funds {
+    /// The top panel shows whole amounts, so the fraction is never sent.
+    fn new(economy: &Economy) -> Self {
+        let one_based = |index: Option<u32>| index.map_or(0, |index| index + 1);
+        Funds {
+            population: economy.population,
+            population_limit: economy.population_limit,
+            population_max: economy.population_max,
+            resources: economy
+                .resources
+                .iter()
+                .map(|resource| {
+                    (
+                        one_based(resource.code),
+                        resource.amount.floor().max(0.0) as u32,
+                        u32::from(resource.gatherers),
+                    )
+                })
+                .collect(),
+            phase: one_based(economy.phase),
+            panel_entities: economy.panel_entities.clone(),
         }
     }
 }
@@ -554,6 +655,12 @@ struct State {
     /// What viewers hold after the last turn, which the next delta builds
     /// on; near the simulation's state, not equal to it.
     dots: BTreeMap<u32, Dot>,
+    /// Capture shares by id, beside `dots` so that a dot stays `Copy`; an
+    /// entity without any has no entry.
+    captures: BTreeMap<u32, Vec<u8>>,
+    /// By player index: the latest, and what viewers hold.
+    economy: Vec<Funds>,
+    economy_shown: Vec<Funds>,
     icons: Table<Icon>,
     templates: Table<Template>,
     strings: Table<String>,
@@ -625,6 +732,9 @@ impl Hub {
                 terrain: None,
                 ground: None,
                 dots: BTreeMap::new(),
+                captures: BTreeMap::new(),
+                economy: Vec::new(),
+                economy_shown: Vec::new(),
                 icons: Table::new(),
                 templates: Table::new(),
                 strings: Table::new(),
@@ -665,6 +775,7 @@ impl Hub {
         state.player_color_templates.clear();
         state.players.clear();
         state.territory = None;
+        state.economy.clear();
         state.sounds.clear();
         state.launches.clear();
         state.removals.clear();
@@ -738,6 +849,10 @@ impl Hub {
             state.players = players;
             state.players_changed = true;
         }
+    }
+
+    pub fn set_economy(&self, economy: &[Economy]) {
+        self.state.lock().unwrap().economy = economy.iter().map(Funds::new).collect();
     }
 
     pub fn set_territory(&self, territory: Territory) {
@@ -851,7 +966,8 @@ impl Hub {
         state.game_speed = game_speed;
     }
 
-    pub fn publish(&self, turn: u32, entities: &[Entity]) -> io::Result<()> {
+    /// `details` is the feed's state as of this turn.
+    pub fn publish(&self, turn: u32, entities: &[Entity], details: &Details) -> io::Result<()> {
         let state = &mut *self.state.lock().unwrap();
         let dots: BTreeMap<u32, Dot> = entities
             .iter()
@@ -862,7 +978,12 @@ impl Hub {
                     .copied()
                     .unwrap_or(0);
                 let player_color = state.player_color_templates.contains(&entity.template);
-                let mut dot = Dot::new(entity, icon, player_color, turn);
+                let health = details
+                    .entities
+                    .get(&entity.id)
+                    .and_then(|groups| groups.health);
+                let mut dot =
+                    Dot::new(entity, icon, player_color, turn, quantize_hitpoints(health));
                 // The hook only sees the state after each turn, so an
                 // animation counts as started on the turn it first shows.
                 // The old match's ids are unrelated to the new one's.
@@ -878,6 +999,11 @@ impl Hub {
                 }
                 (entity.id, dot)
             })
+            .collect();
+        let captures: BTreeMap<u32, Vec<u8>> = entities
+            .iter()
+            .map(|entity| (entity.id, quantize_capture(details, entity.id)))
+            .filter(|(_, shares)| !shares.is_empty())
             .collect();
         // The old match's projectile ids are unrelated to the new one's.
         let mut shots = if state.new_feed {
@@ -921,6 +1047,7 @@ impl Hub {
                 .iter()
                 .map(|(id, dot)| (*id, arrive(ground, dot)))
                 .collect();
+            state.captures = captures;
             let keyframe = encode_keyframe(state, turn, &state.tables(true), &shown, &shots);
             state.open_keyframe = compress(&keyframe).into();
             (envelope_join(&state.open_keyframe, &[]).into(), shown)
@@ -945,7 +1072,16 @@ impl Hub {
                 &state.sounds,
                 &launches,
                 &removals,
+                &Status {
+                    templates: &state.templates.items,
+                    previous_captures: &state.captures,
+                    captures: &captures,
+                    economy: &state.economy,
+                    economy_shown: &state.economy_shown,
+                    renames: &details.renames,
+                },
             );
+            state.captures = captures;
             let next_start = state.first_turn + SEGMENT_TURNS * (state.segments.len() as u32 + 1);
             if turn >= next_start {
                 close_segment(state);
@@ -980,6 +1116,7 @@ impl Hub {
         state.variable_sets.sent = state.variable_sets.items.len();
         state.players_changed = false;
         state.territory_changed = false;
+        state.economy_shown = state.economy.clone();
         // A keyframe carries no sounds, so a new match's first turn drops
         // its own.
         state.sounds.clear();
@@ -1137,12 +1274,18 @@ fn encode_keyframe(
     write_strings(&mut out, tables.strings);
     write_variant_sets(&mut out, tables.variant_sets);
     write_variable_sets(&mut out, tables.variable_sets);
+    out.varint(state.economy.len() as u64);
+    for funds in &state.economy {
+        write_funds(&mut out, funds);
+    }
     out.varint(dots.len() as u64);
     let mut last_id = 0;
     for (id, dot) in dots {
         out.varint(u64::from(id - last_id));
         last_id = *id;
-        write_dot(&mut out, *id, turn, dot);
+        let hitpoints = default_hitpoints(&state.templates.items, dot.template);
+        let capture = capture_of(&state.captures, *id);
+        write_dot(&mut out, *id, turn, dot, hitpoints, capture);
     }
     out.varint(shots.len() as u64);
     let mut last_id = 0;
@@ -1167,6 +1310,7 @@ fn encode_delta(
     sounds: &[Sound],
     launches: &[(u32, Shot)],
     removals: &[u32],
+    status: &Status,
 ) -> (Vec<u8>, BTreeMap<u32, Dot>) {
     let mut shown = BTreeMap::new();
     let mut spawned = Vec::new();
@@ -1179,7 +1323,10 @@ fn encode_delta(
                 shown.insert(*id, dot);
             }
             Some(before) => {
-                let (change, dot) = reckon(ground, before, now);
+                let (mut change, dot) = reckon(ground, before, now);
+                if capture_of(status.previous_captures, *id) != capture_of(status.captures, *id) {
+                    change.mask |= CHANGED_CAPTURE;
+                }
                 if change.mask != 0 {
                     changed.push((*id, change, now));
                 }
@@ -1215,6 +1362,22 @@ fn encode_delta(
     write_strings(&mut out, new_tables.strings);
     write_variant_sets(&mut out, new_tables.variant_sets);
     write_variable_sets(&mut out, new_tables.variable_sets);
+    let funds: Vec<(usize, &Funds)> = status
+        .economy
+        .iter()
+        .enumerate()
+        .filter(|(player, funds)| status.economy_shown.get(*player) != Some(*funds))
+        .collect();
+    if funds.is_empty() {
+        out.u8(0);
+    } else {
+        out.u8(1);
+        out.varint(funds.len() as u64);
+        for (player, funds) in funds {
+            out.varint(player as u64);
+            write_funds(&mut out, funds);
+        }
+    }
     out.varint(spawned.len() as u64);
     out.varint(destroyed.len() as u64);
     out.varint(changed.len() as u64);
@@ -1222,7 +1385,9 @@ fn encode_delta(
     for (id, dot) in &spawned {
         out.varint(u64::from(id - last_id));
         last_id = *id;
-        write_dot(&mut out, *id, turn, dot);
+        let hitpoints = default_hitpoints(status.templates, dot.template);
+        let capture = capture_of(status.captures, *id);
+        write_dot(&mut out, *id, turn, dot, hitpoints, capture);
     }
     let mut last_id = 0;
     for id in destroyed.keys() {
@@ -1233,7 +1398,7 @@ fn encode_delta(
     for (id, change, now) in &changed {
         out.varint(u64::from(id - last_id));
         last_id = *id;
-        write_change(&mut out, *id, change, now);
+        write_change(&mut out, *id, change, now, capture_of(status.captures, *id));
     }
     out.varint(sounds.len() as u64);
     for sound in sounds {
@@ -1257,7 +1422,61 @@ fn encode_delta(
         out.varint(u64::from(id - last_id));
         last_id = *id;
     }
+    let mut renames = status.renames.to_vec();
+    renames.sort_unstable();
+    out.varint(renames.len() as u64);
+    let mut last_id = 0;
+    for (old, new) in renames {
+        out.varint(u64::from(old - last_id));
+        last_id = old;
+        out.zigzag(i64::from(new) - i64::from(old));
+    }
     (out.0, shown)
+}
+
+/// What a delta sends besides the visuals.
+struct Status<'a> {
+    /// The whole table, for the hitpoints an entity defaults to.
+    templates: &'a [Template],
+    previous_captures: &'a BTreeMap<u32, Vec<u8>>,
+    captures: &'a BTreeMap<u32, Vec<u8>>,
+    economy: &'a [Funds],
+    economy_shown: &'a [Funds],
+    /// (old id, new id).
+    renames: &'a [(u32, u32)],
+}
+
+/// What an entity sent without hitpoints has: full with Health, else none.
+/// Most entities are at it, so keyframes leave it out.
+fn default_hitpoints(templates: &[Template], template: u32) -> u8 {
+    let health = templates
+        .get(template as usize)
+        .and_then(|template| template.details.as_ref())
+        .is_some_and(|details| details.components & COMPONENT_HEALTH != 0);
+    if health { 255 } else { 0 }
+}
+
+fn capture_of(captures: &BTreeMap<u32, Vec<u8>>, id: u32) -> &[u8] {
+    captures.get(&id).map_or(&[], Vec::as_slice)
+}
+
+fn write_funds(out: &mut Writer, funds: &Funds) {
+    out.zigzag(i64::from(funds.population));
+    out.zigzag(i64::from(funds.population_limit));
+    out.zigzag(i64::from(funds.population_max));
+    out.varint(funds.resources.len() as u64);
+    for (code, amount, gatherers) in &funds.resources {
+        out.varint(u64::from(*code));
+        out.varint(u64::from(*amount));
+        out.varint(u64::from(*gatherers));
+    }
+    out.varint(u64::from(funds.phase));
+    out.varint(funds.panel_entities.len() as u64);
+    let mut last_id = 0;
+    for id in &funds.panel_entities {
+        out.zigzag(i64::from(*id) - i64::from(last_id));
+        last_id = *id;
+    }
 }
 
 /// What a delta sends for one entity besides the fields it copies from
@@ -1430,6 +1649,7 @@ fn exact_changes(before: &Dot, now: &Dot) -> u64 {
         ),
         (CHANGED_VISIBILITY, before.visibility != now.visibility),
         (CHANGED_VARIABLES, before.variables != now.variables),
+        (CHANGED_HITPOINTS, before.hitpoints != now.hitpoints),
     ];
     changes
         .iter()
@@ -1512,7 +1732,7 @@ fn write_sound(out: &mut Writer, sound: &Sound, entity: Option<&Dot>) {
     }
 }
 
-fn write_change(out: &mut Writer, id: u32, change: &Change, now: &Dot) {
+fn write_change(out: &mut Writer, id: u32, change: &Change, now: &Dot, capture: &[u8]) {
     let mask = change.mask;
     out.varint(mask);
     if mask & CHANGED_POSITION != 0 {
@@ -1566,6 +1786,17 @@ fn write_change(out: &mut Writer, id: u32, change: &Change, now: &Dot) {
     if mask & CHANGED_VARIABLES != 0 {
         out.varint(u64::from(now.variables));
     }
+    if mask & CHANGED_HITPOINTS != 0 {
+        out.u8(now.hitpoints);
+    }
+    if mask & CHANGED_CAPTURE != 0 {
+        write_capture(out, capture);
+    }
+}
+
+fn write_capture(out: &mut Writer, capture: &[u8]) {
+    out.u8(capture.len() as u8);
+    out.0.extend_from_slice(capture);
 }
 
 fn animation_flags(dot: &Dot) -> u8 {
@@ -1685,8 +1916,9 @@ fn write_variable_sets(out: &mut Writer, sets: &[VariableSet]) {
 }
 
 /// `turn` is the message's turn, which the animation and sync turns are
-/// counted back from.
-fn write_dot(out: &mut Writer, id: u32, turn: u32, dot: &Dot) {
+/// counted back from; `hitpoints` is what the entity's template defaults
+/// to.
+fn write_dot(out: &mut Writer, id: u32, turn: u32, dot: &Dot, hitpoints: u8, capture: &[u8]) {
     out.zigzag(i64::from(dot.x));
     out.zigzag(i64::from(dot.z));
     out.zigzag(i64::from(dot.y));
@@ -1712,5 +1944,18 @@ fn write_dot(out: &mut Writer, id: u32, turn: u32, dot: &Dot) {
     out.varint(u64::from(dot.visibility));
     out.zigzag(i64::from(dot.step[0]));
     out.zigzag(i64::from(dot.step[1]));
-    out.u8(if dot.grounded { MOTION_GROUNDED } else { 0 });
+    let mut motion = if dot.grounded { MOTION_GROUNDED } else { 0 };
+    if dot.hitpoints != hitpoints {
+        motion |= MOTION_HITPOINTS;
+    }
+    if !capture.is_empty() {
+        motion |= MOTION_CAPTURE;
+    }
+    out.u8(motion);
+    if motion & MOTION_HITPOINTS != 0 {
+        out.u8(dot.hitpoints);
+    }
+    if motion & MOTION_CAPTURE != 0 {
+        write_capture(out, capture);
+    }
 }

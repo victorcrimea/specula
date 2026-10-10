@@ -34,7 +34,13 @@ const CHANGED_VISIBILITY: u64 = 4096;
 const CHANGED_GROUNDED: u64 = 8192;
 const CHANGED_HEIGHT: u64 = 16384;
 const CHANGED_VARIABLES: u64 = 32768;
+const CHANGED_HITPOINTS: u64 = 65536;
+const CHANGED_CAPTURE: u64 = 131072;
 const MOTION_GROUNDED: u8 = 1;
+const MOTION_HITPOINTS: u8 = 2;
+const MOTION_CAPTURE: u8 = 4;
+/// `TemplateDetails::components` bit for Health.
+const COMPONENT_HEALTH: u32 = 1;
 const SOUND_ENTITY: u8 = 0;
 const SOUND_POSITION: u8 = 1;
 const SOUND_PLAYER: u8 = 2;
@@ -113,6 +119,9 @@ pub struct Dot {
     pub sound_group: u32,
     /// Bit p is set when player p sees the entity.
     pub visibility: u16,
+    /// 0 without Health, else the hitpoints in 1/255 of the max, rounded
+    /// up, at least 1.
+    pub hitpoints: u8,
     /// What it moves by each turn until a delta changes it, in 1/16 m.
     pub step: [i32; 2],
     /// Its height is the ground's.
@@ -213,6 +222,8 @@ struct Change {
     dy: i32,
     /// The entity with the fields the mask sends replaced.
     values: Dot,
+    /// The capture shares, with `CHANGED_CAPTURE`.
+    capture: Vec<u8>,
 }
 
 /// A sound group the simulation played during a turn.
@@ -325,6 +336,29 @@ pub struct TemplateDetails {
     pub components: u32,
 }
 
+/// A player's top panel numbers.
+#[derive(Clone, Default)]
+pub struct Economy {
+    pub population: i32,
+    pub population_limit: i32,
+    pub population_max: i32,
+    /// Sorted by code.
+    pub resources: Vec<Resource>,
+    /// 1-based index into `Scene::strings`, or 0 for none.
+    pub phase: u32,
+    /// Heroes and the like, as `panelEntities`, in their button order.
+    pub panel_entities: Vec<u32>,
+}
+
+#[derive(Clone, Copy)]
+pub struct Resource {
+    /// 1-based index into `Scene::strings`, or 0 for none.
+    pub code: u32,
+    /// Rounded down, as the top panel shows it.
+    pub amount: u32,
+    pub gatherers: u32,
+}
+
 #[derive(Default)]
 pub struct Scene {
     pub turn: u32,
@@ -357,6 +391,16 @@ pub struct Scene {
     pub variant_sets: Vec<VariantSet>,
     pub variable_sets: Vec<VariableSet>,
     pub dots: BTreeMap<u32, Dot>,
+    /// Each player's share of an entity's max capture points, in 1/255, by
+    /// id; an entity without Capturable has no entry.
+    pub captures: BTreeMap<u32, Vec<u8>>,
+    /// By player index; index 0 is gaia.
+    pub economy: Vec<Economy>,
+    /// Set whenever a message changes `economy`; the reader clears it.
+    pub economy_changed: bool,
+    /// (old id, new id) of the entities the last delta replaced by others,
+    /// for a selection to follow; a keyframe has none.
+    pub renames: Vec<(u32, u32)>,
     /// The sounds of the last delta applied; a keyframe has none.
     pub sounds: Vec<Sound>,
     /// By id: in flight, or lying on the ground.
@@ -419,6 +463,7 @@ impl Scene {
         let (&kind, body) = message.split_first().ok_or("empty message")?;
         let mut cursor = Cursor(body);
         self.sounds.clear();
+        self.renames.clear();
         match kind {
             MESSAGE_KEYFRAME => self.apply_keyframe(&mut cursor)?,
             MESSAGE_DELTA => self.apply_delta(&mut cursor, progress)?,
@@ -459,13 +504,22 @@ impl Scene {
         self.variant_sets.clear();
         self.variable_sets.clear();
         self.read_tables(cursor)?;
+        let count = cursor.varint_u32()?;
+        self.economy = (0..count)
+            .map(|_| cursor.economy())
+            .collect::<Result<_, _>>()?;
+        self.economy_changed = true;
         self.dots.clear();
+        self.captures.clear();
         let count = cursor.varint_u32()?;
         let mut id = 0;
         for _ in 0..count {
             id += cursor.varint_u32()?;
-            let dot = cursor.dot(id, self.turn)?;
+            let (dot, capture) = cursor.dot(id, self.turn, &self.template_details)?;
             self.dots.insert(id, dot);
+            if !capture.is_empty() {
+                self.captures.insert(id, capture);
+            }
         }
         self.shots.clear();
         let count = cursor.varint_u32()?;
@@ -503,6 +557,17 @@ impl Scene {
             self.read_territory(cursor)?;
         }
         self.read_tables(cursor)?;
+        if cursor.u8()? != 0 {
+            for _ in 0..cursor.varint_u32()? {
+                let player = cursor.varint()? as usize;
+                let economy = cursor.economy()?;
+                if player >= self.economy.len() {
+                    self.economy.resize(player + 1, Economy::default());
+                }
+                self.economy[player] = economy;
+            }
+            self.economy_changed = true;
+        }
         let spawned = cursor.varint_u32()?;
         let destroyed = cursor.varint_u32()?;
         let changed = cursor.varint_u32()?;
@@ -510,12 +575,13 @@ impl Scene {
         let mut arrived = Vec::new();
         for _ in 0..spawned {
             id += cursor.varint_u32()?;
-            arrived.push((id, cursor.dot(id, self.turn)?));
+            arrived.push((id, cursor.dot(id, self.turn, &self.template_details)?));
         }
         let mut id = 0;
         let mut gone = BTreeMap::new();
         for _ in 0..destroyed {
             id += cursor.varint_u32()?;
+            self.captures.remove(&id);
             if let Some(dot) = self.dots.remove(&id) {
                 gone.insert(id, dot);
             }
@@ -534,7 +600,22 @@ impl Scene {
                 advance(dot, change, ground, self.turn);
             }
         }
-        self.dots.extend(arrived);
+        for (id, change) in changes {
+            if change.mask & CHANGED_CAPTURE == 0 {
+                continue;
+            }
+            if change.capture.is_empty() {
+                self.captures.remove(&id);
+            } else {
+                self.captures.insert(id, change.capture);
+            }
+        }
+        for (id, (dot, capture)) in arrived {
+            self.dots.insert(id, dot);
+            if !capture.is_empty() {
+                self.captures.insert(id, capture);
+            }
+        }
         let known = |id: u32| self.dots.get(&id).or_else(|| gone.get(&id));
         let count = cursor.varint_u32()?;
         for _ in 0..count {
@@ -580,6 +661,14 @@ impl Scene {
         for _ in 0..count {
             id += cursor.varint_u32()?;
             self.shots.remove(&id);
+        }
+        let count = cursor.varint_u32()?;
+        let mut old = 0;
+        for _ in 0..count {
+            old += cursor.varint_u32()?;
+            let new = u32::try_from(i64::from(old) + cursor.zigzag_i64()?)
+                .map_err(|_| "renamed id out of range")?;
+            self.renames.push((old, new));
         }
         Ok(())
     }
@@ -806,6 +895,25 @@ impl Scene {
                 out.u32(value.to_bits());
             }
         }
+        out.varint(self.economy.len() as u64);
+        for economy in &self.economy {
+            out.zigzag(economy.population);
+            out.zigzag(economy.population_limit);
+            out.zigzag(economy.population_max);
+            out.varint(economy.resources.len() as u64);
+            for resource in &economy.resources {
+                out.varint(u64::from(resource.code));
+                out.varint(u64::from(resource.amount));
+                out.varint(u64::from(resource.gatherers));
+            }
+            out.varint(u64::from(economy.phase));
+            out.varint(economy.panel_entities.len() as u64);
+            let mut last_id = 0;
+            for id in &economy.panel_entities {
+                out.zigzag_i64(i64::from(*id) - i64::from(last_id));
+                last_id = *id;
+            }
+        }
         out.varint(self.dots.len() as u64);
         let mut last_id = 0;
         for (id, dot) in &self.dots {
@@ -836,7 +944,22 @@ impl Scene {
             out.varint(u64::from(dot.visibility));
             out.zigzag(dot.step[0]);
             out.zigzag(dot.step[1]);
-            out.u8(if dot.grounded { MOTION_GROUNDED } else { 0 });
+            let capture = self.captures.get(id).map_or(&[][..], Vec::as_slice);
+            let mut motion = if dot.grounded { MOTION_GROUNDED } else { 0 };
+            if dot.hitpoints != default_hitpoints(&self.template_details, dot.template) {
+                motion |= MOTION_HITPOINTS;
+            }
+            if !capture.is_empty() {
+                motion |= MOTION_CAPTURE;
+            }
+            out.u8(motion);
+            if motion & MOTION_HITPOINTS != 0 {
+                out.u8(dot.hitpoints);
+            }
+            if motion & MOTION_CAPTURE != 0 {
+                out.u8(capture.len() as u8);
+                out.0.extend_from_slice(capture);
+            }
         }
         out.varint(self.shots.len() as u64);
         let mut last_id = 0;
@@ -947,6 +1070,9 @@ fn advance(dot: &mut Dot, change: Option<&Change>, ground: Option<&Ground>, turn
         if mask & CHANGED_VARIABLES != 0 {
             dot.variables = values.variables;
         }
+        if mask & CHANGED_HITPOINTS != 0 {
+            dot.hitpoints = values.hitpoints;
+        }
     }
     if mask & CHANGED_ANIMATION != 0 {
         dot.speed_turn = turn;
@@ -961,6 +1087,16 @@ fn advance(dot: &mut Dot, change: Option<&Change>, ground: Option<&Ground>, turn
         // way.
         dot.from_angle = f32::from(dot.angle) - turn_towards(dot.from_angle, dot.angle);
     }
+}
+
+/// What an entity sent without hitpoints has: full with Health, else none.
+fn default_hitpoints(details: &[Option<TemplateDetails>], template: u32) -> u8 {
+    let health = details
+        .get(template as usize)
+        .copied()
+        .flatten()
+        .is_some_and(|details| details.components & COMPONENT_HEALTH != 0);
+    if health { 255 } else { 0 }
 }
 
 /// In 1/256 m/s, from 1/16 m per 0.2 s turn. `sqrt` is correctly rounded
@@ -1277,8 +1413,13 @@ impl<'a> Cursor<'a> {
 
     /// The animation and sync turns are counted back from `turn`, the
     /// message's. A new dot appears in place rather than sliding in from
-    /// anywhere.
-    fn dot(&mut self, id: u32, turn: u32) -> Result<Dot, &'static str> {
+    /// anywhere. Returned with its capture shares.
+    fn dot(
+        &mut self,
+        id: u32,
+        turn: u32,
+        details: &[Option<TemplateDetails>],
+    ) -> Result<(Dot, Vec<u8>), &'static str> {
         let back = |cursor: &mut Self| {
             turn.checked_sub(cursor.varint_u32()?)
                 .ok_or("turn before the match")
@@ -1314,15 +1455,66 @@ impl<'a> Cursor<'a> {
             construction: self.u8()?,
             visibility: self.varint_u32()? as u16,
             step: [self.zigzag()?, self.zigzag()?],
-            grounded: self.u8()? & MOTION_GROUNDED != 0,
+            grounded: false,
+            hitpoints: 0,
             from_x: x as f32,
             from_z: z as f32,
             speed_turn: 0,
             phase: 0.0,
         };
-        Ok(Dot {
+        let motion = self.u8()?;
+        let hitpoints = if motion & MOTION_HITPOINTS != 0 {
+            self.u8()?
+        } else {
+            default_hitpoints(details, dot.template)
+        };
+        let capture = if motion & MOTION_CAPTURE != 0 {
+            self.capture()?
+        } else {
+            Vec::new()
+        };
+        let dot = Dot {
             speed_turn: dot.animation_turn,
+            grounded: motion & MOTION_GROUNDED != 0,
+            hitpoints,
             ..dot
+        };
+        Ok((dot, capture))
+    }
+
+    fn capture(&mut self) -> Result<Vec<u8>, &'static str> {
+        let count = self.u8()?;
+        Ok(self.take(usize::from(count))?.to_vec())
+    }
+
+    fn economy(&mut self) -> Result<Economy, &'static str> {
+        let population = self.zigzag()?;
+        let population_limit = self.zigzag()?;
+        let population_max = self.zigzag()?;
+        let resources = (0..self.varint_u32()?)
+            .map(|_| {
+                Ok(Resource {
+                    code: self.varint_u32()?,
+                    amount: self.varint_u32()?,
+                    gatherers: self.varint_u32()?,
+                })
+            })
+            .collect::<Result<_, &'static str>>()?;
+        let phase = self.varint_u32()?;
+        let mut last_id = 0i64;
+        let panel_entities = (0..self.varint_u32()?)
+            .map(|_| {
+                last_id += self.zigzag_i64()?;
+                u32::try_from(last_id).map_err(|_| "panel entity out of range")
+            })
+            .collect::<Result<_, _>>()?;
+        Ok(Economy {
+            population,
+            population_limit,
+            population_max,
+            resources,
+            phase,
+            panel_entities,
         })
     }
 
@@ -1334,6 +1526,7 @@ impl<'a> Cursor<'a> {
             step: [0, 0],
             dy: 0,
             values: *dot,
+            capture: Vec::new(),
         };
         if mask & CHANGED_POSITION != 0 {
             change.step = [self.zigzag()?, self.zigzag()?];
@@ -1385,6 +1578,12 @@ impl<'a> Cursor<'a> {
         }
         if mask & CHANGED_VARIABLES != 0 {
             values.variables = self.varint_u32()?;
+        }
+        if mask & CHANGED_HITPOINTS != 0 {
+            values.hitpoints = self.u8()?;
+        }
+        if mask & CHANGED_CAPTURE != 0 {
+            change.capture = self.capture()?;
         }
         Ok(change)
     }

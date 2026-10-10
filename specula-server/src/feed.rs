@@ -265,7 +265,6 @@ impl EntityDetails {
     }
 }
 
-#[expect(dead_code, reason = "the wire carries them from C7 on")]
 pub struct Capture {
     /// By player index.
     pub points: Vec<f32>,
@@ -342,7 +341,6 @@ pub struct Trader {
 }
 
 /// A player's top panel numbers; index 0 is gaia.
-#[expect(dead_code, reason = "the wire carries them from C7 on")]
 pub struct Economy {
     pub population: i32,
     pub population_limit: i32,
@@ -355,7 +353,6 @@ pub struct Economy {
     pub panel_entities: Vec<u32>,
 }
 
-#[expect(dead_code, reason = "the wire carries them from C7 on")]
 pub struct Resource {
     /// String record index.
     pub code: Option<u32>,

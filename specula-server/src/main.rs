@@ -255,7 +255,10 @@ fn serve(stream: UnixStream, hub: &Hub) -> io::Result<()> {
             Record::Details { changed, gone } => details.apply(changed, gone),
             Record::StringList { index, strings } => details.add_string_list(index, strings),
             Record::Renames(renames) => details.set_renames(renames),
-            Record::Economy(economy) => details.set_economy(economy),
+            Record::Economy(economy) => {
+                hub.set_economy(&economy);
+                details.set_economy(economy);
+            }
             Record::Terrain(terrain) => {
                 let resource = terrain::encode(&terrain);
                 println!(
@@ -269,7 +272,7 @@ fn serve(stream: UnixStream, hub: &Hub) -> io::Result<()> {
                 hub.set_terrain(resource.id, resource.bytes, Ground::new(&terrain));
             }
             Record::Turn { turn, entities } => {
-                hub.publish(turn, &entities)?;
+                hub.publish(turn, &entities, &details)?;
                 details.end_turn();
                 if let Some(summary) = classifier.observe(turn, &entities) {
                     println!("{summary}, {} templates", templates.len());
