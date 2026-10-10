@@ -9,6 +9,8 @@ pub struct Gpu {
     pub config: wgpu::SurfaceConfiguration,
     /// The API's name, for the FPS counter.
     pub backend: &'static str,
+    /// The adapter as the browser names it, for the benchmark report.
+    pub adapter: String,
 }
 
 pub async fn init(canvas: HtmlCanvasElement) -> Result<Gpu, String> {
@@ -34,6 +36,12 @@ pub async fn init(canvas: HtmlCanvasElement) -> Result<Gpu, String> {
         _ => "other",
     };
     crate::log(&format!("graphics backend: {backend}"));
+    let info = adapter.get_info();
+    let adapter_name = [info.name, info.driver, info.driver_info]
+        .into_iter()
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
     // Lets the observer page upload the game's DXT textures as they are;
     // without it they are decoded in WASM.
     let bc = adapter.features() & wgpu::Features::TEXTURE_COMPRESSION_BC;
@@ -83,5 +91,6 @@ pub async fn init(canvas: HtmlCanvasElement) -> Result<Gpu, String> {
         queue,
         config,
         backend,
+        adapter: adapter_name,
     })
 }

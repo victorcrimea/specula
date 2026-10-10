@@ -12,6 +12,7 @@
 //! Decals (a field's soil, the dirt under a building) are drawn over the
 //! ground's own triangles, at every distance.
 
+use std::cell::Cell;
 use std::cell::RefCell;
 use std::collections::BTreeSet;
 use std::collections::HashMap;
@@ -56,6 +57,8 @@ use crate::assets;
 use crate::assets::Get;
 use crate::assets::Progress;
 use crate::assets::Store;
+use crate::bench::BenchInfo;
+use crate::bench::CameraPose;
 use crate::blend;
 use crate::blend::Splat;
 use crate::far;
@@ -72,6 +75,7 @@ use crate::particles::Particles;
 use crate::pose;
 use crate::postproc;
 use crate::postproc::Post;
+use crate::postproc::Upscale;
 use crate::projectile;
 use crate::projectile::Flight;
 use crate::shadow;
@@ -411,6 +415,10 @@ pub struct Field {
     antialiasing: bool,
     sharpening: bool,
     sharpness: f32,
+    /// `renderer.scale` and `renderer.upscale.technique`, which apply
+    /// only with post-processing on.
+    render_scale: f32,
+    upscale: Upscale,
     /// The viewer's fog setting.
     fog: bool,
     /// The viewer's water effects setting: the engine's fancy water,
@@ -531,6 +539,8 @@ pub struct Field {
     device_pixel_ratio: f32,
     stats: Stats,
     timer: Timer,
+    /// This frame's model and ground draw calls, over all passes.
+    draw_calls: Cell<u32>,
 }
 
 /// Where an entity's animation was when its sound point was last looked
@@ -559,6 +569,7 @@ struct Stats {
     levels: [u32; LEVELS],
     stream: StreamBytes,
     backend: &'static str,
+    adapter: String,
 }
 
 impl Field {
@@ -569,6 +580,7 @@ impl Field {
             queue,
             config,
             backend,
+            adapter,
         } = gpu::init(canvas.clone()).await?;
         let bc = device
             .features()
@@ -1052,6 +1064,7 @@ impl Field {
             levels: [0; LEVELS],
             stream: StreamBytes::default(),
             backend,
+            adapter,
         };
         Ok(Field {
             surface,
@@ -1072,6 +1085,8 @@ impl Field {
             antialiasing: false,
             sharpening: false,
             sharpness: postproc::DEFAULT_SHARPNESS,
+            render_scale: 1.0,
+            upscale: Upscale::Fsr,
             fog: false,
             water_effects: false,
             water_pipeline,
@@ -1151,6 +1166,7 @@ impl Field {
             device_pixel_ratio: 1.0,
             stats,
             timer,
+            draw_calls: Cell::new(0),
         })
     }
 
@@ -3015,7 +3031,7 @@ impl Field {
                 .then(|| water::Targets::new(&self.device, self.config.format, self.config.height));
             self.water_targets_generation += 1;
         }
-        let effects_size = (self.config.width, self.config.height);
+        let effects_size = self.scaled_size();
         if options.fancy
             != self
                 .water_effects_targets
@@ -3112,6 +3128,29 @@ impl Field {
         self.queue.write_buffer(&self.water.buffer, 0, &uniform);
     }
 
+    /// The resolution scale in effect: `RecalculateSize` keeps 1 without
+    /// post-processing.
+    fn scale(&self) -> f32 {
+        if self.postproc {
+            self.render_scale
+        } else {
+            1.0
+        }
+    }
+
+    /// The scene's size at the resolution scale.
+    fn scaled_size(&self) -> (u32, u32) {
+        let max = self.device.limits().max_texture_dimension_2d;
+        let scale = |pixels: u32| ((pixels as f32 * self.scale()).round() as u32).clamp(1, max);
+        (scale(self.config.width), scale(self.config.height))
+    }
+
+    fn resize_post(&mut self) {
+        let screen = (self.config.width, self.config.height);
+        let scaled = self.scaled_size();
+        self.post.resize(&self.device, screen, scaled, self.upscale);
+    }
+
     /// The water options this frame draws with: `None` while the flat
     /// plane stands in, with the water effects off or their frames on
     /// their way, or on a map without water.
@@ -3141,8 +3180,7 @@ impl View for Field {
         self.config.width = width.max(1);
         self.config.height = height.max(1);
         self.surface.configure(&self.device, &self.config);
-        self.post
-            .resize(&self.device, self.config.width, self.config.height);
+        self.resize_post();
         if self.water_targets.as_ref().is_some_and(|targets| {
             targets.side != water::Targets::side(&self.device, self.config.height)
         }) {
@@ -3197,6 +3235,7 @@ impl View for Field {
 
     fn set_postproc(&mut self, on: bool) {
         self.postproc = on;
+        self.resize_post();
     }
 
     fn set_bloom(&mut self, on: bool) {
@@ -3217,6 +3256,16 @@ impl View for Field {
 
     fn set_sharpness(&mut self, sharpness: f32) {
         self.sharpness = sharpness;
+    }
+
+    fn set_render_scale(&mut self, scale: f32) {
+        self.render_scale = scale;
+        self.resize_post();
+    }
+
+    fn set_upscale(&mut self, upscale: Upscale) {
+        self.upscale = upscale;
+        self.resize_post();
     }
 
     fn set_fog(&mut self, on: bool) {
@@ -3395,6 +3444,43 @@ impl View for Field {
         Some(Rc::clone(&self.store))
     }
 
+    fn camera(&self) -> Option<CameraPose> {
+        let camera = self.camera.borrow();
+        Some(CameraPose {
+            target: camera.target,
+            yaw: camera.yaw + camera.yaw_ahead,
+            pitch: camera.pitch + camera.pitch_ahead,
+            distance: camera.distance + camera.distance_ahead,
+            birds_eye: camera.birds_eye,
+        })
+    }
+
+    fn set_camera(&mut self, pose: CameraPose) {
+        let camera = &mut *self.camera.borrow_mut();
+        camera.target = pose.target;
+        camera.yaw = pose.yaw;
+        camera.pitch = pose.pitch;
+        camera.distance = pose.distance;
+        camera.birds_eye = pose.birds_eye;
+        camera.yaw_ahead = 0.0;
+        camera.pitch_ahead = 0.0;
+        camera.distance_ahead = 0.0;
+        camera.keys = 0;
+    }
+
+    fn bench_info(&self) -> BenchInfo {
+        BenchInfo {
+            adapter: self.stats.adapter.clone(),
+            backend: self.stats.backend,
+            gpu_timed: self.timer.measures_gpu(),
+            canvas: [self.config.width, self.config.height],
+            device_pixel_ratio: self.device_pixel_ratio,
+            entities: self.entities.dots.len() as u32,
+            in_view: self.stats.levels.iter().sum(),
+            models: self.stats.models,
+        }
+    }
+
     fn listener(&self) -> Option<Listener> {
         let (view_projection, eye, _, _) = self.view_projection();
         Some(Listener {
@@ -3446,6 +3532,7 @@ impl View for Field {
             self.dof,
             self.antialiasing,
             self.sharpening,
+            self.scale(),
         );
         if post.is_some() {
             self.post
@@ -3636,8 +3723,8 @@ impl View for Field {
             &self.device,
             &self.queue,
             self.ground.as_ref().map(|ground| &ground.image),
-            2.0 * (FIELD_OF_VIEW / 2.0).tan() / self.config.height as f32,
-            self.device_pixel_ratio,
+            2.0 * (FIELD_OF_VIEW / 2.0).tan() / self.scaled_size().1 as f32,
+            self.device_pixel_ratio * self.scaled_size().1 as f32 / self.config.height as f32,
             territory::blink_seconds(now()),
         );
         let screen = frame.texture.create_view(&Default::default());
@@ -3648,6 +3735,7 @@ impl View for Field {
         };
         let mut encoder = self.device.create_command_encoder(&Default::default());
         self.timer.begin();
+        self.draw_calls.set(0);
         if casters.is_some()
             && let Some(mut pass) = self
                 .shadow
@@ -3664,6 +3752,7 @@ impl View for Field {
                     for splat in &ground.base {
                         pass.draw_indexed(splat.first..splat.first + splat.count, 0, 0..1);
                     }
+                    self.count_draws(ground.base.len());
                 }
                 pass.set_pipeline(&self.shadow.model_pipeline);
                 pass.set_bind_group(1, &self.pose_bind_group, &[]);
@@ -3925,7 +4014,7 @@ impl View for Field {
         self.queue.submit([encoder.finish()]);
         self.timer.submitted(&self.queue);
         self.queue.present(frame);
-        timing::draw(encoded - start, now() - encoded);
+        timing::draw(encoded - start, now() - encoded, self.draw_calls.get());
         self.show_stats(draws.len() + far_draws.len());
         true
     }
@@ -3956,6 +4045,7 @@ impl Field {
             pass.set_bind_group(1, group(splat.texture), &[]);
             pass.draw_indexed(splat.first..splat.first + splat.count, 0, 0..1);
         }
+        self.count_draws(ground.base.len());
         if let Some(alpha_maps) = &ground.alpha_maps {
             pass.set_pipeline(&scene.blend[maps][triplanar]);
             pass.set_bind_group(2, alpha_maps, &[]);
@@ -3963,6 +4053,7 @@ impl Field {
                 pass.set_bind_group(1, group(splat.texture), &[]);
                 pass.draw_indexed(splat.first..splat.first + splat.count, 0, 0..1);
             }
+            self.count_draws(ground.blends.len());
         }
     }
 
@@ -4002,7 +4093,12 @@ impl Field {
             pass.set_vertex_buffer(1, instances.slice(*start..*end));
             pass.set_index_buffer(gpu.indices.slice(..), wgpu::IndexFormat::Uint16);
             pass.draw_indexed(first..first + index_count, 0, 0..*count);
+            self.count_draws(1);
         }
+    }
+
+    fn count_draws(&self, draws: usize) {
+        self.draw_calls.set(self.draw_calls.get() + draws as u32);
     }
 
     fn show_stats(&mut self, draws: usize) {
@@ -4066,7 +4162,15 @@ impl Field {
         pane.row("  mesh low", low, "");
         pane.row("  impostors", impostors, "");
         pane.row("Models", stats.models, "");
-        pane.row("Draws", draws, "");
+        pane.row("Draws, main pass", draws, "");
+        pane.row(
+            "Model+ground draws",
+            times
+                .draws
+                .average()
+                .map_or("-".into(), |draws| format!("{draws:.0}")),
+            "",
+        );
         pane.row("Impostor uploads", format!("{uploads:.1}"), "/s");
         pane.row("Impostor bakes", format!("{bakes:.1}"), "/s");
         stats.profiling.set_text_content(Some(&pane.0));

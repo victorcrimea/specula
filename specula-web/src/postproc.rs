@@ -17,6 +17,15 @@ pub const DEFAULT_SHARPNESS: f32 = 0.3;
 /// Each blur level's divisor of the scene size, `m_BlurScales`.
 const LEVEL_DIVISORS: [u32; 3] = [2, 4, 8];
 
+/// `renderer.upscale.technique`: how a scene drawn below the screen's
+/// size reaches it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Upscale {
+    Fsr,
+    Bilinear,
+    Pixelated,
+}
+
 /// The passes one frame runs.
 #[derive(Clone, Copy)]
 pub struct Plan {
@@ -32,7 +41,7 @@ pub struct Plan {
 impl Plan {
     /// `None` when the scene goes straight to the screen: post-processing
     /// off, or the map's effect is "default" with neither FXAA nor CAS
-    /// on, for which the engine skips it all.
+    /// on and the resolution scale 1, for which the engine skips it all.
     pub fn new(
         light: &Light,
         enabled: bool,
@@ -40,11 +49,14 @@ impl Plan {
         dof: bool,
         fxaa: bool,
         cas: bool,
+        scale: f32,
     ) -> Option<Self> {
         let effect = light.effect != PostEffect::Default;
-        if !enabled || !(effect || fxaa || cas) {
+        if !enabled || !(effect || fxaa || cas || scale != 1.0) {
             return None;
         }
+        // The engine leaves CAS out when upscaling; FSR's RCAS sharpens.
+        let cas = cas && scale >= 1.0;
         let bloom = bloom && effect;
         let dof = dof && light.effect == PostEffect::Dof;
         Some(Plan {
@@ -69,8 +81,12 @@ struct Targets {
     scene: wgpu::TextureView,
     /// The level textures: each level's result, then its scratch.
     levels: [[wgpu::TextureView; 2]; 3],
-    /// The scene, as the downscale passes read it.
+    /// The scene, as the downscale and resampling passes read it.
     downscale_group: wgpu::BindGroup,
+    /// Ping, as the resampling passes read it.
+    ping_source_group: wgpu::BindGroup,
+    /// The size of every full-size target, the scaled one.
+    size: (u32, u32),
     /// Each level's result and scratch, as the blur passes read them.
     level_groups: [[wgpu::BindGroup; 2]; 3],
     /// The effect inputs with the scene, and with the ping texture, which
@@ -94,7 +110,14 @@ pub struct Post {
     hdr: [wgpu::RenderPipeline; 2],
     fxaa: wgpu::RenderPipeline,
     cas: wgpu::RenderPipeline,
+    nearest: wgpu::RenderPipeline,
+    easu: wgpu::RenderPipeline,
+    rcas: wgpu::RenderPipeline,
     targets: Targets,
+    screen: (u32, u32),
+    upscale: Upscale,
+    /// EASU's output at the screen's size, for RCAS, when FSR upscales.
+    easu_target: Option<(wgpu::TextureView, wgpu::BindGroup)>,
 }
 
 impl Post {
@@ -208,6 +231,14 @@ impl Post {
         });
         let fxaa = pipeline("postproc fxaa", &effect_pipeline_layout, "fs_fxaa", &[]);
         let cas = pipeline("postproc cas", &effect_pipeline_layout, "fs_cas", &[]);
+        let nearest = pipeline(
+            "postproc nearest",
+            &source_pipeline_layout,
+            "fs_nearest",
+            &[],
+        );
+        let easu = pipeline("postproc easu", &source_pipeline_layout, "fs_easu", &[]);
+        let rcas = pipeline("postproc rcas", &source_pipeline_layout, "fs_rcas", &[]);
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("postproc"),
             mag_filter: wgpu::FilterMode::Linear,
@@ -243,21 +274,66 @@ impl Post {
             hdr,
             fxaa,
             cas,
+            nearest,
+            easu,
+            rcas,
             targets,
+            screen: (width, height),
+            upscale: Upscale::Fsr,
+            easu_target: None,
         }
     }
 
-    pub fn resize(&mut self, device: &wgpu::Device, width: u32, height: u32) {
-        self.targets = create_targets(
-            device,
-            self.format,
-            &self.sampler,
-            &self.uniform,
-            &self.source_layout,
-            &self.effect_layout,
-            width,
-            height,
-        );
+    /// `screen` is the canvas's size, `scaled` the scene's at the
+    /// resolution scale.
+    pub fn resize(
+        &mut self,
+        device: &wgpu::Device,
+        screen: (u32, u32),
+        scaled: (u32, u32),
+        upscale: Upscale,
+    ) {
+        if self.targets.size != scaled {
+            self.targets = create_targets(
+                device,
+                self.format,
+                &self.sampler,
+                &self.uniform,
+                &self.source_layout,
+                &self.effect_layout,
+                scaled.0,
+                scaled.1,
+            );
+        }
+        let fsr = upscale == Upscale::Fsr && self.upscaling_from(scaled, screen);
+        if self.screen != screen || !fsr {
+            self.easu_target = None;
+        }
+        if fsr && self.easu_target.is_none() {
+            let view = create_texture(device, "postproc easu", self.format, screen.0, screen.1);
+            let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("postproc easu"),
+                layout: &self.source_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::Sampler(&self.sampler),
+                    },
+                ],
+            });
+            self.easu_target = Some((view, group));
+        }
+        self.screen = screen;
+        self.upscale = upscale;
+    }
+
+    /// `ShouldUpscale`.
+    fn upscaling_from(&self, scaled: (u32, u32), screen: (u32, u32)) -> bool {
+        scaled.0 < screen.0 || scaled.1 < screen.1
     }
 
     /// The scene pass's depth, readable by the DOF pass.
@@ -322,6 +398,9 @@ impl Post {
             (plan.cas, &self.cas),
         ];
         let mut left = passes.iter().filter(|(on, _)| *on).count();
+        // Off the screen's size, or with no pass left to draw to it, the
+        // image is resampled into it, as BlitOutputFramebuffer does.
+        let resample = targets.size != self.screen || left == 0;
         for (_, pipeline) in passes.iter().filter(|(on, _)| *on) {
             left -= 1;
             let (group, next) = if in_scene {
@@ -329,9 +408,26 @@ impl Post {
             } else {
                 (&targets.ping_group, &targets.scene)
             };
-            let output = if left == 0 { target } else { next };
+            let output = if left == 0 && !resample { target } else { next };
             runs.push((output, *pipeline, 0, group));
             in_scene = !in_scene;
+        }
+        if resample {
+            let group = if in_scene {
+                &targets.downscale_group
+            } else {
+                &targets.ping_source_group
+            };
+            let upscaling = self.upscaling_from(targets.size, self.screen);
+            match (upscaling, self.upscale, &self.easu_target) {
+                (true, Upscale::Fsr, Some((easu, easu_group))) => {
+                    runs.push((easu, &self.easu, 1, group));
+                    runs.push((target, &self.rcas, 1, easu_group));
+                }
+                (true, Upscale::Pixelated, _) => runs.push((target, &self.nearest, 1, group)),
+                // Bilinear, and compute_downscale's one tap per pixel.
+                _ => runs.push((target, &self.downscale, 1, group)),
+            }
         }
         let last = runs.len().saturating_sub(1);
         for (run, (output, pipeline, index, group)) in runs.into_iter().enumerate() {
@@ -463,11 +559,14 @@ fn create_targets(
     let level_groups = [0, 1, 2].map(|level| [0, 1].map(|step| source_group(&levels[level][step])));
     let scene_group = effect_group(&scene);
     let ping_group = effect_group(&ping);
+    let ping_source_group = source_group(&ping);
     Targets {
         depth,
         scene,
         levels,
         downscale_group,
+        ping_source_group,
+        size: (width, height),
         level_groups,
         scene_group,
         ping_group,

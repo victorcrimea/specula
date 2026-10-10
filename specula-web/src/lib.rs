@@ -1,5 +1,6 @@
 mod assets;
 mod audio;
+mod bench;
 mod blend;
 mod diplomacy;
 mod far;
@@ -56,10 +57,14 @@ use crate::assets::Store;
 use crate::audio::Audio;
 use crate::audio::DEFAULT_VOLUME;
 use crate::audio::Settings;
+use crate::bench::Bench;
+use crate::bench::BenchInfo;
+use crate::bench::CameraPose;
 use crate::diplomacy::Perspective;
 use crate::field::Field;
 use crate::icons::IconAtlas;
 use crate::minimap::Minimap;
+use crate::postproc::Upscale;
 use crate::render::Renderer;
 use crate::stream::Ground;
 use crate::stream::PlayerState;
@@ -119,6 +124,10 @@ const DOF_SETTINGS_KEY: &str = "specula.dof";
 const ANTIALIASING_SETTINGS_KEY: &str = "specula.antialiasing";
 const SHARPENING_SETTINGS_KEY: &str = "specula.sharpening";
 const SHARPNESS_SETTINGS_KEY: &str = "specula.sharpness";
+/// localStorage keys of the resolution scale, a factor of the canvas's
+/// size, and of the upscale technique, "fsr", "bilinear" or "pixelated".
+const RENDER_SCALE_SETTINGS_KEY: &str = "specula.renderscale";
+const UPSCALE_SETTINGS_KEY: &str = "specula.upscale";
 const FOG_SETTINGS_KEY: &str = "specula.fog";
 const WATER_SETTINGS_KEY: &str = "specula.water";
 const SKY_SETTINGS_KEY: &str = "specula.sky";
@@ -199,6 +208,10 @@ trait View {
     fn set_sharpening(&mut self, _on: bool) {}
     /// CAS's strength, from 0 to 1, likewise.
     fn set_sharpness(&mut self, _sharpness: f32) {}
+    /// The factor of the canvas's size the scene is drawn at, likewise.
+    fn set_render_scale(&mut self, _scale: f32) {}
+    /// How a scene drawn below the canvas's size is brought up to it.
+    fn set_upscale(&mut self, _upscale: Upscale) {}
     /// Whether the map's fog is drawn, likewise.
     fn set_fog(&mut self, _on: bool) {}
     /// Whether the water is drawn as the engine's fancy water, likewise.
@@ -241,6 +254,15 @@ trait View {
     /// The animation sounds due since the last call.
     fn take_animation_sounds(&mut self, _progress: f32) -> Vec<AnimationSound> {
         Vec::new()
+    }
+    /// Where the camera is, for the benchmark to hold it there.
+    fn camera(&self) -> Option<CameraPose> {
+        None
+    }
+    fn set_camera(&mut self, _pose: CameraPose) {}
+    /// What the benchmark report describes the view with.
+    fn bench_info(&self) -> BenchInfo {
+        BenchInfo::default()
     }
 }
 
@@ -882,6 +904,7 @@ async fn run(page: Page, glue_url: String, wasm_url: String) -> Result<(), Strin
         let dof: HtmlSelectElement = element(&document, "dof")?;
         let antialiasing: HtmlSelectElement = element(&document, "antialiasing")?;
         let sharpening: HtmlSelectElement = element(&document, "sharpening")?;
+        let render_scale: HtmlSelectElement = element(&document, "renderscale")?;
         wire_switch(
             &app,
             postproc.clone(),
@@ -892,7 +915,14 @@ async fn run(page: Page, glue_url: String, wasm_url: String) -> Result<(), Strin
                 dof.clone(),
                 antialiasing.clone(),
                 sharpening.clone(),
+                render_scale.clone(),
             ],
+        );
+        wire_render_scale(
+            &app,
+            render_scale,
+            element(&document, "upscale")?,
+            postproc.clone(),
         );
         wire_switch(
             &app,
@@ -998,9 +1028,17 @@ async fn run(page: Page, glue_url: String, wasm_url: String) -> Result<(), Strin
         wire_storage_notice(&app, &document)?;
     }
     wire_playback(&app);
+    let bench = match page {
+        Page::Map => None,
+        Page::Observer => {
+            let bench = Rc::new(RefCell::new(Bench::new(&document)?));
+            bench::wire(&bench, &app);
+            Some(bench)
+        }
+    };
     connect(&app);
     wasm_bindgen_futures::spawn_local(load_icons(Rc::clone(&app)));
-    animate(app);
+    animate(app, bench);
     Ok(())
 }
 
@@ -1294,6 +1332,87 @@ fn wire_shadows(app: &Rc<RefCell<App>>, select: HtmlSelectElement) {
         }
         let app = &mut *target.borrow_mut();
         app.renderer.set_shadows(size);
+        app.dirty = true;
+    });
+    select.set_onchange(Some(on_change.as_ref().unchecked_ref()));
+    // The controls live as long as the page, so their handlers do too.
+    on_change.forget();
+}
+
+/// The resolution scale and upscale technique lists, kept across visits;
+/// the technique is disabled unless post-processing is on and the scale
+/// below 1, as in the game's options.
+fn wire_render_scale(
+    app: &Rc<RefCell<App>>,
+    scale: HtmlSelectElement,
+    upscale: HtmlSelectElement,
+    postproc: HtmlSelectElement,
+) {
+    wire_list(
+        app,
+        &scale,
+        RENDER_SCALE_SETTINGS_KEY,
+        "1",
+        |view, value| {
+            view.set_render_scale(value.parse().unwrap_or(1.0));
+        },
+    );
+    wire_list(app, &upscale, UPSCALE_SETTINGS_KEY, "fsr", |view, value| {
+        view.set_upscale(match value {
+            "bilinear" => Upscale::Bilinear,
+            "pixelated" => Upscale::Pixelated,
+            _ => Upscale::Fsr,
+        });
+    });
+    let update = {
+        let scale = scale.clone();
+        let postproc = postproc.clone();
+        move || {
+            let below = scale.value().parse::<f32>().is_ok_and(|scale| scale < 1.0);
+            upscale.set_disabled(postproc.value() != "1" || !below);
+        }
+    };
+    update();
+    let on_change = Closure::<dyn FnMut()>::new(update);
+    for parent in [&postproc, &scale] {
+        let _ =
+            parent.add_event_listener_with_callback("change", on_change.as_ref().unchecked_ref());
+    }
+    // The controls live as long as the page, so their handlers do too.
+    on_change.forget();
+}
+
+/// A list kept across visits under `key`, `default` until chosen or when
+/// the saved value is no longer offered.
+fn wire_list(
+    app: &Rc<RefCell<App>>,
+    select: &HtmlSelectElement,
+    key: &'static str,
+    default: &str,
+    apply: fn(&mut dyn View, &str),
+) {
+    let saved = web_sys::window()
+        .and_then(|window| window.local_storage().ok().flatten())
+        .and_then(|storage| storage.get_item(key).ok().flatten());
+    select.set_value(saved.as_deref().unwrap_or(default));
+    // An unknown value leaves the list with none selected.
+    if select.value().is_empty() {
+        select.set_value(default);
+    }
+    apply(&mut *app.borrow_mut().renderer, &select.value());
+
+    let target = Rc::clone(app);
+    let list = select.clone();
+    let on_change = Closure::<dyn FnMut()>::new(move || {
+        let value = list.value();
+        // Best effort: without storage the choice lasts only this visit.
+        if let Some(storage) =
+            web_sys::window().and_then(|window| window.local_storage().ok().flatten())
+        {
+            let _ = storage.set_item(key, &value);
+        }
+        let app = &mut *target.borrow_mut();
+        apply(&mut *app.renderer, &value);
         app.dirty = true;
     });
     select.set_onchange(Some(on_change.as_ref().unchecked_ref()));
@@ -1950,13 +2069,16 @@ async fn fetch_bytes(url: &str) -> Result<Vec<u8>, String> {
     Ok(js_sys::Uint8Array::new(&buffer).to_vec())
 }
 
-fn animate(app: Rc<RefCell<App>>) {
+fn animate(app: Rc<RefCell<App>>, bench: Option<Rc<RefCell<Bench>>>) {
     let callback: Rc<RefCell<Option<FrameCallback>>> = Rc::new(RefCell::new(None));
     let next = Rc::clone(&callback);
     // The closure holds an Rc to itself, which keeps the loop alive for the
     // lifetime of the page.
     *callback.borrow_mut() = Some(Closure::new(move |now: f64| {
         app.borrow_mut().frame(now);
+        if let Some(bench) = &bench {
+            bench.borrow_mut().step(&app, now);
+        }
         request_frame(next.borrow().as_ref().unwrap());
     }));
     request_frame(callback.borrow().as_ref().unwrap());

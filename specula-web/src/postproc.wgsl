@@ -397,3 +397,197 @@ fn fs_cas(in: Varyings) -> @location(0) vec4<f32> {
     let color = clamp(((b + d + f + h) * w + e) * rcp_weight, vec3<f32>(0.0), vec3<f32>(1.0));
     return vec4<f32>(color, 1.0);
 }
+
+// The resolution scale's resampling into the screen, as
+// CPostprocManager::BlitOutputFramebuffer does it. Bilinear and the
+// downscale are fs_downscale's single tap; these read `source` too.
+
+// upscale_nearest.fs, the "pixelated" technique.
+@fragment
+fn fs_nearest(in: Varyings) -> @location(0) vec4<f32> {
+    let size = vec2<f32>(textureDimensions(source));
+    let texel = min(vec2<i32>(in.uv * size), vec2<i32>(size) - 1);
+    return vec4<f32>(textureLoad(source, texel, 0).rgb, 1.0);
+}
+
+// FSR 1.0, compute_upscale_fsr.cs and compute_rcas.cs as fragment passes,
+// from ffx_fsr1.h's 32-bit versions; under the AMD license above.
+
+// Clamped as the engine's gathers are by their sampler, and loaded one by
+// one: WebGL2 has no textureGather.
+fn fsr_load(at: vec2<i32>) -> vec3<f32> {
+    let last = vec2<i32>(textureDimensions(source)) - 1;
+    return textureLoad(source, clamp(at, vec2<i32>(0), last), 0).rgb;
+}
+
+// Luma times 2.
+fn fsr_luma(c: vec3<f32>) -> f32 {
+    return c.b * 0.5 + (c.r * 0.5 + c.g);
+}
+
+// ffx_a.h's APrxLoRcpF1, APrxMedRcpF1 and APrxLoRsqF1, whose error the
+// filters were tuned with.
+fn prx_lo_rcp(a: f32) -> f32 {
+    return bitcast<f32>(0x7ef07ebbu - bitcast<u32>(a));
+}
+
+fn prx_med_rcp(a: f32) -> f32 {
+    let b = bitcast<f32>(0x7ef19fffu - bitcast<u32>(a));
+    return b * (-b * a + 2.0);
+}
+
+fn prx_lo_rsq(a: f32) -> f32 {
+    return bitcast<f32>(0x5f347d74u - (bitcast<u32>(a) >> 1u));
+}
+
+// FsrEasuSetF: the direction and length one bilinear corner adds, with
+// its weight `w`, from the '+' around c:
+//    a
+//  b c d
+//    e
+fn easu_set(w: f32, l_a: f32, l_b: f32, l_c: f32, l_d: f32, l_e: f32) -> vec3<f32> {
+    let dir_x = l_d - l_b;
+    var len_x = prx_lo_rcp(max(abs(l_d - l_c), abs(l_c - l_b)));
+    len_x = saturate(abs(dir_x) * len_x);
+    let dir_y = l_e - l_a;
+    var len_y = prx_lo_rcp(max(abs(l_e - l_c), abs(l_c - l_a)));
+    len_y = saturate(abs(dir_y) * len_y);
+    return vec3<f32>(dir_x * w, dir_y * w, (len_x * len_x + len_y * len_y) * w);
+}
+
+// FsrEasuTapF: the colour times its weight, and the weight.
+fn easu_tap(
+    off: vec2<f32>,
+    dir: vec2<f32>,
+    len: vec2<f32>,
+    lob: f32,
+    clp: f32,
+    c: vec3<f32>,
+) -> vec4<f32> {
+    let v = vec2<f32>(off.x * dir.x + off.y * dir.y, off.x * -dir.y + off.y * dir.x) * len;
+    let d2 = min(dot(v, v), clp);
+    // Lanczos 2 approximated without sin, rcp or sqrt.
+    var w_b = 2.0 / 5.0 * d2 - 1.0;
+    var w_a = lob * d2 - 1.0;
+    w_b *= w_b;
+    w_a *= w_a;
+    w_b = 25.0 / 16.0 * w_b - (25.0 / 16.0 - 1.0);
+    let w = w_b * w_a;
+    return vec4<f32>(c * w, w);
+}
+
+// FsrEasuF, with the input filling its texture.
+@fragment
+fn fs_easu(in: Varyings) -> @location(0) vec4<f32> {
+    // FsrEasuCon's con0 applied to the pixel: its centre in input pixels.
+    var pp = in.uv * vec2<f32>(textureDimensions(source)) - 0.5;
+    let fp = floor(pp);
+    pp -= fp;
+    let at = vec2<i32>(fp);
+    // The 12-tap kernel around f:
+    //    b c
+    //  e f g h
+    //  i j k l
+    //    n o
+    let b = fsr_load(at + vec2<i32>(0, -1));
+    let c = fsr_load(at + vec2<i32>(1, -1));
+    let e = fsr_load(at + vec2<i32>(-1, 0));
+    let f = fsr_load(at);
+    let g = fsr_load(at + vec2<i32>(1, 0));
+    let h = fsr_load(at + vec2<i32>(2, 0));
+    let i = fsr_load(at + vec2<i32>(-1, 1));
+    let j = fsr_load(at + vec2<i32>(0, 1));
+    let k = fsr_load(at + vec2<i32>(1, 1));
+    let l = fsr_load(at + vec2<i32>(2, 1));
+    let n = fsr_load(at + vec2<i32>(0, 2));
+    let o = fsr_load(at + vec2<i32>(1, 2));
+    let b_l = fsr_luma(b);
+    let c_l = fsr_luma(c);
+    let e_l = fsr_luma(e);
+    let f_l = fsr_luma(f);
+    let g_l = fsr_luma(g);
+    let h_l = fsr_luma(h);
+    let i_l = fsr_luma(i);
+    let j_l = fsr_luma(j);
+    let k_l = fsr_luma(k);
+    let l_l = fsr_luma(l);
+    let n_l = fsr_luma(n);
+    let o_l = fsr_luma(o);
+    let corners = easu_set((1.0 - pp.x) * (1.0 - pp.y), b_l, e_l, f_l, g_l, j_l)
+        + easu_set(pp.x * (1.0 - pp.y), c_l, f_l, g_l, h_l, k_l)
+        + easu_set((1.0 - pp.x) * pp.y, f_l, i_l, j_l, k_l, n_l)
+        + easu_set(pp.x * pp.y, g_l, j_l, k_l, l_l, o_l);
+    var dir = corners.xy;
+    var len = corners.z;
+    // Normalize with approximation, and clean up close to zero.
+    let dir2 = dir * dir;
+    let zero = dir2.x + dir2.y < 1.0 / 32768.0;
+    let dir_r = select(prx_lo_rsq(dir2.x + dir2.y), 1.0, zero);
+    dir.x = select(dir.x, 1.0, zero);
+    dir *= dir_r;
+    // From {0 to 2} to {0 to 1}, shaped with a square.
+    len *= 0.5;
+    len *= len;
+    // Stretch the kernel from 1.0 vertically or horizontally to sqrt(2.0)
+    // on the diagonal.
+    let stretch = dot(dir, dir) * prx_lo_rcp(max(abs(dir.x), abs(dir.y)));
+    let len2 = vec2<f32>(1.0 + (stretch - 1.0) * len, 1.0 - 0.5 * len);
+    let lob = 0.5 + ((1.0 / 4.0 - 0.04) - 0.5) * len;
+    let clp = prx_lo_rcp(lob);
+    // Deringing by the 4 nearest.
+    let min4 = min(min(f, g), min(j, k));
+    let max4 = max(max(f, g), max(j, k));
+    let sum = easu_tap(vec2<f32>(0.0, -1.0) - pp, dir, len2, lob, clp, b)
+        + easu_tap(vec2<f32>(1.0, -1.0) - pp, dir, len2, lob, clp, c)
+        + easu_tap(vec2<f32>(-1.0, 1.0) - pp, dir, len2, lob, clp, i)
+        + easu_tap(vec2<f32>(0.0, 1.0) - pp, dir, len2, lob, clp, j)
+        + easu_tap(vec2<f32>(0.0, 0.0) - pp, dir, len2, lob, clp, f)
+        + easu_tap(vec2<f32>(-1.0, 0.0) - pp, dir, len2, lob, clp, e)
+        + easu_tap(vec2<f32>(1.0, 1.0) - pp, dir, len2, lob, clp, k)
+        + easu_tap(vec2<f32>(2.0, 1.0) - pp, dir, len2, lob, clp, l)
+        + easu_tap(vec2<f32>(2.0, 0.0) - pp, dir, len2, lob, clp, h)
+        + easu_tap(vec2<f32>(1.0, 0.0) - pp, dir, len2, lob, clp, g)
+        + easu_tap(vec2<f32>(1.0, 2.0) - pp, dir, len2, lob, clp, o)
+        + easu_tap(vec2<f32>(0.0, 2.0) - pp, dir, len2, lob, clp, n);
+    return vec4<f32>(min(max4, max(min4, sum.rgb / sum.w)), 1.0);
+}
+
+// ApplySharpnessAfterScale's fixed sharpness, in stops below the maximum.
+const RCAS_SHARPNESS: f32 = 0.2;
+const RCAS_LIMIT: f32 = 0.25 - 1.0 / 16.0;
+
+// FsrRcasF with FSR_RCAS_DENOISE, on EASU's output at the screen size.
+@fragment
+fn fs_rcas(in: Varyings) -> @location(0) vec4<f32> {
+    let at = vec2<i32>(in.position.xy);
+    //    b
+    //  d e f
+    //    h
+    let b = fsr_load(at + vec2<i32>(0, -1));
+    let d = fsr_load(at + vec2<i32>(-1, 0));
+    let e = fsr_load(at);
+    let f = fsr_load(at + vec2<i32>(1, 0));
+    let h = fsr_load(at + vec2<i32>(0, 1));
+    let b_l = fsr_luma(b);
+    let d_l = fsr_luma(d);
+    let e_l = fsr_luma(e);
+    let f_l = fsr_luma(f);
+    let h_l = fsr_luma(h);
+    // Noise detection.
+    var nz = 0.25 * b_l + 0.25 * d_l + 0.25 * f_l + 0.25 * h_l - e_l;
+    let range = max(max(max(b_l, d_l), e_l), max(f_l, h_l))
+        - min(min(min(b_l, d_l), e_l), min(f_l, h_l));
+    nz = saturate(abs(nz) * prx_med_rcp(range));
+    nz = -0.5 * nz + 1.0;
+    // Min and max of the ring, and the lobe that keeps the result within.
+    let mn4 = min(min(b, d), min(f, h));
+    let mx4 = max(max(b, d), max(f, h));
+    let hit_min = min(mn4, e) / (4.0 * mx4);
+    let hit_max = (1.0 - max(mx4, e)) / (4.0 * mn4 - 4.0);
+    let lobes = max(-hit_min, hit_max);
+    var lobe = max(-RCAS_LIMIT, min(max(max(lobes.r, lobes.g), lobes.b), 0.0))
+        * exp2(-RCAS_SHARPNESS);
+    lobe *= nz;
+    let rcp_l = prx_med_rcp(4.0 * lobe + 1.0);
+    return vec4<f32>((lobe * (b + d + h + f) + e) * rcp_l, 1.0);
+}

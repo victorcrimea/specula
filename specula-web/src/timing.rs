@@ -63,16 +63,50 @@ pub struct Times {
     pub groups: [Span; 4],
     /// From the submit until the GPU reports the work done.
     pub done: Span,
+    /// Model and ground draw calls over all passes.
+    pub draws: Span,
+}
+
+/// Every value a benchmark run records, one per frame, for its
+/// percentiles; the `Times` fields of the same names.
+#[derive(Default)]
+pub struct Samples {
+    pub frame: Vec<f64>,
+    pub encode: Vec<f64>,
+    pub submit: Vec<f64>,
+    pub gpu: Vec<f64>,
+    pub groups: [Vec<f64>; 4],
+    pub done: Vec<f64>,
+    pub draws: Vec<f64>,
 }
 
 thread_local! {
     // on_submitted_work_done wants a Send callback, which an Rc is not;
     // the page has one thread, so the callbacks share this instead.
     static TIMES: RefCell<Times> = RefCell::new(Times::default());
+    static SAMPLES: RefCell<Option<Samples>> = const { RefCell::new(None) };
 }
 
 fn record(update: impl FnOnce(&mut Times)) {
     TIMES.with(|times| update(&mut times.borrow_mut()));
+}
+
+fn sample(update: impl FnOnce(&mut Samples)) {
+    SAMPLES.with(|samples| {
+        if let Some(samples) = &mut *samples.borrow_mut() {
+            update(samples);
+        }
+    });
+}
+
+/// Starts keeping every sample, dropping any kept before.
+pub fn start_samples() {
+    SAMPLES.with(|samples| *samples.borrow_mut() = Some(Samples::default()));
+}
+
+/// The samples since `start_samples`, which stops keeping them.
+pub fn take_samples() -> Samples {
+    SAMPLES.with(|samples| samples.borrow_mut().take().unwrap_or_default())
 }
 
 /// The times since the last call.
@@ -85,17 +119,24 @@ pub fn frame(ms: f64, drew: bool) {
     record(|times| {
         if drew {
             times.frame.add(ms);
+            sample(|samples| samples.frame.push(ms));
         } else {
             times.idle += 1;
         }
     });
 }
 
-/// The draw's CPU time up to the submit, and the submit's.
-pub fn draw(encode_ms: f64, submit_ms: f64) {
+/// The draw's CPU time up to the submit, the submit's, and its draw calls.
+pub fn draw(encode_ms: f64, submit_ms: f64, draws: u32) {
     record(|times| {
         times.encode.add(encode_ms);
         times.submit.add(submit_ms);
+        times.draws.add(f64::from(draws));
+    });
+    sample(|samples| {
+        samples.encode.push(encode_ms);
+        samples.submit.push(submit_ms);
+        samples.draws.push(f64::from(draws));
     });
 }
 
@@ -222,7 +263,11 @@ impl Timer {
     pub fn submitted(&self, queue: &wgpu::Queue) {
         if self.work_done {
             let at = now();
-            queue.on_submitted_work_done(move || record(|times| times.done.add(now() - at)));
+            queue.on_submitted_work_done(move || {
+                let ms = now() - at;
+                record(|times| times.done.add(ms));
+                sample(|samples| samples.done.push(ms));
+            });
         }
         let Some(queries) = &self.queries else {
             return;
@@ -252,7 +297,7 @@ impl Timer {
                     };
                     buffer.unmap();
                     if stamps.len() == QUERIES as usize {
-                        record(|times| add_stamps(times, &stamps, written, period));
+                        add_stamps(&stamps, written, period);
                     }
                 }
                 mapping.set(false);
@@ -260,9 +305,9 @@ impl Timer {
     }
 }
 
-fn add_stamps(times: &mut Times, stamps: &[u64], written: u32, period: f64) {
+fn add_stamps(stamps: &[u64], written: u32, period: f64) {
     let ms = |ticks: u64| ticks as f64 * period / 1e6;
-    let mut water = None;
+    let mut groups = [None; 4];
     let mut start = u64::MAX;
     let mut end = 0;
     for group in 0..GROUPS {
@@ -274,17 +319,31 @@ fn add_stamps(times: &mut Times, stamps: &[u64], written: u32, period: f64) {
         end = end.max(finish);
         // The spec lets an end come before its start on some GPUs.
         let span = ms(finish.saturating_sub(begin));
-        match group {
-            SHADOW => times.groups[0].add(span),
-            REFRACTION | WAVES | REFLECTION => *water.get_or_insert(0.0) += span,
-            MAIN => times.groups[2].add(span),
-            _ => times.groups[3].add(span),
+        let shown = match group {
+            SHADOW => 0,
+            REFRACTION | WAVES | REFLECTION => 1,
+            MAIN => 2,
+            _ => 3,
+        };
+        *groups[shown].get_or_insert(0.0) += span;
+    }
+    let total = ms(end.saturating_sub(start));
+    record(|times| {
+        times.gpu.add(total);
+        for (span, ms) in times.groups.iter_mut().zip(groups) {
+            if let Some(ms) = ms {
+                span.add(ms);
+            }
         }
-    }
-    if let Some(water) = water {
-        times.groups[1].add(water);
-    }
-    times.gpu.add(ms(end.saturating_sub(start)));
+    });
+    sample(|samples| {
+        samples.gpu.push(total);
+        for (series, ms) in samples.groups.iter_mut().zip(groups) {
+            if let Some(ms) = ms {
+                series.push(ms);
+            }
+        }
+    });
 }
 
 fn now() -> f64 {
