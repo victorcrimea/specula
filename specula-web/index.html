@@ -93,7 +93,10 @@ body:not(.debug) #stats, body:not(.debug) #errors { display: none; }
 #settings button, #settings select {
   font: inherit; color: #e6e9eb; background: rgba(15, 18, 20, 0.85);
   border: 1px solid #3a4248; border-radius: 4px; padding: 4px 8px; }
-#settings select:disabled, #settings option:disabled { opacity: 0.5; }
+#settings select:disabled, #settings option:disabled,
+#settings input:disabled { opacity: 0.5; }
+#settings .pane label > span { white-space: nowrap; }
+#shadowscutoff-value { display: inline-block; min-width: 4.5em; text-align: right; }
 /* A single tab needs no tab bar; it appears once a second tab is added. */
 #settings .tabs:not(:has(> :nth-child(2))) { display: none; }
 #settings .tabs { display: flex; gap: 4px; padding: 8px 12px 0;
@@ -162,6 +165,8 @@ body:not(.debug) #stats, body:not(.debug) #errors { display: none; }
 <option value="2048">Medium</option>
 <option value="4096">High</option>
 </select></label>
+<label>Cutoff distance <span><input id="shadowscutoff" type="range" min="100" max="1500" step="10" value="300">
+<span id="shadowscutoff-value">300 m</span></span></label>
 <label>Textures <select id="textures">
 <option value="1">Low</option>
 <option value="2">Medium</option>

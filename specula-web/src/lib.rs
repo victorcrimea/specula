@@ -99,6 +99,8 @@ const POSITION_UNITS_PER_METRE: f32 = 16.0;
 const SOUND_SETTINGS_KEY: &str = "specula.sound";
 /// localStorage key of the shadow map size, 0 for no shadows.
 const SHADOW_SETTINGS_KEY: &str = "specula.shadows";
+/// localStorage key of the shadow cutoff distance in metres.
+const SHADOW_CUTOFF_SETTINGS_KEY: &str = "specula.shadowscutoff";
 /// localStorage key of the texture quality: 1 low, 2 medium, 3 high.
 const TEXTURE_SETTINGS_KEY: &str = "specula.textures";
 /// localStorage key of the material maps setting: 0 off, 1 on.
@@ -162,6 +164,8 @@ trait View {
     fn set_projectiles(&mut self, _on: bool) {}
     /// The shadow map's size, 0 for none, where it draws shadows.
     fn set_shadows(&mut self, _size: u32) {}
+    /// How far ahead shadows reach, in metres, likewise.
+    fn set_shadow_cutoff(&mut self, _metres: f32) {}
     /// The texture quality, as a count of `TEXTURE_TIER_SIDES`, where it
     /// draws textures.
     fn set_texture_tiers(&mut self, _tiers: usize) {}
@@ -863,7 +867,14 @@ async fn run(page: Page, glue_url: String, wasm_url: String) -> Result<(), Strin
     wire_controls(&app);
     wire_projectiles(&app, &window);
     if page == Page::Observer {
-        wire_shadows(&app, element(&document, "shadows")?);
+        let shadows: HtmlSelectElement = element(&document, "shadows")?;
+        wire_shadows(&app, shadows.clone());
+        wire_shadow_cutoff(
+            &app,
+            element(&document, "shadowscutoff")?,
+            element(&document, "shadowscutoff-value")?,
+            &shadows,
+        );
         wire_textures(&app, element(&document, "textures")?);
         wire_maps(&app, element(&document, "maps")?);
         wire_triplanar(&app, element(&document, "triplanar")?);
@@ -1239,6 +1250,66 @@ fn wire_shadows(app: &Rc<RefCell<App>>, select: HtmlSelectElement) {
     select.set_onchange(Some(on_change.as_ref().unchecked_ref()));
     // The controls live as long as the page, so their handlers do too.
     on_change.forget();
+}
+
+/// The shadow cutoff slider, kept across visits, applied as it is
+/// dragged; disabled while shadows are off, as in the game's options.
+fn wire_shadow_cutoff(
+    app: &Rc<RefCell<App>>,
+    slider: HtmlInputElement,
+    readout: HtmlElement,
+    shadows: &HtmlSelectElement,
+) {
+    let in_range = |metres: &f32| (shadow::MIN_CUTOFF..=shadow::MAX_CUTOFF).contains(metres);
+    let saved = web_sys::window()
+        .and_then(|window| window.local_storage().ok().flatten())
+        .and_then(|storage| storage.get_item(SHADOW_CUTOFF_SETTINGS_KEY).ok().flatten())
+        .and_then(|text| text.parse::<f32>().ok())
+        .filter(in_range)
+        .unwrap_or(shadow::DEFAULT_CUTOFF);
+    slider.set_value(&saved.to_string());
+    readout.set_text_content(Some(&format!("{saved} m")));
+    app.borrow_mut().renderer.set_shadow_cutoff(saved);
+
+    let target = Rc::clone(app);
+    let input = slider.clone();
+    let on_input = Closure::<dyn FnMut()>::new(move || {
+        let metres = input
+            .value()
+            .parse::<f32>()
+            .ok()
+            .filter(in_range)
+            .unwrap_or(shadow::DEFAULT_CUTOFF);
+        readout.set_text_content(Some(&format!("{metres} m")));
+        let app = &mut *target.borrow_mut();
+        app.renderer.set_shadow_cutoff(metres);
+        app.dirty = true;
+    });
+    slider.set_oninput(Some(on_input.as_ref().unchecked_ref()));
+    // The controls live as long as the page, so their handlers do too.
+    on_input.forget();
+
+    // Saved on release only, so a drag does not write storage per step.
+    let input = slider.clone();
+    let on_change = Closure::<dyn FnMut()>::new(move || {
+        // Best effort: without storage the choice lasts only this visit.
+        if let Some(storage) =
+            web_sys::window().and_then(|window| window.local_storage().ok().flatten())
+        {
+            let _ = storage.set_item(SHADOW_CUTOFF_SETTINGS_KEY, &input.value());
+        }
+    });
+    slider.set_onchange(Some(on_change.as_ref().unchecked_ref()));
+    on_change.forget();
+
+    let update = {
+        let shadows = shadows.clone();
+        move || slider.set_disabled(shadows.value() == "0")
+    };
+    update();
+    let on_shadows = Closure::<dyn FnMut()>::new(update);
+    let _ = shadows.add_event_listener_with_callback("change", on_shadows.as_ref().unchecked_ref());
+    on_shadows.forget();
 }
 
 fn wire_warmup(app: &Rc<RefCell<App>>) {

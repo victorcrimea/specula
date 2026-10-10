@@ -13,7 +13,10 @@ use crate::unit::multiply;
 const LIGHT_SIZE: u64 = 176;
 const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 /// `DEFAULT_SHADOWS_CUTOFF_DISTANCE`, in metres along the view.
-const CUTOFF: f32 = 300.0;
+pub const DEFAULT_CUTOFF: f32 = 300.0;
+/// The bounds of the game options' "Cutoff distance" slider.
+pub const MIN_CUTOFF: f32 = 100.0;
+pub const MAX_CUTOFF: f32 = 1500.0;
 /// `CalculateBoundsForCascade`'s insets, in metres.
 const INSETS: f32 = 0.2;
 /// Above the highest ground, so the tallest building still falls inside
@@ -66,6 +69,8 @@ pub struct Shadow {
     /// The map, when shadows are on.
     target: Option<wgpu::TextureView>,
     size: u32,
+    /// In metres along the view.
+    cutoff: f32,
 }
 
 impl Shadow {
@@ -217,6 +222,7 @@ impl Shadow {
             model_pipeline,
             target: None,
             size: 0,
+            cutoff: DEFAULT_CUTOFF,
         }
     }
 
@@ -232,6 +238,10 @@ impl Shadow {
         self.target = (size > 0).then_some(map);
     }
 
+    pub fn set_cutoff(&mut self, cutoff: f32) {
+        self.cutoff = cutoff.clamp(MIN_CUTOFF, MAX_CUTOFF);
+    }
+
     /// Fits the map to this frame's camera and writes the light uniform,
     /// with the map's fog when `fog`; the planes of the box casters must
     /// touch, `None` when there is no shadow to draw.
@@ -244,7 +254,7 @@ impl Shadow {
         bounds: Option<&Bounds>,
     ) -> Option<[[f32; 4]; 6]> {
         let fitted = match bounds {
-            Some(bounds) if self.size > 0 => fit(light.sun, eye, bounds, self.size),
+            Some(bounds) if self.size > 0 => fit(light.sun, eye, bounds, self.size, self.cutoff),
             _ => None,
         };
         let mut uniform: Vec<f32> = Vec::with_capacity((LIGHT_SIZE / 4) as usize);
@@ -271,7 +281,7 @@ impl Shadow {
             }
         }
         let [x, y, z] = eye.position;
-        uniform.extend_from_slice(&[x, y, z, CUTOFF]);
+        uniform.extend_from_slice(&[x, y, z, self.cutoff]);
         let [x, y, z] = eye.forward;
         uniform.extend_from_slice(&[x, y, z, 1.0 / self.size.max(1) as f32]);
         uniform.extend_from_slice(&[
@@ -378,11 +388,17 @@ fn light_bind_group(
 /// size as the camera turns, and moves in whole texels, so shadows do not
 /// shimmer as it pans. `None` when the camera is so high above the ground
 /// that all of it lies past the cutoff, which the engine's camera never is.
-fn fit(sun: [f32; 3], eye: &Eye, bounds: &Bounds, size: u32) -> Option<([[f32; 4]; 4], f32)> {
+fn fit(
+    sun: [f32; 3],
+    eye: &Eye,
+    bounds: &Bounds,
+    size: u32,
+    cutoff: f32,
+) -> Option<([[f32; 4]; 4], f32)> {
     let spread = (eye.field_of_view / 2.0).tan() * (1.0 + eye.aspect * eye.aspect).sqrt();
     // A point in view is at least its distance times the cosine of the
     // frustum's corner angle ahead of the eye.
-    if eye.position[1] - bounds.high > CUTOFF * (1.0 + spread * spread).sqrt() {
+    if eye.position[1] - bounds.high > cutoff * (1.0 + spread * spread).sqrt() {
         return None;
     }
 
@@ -398,8 +414,8 @@ fn fit(sun: [f32; 3], eye: &Eye, bounds: &Bounds, size: u32) -> Option<([[f32; 4
     // CalculateBoundsForCascade: the frustum is symmetric, so one corner
     // of the near and of the far quad gives the circumscribed sphere.
     let first_base = eye.near * spread;
-    let second_base = CUTOFF * spread;
-    let height = CUTOFF - eye.near;
+    let second_base = cutoff * spread;
+    let height = cutoff - eye.near;
     let to_centre =
         (height * height + second_base * second_base - first_base * first_base) * 0.5 / height;
     let centre: [f32; 3] =

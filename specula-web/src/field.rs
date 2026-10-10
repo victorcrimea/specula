@@ -2944,6 +2944,10 @@ impl View for Field {
         self.shadow.set_size(&self.device, size);
     }
 
+    fn set_shadow_cutoff(&mut self, metres: f32) {
+        self.shadow.set_cutoff(metres);
+    }
+
     fn max_texture_tiers(&self) -> usize {
         max_texture_tiers(self.bc)
     }
