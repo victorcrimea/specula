@@ -51,8 +51,11 @@ pub struct Times {
     pub frame: Span,
     /// Callbacks that drew nothing, the scene being unchanged.
     pub idle: u32,
-    /// From the start of the draw to the submit: the scene's update and
-    /// the command encoding.
+    /// Waiting for the swapchain's next image, which the GPU holds while it
+    /// is behind.
+    pub acquire: Span,
+    /// From the image's arrival to the submit: the scene's update, bakes,
+    /// uploads and the command encoding.
     pub encode: Span,
     /// The submit and the present.
     pub submit: Span,
@@ -71,13 +74,20 @@ pub struct Times {
 /// percentiles; the `Times` fields of the same names.
 #[derive(Default)]
 pub struct Samples {
+    /// From one animation frame callback to the next.
+    pub interval: Vec<f64>,
     pub frame: Vec<f64>,
+    pub acquire: Vec<f64>,
     pub encode: Vec<f64>,
     pub submit: Vec<f64>,
     pub gpu: Vec<f64>,
     pub groups: [Vec<f64>; 4],
     pub done: Vec<f64>,
     pub draws: Vec<f64>,
+    /// Impostor bakes, and far atlas plus texture uploads, per frame: work
+    /// a frame takes on now and then, which skews its CPU time.
+    pub bakes: Vec<f64>,
+    pub uploads: Vec<f64>,
 }
 
 thread_local! {
@@ -114,6 +124,11 @@ pub fn take() -> Times {
     TIMES.with(|times| std::mem::take(&mut *times.borrow_mut()))
 }
 
+/// The time since the previous frame callback.
+pub fn interval(ms: f64) {
+    sample(|samples| samples.interval.push(ms));
+}
+
 /// One frame callback's CPU time, and whether it drew.
 pub fn frame(ms: f64, drew: bool) {
     record(|times| {
@@ -126,17 +141,38 @@ pub fn frame(ms: f64, drew: bool) {
     });
 }
 
-/// The draw's CPU time up to the submit, the submit's, and its draw calls.
-pub fn draw(encode_ms: f64, submit_ms: f64, draws: u32) {
+/// What one draw did and the CPU time of each part.
+pub struct Draw {
+    pub acquire_ms: f64,
+    pub encode_ms: f64,
+    pub submit_ms: f64,
+    pub draws: u32,
+    pub bakes: u32,
+    pub uploads: u32,
+}
+
+pub fn draw(draw: Draw) {
+    let Draw {
+        acquire_ms,
+        encode_ms,
+        submit_ms,
+        draws,
+        bakes,
+        uploads,
+    } = draw;
     record(|times| {
+        times.acquire.add(acquire_ms);
         times.encode.add(encode_ms);
         times.submit.add(submit_ms);
         times.draws.add(f64::from(draws));
     });
     sample(|samples| {
+        samples.acquire.push(acquire_ms);
         samples.encode.push(encode_ms);
         samples.submit.push(submit_ms);
         samples.draws.push(f64::from(draws));
+        samples.bakes.push(f64::from(bakes));
+        samples.uploads.push(f64::from(uploads));
     });
 }
 

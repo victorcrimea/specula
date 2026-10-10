@@ -117,6 +117,11 @@ const WARMUP_FRAMES: u32 = 30;
 const MEASURED_FRAMES: u32 = 90;
 /// The longest a run waits for its assets before it measures anyway.
 const SETTLE_LIMIT_MS: f64 = 20_000.0;
+/// Max is measured again after this many runs, and at the end, so a
+/// drift over the benchmark's hour shows apart from the settings' cost.
+const REPEAT_EVERY: usize = 10;
+/// A frame whose interval exceeds the run's median this many times over.
+const STALL_FACTOR: f64 = 3.0;
 
 struct Control {
     id: &'static str,
@@ -220,6 +225,8 @@ struct Run {
     /// The controls it changes from `base`.
     changed: Vec<usize>,
     values: Vec<String>,
+    /// Which repeat of the Max baseline it is.
+    repeat: Option<u32>,
 }
 
 enum Phase {
@@ -391,6 +398,7 @@ impl Bench {
                 base,
                 changed,
                 values,
+                repeat: None,
             });
         };
         let describe = |values: &[String], changed: &[usize]| -> String {
@@ -517,7 +525,26 @@ impl Bench {
                 push(&mut runs, &mut set, name, "max", changed, values);
             }
         }
-        runs
+
+        let repeat = |n: u32| Run {
+            set: None,
+            name: format!("Max (repeat {n})"),
+            base: "max",
+            changed: Vec::new(),
+            values: max.clone(),
+            repeat: Some(n),
+        };
+        let mut repeated = Vec::new();
+        let mut count = 0;
+        for (i, run) in runs.into_iter().enumerate() {
+            if i > 0 && i % REPEAT_EVERY == 0 {
+                count += 1;
+                repeated.push(repeat(count));
+            }
+            repeated.push(run);
+        }
+        repeated.push(repeat(count + 1));
+        repeated
     }
 
     fn apply(&self, values: &[String]) {
@@ -694,13 +721,25 @@ impl Bench {
         line(&mut out, "//   cpu.frame   the whole frame callback");
         line(
             &mut out,
-            "//   cpu.encode  from the start of the draw to the submit: placing",
+            "//   cpu.clean   cpu.frame without the frames that baked or uploaded",
+        );
+        line(
+            &mut out,
+            "//   cpu.acquire waiting for the swapchain's next image, which the",
+        );
+        line(&mut out, "//               GPU holds while it is behind");
+        line(
+            &mut out,
+            "//   cpu.encode  from the image's arrival to the submit: placing",
         );
         line(
             &mut out,
             "//               the entities, building and uploading instances,",
         );
-        line(&mut out, "//               recording the passes");
+        line(
+            &mut out,
+            "//               recording the passes, impostor bakes and uploads",
+        );
         line(&mut out, "//   cpu.submit  the submit and the present");
         line(
             &mut out,
@@ -734,6 +773,35 @@ impl Bench {
         line(&mut out, "//               are not counted)");
         line(
             &mut out,
+            "//   interval    from one animation frame callback to the next,",
+        );
+        line(
+            &mut out,
+            "//               which shows stalls outside the frame callback",
+        );
+        line(
+            &mut out,
+            &format!(
+                "//   stalls      frames whose interval exceeds {STALL_FACTOR}x the run's p50"
+            ),
+        );
+        line(
+            &mut out,
+            "//   bakes       impostor bakes in the run, each its own submit and",
+        );
+        line(&mut out, "//               readback");
+        line(
+            &mut out,
+            "//   uploads     far impostor atlases and textures uploaded in the run",
+        );
+        line(
+            &mut out,
+            &format!(
+                "//   repeat      the Max baseline again, every {REPEAT_EVERY} runs and at the end"
+            ),
+        );
+        line(
+            &mut out,
             "//   settled     false where the assets were still loading after",
         );
         line(
@@ -758,7 +826,7 @@ impl Bench {
         );
         line(
             &mut out,
-            "// GPU times leave out but the CPU frame time includes.",
+            "// GPU times leave out but cpu.frame includes; cpu.clean does not.",
         );
         if !complete {
             line(&mut out, "//");
@@ -766,6 +834,42 @@ impl Bench {
                 &mut out,
                 "// Stopped before the end: only the runs measured are here.",
             );
+        }
+        let maxes = running
+            .results
+            .iter()
+            .filter(|result| {
+                let run = &running.runs[result.run];
+                run.repeat.is_some() || run.name == "Max"
+            })
+            .collect::<Vec<_>>();
+        if !maxes.is_empty() {
+            line(&mut out, "//");
+            line(
+                &mut out,
+                "// Drift, Max measured again (p50 ms; the same settings should match):",
+            );
+            line(
+                &mut out,
+                &format!(
+                    "//   {:<16}  {:>6}  {:>6}  {:>6}  {:>6}",
+                    "run", "cpu", "clean", "gpu", "at run"
+                ),
+            );
+            for result in maxes {
+                let samples = &result.samples;
+                line(
+                    &mut out,
+                    &format!(
+                        "//   {:<16}  {:>6}  {:>6}  {:>6}  {:>6}",
+                        running.runs[result.run].name,
+                        median(&samples.frame),
+                        median(&clean(samples)),
+                        median(&samples.gpu),
+                        result.run + 1,
+                    ),
+                );
+            }
         }
         line(&mut out, "//");
         line(&mut out, "// Summary (p50 ms):");
@@ -779,27 +883,46 @@ impl Bench {
         line(
             &mut out,
             &format!(
-                "//   {:<width$}  {:>6}  {:>6}  {:>6}  {:>6}  {:>6}",
-                "run", "fps", "cpu", "encode", "gpu", "draws"
+                "//   {:<width$}  {:>6}  {:>6}  {:>6}  {:>6}  {:>6}  {:>6}  {:>8}  {:>5}  {:>7}",
+                "run",
+                "fps",
+                "cpu",
+                "clean",
+                "encode",
+                "gpu",
+                "draws",
+                "interval",
+                "bakes",
+                "uploads"
+            ),
+        );
+        line(
+            &mut out,
+            &format!(
+                "//   {:<width$}  {:>6}  {:>6}  {:>6}  {:>6}  {:>6}  {:>6}  {:>8}  {:>5}  {:>7}",
+                "", "", "", "", "", "", "", "max", "", ""
             ),
         );
         for result in &running.results {
-            let median = |series: &[f64]| {
-                percentile(series, 0.5)
-                    .map_or_else(|| "-".to_string(), |value| format!("{value:.1}"))
-            };
-            let draws = percentile(&result.samples.draws, 0.5)
+            let samples = &result.samples;
+            let draws = percentile(&samples.draws, 0.5)
                 .map_or_else(|| "-".to_string(), |value| format!("{value:.0}"));
+            let interval = percentile(&samples.interval, 1.0)
+                .map_or_else(|| "-".to_string(), |value| format!("{value:.1}"));
             line(
                 &mut out,
                 &format!(
-                    "//   {:<width$}  {:>6.1}  {:>6}  {:>6}  {:>6}  {:>6}",
+                    "//   {:<width$}  {:>6.1}  {:>6}  {:>6}  {:>6}  {:>6}  {:>6}  {:>8}  {:>5}  {:>7}",
                     running.runs[result.run].name,
                     result.fps,
-                    median(&result.samples.frame),
-                    median(&result.samples.encode),
-                    median(&result.samples.gpu),
+                    median(&samples.frame),
+                    median(&clean(samples)),
+                    median(&samples.encode),
+                    median(&samples.gpu),
                     draws,
+                    interval,
+                    total(&samples.bakes),
+                    total(&samples.uploads),
                 ),
             );
         }
@@ -852,6 +975,9 @@ impl Bench {
             let _ = writeln!(out, "    {{");
             let _ = writeln!(out, "      \"name\": {},", quote(&run.name));
             let _ = writeln!(out, "      \"base\": {},", quote(run.base));
+            if let Some(repeat) = run.repeat {
+                let _ = writeln!(out, "      \"repeat\": {repeat},");
+            }
             let changed = run
                 .changed
                 .iter()
@@ -865,11 +991,17 @@ impl Bench {
             let samples = &result.samples;
             let _ = writeln!(
                 out,
-                "      \"cpu\": {{ \"frame\": {}, \"encode\": {}, \"submit\": {} }},",
+                "      \"cpu\": {{ \"frame\": {}, \"clean\": {}, \"acquire\": {}, \"encode\": {}, \"submit\": {} }},",
                 series(&samples.frame),
+                series(&clean(samples)),
+                series(&samples.acquire),
                 series(&samples.encode),
                 series(&samples.submit)
             );
+            let _ = writeln!(out, "      \"interval\": {},", series(&samples.interval));
+            let _ = writeln!(out, "      \"stalls\": {},", stalls(&samples.interval));
+            let _ = writeln!(out, "      \"bakes\": {},", total(&samples.bakes));
+            let _ = writeln!(out, "      \"uploads\": {},", total(&samples.uploads));
             let [shadow, water, main, post] = &samples.groups;
             let _ = writeln!(
                 out,
@@ -905,6 +1037,40 @@ impl Bench {
         let _ = writeln!(out, "}}");
         out
     }
+}
+
+/// The frame times of the frames that neither baked nor uploaded; empty
+/// where the series do not line up, a frame having drawn nothing.
+fn clean(samples: &Samples) -> Vec<f64> {
+    let aligned =
+        samples.frame.len() == samples.bakes.len() && samples.frame.len() == samples.uploads.len();
+    if !aligned {
+        return Vec::new();
+    }
+    samples
+        .frame
+        .iter()
+        .zip(samples.bakes.iter().zip(&samples.uploads))
+        .filter(|(_, (bakes, uploads))| **bakes == 0.0 && **uploads == 0.0)
+        .map(|(frame, _)| *frame)
+        .collect()
+}
+
+fn stalls(intervals: &[f64]) -> usize {
+    percentile(intervals, 0.5).map_or(0, |p50| {
+        intervals
+            .iter()
+            .filter(|interval| **interval > STALL_FACTOR * p50)
+            .count()
+    })
+}
+
+fn total(series: &[f64]) -> u64 {
+    series.iter().sum::<f64>() as u64
+}
+
+fn median(series: &[f64]) -> String {
+    percentile(series, 0.5).map_or_else(|| "-".to_string(), |value| format!("{value:.1}"))
 }
 
 /// The nearest-rank percentile.

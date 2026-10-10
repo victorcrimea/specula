@@ -3504,7 +3504,7 @@ impl View for Field {
     }
 
     fn draw(&mut self, progress: f32) -> bool {
-        let start = now();
+        let acquiring = now();
         let frame = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(frame)
             | wgpu::CurrentSurfaceTexture::Suboptimal(frame) => frame,
@@ -3514,6 +3514,11 @@ impl View for Field {
             }
             _ => return false,
         };
+        let start = now();
+        // Counted as they run, so the bench can set apart the frames that
+        // baked or uploaded.
+        let bakes = self.far.drawn;
+        let uploads = self.far.from_storage as u64 + self.uploads;
         self.camera.borrow_mut().step(now());
         let (view_proj, eye, right, up) = self.view_projection();
         let wind = self.wind(progress);
@@ -4014,7 +4019,14 @@ impl View for Field {
         self.queue.submit([encoder.finish()]);
         self.timer.submitted(&self.queue);
         self.queue.present(frame);
-        timing::draw(encoded - start, now() - encoded, self.draw_calls.get());
+        timing::draw(timing::Draw {
+            acquire_ms: start - acquiring,
+            encode_ms: encoded - start,
+            submit_ms: now() - encoded,
+            draws: self.draw_calls.get(),
+            bakes: self.far.drawn - bakes,
+            uploads: (self.far.from_storage as u64 + self.uploads - uploads) as u32,
+        });
         self.show_stats(draws.len() + far_draws.len());
         true
     }
@@ -4145,6 +4157,7 @@ impl Field {
 
         let mut pane = Pane::new("Profiling, ms", "avg", "max");
         pane.span("CPU frame", times.frame, true);
+        pane.span("  acquire", times.acquire, true);
         pane.span("  encode", times.encode, true);
         pane.span("  submit", times.submit, true);
         pane.row("  idle frames", times.idle, "");

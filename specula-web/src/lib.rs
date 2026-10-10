@@ -29,6 +29,7 @@ mod warmup;
 mod water;
 mod worker;
 
+use std::cell::Cell;
 use std::cell::RefCell;
 use std::collections::BTreeSet;
 use std::rc::Rc;
@@ -2074,7 +2075,13 @@ fn animate(app: Rc<RefCell<App>>, bench: Option<Rc<RefCell<Bench>>>) {
     let next = Rc::clone(&callback);
     // The closure holds an Rc to itself, which keeps the loop alive for the
     // lifetime of the page.
+    let previous = Cell::new(None);
     *callback.borrow_mut() = Some(Closure::new(move |now: f64| {
+        // Between callbacks, which shows a stall the frame's own time
+        // leaves out: the browser's work, or a wait on the GPU.
+        if let Some(previous) = previous.replace(Some(now)) {
+            timing::interval(now - previous);
+        }
         app.borrow_mut().frame(now);
         if let Some(bench) = &bench {
             bench.borrow_mut().step(&app, now);
