@@ -14,8 +14,12 @@ use crate::unit::sub;
 /// `TemplateDetails::flags`, as `SpeculaFeed.h` kind 11 numbers them.
 pub const FLAG_SELECTABLE: u32 = 1;
 pub const FLAG_EDITOR_ONLY: u32 = 2;
+pub const FLAG_OUTLINE: u32 = 4;
+pub const FLAG_ALWAYS_VISIBLE: u32 = 8;
 pub const FLAG_FOOTPRINT_SELECTION: u32 = 16;
 pub const FLAG_SQUARE_FOOTPRINT: u32 = 32;
+pub const FLAG_OVERLAY_SQUARE: u32 = 64;
+pub const FLAG_OVERLAY_CIRCLE: u32 = 128;
 pub const FLAG_FOOTPRINT: u32 = 256;
 
 /// An entity drawn this frame, in world space.
@@ -23,6 +27,9 @@ pub struct Pickable {
     pub id: u32,
     /// `ICmpVisual::GetPosition`: the model's translation.
     pub position: [f32; 3],
+    /// Where the model's +x points on the ground, unit length: the engine's
+    /// `unitX` for the interpolated heading.
+    pub facing: [f32; 2],
     pub bounds: OrientedBox,
 }
 

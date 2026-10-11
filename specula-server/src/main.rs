@@ -84,7 +84,8 @@ async fn main() {
                 web::index,
                 web::page,
                 web::pkg_file,
-                web::asset
+                web::asset,
+                web::selection_atlas
             ],
         )
         .mount("/", FileServer::from(WEB_ROOT))

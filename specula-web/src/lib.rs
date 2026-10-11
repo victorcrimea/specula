@@ -11,12 +11,14 @@ mod impostor;
 mod march;
 mod minimap;
 mod opfs;
+mod overlay;
 mod particles;
 mod pick;
 mod pose;
 mod postproc;
 mod projectile;
 mod render;
+mod selection;
 mod shadow;
 mod sky;
 mod stored;
@@ -173,9 +175,14 @@ trait View {
     fn draw(&mut self, progress: f32) -> bool;
     /// `palette` is the displayed colour of each player id.
     fn set_scene(&mut self, scene: &Scene, palette: &[u32]);
+    /// The renames of every message applied since the last `set_scene`,
+    /// in order, before it.
+    fn set_renames(&mut self, _renames: &[(u32, u32)]) {}
     /// `None` for a new match whose terrain has not arrived yet.
     fn set_terrain(&mut self, image: Option<&TerrainImage>);
     fn set_icon_atlas(&mut self, _atlas: IconAtlas) {}
+    /// `/selection.bin`, where it draws selection overlays.
+    fn set_selection_atlas(&mut self, _bytes: &[u8]) {}
     /// Whether it moves between turns on its own, and so needs every frame.
     fn animating(&self) -> bool {
         false
@@ -371,6 +378,9 @@ struct App {
     measure_turns: bool,
     turn_arrived: bool,
     scene_changed: bool,
+    /// `Scene::renames` of the messages applied since the view last took
+    /// the scene; each message clears the scene's own.
+    renames: Vec<(u32, u32)>,
     dirty: bool,
     /// The terrain shown; 0 for none.
     terrain_id: u64,
@@ -532,6 +542,8 @@ impl App {
         }
         if self.scene_changed {
             self.scene_changed = false;
+            self.renderer.set_renames(&self.renames);
+            self.renames.clear();
             self.renderer.set_scene(&self.scene, &self.palette);
             if let Some(minimap) = &mut self.minimap {
                 minimap.set_scene(&self.scene, &self.palette);
@@ -851,6 +863,7 @@ async fn run(page: Page, glue_url: String, wasm_url: String) -> Result<(), Strin
         measure_turns: true,
         turn_arrived: false,
         scene_changed: false,
+        renames: Vec::new(),
         dirty: true,
         terrain_id: 0,
         terrain_image: None,
@@ -1040,6 +1053,9 @@ async fn run(page: Page, glue_url: String, wasm_url: String) -> Result<(), Strin
     };
     connect(&app);
     wasm_bindgen_futures::spawn_local(load_icons(Rc::clone(&app)));
+    if matches!(page, Page::Observer) {
+        wasm_bindgen_futures::spawn_local(load_selection_atlas(Rc::clone(&app)));
+    }
     animate(app, bench);
     Ok(())
 }
@@ -1947,6 +1963,7 @@ fn receive(app_rc: &Rc<RefCell<App>>, turn_ms: f64, message: &[u8]) {
             app.progress = 0.0;
             app.turn_arrived = true;
             app.scene_changed = true;
+            app.renames.extend_from_slice(&app.scene.renames);
             if turn_ms > 0.0 {
                 app.turn_interval = turn_ms;
                 app.measure_turns = false;
@@ -2037,6 +2054,14 @@ async fn load_icons(app: Rc<RefCell<App>>) {
         }
         // Not fatal: every entity still has its dot.
         Err(error) => web_sys::console::error_1(&format!("icons: {error}").into()),
+    }
+}
+
+async fn load_selection_atlas(app: Rc<RefCell<App>>) {
+    match fetch_bytes("/selection.bin").await {
+        Ok(bytes) => app.borrow_mut().renderer.set_selection_atlas(&bytes),
+        // Not fatal: the selection works, only unseen.
+        Err(error) => web_sys::console::error_1(&format!("selection.bin: {error}").into()),
     }
 }
 

@@ -69,6 +69,9 @@ use crate::far::LookKey;
 use crate::far::Request;
 use crate::gpu;
 use crate::impostor;
+use crate::overlay::Mark;
+use crate::overlay::OverlayShape;
+use crate::overlay::Overlays;
 use crate::particles;
 use crate::particles::Owner;
 use crate::particles::Particles;
@@ -81,6 +84,9 @@ use crate::postproc::Post;
 use crate::postproc::Upscale;
 use crate::projectile;
 use crate::projectile::Flight;
+use crate::selection::Lookup;
+use crate::selection::Selectee;
+use crate::selection::Selection;
 use crate::shadow;
 use crate::shadow::Shadow;
 use crate::sky::Sky;
@@ -352,14 +358,44 @@ struct Camera {
     press: Option<(i32, [f32; 2], [f32; 2])>,
     /// Left clicks and drags yet to be picked from.
     picks: Vec<PickInput>,
+    /// The mouse over the canvas, 0..1 across it from its top left.
+    hover: Option<[f32; 2]>,
+    /// The left button's drag past `DRAG_DELTA` while it is held.
+    band: Option<Band>,
 }
 
 /// A left click or drag on the canvas, points 0..1 across it from its top
-/// left. Logged for now; C13 makes a selection of them.
+/// left, with the engine's selection.add (Shift) and selection.remove
+/// (Ctrl) held or not; or selection.cancel (Escape).
 enum PickInput {
-    Click { at: [f32; 2], count: u32 },
-    Rect { from: [f32; 2], to: [f32; 2] },
+    Click {
+        at: [f32; 2],
+        count: u32,
+        add: bool,
+        remove: bool,
+    },
+    Rect {
+        from: [f32; 2],
+        to: [f32; 2],
+        add: bool,
+        remove: bool,
+    },
+    Clear,
 }
+
+/// A bandbox being drawn: its corners 0..1 across the canvas, and in
+/// client pixels for the page's rectangle.
+#[derive(Clone, Copy)]
+struct Band {
+    from: [f32; 2],
+    to: [f32; 2],
+    client_from: [f32; 2],
+    client_to: [f32; 2],
+}
+
+/// `CCmpSelectable`'s `RGB_DESATURATION`: how far an unselected always
+/// visible overlay's colour moves towards its largest channel.
+const RGB_DESATURATION: f32 = 0.333_333;
 
 /// `gui.session.dragdelta`: how far, in pixels, a press may move and still
 /// be a click.
@@ -497,6 +533,8 @@ pub struct Field {
     decal_pipeline: wgpu::RenderPipeline,
     shadow: Shadow,
     borders: Borders,
+    /// Selection rings, stars and outlines.
+    overlays: Overlays,
     ground_layout: wgpu::BindGroupLayout,
     /// Repeating, for the terrain textures.
     terrain_sampler: wgpu::Sampler,
@@ -558,6 +596,13 @@ pub struct Field {
     eye: [f32; 3],
     /// The selectable entities drawn this frame.
     pickables: Vec<Pickable>,
+    selection: Selection,
+    /// Handed over before the scene they belong to.
+    renames: Vec<(u32, u32)>,
+    /// The page's bandbox rectangle, if it has one.
+    bandbox: Option<HtmlElement>,
+    /// When the overlays last faded, in page milliseconds.
+    last_fade: f64,
     /// The animation time each entity's sound was last checked at.
     sound_clocks: HashMap<u32, SoundClock>,
     shots: HashMap<u32, Flying>,
@@ -963,6 +1008,7 @@ impl Field {
         });
 
         let borders = Borders::new(&device, &queue, config.format, &view_layout)?;
+        let overlays = Overlays::new(&device, &queue, config.format, &view_layout);
         let sky = Sky::new(&device, &queue, config.format);
         let particle_pipelines = particles::Pipelines::new(
             &device,
@@ -1081,6 +1127,8 @@ impl Field {
             last_step: now(),
             press: None,
             picks: Vec::new(),
+            hover: None,
+            band: None,
         }));
         wire_camera(&canvas, &camera)?;
         let document = web_sys::window()
@@ -1152,6 +1200,7 @@ impl Field {
             decal_pipeline,
             shadow,
             borders,
+            overlays,
             ground_layout,
             terrain_sampler,
             view_buffer,
@@ -1195,6 +1244,12 @@ impl Field {
             decal_indices,
             eye: [0.0; 3],
             pickables: Vec::new(),
+            selection: Selection::default(),
+            renames: Vec::new(),
+            bandbox: document
+                .get_element_by_id("bandbox")
+                .and_then(|element| element.dyn_into::<HtmlElement>().ok()),
+            last_fade: now(),
             sound_clocks: HashMap::new(),
             shots: HashMap::new(),
             shot_models: HashMap::new(),
@@ -1567,60 +1622,110 @@ impl Field {
         let Some((low, high)) = pick::local_box(details, bounds) else {
             return;
         };
+        let (x, z) = (transform.m[0][0], transform.m[2][0]);
+        let length = x.hypot(z);
         self.pickables.push(Pickable {
             id,
             position: [transform.m[0][3], transform.m[1][3], transform.m[2][3]],
+            facing: if length > 0.0 {
+                [x / length, z / length]
+            } else {
+                [1.0, 0.0]
+            },
             bounds: OrientedBox::new(low, high, transform),
         });
     }
 
-    /// Logs what the clicks and drags since the last frame pick. C13 makes
-    /// a selection of them instead.
-    fn log_picks(&self, view_proj: &[[f32; 4]; 4], eye: [f32; 3], right: [f32; 3], up: [f32; 3]) {
-        let picks = std::mem::take(&mut self.camera.borrow_mut().picks);
+    /// Makes a selection of the clicks and drags since the last frame, as
+    /// `handleInputBeforeGui` does, then highlights what the bandbox would
+    /// select or else what the mouse is over.
+    fn apply_picks(
+        &mut self,
+        view_proj: &[[f32; 4]; 4],
+        eye: [f32; 3],
+        right: [f32; 3],
+        up: [f32; 3],
+    ) {
+        let (picks, hover, band) = {
+            let mut camera = self.camera.borrow_mut();
+            (std::mem::take(&mut camera.picks), camera.hover, camera.band)
+        };
         let aspect = self.config.width as f32 / self.config.height.max(1) as f32;
         let tan_half = (FIELD_OF_VIEW / 2.0).tan();
+        let ray = |at| pick::camera_ray(eye, right, up, cross(right, up), tan_half, aspect, at);
+        let entities = &self.entities;
+        let look: Lookup = &|id| selectee(entities, id);
         for input in picks {
-            let (what, ids) = match input {
-                PickInput::Click { at, count } => {
-                    let ray =
-                        pick::camera_ray(eye, right, up, cross(right, up), tan_half, aspect, at);
-                    let ids = match pick::pick_at_point(&self.pickables, &ray) {
+            let (ids, add, remove) = match input {
+                PickInput::Click {
+                    at,
+                    count,
+                    add,
+                    remove,
+                } => {
+                    let ids = match pick::pick_at_point(&self.pickables, &ray(at)) {
                         Some(id) if count >= 2 => self.similar(id, count >= 3, view_proj),
                         Some(id) => vec![id],
+                        // Ground clicked: the selection stays while adding
+                        // or removing, else it clears.
+                        None if add || remove => continue,
                         None => Vec::new(),
                     };
-                    (format!("click x{count}"), ids)
+                    (ids, add, remove)
                 }
-                PickInput::Rect { from, to } => {
-                    let ids = pick::pick_in_rect(&self.pickables, view_proj, from, to);
-                    let ids = pick::preferred(ids, |id, class| {
-                        self.dot_details(id).is_some_and(|(_, details)| {
-                            pick::has_class(details, &self.entities.strings, class)
-                        })
-                    });
-                    ("box".to_string(), ids)
-                }
+                PickInput::Rect {
+                    from,
+                    to,
+                    add,
+                    remove,
+                } => (self.in_band(view_proj, from, to), add, remove),
+                PickInput::Clear => (Vec::new(), false, false),
             };
-            let named: Vec<String> = ids
-                .iter()
-                .map(|id| {
-                    let template = self.entity_dot(*id).and_then(|dot| {
-                        self.entities
-                            .templates
-                            .get(dot.template as usize)
-                            .map(|name| (name.as_str(), dot.owner))
-                    });
-                    match template {
-                        Some((name, owner)) => format!("{id} {name} p{owner}"),
-                        None => id.to_string(),
-                    }
-                })
-                .collect();
-            web_sys::console::log_1(
-                &format!("pick {what}: {} [{}]", named.len(), named.join(", ")).into(),
-            );
+            if add {
+                self.selection.add_list(&ids, look);
+            } else if remove {
+                self.selection.remove_list(&ids, look);
+            } else {
+                self.selection.reset(look);
+                self.selection.add_list(&ids, look);
+            }
         }
+        let highlighted = match (band, hover) {
+            (Some(band), _) => self.in_band(view_proj, band.from, band.to),
+            (None, Some(at)) => pick::pick_at_point(&self.pickables, &ray(at))
+                .into_iter()
+                .collect(),
+            (None, None) => Vec::new(),
+        };
+        self.selection.set_highlight_list(&highlighted, look);
+        if let Some(element) = &self.bandbox {
+            match band {
+                Some(band) => {
+                    let [x0, y0] = [0, 1].map(|i| band.client_from[i].min(band.client_to[i]));
+                    let [x1, y1] = [0, 1].map(|i| band.client_from[i].max(band.client_to[i]));
+                    let _ = element.set_attribute(
+                        "style",
+                        &format!(
+                            "left: {x0}px; top: {y0}px; width: {}px; height: {}px",
+                            x1 - x0,
+                            y1 - y0
+                        ),
+                    );
+                    element.set_hidden(false);
+                }
+                None => element.set_hidden(true),
+            }
+        }
+    }
+
+    /// `PickEntitiesInRect` then `getPreferredEntities`, corners 0..1
+    /// across the canvas.
+    fn in_band(&self, view_proj: &[[f32; 4]; 4], from: [f32; 2], to: [f32; 2]) -> Vec<u32> {
+        let ids = pick::pick_in_rect(&self.pickables, view_proj, from, to);
+        pick::preferred(ids, |id, class| {
+            self.dot_details(id)
+                .is_some_and(|(_, details)| pick::has_class(details, &self.entities.strings, class))
+        })
     }
 
     /// `PickSimilarEntities` for a double click, or with `exact` a triple
@@ -1646,9 +1751,7 @@ impl Field {
     }
 
     fn entity_dot(&self, id: u32) -> Option<&Dot> {
-        let dots = &self.entities.dots;
-        let index = dots.binary_search_by_key(&id, |(id, _)| *id).ok()?;
-        Some(&dots[index].1)
+        entity_dot(&self.entities, id)
     }
 
     fn dot_details(&self, id: u32) -> Option<(&Dot, &TemplateDetails)> {
@@ -3529,6 +3632,7 @@ impl View for Field {
             entities.variable_sets.clear();
             self.particles.clear();
             self.camera.borrow_mut().placed = false;
+            self.selection = Selection::default();
         }
         // The tables only grow within a match, so only the tail is new.
         if scene.templates.len() < entities.templates.len() {
@@ -3589,6 +3693,10 @@ impl View for Field {
                 },
             );
         }
+        let renames = std::mem::take(&mut self.renames);
+        let entities = &self.entities;
+        self.selection
+            .update(&renames, &|id| selectee(entities, id));
         self.palette = palette.to_vec();
         self.borders
             .set_territory(&scene.territory, scene.territory_generation, palette);
@@ -3700,6 +3808,16 @@ impl View for Field {
         self.animation_sounds(progress)
     }
 
+    fn set_selection_atlas(&mut self, bytes: &[u8]) {
+        if let Err(error) = self.overlays.set_atlas(&self.device, &self.queue, bytes) {
+            web_sys::console::error_1(&format!("selection.bin: {error}").into());
+        }
+    }
+
+    fn set_renames(&mut self, renames: &[(u32, u32)]) {
+        self.renames.extend_from_slice(renames);
+    }
+
     fn set_terrain(&mut self, image: Option<&TerrainImage>) {
         match image {
             Some(image) if image.size > 0 => self.upload_ground(image),
@@ -3772,7 +3890,23 @@ impl View for Field {
         self.far.begin_frame(&self.device);
         let shadowed = casters.is_some();
         self.place_entities(progress, &view_proj, casters);
-        self.log_picks(&view_proj, eye, right, up);
+        self.apply_picks(&view_proj, eye, right, up);
+        let time = now();
+        self.selection
+            .tick(((time - self.last_fade) / 1000.0) as f32);
+        self.last_fade = time;
+        let marks = overlay_marks(
+            &self.pickables,
+            &self.entities,
+            &self.selection,
+            &self.palette,
+        );
+        self.overlays.prepare(
+            &self.device,
+            &self.queue,
+            &marks,
+            self.ground.as_ref().map(|ground| &ground.image),
+        );
         self.far.take_loaded(&self.device, &self.queue);
         let mut prepared = Vec::new();
         for (key, request) in self.far.next_bakes(&self.device) {
@@ -4202,6 +4336,7 @@ impl View for Field {
                 // After the water, as the engine draws overlays, so a line
                 // floating on it shows.
                 self.borders.draw(&mut pass);
+                self.overlays.draw(&mut pass);
             }
             // Last, as the engine draws them after the water and the
             // overlays.
@@ -5319,6 +5454,113 @@ impl Camera {
     }
 }
 
+/// The overlay of each drawn entity it shows for, coloured as
+/// `CCmpSelectable::UpdateColor` and `SetSelectionHighlight`.
+fn overlay_marks<'a>(
+    pickables: &[Pickable],
+    entities: &'a Entities,
+    selection: &Selection,
+    palette: &[u32],
+) -> Vec<Mark<'a>> {
+    let mut marks = Vec::new();
+    for pickable in pickables {
+        let Some(dot) = entity_dot(entities, pickable.id) else {
+            continue;
+        };
+        let Some(details) = entities
+            .template_details
+            .get(dot.template as usize)
+            .and_then(Option::as_ref)
+        else {
+            continue;
+        };
+        let always_visible = details.flags & pick::FLAG_ALWAYS_VISIBLE != 0;
+        let overlay = selection.overlay(pickable.id, always_visible);
+        if overlay.alpha <= 0.0 {
+            continue;
+        }
+        let Some(shape) = overlay_shape(details) else {
+            continue;
+        };
+        let Some(texture) = (details.overlay_texture as usize)
+            .checked_sub(1)
+            .and_then(|index| entities.strings.get(index))
+        else {
+            continue;
+        };
+        // White without an owner.
+        let mut rgb = usize::try_from(dot.owner)
+            .ok()
+            .and_then(|owner| palette.get(owner))
+            .map_or([1.0; 3], |color| {
+                let argb = color.to_be_bytes();
+                [argb[1], argb[2], argb[3]].map(|value| f32::from(value) / 255.0)
+            });
+        if always_visible && !overlay.selected {
+            let max = rgb[0].max(rgb[1]).max(rgb[2]);
+            rgb = rgb.map(|value| value + (max - value) * RGB_DESATURATION);
+        }
+        let [r, g, b, a] = [rgb[0], rgb[1], rgb[2], overlay.alpha]
+            .map(|value| (value.clamp(0.0, 1.0) * 255.0).round() as u32);
+        marks.push(Mark {
+            texture,
+            outline: (details.flags & pick::FLAG_OUTLINE != 0).then_some(details.line_thickness),
+            shape,
+            centre: [pickable.position[0], pickable.position[2]],
+            facing: pickable.facing,
+            color: a << 24 | r << 16 | g << 8 | b,
+        });
+    }
+    marks
+}
+
+fn entity_dot(entities: &Entities, id: u32) -> Option<&Dot> {
+    let dots = &entities.dots;
+    let index = dots.binary_search_by_key(&id, |(id, _)| *id).ok()?;
+    Some(&dots[index].1)
+}
+
+/// `CCmpSelectable`'s overlay shape: its own, else the footprint's, else
+/// none, as the engine then draws nothing.
+fn overlay_shape(details: &TemplateDetails) -> Option<OverlayShape> {
+    let flags = details.flags;
+    if flags & pick::FLAG_OVERLAY_SQUARE != 0 {
+        Some(OverlayShape::Square {
+            width: details.overlay_width,
+            depth: details.overlay_depth,
+        })
+    } else if flags & pick::FLAG_OVERLAY_CIRCLE != 0 {
+        Some(OverlayShape::Circle {
+            radius: details.overlay_width,
+        })
+    } else if flags & pick::FLAG_FOOTPRINT == 0 {
+        None
+    } else if flags & pick::FLAG_SQUARE_FOOTPRINT != 0 {
+        Some(OverlayShape::Square {
+            width: details.footprint_width,
+            depth: details.footprint_depth,
+        })
+    } else {
+        Some(OverlayShape::Circle {
+            radius: details.footprint_width,
+        })
+    }
+}
+
+/// What the selection needs of entity `id`, `None` when it does not exist.
+fn selectee(entities: &Entities, id: u32) -> Option<Selectee> {
+    let dot = entity_dot(entities, id)?;
+    let flags = entities
+        .template_details
+        .get(dot.template as usize)
+        .and_then(Option::as_ref)
+        .map_or(0, |details| details.flags);
+    Some(Selectee {
+        owner: dot.owner,
+        always_visible: flags & pick::FLAG_ALWAYS_VISIBLE != 0,
+    })
+}
+
 /// Whether a press moved far enough to be a drag.
 fn dragged(from: [f32; 2], to: [f32; 2]) -> bool {
     (to[0] - from[0]).hypot(to[1] - from[1]) >= DRAG_DELTA
@@ -5399,9 +5641,12 @@ fn wire_camera(canvas: &HtmlCanvasElement, camera: &Rc<RefCell<Camera>>) -> Resu
                 return;
             }
             camera.press = None;
+            camera.band = None;
             camera.picks.push(PickInput::Rect {
                 from: on_canvas(&up_canvas, from, offset),
                 to: on_canvas(&up_canvas, to, offset),
+                add: event.shift_key(),
+                remove: event.ctrl_key(),
             });
         }),
     );
@@ -5426,6 +5671,8 @@ fn wire_camera(canvas: &HtmlCanvasElement, camera: &Rc<RefCell<Camera>>) -> Resu
             camera.picks.push(PickInput::Click {
                 at: on_canvas(&click_canvas, at, offset),
                 count,
+                add: event.shift_key(),
+                remove: event.ctrl_key(),
             });
         }),
     );
@@ -5445,6 +5692,14 @@ fn wire_camera(canvas: &HtmlCanvasElement, camera: &Rc<RefCell<Camera>>) -> Resu
         canvas,
         "mousedown",
         Closure::new(move |event: MouseEvent| {
+            // The right button cancels a bandbox, as the engine's.
+            if event.button() == 2 {
+                let camera = &mut *target.borrow_mut();
+                if camera.band.take().is_some() {
+                    camera.press = None;
+                }
+                return;
+            }
             let turn = match event.button() {
                 1 => 0.0,
                 3 => WHEEL_ROTATE_STEP,
@@ -5469,17 +5724,52 @@ fn wire_camera(canvas: &HtmlCanvasElement, camera: &Rc<RefCell<Camera>>) -> Resu
 
     // On the window, so a drag that leaves the canvas still ends.
     let target = Rc::clone(camera);
+    let move_canvas = canvas.clone();
     listen(
         &window,
         "pointermove",
         Closure::new(move |event: MouseEvent| {
-            target.borrow_mut().pointer_moved(
-                pointer_id(&event),
-                event.buttons(),
-                event.client_x() as f32,
-                event.client_y() as f32,
-            );
+            let camera = &mut *target.borrow_mut();
+            let id = pointer_id(&event);
+            let at = [event.client_x() as f32, event.client_y() as f32];
+            camera.pointer_moved(id, event.buttons(), at[0], at[1]);
+            if let Some((pressed, from, offset)) = camera.press
+                && pressed == id
+                && (camera.band.is_some() || dragged(from, at))
+            {
+                camera.band = Some(Band {
+                    from: on_canvas(&move_canvas, from, offset),
+                    to: on_canvas(&move_canvas, at, offset),
+                    client_from: from,
+                    client_to: at,
+                });
+            }
         }),
+    );
+    // Hover is the mouse's only; a finger is never over anything.
+    let target = Rc::clone(camera);
+    let hover_canvas = canvas.clone();
+    listen(
+        canvas,
+        "pointermove",
+        Closure::new(move |event: MouseEvent| {
+            let mouse = js_sys::Reflect::get(&event, &"pointerType".into())
+                .ok()
+                .and_then(|kind| kind.as_string())
+                .is_none_or(|kind| kind == "mouse");
+            target.borrow_mut().hover = mouse.then(|| {
+                [
+                    event.offset_x() as f32 / hover_canvas.client_width().max(1) as f32,
+                    event.offset_y() as f32 / hover_canvas.client_height().max(1) as f32,
+                ]
+            });
+        }),
+    );
+    let target = Rc::clone(camera);
+    listen(
+        canvas,
+        "pointerleave",
+        Closure::new(move |_: MouseEvent| target.borrow_mut().hover = None),
     );
     for name in ["pointerup", "pointercancel"] {
         let target = Rc::clone(camera);
@@ -5568,6 +5858,13 @@ fn wire_camera(canvas: &HtmlCanvasElement, camera: &Rc<RefCell<Camera>>) -> Resu
                     event.prevent_default();
                     if press {
                         camera.reset_angle_zoom();
+                    }
+                    return;
+                }
+                // The engine's selection.cancel.
+                "Escape" if !ctrl && !shift => {
+                    if press {
+                        camera.picks.push(PickInput::Clear);
                     }
                     return;
                 }

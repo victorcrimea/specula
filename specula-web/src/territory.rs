@@ -29,16 +29,16 @@ const ALPHA_FALLOFF: i32 = 0x20;
 /// `InterpolatePointsRNS`' default.
 const SEGMENT_SAMPLES: usize = 4;
 /// `OverlayRenderer::OVERLAY_VOFFSET`, in metres along the ground normal.
-const OVERLAY_VOFFSET: f32 = 0.2;
+pub const OVERLAY_VOFFSET: f32 = 0.2;
 /// The narrowest a ground line is drawn, in CSS pixels.
 const MIN_PIXELS: f32 = 8.0;
 /// The engine's colour for a player it cannot find.
 const MISSING_COLOR: u32 = 0xFFFF_00FF;
-/// Position, miter, uv f32x3 f32x3 f32x2, colour u8x4, blinking f32;
-/// borders.wgsl.
-const VERTEX_SIZE: usize = 40;
+/// Position, miter, uv f32x3 f32x3 f32x2, colour u8x4, then a float of
+/// the shader's: borders.wgsl's blinking, selection.wgsl's thickness.
+pub const VERTEX_SIZE: usize = 40;
 const UV_OFFSET: usize = 24;
-const VERTEX_ATTRIBUTES: [wgpu::VertexAttribute; 5] = wgpu::vertex_attr_array![
+pub const VERTEX_ATTRIBUTES: [wgpu::VertexAttribute; 5] = wgpu::vertex_attr_array![
     0 => Float32x3,
     1 => Float32x3,
     2 => Float32x2,
@@ -48,8 +48,8 @@ const VERTEX_ATTRIBUTES: [wgpu::VertexAttribute; 5] = wgpu::vertex_attr_array![
 /// Metres per pixel at depth 1, narrowest width in pixels, seconds, unused;
 /// borders.wgsl `Params`.
 const PARAMS_SIZE: u64 = 16;
-/// The engine samples the border textures anisotropically.
-const ANISOTROPY: u16 = 16;
+/// The engine samples the border and selection textures anisotropically.
+pub const ANISOTROPY: u16 = 16;
 /// territory-border.bin's format, built by specula-tools' territory-border
 /// (layout documented there).
 const BORDER_VERSION: u8 = 0;
@@ -326,11 +326,12 @@ fn dot3(a: [f32; 3], b: [f32; 3]) -> f32 {
 
 /// The closed-line part of `CTexturedLineRData::Update`, appended to
 /// `vertices` and `indices`. Each vertex keeps the line's own point and the
-/// miter for a width of 1 m, which the shader scales.
-fn ribbon(
+/// miter for a width of 1 m, which the shader scales, and `extra` for the
+/// shader.
+pub fn ribbon(
     points: &[[f32; 2]],
     color: u32,
-    blinking: bool,
+    extra: f32,
     image: &TerrainImage,
     vertices: &mut Vec<u8>,
     indices: &mut Vec<u32>,
@@ -352,13 +353,12 @@ fn ribbon(
     let first = (vertices.len() / VERTEX_SIZE) as u32;
     let rgba = color.to_be_bytes();
     let color = [rgba[1], rgba[2], rgba[3], rgba[0]];
-    let blinking = if blinking { 1.0f32 } else { 0.0 };
     let mut push = |position: [f32; 3], miter: [f32; 3], uv: [f32; 2]| {
         for value in position.iter().chain(&miter).chain(&uv) {
             vertices.extend_from_slice(&value.to_le_bytes());
         }
         vertices.extend_from_slice(&color);
-        vertices.extend_from_slice(&blinking.to_le_bytes());
+        vertices.extend_from_slice(&extra.to_le_bytes());
     };
     let mut v = 0.0;
     for i in 0..n {
@@ -451,8 +451,17 @@ impl Borders {
         view_layout: &wgpu::BindGroupLayout,
     ) -> Result<Self, String> {
         let (width, height, base, mask) = decode_textures(BORDER_TEXTURES)?;
-        let base = upload_texture(device, queue, "territory border", width, height, base);
-        let mask = upload_texture(device, queue, "territory border mask", width, height, mask);
+        let rgba = wgpu::TextureFormat::Rgba8Unorm;
+        let base = upload_texture(device, queue, "territory border", width, height, rgba, base);
+        let mask = upload_texture(
+            device,
+            queue,
+            "territory border mask",
+            width,
+            height,
+            rgba,
+            mask,
+        );
         // Across the line the texture is clamped, as the engine's
         // CLAMP_TO_BORDER, which every edge texel here already is.
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
@@ -661,7 +670,7 @@ impl Borders {
                 ribbon(
                     &line.points,
                     line.color,
-                    line.blinking,
+                    if line.blinking { 1.0 } else { 0.0 },
                     image,
                     &mut vertices,
                     &mut indices,
@@ -746,29 +755,35 @@ fn decode_textures(bytes: &[u8]) -> Result<(u32, u32, Vec<u8>, Vec<u8>), String>
 }
 
 /// With a box-filtered mip chain: a line a few pixels wide shows the
-/// texture's 32 texels minified.
-fn upload_texture(
+/// texture's 32 texels minified. `format` is `Rgba8Unorm` or `R8Unorm`.
+pub fn upload_texture(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     label: &str,
     width: u32,
     height: u32,
-    rgba: Vec<u8>,
+    format: wgpu::TextureFormat,
+    pixels: Vec<u8>,
 ) -> wgpu::TextureView {
-    let mut levels = vec![(width, height, rgba)];
+    let channels = if format == wgpu::TextureFormat::R8Unorm {
+        1
+    } else {
+        4
+    };
+    let mut levels = vec![(width, height, pixels)];
     while let Some((w, h, pixels)) = levels.last().filter(|(w, h, _)| *w > 1 || *h > 1) {
         let (nw, nh) = ((w / 2).max(1), (h / 2).max(1));
-        let mut next = vec![0u8; (nw * nh * 4) as usize];
+        let mut next = vec![0u8; (nw * nh * channels) as usize];
         for y in 0..nh {
             for x in 0..nw {
-                for channel in 0..4 {
+                for channel in 0..channels {
                     let mut sum = 0u32;
                     for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
                         let sx = (2 * x + dx).min(w - 1);
                         let sy = (2 * y + dy).min(h - 1);
-                        sum += u32::from(pixels[((sy * w + sx) * 4 + channel) as usize]);
+                        sum += u32::from(pixels[((sy * w + sx) * channels + channel) as usize]);
                     }
-                    next[((y * nw + x) * 4 + channel) as usize] = ((sum + 2) / 4) as u8;
+                    next[((y * nw + x) * channels + channel) as usize] = ((sum + 2) / 4) as u8;
                 }
             }
         }
@@ -784,7 +799,7 @@ fn upload_texture(
         mip_level_count: levels.len() as u32,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
-        format: wgpu::TextureFormat::Rgba8Unorm,
+        format,
         usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
         view_formats: &[],
     });
@@ -799,7 +814,7 @@ fn upload_texture(
             pixels,
             wgpu::TexelCopyBufferLayout {
                 offset: 0,
-                bytes_per_row: Some(w * 4),
+                bytes_per_row: Some(w * channels),
                 rows_per_image: None,
             },
             wgpu::Extent3d {

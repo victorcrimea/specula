@@ -1,6 +1,6 @@
 //! The browser client's files where the plain file server is not enough:
-//! baked assets with the brotli copy bake-assets writes next to each, the
-//! wasm and its glue compressed here once per build, and the pages with
+//! baked assets and the selection atlas with the brotli copy their tools
+//! write next to each, the wasm and its glue compressed here once per build, and the pages with
 //! the current glue and wasm versions in their URLs, and the match terrain
 //! with its brotli copy.
 //!
@@ -371,25 +371,49 @@ pub async fn asset(name: &str, accepts: AcceptsBrotli) -> Option<Encoded<NamedFi
     if !plain_name(name) {
         return None;
     }
-    let path = Path::new(WEB_ROOT).join("assets").join(name);
+    // Baked assets are named by their content, so a copy never goes stale.
     // bake-assets leaves the brotli copy out when it would not be smaller.
+    with_brotli(
+        &Path::new(WEB_ROOT).join("assets").join(name),
+        accepts,
+        IMMUTABLE,
+    )
+    .await
+}
+
+/// The selection overlay textures, with the brotli copy selection-atlas
+/// writes next to them, 60 times smaller. The name stays across rebuilds.
+#[rocket::get("/selection.bin")]
+pub async fn selection_atlas(accepts: AcceptsBrotli) -> Option<Encoded<NamedFile>> {
+    with_brotli(
+        &Path::new(WEB_ROOT).join("selection.bin"),
+        accepts,
+        REVALIDATE,
+    )
+    .await
+}
+
+/// `path`, or its brotli copy when the request takes one and it is there.
+async fn with_brotli(
+    path: &Path,
+    accepts: AcceptsBrotli,
+    cache: &'static str,
+) -> Option<Encoded<NamedFile>> {
     let compressed = if accepts.0 {
-        NamedFile::open(brotli_path(&path)).await.ok()
+        NamedFile::open(brotli_path(path)).await.ok()
     } else {
         None
     };
     let brotli = compressed.is_some();
     let body = match compressed {
         Some(file) => file,
-        None => NamedFile::open(&path).await.ok()?,
+        None => NamedFile::open(path).await.ok()?,
     };
     Some(Encoded {
         body,
         content_type: ContentType::Binary,
         brotli,
-        // Baked assets are named by their content, so a copy never goes
-        // stale.
-        cache: IMMUTABLE,
+        cache,
     })
 }
 
