@@ -1624,11 +1624,13 @@ impl Field {
         };
         let (x, z) = (transform.m[0][0], transform.m[2][0]);
         let length = x.hypot(z);
+        // The transform turns the model by rotY + PI, but the overlay's
+        // unitX comes from rotY alone, so it is the model's -x.
         self.pickables.push(Pickable {
             id,
             position: [transform.m[0][3], transform.m[1][3], transform.m[2][3]],
             facing: if length > 0.0 {
-                [x / length, z / length]
+                [-x / length, -z / length]
             } else {
                 [1.0, 0.0]
             },

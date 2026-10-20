@@ -27,8 +27,8 @@ pub struct Pickable {
     pub id: u32,
     /// `ICmpVisual::GetPosition`: the model's translation.
     pub position: [f32; 3],
-    /// Where the model's +x points on the ground, unit length: the engine's
-    /// `unitX` for the interpolated heading.
+    /// The engine's `unitX` for the interpolated heading, unit length: the
+    /// drawn model's -x on the ground, as models are turned by an extra PI.
     pub facing: [f32; 2],
     pub bounds: OrientedBox,
 }
