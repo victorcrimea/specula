@@ -1,6 +1,6 @@
 //! Packs the textures the engine draws selection overlays with
-//! (`CCmpSelectable`) into one file the web client loads, so the browser
-//! needs no PNG decoder.
+//! (`CCmpSelectable`) and status bars with (`StatusBars.js`) into one file
+//! the web client loads, so the browser needs no PNG decoder.
 //!
 //! Usage: selection-atlas [mod dir] [output]
 //! Defaults: ../0ad/binaries/data/mods/public and specula-web/selection.bin.
@@ -12,16 +12,27 @@
 //! (outlines, range overlays) and are kept whole, since a line repeats its
 //! texture along its length.
 //!
-//! Output, format v0, little-endian: u8 version, u32 atlas width, u32
+//! The status bar sprites are the bar textures under
+//! art/textures/ui/session/icons/ and every rank icon in its ranks/. They
+//! have no mask, as `AddSprite` tints a plain texture, and go into an atlas
+//! of their own. A sprite one texel wide (or tall) is repeated across a
+//! square cell: stretched along that side, it looks the same, and the mips
+//! do not blend it with its neighbour.
+//!
+//! Output, format v1, little-endian: u8 version, u32 atlas width, u32
 //! atlas height, u32 quad count, count x {u16 name length, UTF-8 name, u16
 //! mask name length, UTF-8 mask name, u16 x, u16 y, u16 width, u16 height},
 //! u32 line count, count x {u16 name length, UTF-8 name, u16 mask name
 //! length, UTF-8 mask name, u32 width, u32 height}, then the atlas as
 //! width * height RGBA8 pixels and width * height R8 mask values, then
-//! each line's RGBA8 pixels and R8 mask values, all row-major. Only the
+//! each line's RGBA8 pixels and R8 mask values, then u32 sprite atlas
+//! width, u32 sprite atlas height, u32 sprite count, count x {u16 name
+//! length, UTF-8 name, u16 x, u16 y, u16 width, u16 height}, then the
+//! sprite atlas as width * height RGBA8 pixels, all row-major. Only the
 //! mask's red channel is kept, as the engine's `overlayline.fs` reads only
-//! that. Names are relative to art/textures/selection/, as the observer
-//! hook sends them.
+//! that. Quad and line names are relative to art/textures/selection/, as
+//! the observer hook sends them; sprite names to
+//! art/textures/ui/session/icons/, as `StatusBars.js` builds its paths.
 
 use std::fs;
 use std::io::Cursor;
@@ -32,8 +43,23 @@ use std::process::ExitCode;
 
 const DEFAULT_MOD: &str = "../0ad/binaries/data/mods/public";
 const DEFAULT_OUTPUT: &str = "specula-web/selection.bin";
-const VERSION: u8 = 0;
+const VERSION: u8 = 1;
 const TEXTURE_DIRECTORY: &str = "art/textures/selection";
+const SPRITE_DIRECTORY: &str = "art/textures/ui/session/icons";
+/// Every bar `StatusBars.js` draws asks for one of these, so each must exist.
+const BAR_SPRITES: [&str; 9] = [
+    "capture_bar.png",
+    "health_bg.png",
+    "health_fg.png",
+    "pack_bg.png",
+    "pack_fg.png",
+    "supply_bg.png",
+    "supply_fg.png",
+    "upgrade_bg.png",
+    "upgrade_fg.png",
+];
+/// `Identity`'s rank is free text, so all of them.
+const RANK_DIRECTORY: &str = "ranks";
 /// Aura range textures are 1024 px squares, larger than all the rest
 /// together, and nothing draws auras yet.
 const SKIPPED_DIRECTORY: &str = "auras";
@@ -58,10 +84,21 @@ struct Texture {
     mask: Vec<u8>,
 }
 
-struct Placed {
-    texture: Texture,
+struct Sprite {
+    name: String,
+    image: Image,
+}
+
+struct Placed<T> {
+    item: T,
     x: u32,
     y: u32,
+}
+
+struct SpriteAtlas {
+    width: u32,
+    height: u32,
+    sprites: Vec<Placed<Sprite>>,
 }
 
 fn main() -> ExitCode {
@@ -105,14 +142,52 @@ fn main() -> ExitCode {
         }
     }
 
-    let (placed, atlas_height) = match pack(quads) {
+    let sprites = match load_sprites(&mod_dir.join(SPRITE_DIRECTORY)) {
+        Ok(sprites) => sprites,
+        Err(error) => {
+            eprintln!("{error}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let (placed, atlas_height) = match pack(
+        quads,
+        |quad| (quad.base.width, quad.base.height),
+        |quad| &quad.name,
+        ATLAS_WIDTH,
+        ATLAS_HEIGHT_STEP,
+    ) {
         Ok(packed) => packed,
         Err(error) => {
             eprintln!("cannot pack the atlas: {error}");
             return ExitCode::FAILURE;
         }
     };
-    let bytes = match encode(&placed, atlas_height, &lines) {
+    // The largest cell, so every cell divides both sides.
+    let sprite_side = sprites
+        .iter()
+        .map(|sprite| sprite.image.width)
+        .max()
+        .unwrap_or(1);
+    let (sprites, sprite_height) = match pack(
+        sprites,
+        |sprite| (sprite.image.width, sprite.image.height),
+        |sprite| &sprite.name,
+        sprite_side,
+        sprite_side,
+    ) {
+        Ok(packed) => packed,
+        Err(error) => {
+            eprintln!("cannot pack the sprites: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let sprite_atlas = SpriteAtlas {
+        width: sprite_side,
+        height: sprite_height,
+        sprites,
+    };
+    let bytes = match encode(&placed, atlas_height, &lines, &sprite_atlas) {
         Ok(bytes) => bytes,
         Err(error) => {
             eprintln!("cannot write the atlas: {error}");
@@ -140,9 +215,12 @@ fn main() -> ExitCode {
     }
 
     println!(
-        "{} quads in a {ATLAS_WIDTH}x{atlas_height} atlas, {} lines, {} bytes written to {}, {} to {}",
+        "{} quads in a {ATLAS_WIDTH}x{atlas_height} atlas, {} lines, {} sprites in a {}x{} atlas, {} bytes written to {}, {} to {}",
         placed.len(),
         lines.len(),
+        sprite_atlas.sprites.len(),
+        sprite_atlas.width,
+        sprite_atlas.height,
         bytes.len(),
         output.display(),
         packed.len(),
@@ -193,6 +271,55 @@ fn load(root: &Path, name: &str) -> Result<Option<Texture>, String> {
     }))
 }
 
+fn load_sprites(root: &Path) -> Result<Vec<Sprite>, String> {
+    let mut names: Vec<String> = BAR_SPRITES.iter().map(|name| name.to_string()).collect();
+    let ranks = root.join(RANK_DIRECTORY);
+    let entries = fs::read_dir(&ranks).map_err(|error| format!("{}: {error}", ranks.display()))?;
+    let mut rank_names: Vec<String> = entries
+        .flatten()
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|file_name| file_name.ends_with(".png"))
+        .map(|file_name| format!("{RANK_DIRECTORY}/{file_name}"))
+        .collect();
+    rank_names.sort();
+    names.extend(rank_names);
+    names
+        .into_iter()
+        .map(|name| {
+            let image =
+                square(read_png(&root.join(&name))?).map_err(|error| format!("{name}: {error}"))?;
+            Ok(Sprite { name, image })
+        })
+        .collect()
+}
+
+/// Repeats a one texel wide or tall image across a square.
+fn square(image: Image) -> Result<Image, String> {
+    let (width, height) = (image.width, image.height);
+    if width == height {
+        return Ok(image);
+    }
+    let side = width.max(height);
+    let rgba = match (width, height) {
+        (1, _) => image
+            .rgba
+            .chunks_exact(4)
+            .flat_map(|pixel| pixel.repeat(side as usize))
+            .collect(),
+        (_, 1) => image.rgba.repeat(side as usize),
+        _ => {
+            return Err(format!(
+                "{width}x{height} is neither square nor one texel thin"
+            ));
+        }
+    };
+    Ok(Image {
+        width: side,
+        height: side,
+        rgba,
+    })
+}
+
 fn read_png(path: &Path) -> Result<Image, String> {
     fs::read(path)
         .map_err(|error| error.to_string())
@@ -233,48 +360,75 @@ fn decode_png(bytes: &[u8]) -> Result<Image, String> {
     })
 }
 
-/// Each quad sits at a multiple of its own width and height, and the sizes
+/// Each item sits at a multiple of its own width and height, and the sizes
 /// are powers of two, so down the mip chain a texel never averages two
 /// shapes until the shape itself is a single texel.
-fn pack(mut quads: Vec<Texture>) -> Result<(Vec<Placed>, u32), String> {
-    quads.sort_by_key(|quad| std::cmp::Reverse(quad.base.width * quad.base.height));
-    let mut placed: Vec<Placed> = Vec::new();
-    for texture in quads {
-        let (width, height) = (texture.base.width, texture.base.height);
-        if width > ATLAS_WIDTH || !width.is_power_of_two() || !height.is_power_of_two() {
-            return Err(format!("{} is {width}x{height}", texture.name));
+fn pack<T>(
+    mut items: Vec<T>,
+    size: impl Fn(&T) -> (u32, u32),
+    name: impl Fn(&T) -> &str,
+    atlas_width: u32,
+    height_step: u32,
+) -> Result<(Vec<Placed<T>>, u32), String> {
+    items.sort_by_key(|item| {
+        let (width, height) = size(item);
+        std::cmp::Reverse(width * height)
+    });
+    let mut placed: Vec<Placed<T>> = Vec::new();
+    for item in items {
+        let (width, height) = size(&item);
+        if width > atlas_width || !width.is_power_of_two() || !height.is_power_of_two() {
+            return Err(format!("{} is {width}x{height}", name(&item)));
         }
         let free = |x: u32, y: u32| {
             placed.iter().all(|other| {
+                let (other_width, other_height) = size(&other.item);
                 x + width <= other.x
-                    || other.x + other.texture.base.width <= x
+                    || other.x + other_width <= x
                     || y + height <= other.y
-                    || other.y + other.texture.base.height <= y
+                    || other.y + other_height <= y
             })
         };
         let (x, y) = (0..)
             .map(|row| row * height)
             .find_map(|y| {
-                (0..ATLAS_WIDTH / width)
+                (0..atlas_width / width)
                     .map(|column| column * width)
                     .find(|&x| free(x, y))
                     .map(|x| (x, y))
             })
-            .expect("rows below every placed quad are free");
-        placed.push(Placed { texture, x, y });
+            .expect("rows below every placed item are free");
+        placed.push(Placed { item, x, y });
     }
     let bottom = placed
         .iter()
-        .map(|quad| quad.y + quad.texture.base.height)
+        .map(|placed| placed.y + size(&placed.item).1)
         .max()
         .unwrap_or(0);
-    let height = bottom.div_ceil(ATLAS_HEIGHT_STEP) * ATLAS_HEIGHT_STEP;
+    let height = bottom.div_ceil(height_step) * height_step;
     if height > u32::from(u16::MAX) {
         return Err(format!(
-            "{ATLAS_WIDTH}x{height} does not fit u16 rectangles"
+            "{atlas_width}x{height} does not fit u16 rectangles"
         ));
     }
     Ok((placed, height))
+}
+
+fn blit(
+    atlas: &mut [u8],
+    atlas_width: u32,
+    x: u32,
+    y: u32,
+    image: &[u8],
+    width: u32,
+    channels: usize,
+) {
+    let width = width as usize;
+    let row_bytes = width * channels;
+    for (row, source) in image.chunks_exact(row_bytes).enumerate() {
+        let start = ((y as usize + row) * atlas_width as usize + x as usize) * channels;
+        atlas[start..start + row_bytes].copy_from_slice(source);
+    }
 }
 
 fn push_name(out: &mut Vec<u8>, name: &str) -> Result<(), String> {
@@ -284,7 +438,12 @@ fn push_name(out: &mut Vec<u8>, name: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn encode(placed: &[Placed], atlas_height: u32, lines: &[Texture]) -> Result<Vec<u8>, String> {
+fn encode(
+    placed: &[Placed<Texture>],
+    atlas_height: u32,
+    lines: &[Texture],
+    sprites: &SpriteAtlas,
+) -> Result<Vec<u8>, String> {
     let mut out = vec![VERSION];
     out.extend_from_slice(&ATLAS_WIDTH.to_le_bytes());
     out.extend_from_slice(&atlas_height.to_le_bytes());
@@ -293,20 +452,31 @@ fn encode(placed: &[Placed], atlas_height: u32, lines: &[Texture]) -> Result<Vec
     let mut atlas = vec![0u8; pixels * 4];
     let mut atlas_mask = vec![0u8; pixels];
     for quad in placed {
-        let texture = &quad.texture;
+        let texture = &quad.item;
         push_name(&mut out, &texture.name)?;
         push_name(&mut out, &texture.mask_name)?;
         for value in [quad.x, quad.y, texture.base.width, texture.base.height] {
             out.extend_from_slice(&(value as u16).to_le_bytes());
         }
-        let width = texture.base.width as usize;
-        for row in 0..texture.base.height as usize {
-            let start = (quad.y as usize + row) * ATLAS_WIDTH as usize + quad.x as usize;
-            atlas[start * 4..(start + width) * 4]
-                .copy_from_slice(&texture.base.rgba[row * width * 4..(row + 1) * width * 4]);
-            atlas_mask[start..start + width]
-                .copy_from_slice(&texture.mask[row * width..(row + 1) * width]);
-        }
+        let width = texture.base.width;
+        blit(
+            &mut atlas,
+            ATLAS_WIDTH,
+            quad.x,
+            quad.y,
+            &texture.base.rgba,
+            width,
+            4,
+        );
+        blit(
+            &mut atlas_mask,
+            ATLAS_WIDTH,
+            quad.x,
+            quad.y,
+            &texture.mask,
+            width,
+            1,
+        );
     }
 
     out.extend_from_slice(&(lines.len() as u32).to_le_bytes());
@@ -322,5 +492,27 @@ fn encode(placed: &[Placed], atlas_height: u32, lines: &[Texture]) -> Result<Vec
         out.extend_from_slice(&line.base.rgba);
         out.extend_from_slice(&line.mask);
     }
+
+    out.extend_from_slice(&sprites.width.to_le_bytes());
+    out.extend_from_slice(&sprites.height.to_le_bytes());
+    out.extend_from_slice(&(sprites.sprites.len() as u32).to_le_bytes());
+    let mut sprite_atlas = vec![0u8; (sprites.width * sprites.height) as usize * 4];
+    for sprite in &sprites.sprites {
+        let image = &sprite.item.image;
+        push_name(&mut out, &sprite.item.name)?;
+        for value in [sprite.x, sprite.y, image.width, image.height] {
+            out.extend_from_slice(&(value as u16).to_le_bytes());
+        }
+        blit(
+            &mut sprite_atlas,
+            sprites.width,
+            sprite.x,
+            sprite.y,
+            &image.rgba,
+            image.width,
+            4,
+        );
+    }
+    out.extend_from_slice(&sprite_atlas);
     Ok(out)
 }

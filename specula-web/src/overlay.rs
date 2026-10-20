@@ -19,7 +19,7 @@ use crate::unit::create_buffer;
 
 /// selection.bin's format, built by specula-tools' selection-atlas (layout
 /// documented there).
-const ATLAS_VERSION: u8 = 0;
+const ATLAS_VERSION: u8 = 1;
 /// Four corners f32x3, the atlas rect f32x4, colour u8x4; selection.wgsl.
 const QUAD_SIZE: usize = 68;
 const QUAD_ATTRIBUTES: [wgpu::VertexAttribute; 6] = wgpu::vertex_attr_array![
@@ -529,6 +529,14 @@ fn decode(bytes: &[u8]) -> Result<Atlas, &'static str> {
             mask: cursor.take(texels)?.to_vec(),
         });
     }
+    // The status bar sprites, which nothing draws until C18.
+    let sprite_width = cursor.u32()? as usize;
+    let sprite_height = cursor.u32()? as usize;
+    for _ in 0..cursor.u32()? {
+        cursor.name()?;
+        cursor.take(4 * 2)?;
+    }
+    cursor.take(sprite_width * sprite_height * 4)?;
     if !cursor.0.is_empty() {
         return Err("selection.bin has trailing bytes");
     }
