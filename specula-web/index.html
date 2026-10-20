@@ -158,7 +158,8 @@ html, body { margin: 0; height: 100%; background: #0f1214; }
 #details .group, #details .cell { position: absolute; width: 38px; height: 38px;
   padding: 0; margin: 0; border: 0;
   background: var(--gui-portrait-black) 0 0 / 100% 100%; }
-#details .group { cursor: pointer; }
+/* A button takes neither colour nor font from its parent by default. */
+#details .group { cursor: pointer; color: inherit; font-family: inherit; }
 #details .group:hover::after { content: ""; position: absolute; inset: 0;
   background: rgb(42, 42, 42); mix-blend-mode: plus-lighter; pointer-events: none; }
 #details :is(.group, .cell) > .owner { position: absolute; inset: 0; }
