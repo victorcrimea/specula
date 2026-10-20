@@ -109,7 +109,8 @@ impl Selection {
     }
 
     /// Whether `id` is selected or highlighted, as the engine's
-    /// `RangeOverlayManager` is told to show its range circles.
+    /// `RangeOverlayManager` is told to show its range circles, and
+    /// `recalculateStatusBarDisplay` its status bars.
     pub fn shows_ranges(&self, id: u32) -> bool {
         self.highlighted.contains(&id) || self.selected.contains(&id)
     }

@@ -43,6 +43,8 @@ const MOTION_HITPOINTS: u8 = 2;
 const MOTION_CAPTURE: u8 = 4;
 /// `TemplateDetails::components` bit for Health.
 const COMPONENT_HEALTH: u32 = 1;
+/// And for ResourceSupply.
+pub const COMPONENT_RESOURCE_SUPPLY: u32 = 4;
 const SOUND_ENTITY: u8 = 0;
 const SOUND_POSITION: u8 = 1;
 const SOUND_PLAYER: u8 = 2;

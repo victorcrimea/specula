@@ -1,6 +1,8 @@
 // Selection overlays on the ground (overlay.rs): the quads under units, as
 // the engine's overlay quads, and the outlines round buildings, as its
-// CTexturedLineRData lines. Both shade as its overlayline shader.
+// CTexturedLineRData lines. Both shade as its overlayline shader. The
+// status bar sprites reuse the quads' vertex stage, their corners already
+// facing the camera.
 
 struct View {
     view_proj: mat4x4<f32>,
@@ -73,4 +75,11 @@ fn fs_main(in: Varyings) -> @location(0) vec4<f32> {
     let base = textureSample(base_texture, overlay_sampler, in.uv);
     let mask = textureSample(mask_texture, overlay_sampler, in.uv);
     return vec4<f32>(mix(base.rgb, in.color.rgb, mask.r), in.color.a * base.a);
+}
+
+// The status bars, as the engine's foreground_overlay shader: a tinted
+// texture with no mask.
+@fragment
+fn fs_sprite(in: Varyings) -> @location(0) vec4<f32> {
+    return textureSample(base_texture, overlay_sampler, in.uv) * in.color;
 }

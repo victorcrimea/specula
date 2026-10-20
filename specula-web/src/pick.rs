@@ -21,6 +21,8 @@ pub const FLAG_SQUARE_FOOTPRINT: u32 = 32;
 pub const FLAG_OVERLAY_SQUARE: u32 = 64;
 pub const FLAG_OVERLAY_CIRCLE: u32 = 128;
 pub const FLAG_FOOTPRINT: u32 = 256;
+pub const FLAG_STATUS_BARS: u32 = 512;
+pub const FLAG_INFINITE_SUPPLY: u32 = 1024;
 
 /// An entity drawn this frame, in world space.
 pub struct Pickable {

@@ -2,11 +2,14 @@
 //! (`RenderOverlaysAfterWater`): the outlines round buildings, then the
 //! quads under units, rings and stars (`CCmpSelectable`), with the
 //! textures of `/selection.bin`. Nothing draws until it has loaded.
+//! Also the status bars the engine draws last of all
+//! (`RenderForegroundOverlays`), with that file's sprite atlas.
 //!
 //! A texture is found by the name the template gives; its mask is the one
 //! selection-atlas paired with it, which is the template's own in every
 //! template of the game.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::f32::consts::PI;
 
@@ -56,10 +59,28 @@ pub struct Mark<'a> {
     pub color: u32,
 }
 
+/// One `CCmpOverlayRenderer` sprite this frame.
+pub struct Sprite<'a> {
+    /// Relative to art/textures/ui/session/icons/.
+    pub name: Cow<'a, str>,
+    /// The interpolated position plus the sprite's offset.
+    pub anchor: [f32; 3],
+    /// Corners along the camera's right and up, from the anchor.
+    pub x0: f32,
+    pub y0: f32,
+    pub x1: f32,
+    pub y1: f32,
+    /// 0xAARRGGBB.
+    pub color: u32,
+}
+
 struct Textures {
     group: wgpu::BindGroup,
     /// Quad name to u0, v0, u1, v1 in the atlas.
     quads: HashMap<String, [f32; 4]>,
+    sprite_group: wgpu::BindGroup,
+    /// Sprite name to u0, v0, u1, v1 in the sprite atlas.
+    sprites: HashMap<String, [f32; 4]>,
     /// Line texture name to its own group.
     lines: HashMap<String, wgpu::BindGroup>,
 }
@@ -67,6 +88,7 @@ struct Textures {
 pub struct Overlays {
     quad_pipeline: wgpu::RenderPipeline,
     line_pipeline: wgpu::RenderPipeline,
+    sprite_pipeline: wgpu::RenderPipeline,
     layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
     textures: Option<Textures>,
@@ -76,6 +98,8 @@ pub struct Overlays {
     line_indices: wgpu::Buffer,
     /// Per line texture, its index range.
     line_draws: Vec<(String, std::ops::Range<u32>)>,
+    sprites: wgpu::Buffer,
+    sprite_count: u32,
 }
 
 impl Overlays {
@@ -127,10 +151,27 @@ impl Overlays {
             bind_group_layouts: &[Some(view_layout), Some(&layout)],
             immediate_size: 0,
         });
+        // On the ground, as the territory borders: hidden behind what
+        // stands in front, hiding nothing itself.
+        let ground_depth = wgpu::DepthStencilState {
+            format: DEPTH_FORMAT,
+            depth_write_enabled: Some(false),
+            depth_compare: Some(wgpu::CompareFunction::Less),
+            stencil: Default::default(),
+            // Lifted only 0.2 m, which far away the depth buffer cannot
+            // tell from the ground.
+            bias: wgpu::DepthBiasState {
+                constant: -2,
+                slope_scale: -1.0,
+                clamp: 0.0,
+            },
+        };
         let pipeline = |label: &str,
                         entry_point: &str,
+                        fragment_entry_point: &str,
                         buffer: wgpu::VertexBufferLayout,
-                        topology: wgpu::PrimitiveTopology| {
+                        topology: wgpu::PrimitiveTopology,
+                        depth_stencil: wgpu::DepthStencilState| {
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some(label),
                 layout: Some(&pipeline_layout),
@@ -144,25 +185,11 @@ impl Overlays {
                     topology,
                     ..Default::default()
                 },
-                // On the ground, as the territory borders: hidden behind
-                // what stands in front, hiding nothing itself.
-                depth_stencil: Some(wgpu::DepthStencilState {
-                    format: DEPTH_FORMAT,
-                    depth_write_enabled: Some(false),
-                    depth_compare: Some(wgpu::CompareFunction::Less),
-                    stencil: Default::default(),
-                    // Lifted only 0.2 m, which far away the depth buffer
-                    // cannot tell from the ground.
-                    bias: wgpu::DepthBiasState {
-                        constant: -2,
-                        slope_scale: -1.0,
-                        clamp: 0.0,
-                    },
-                }),
+                depth_stencil: Some(depth_stencil),
                 multisample: Default::default(),
                 fragment: Some(wgpu::FragmentState {
                     module: &shader,
-                    entry_point: Some("fs_main"),
+                    entry_point: Some(fragment_entry_point),
                     compilation_options: Default::default(),
                     targets: &[Some(wgpu::ColorTargetState {
                         format,
@@ -174,30 +201,51 @@ impl Overlays {
                 cache: None,
             })
         };
+        let quad_layout = wgpu::VertexBufferLayout {
+            array_stride: QUAD_SIZE as u64,
+            step_mode: wgpu::VertexStepMode::Instance,
+            attributes: &QUAD_ATTRIBUTES,
+        };
         let quad_pipeline = pipeline(
             "selection quad",
             "vs_quad",
-            wgpu::VertexBufferLayout {
-                array_stride: QUAD_SIZE as u64,
-                step_mode: wgpu::VertexStepMode::Instance,
-                attributes: &QUAD_ATTRIBUTES,
-            },
+            "fs_main",
+            quad_layout.clone(),
             wgpu::PrimitiveTopology::TriangleStrip,
+            ground_depth.clone(),
         );
         let line_pipeline = pipeline(
             "selection outline",
             "vs_line",
+            "fs_main",
             wgpu::VertexBufferLayout {
                 array_stride: territory::VERTEX_SIZE as u64,
                 step_mode: wgpu::VertexStepMode::Vertex,
                 attributes: &territory::VERTEX_ATTRIBUTES,
             },
             wgpu::PrimitiveTopology::TriangleList,
+            ground_depth,
+        );
+        // Never hidden by models, as the engine's foreground overlays.
+        let sprite_pipeline = pipeline(
+            "status bars",
+            "vs_quad",
+            "fs_sprite",
+            quad_layout,
+            wgpu::PrimitiveTopology::TriangleStrip,
+            wgpu::DepthStencilState {
+                format: DEPTH_FORMAT,
+                depth_write_enabled: Some(false),
+                depth_compare: Some(wgpu::CompareFunction::Always),
+                stencil: Default::default(),
+                bias: Default::default(),
+            },
         );
         let empty = |label, usage| create_buffer(device, queue, label, &[], usage);
         Overlays {
             quad_pipeline,
             line_pipeline,
+            sprite_pipeline,
             layout,
             sampler,
             textures: None,
@@ -206,6 +254,8 @@ impl Overlays {
             line_vertices: empty("selection outline vertices", wgpu::BufferUsages::VERTEX),
             line_indices: empty("selection outline indices", wgpu::BufferUsages::INDEX),
             line_draws: Vec::new(),
+            sprites: empty("status bars", wgpu::BufferUsages::VERTEX),
+            sprite_count: 0,
         }
     }
 
@@ -262,6 +312,15 @@ impl Overlays {
             atlas.rgba,
             atlas.mask,
         );
+        // fs_sprite reads no mask, but the layout has one; at 64x832 a
+        // blank one costs less than a layout of its own.
+        let sprite_group = group(
+            "status bar atlas",
+            atlas.sprite_width,
+            atlas.sprite_height,
+            atlas.sprite_rgba,
+            vec![0; (atlas.sprite_width * atlas.sprite_height) as usize],
+        );
         let lines = atlas
             .lines
             .into_iter()
@@ -273,6 +332,8 @@ impl Overlays {
         self.textures = Some(Textures {
             group: quads_group,
             quads: atlas.quads,
+            sprite_group,
+            sprites: atlas.sprites,
             lines,
         });
         Ok(())
@@ -314,18 +375,12 @@ impl Overlays {
             let [ux, uz] = mark.facing;
             let unit_z = [-uz, ux];
             let [cx, cz] = mark.centre;
-            for (sx, sz) in [(-1.0, 1.0), (-1.0, -1.0), (1.0, -1.0), (1.0, 1.0)] {
+            let corners = [(-1.0, 1.0), (-1.0, -1.0), (1.0, -1.0), (1.0, 1.0)].map(|(sx, sz)| {
                 let x = cx + ux * sx * half_x + unit_z[0] * sz * half_z;
                 let z = cz + uz * sx * half_x + unit_z[1] * sz * half_z;
-                for value in [x, height(x, z), z] {
-                    quads.extend_from_slice(&value.to_le_bytes());
-                }
-            }
-            for value in rect {
-                quads.extend_from_slice(&value.to_le_bytes());
-            }
-            let argb = mark.color.to_be_bytes();
-            quads.extend_from_slice(&[argb[1], argb[2], argb[3], argb[0]]);
+                [x, height(x, z), z]
+            });
+            push_quad(&mut quads, corners, *rect, mark.color);
         }
         self.quad_count = (quads.len() / QUAD_SIZE) as u32;
         upload(device, queue, &mut self.quads, "selection quads", &quads);
@@ -369,6 +424,54 @@ impl Overlays {
             "selection outline indices",
             &index_bytes,
         );
+    }
+
+    /// Lays this frame's status bar `sprites` across the camera's `right`
+    /// and `up`, as `RenderForegroundOverlays`.
+    pub fn prepare_sprites(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        sprites: &[Sprite],
+        right: [f32; 3],
+        up: [f32; 3],
+    ) {
+        self.sprite_count = 0;
+        let Some(textures) = &self.textures else {
+            return;
+        };
+        let mut quads = Vec::new();
+        for sprite in sprites {
+            let Some(rect) = textures.sprites.get(sprite.name.as_ref()) else {
+                continue;
+            };
+            let at = |x: f32, y: f32| {
+                [0, 1, 2].map(|axis| sprite.anchor[axis] + right[axis] * x + up[axis] * y)
+            };
+            // The image's top row at the sprite's top.
+            let corners = [
+                at(sprite.x0, sprite.y1),
+                at(sprite.x0, sprite.y0),
+                at(sprite.x1, sprite.y0),
+                at(sprite.x1, sprite.y1),
+            ];
+            push_quad(&mut quads, corners, *rect, sprite.color);
+        }
+        self.sprite_count = (quads.len() / QUAD_SIZE) as u32;
+        upload(device, queue, &mut self.sprites, "status bars", &quads);
+    }
+
+    /// Last of all, the view bind group at 0.
+    pub fn draw_sprites(&self, pass: &mut wgpu::RenderPass) {
+        let Some(textures) = &self.textures else {
+            return;
+        };
+        if self.sprite_count > 0 {
+            pass.set_pipeline(&self.sprite_pipeline);
+            pass.set_bind_group(1, &textures.sprite_group, &[]);
+            pass.set_vertex_buffer(0, self.sprites.slice(..));
+            pass.draw(0..4, 0..self.sprite_count);
+        }
     }
 
     /// Expects the view bind group at 0.
@@ -446,6 +549,16 @@ fn outline_points(mark: &Mark, thickness: f32) -> Vec<[f32; 2]> {
     }
 }
 
+/// One quad instance: `corners` top left, bottom left, bottom right, top
+/// right, as selection.wgsl's `vs_quad` takes them.
+fn push_quad(out: &mut Vec<u8>, corners: [[f32; 3]; 4], rect: [f32; 4], color: u32) {
+    for value in corners.into_iter().flatten().chain(rect) {
+        out.extend_from_slice(&value.to_le_bytes());
+    }
+    let argb = color.to_be_bytes();
+    out.extend_from_slice(&[argb[1], argb[2], argb[3], argb[0]]);
+}
+
 /// Writes `bytes` to `buffer`, growing it in powers of two as particle
 /// instances do.
 fn upload(
@@ -476,6 +589,10 @@ struct Atlas {
     rgba: Vec<u8>,
     mask: Vec<u8>,
     lines: Vec<Line>,
+    sprite_width: u32,
+    sprite_height: u32,
+    sprites: HashMap<String, [f32; 4]>,
+    sprite_rgba: Vec<u8>,
 }
 
 struct Line {
@@ -497,17 +614,7 @@ fn decode(bytes: &[u8]) -> Result<Atlas, &'static str> {
     for _ in 0..cursor.u32()? {
         let name = cursor.name()?;
         cursor.name()?;
-        let [x, y, w, h] =
-            [cursor.u16()?, cursor.u16()?, cursor.u16()?, cursor.u16()?].map(f32::from);
-        quads.insert(
-            name,
-            [
-                x / width as f32,
-                y / height as f32,
-                (x + w) / width as f32,
-                (y + h) / height as f32,
-            ],
-        );
+        quads.insert(name, cursor.rect(width, height)?);
     }
     let mut sizes = Vec::new();
     for _ in 0..cursor.u32()? {
@@ -529,14 +636,16 @@ fn decode(bytes: &[u8]) -> Result<Atlas, &'static str> {
             mask: cursor.take(texels)?.to_vec(),
         });
     }
-    // The status bar sprites, which nothing draws until C18.
-    let sprite_width = cursor.u32()? as usize;
-    let sprite_height = cursor.u32()? as usize;
+    let sprite_width = cursor.u32()?;
+    let sprite_height = cursor.u32()?;
+    let mut sprites = HashMap::new();
     for _ in 0..cursor.u32()? {
-        cursor.name()?;
-        cursor.take(4 * 2)?;
+        let name = cursor.name()?;
+        sprites.insert(name, cursor.rect(sprite_width, sprite_height)?);
     }
-    cursor.take(sprite_width * sprite_height * 4)?;
+    let sprite_rgba = cursor
+        .take(sprite_width as usize * sprite_height as usize * 4)?
+        .to_vec();
     if !cursor.0.is_empty() {
         return Err("selection.bin has trailing bytes");
     }
@@ -547,6 +656,10 @@ fn decode(bytes: &[u8]) -> Result<Atlas, &'static str> {
         rgba,
         mask,
         lines,
+        sprite_width,
+        sprite_height,
+        sprites,
+        sprite_rgba,
     })
 }
 
@@ -572,6 +685,14 @@ impl<'a> Cursor<'a> {
 
     fn u32(&mut self) -> Result<u32, &'static str> {
         Ok(u32::from_le_bytes(self.take(4)?.try_into().unwrap()))
+    }
+
+    /// A u16 x, y, width and height in an atlas this size, as u0, v0, u1,
+    /// v1.
+    fn rect(&mut self, width: u32, height: u32) -> Result<[f32; 4], &'static str> {
+        let [x, y, w, h] = [self.u16()?, self.u16()?, self.u16()?, self.u16()?].map(f32::from);
+        let (width, height) = (width as f32, height as f32);
+        Ok([x / width, y / height, (x + w) / width, (y + h) / height])
     }
 
     fn name(&mut self) -> Result<String, &'static str> {

@@ -12,8 +12,10 @@
 //! Decals (a field's soil, the dirt under a building) are drawn over the
 //! ground's own triangles, at every distance.
 
+use std::borrow::Cow;
 use std::cell::Cell;
 use std::cell::RefCell;
+use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::hash::DefaultHasher;
@@ -73,6 +75,7 @@ use crate::impostor;
 use crate::overlay::Mark;
 use crate::overlay::OverlayShape;
 use crate::overlay::Overlays;
+use crate::overlay::Sprite;
 use crate::particles;
 use crate::particles::Owner;
 use crate::particles::Particles;
@@ -91,6 +94,7 @@ use crate::selection::Selection;
 use crate::shadow;
 use crate::shadow::Shadow;
 use crate::sky::Sky;
+use crate::stream::COMPONENT_RESOURCE_SUPPLY;
 use crate::stream::Dot;
 use crate::stream::RangeSet;
 use crate::stream::Scene;
@@ -450,6 +454,8 @@ struct Entities {
     variant_sets: Vec<VariantSet>,
     variable_sets: Vec<VariableSet>,
     range_sets: Vec<RangeSet>,
+    /// `Scene::captures`.
+    captures: BTreeMap<u32, Vec<u8>>,
 }
 
 pub struct Field {
@@ -3698,6 +3704,7 @@ impl View for Field {
         entities
             .dots
             .extend(scene.dots.iter().map(|(id, dot)| (*id, *dot)));
+        entities.captures.clone_from(&scene.captures);
         self.shots.retain(|id, _| scene.shots.contains_key(id));
         for (id, shot) in &scene.shots {
             if self.shots.contains_key(id) {
@@ -3938,6 +3945,14 @@ impl View for Field {
             &marks,
             self.ground.as_ref().map(|ground| &ground.image),
         );
+        let sprites = status_bar_sprites(
+            &self.pickables,
+            &self.entities,
+            &self.selection,
+            &self.palette,
+        );
+        self.overlays
+            .prepare_sprites(&self.device, &self.queue, &sprites, right, up);
         self.far.take_loaded(&self.device, &self.queue);
         let mut prepared = Vec::new();
         for (key, request) in self.far.next_bakes(&self.device) {
@@ -4379,6 +4394,9 @@ impl View for Field {
                 &self.shadow.bind_group,
                 particle_texture,
             );
+            // After everything, as `RenderForegroundOverlays`.
+            pass.set_bind_group(0, &self.view_bind_group, &[]);
+            self.overlays.draw_sprites(&mut pass);
         }
         if let Some(plan) = post {
             self.post.draw(&mut encoder, plan, &screen, &self.timer);
@@ -5495,21 +5513,7 @@ fn overlay_marks<'a>(
     ranges: [bool; 3],
 ) -> Vec<Mark<'a>> {
     let mut marks = Vec::new();
-    // White without an owner.
-    let owner_rgb = |owner: i32| {
-        usize::try_from(owner)
-            .ok()
-            .and_then(|owner| palette.get(owner))
-            .map_or([1.0; 3], |color| {
-                let argb = color.to_be_bytes();
-                [argb[1], argb[2], argb[3]].map(|value| f32::from(value) / 255.0)
-            })
-    };
-    let packed = |rgb: [f32; 3], alpha: f32| {
-        let [r, g, b, a] = [rgb[0], rgb[1], rgb[2], alpha]
-            .map(|value| (value.clamp(0.0, 1.0) * 255.0).round() as u32);
-        a << 24 | r << 16 | g << 8 | b
-    };
+    let owner_rgb = |owner: i32| owner_rgb(palette, owner);
     for pickable in pickables {
         let Some(dot) = entity_dot(entities, pickable.id) else {
             continue;
@@ -5584,6 +5588,140 @@ fn overlay_marks<'a>(
         });
     }
     marks
+}
+
+/// Player `owner`'s displayed colour, white without an owner.
+fn owner_rgb(palette: &[u32], owner: i32) -> [f32; 3] {
+    usize::try_from(owner)
+        .ok()
+        .and_then(|owner| palette.get(owner))
+        .map_or([1.0; 3], |color| {
+            let argb = color.to_be_bytes();
+            [argb[1], argb[2], argb[3]].map(|value| f32::from(value) / 255.0)
+        })
+}
+
+/// 0xAARRGGBB.
+fn packed(rgb: [f32; 3], alpha: f32) -> u32 {
+    let [r, g, b, a] =
+        [rgb[0], rgb[1], rgb[2], alpha].map(|value| (value.clamp(0.0, 1.0) * 255.0).round() as u32);
+    a << 24 | r << 16 | g << 8 | b
+}
+
+/// The sprites `StatusBars.js` adds for each drawn entity that is
+/// selected or highlighted, in its order. Experience, pack, upgrade and
+/// finite supply bars need stream 2; aura icons are not in the atlas.
+fn status_bar_sprites<'a>(
+    pickables: &[Pickable],
+    entities: &'a Entities,
+    selection: &Selection,
+    palette: &[u32],
+) -> Vec<Sprite<'a>> {
+    const WHITE: u32 = 0xffff_ffff;
+    let mut sprites = Vec::new();
+    for pickable in pickables {
+        if !selection.shows_ranges(pickable.id) {
+            continue;
+        }
+        let Some(dot) = entity_dot(entities, pickable.id) else {
+            continue;
+        };
+        let Some(details) = entities
+            .template_details
+            .get(dot.template as usize)
+            .and_then(Option::as_ref)
+        else {
+            continue;
+        };
+        if details.flags & pick::FLAG_STATUS_BARS == 0 {
+            continue;
+        }
+        let [x, y, z] = pickable.position;
+        let anchor = [x, y + details.bar_offset, z];
+        let width = details.bar_width;
+        let height = details.bar_height;
+        let mut yoffset = 0.0;
+        // `AddBar`.
+        let bar = |sprites: &mut Vec<Sprite<'a>>,
+                   yoffset: &mut f32,
+                   [background, foreground]: [&'static str; 2],
+                   amount: f32| {
+            for (name, x1) in [
+                (background, width / 2.0),
+                (foreground, width * (amount - 0.5)),
+            ] {
+                sprites.push(Sprite {
+                    name: Cow::Borrowed(name),
+                    anchor,
+                    x0: -width / 2.0,
+                    y0: *yoffset,
+                    x1,
+                    y1: height + *yoffset,
+                    color: WHITE,
+                });
+            }
+            *yoffset += height * 1.2;
+        };
+        // `AddResourceSupplyBar`, of which only an infinite one is known.
+        if details.components & COMPONENT_RESOURCE_SUPPLY != 0
+            && details.flags & pick::FLAG_INFINITE_SUPPLY != 0
+        {
+            bar(
+                &mut sprites,
+                &mut yoffset,
+                ["supply_bg.png", "supply_fg.png"],
+                1.0,
+            );
+        }
+        // `AddCaptureBar`: the owner's share first, then the others.
+        if let Some(shares) = entities.captures.get(&pickable.id)
+            && let Ok(owner) = usize::try_from(dot.owner)
+        {
+            let mut start = -width / 2.0;
+            let order = std::iter::once(owner)
+                .chain((0..shares.len()).filter(|&player| player != owner && shares[player] > 0));
+            for player in order {
+                let size = width * f32::from(shares.get(player).copied().unwrap_or(0)) / 255.0;
+                sprites.push(Sprite {
+                    name: Cow::Borrowed("capture_bar.png"),
+                    anchor,
+                    x0: start,
+                    y0: yoffset,
+                    x1: start + size,
+                    y1: height + yoffset,
+                    color: packed(owner_rgb(palette, player as i32), 1.0),
+                });
+                start += size;
+            }
+            yoffset += height * 1.2;
+        }
+        if dot.hitpoints > 0 {
+            bar(
+                &mut sprites,
+                &mut yoffset,
+                ["health_bg.png", "health_fg.png"],
+                f32::from(dot.hitpoints) / 255.0,
+            );
+        }
+        // `AddRankIcon`, as `gui.session.rankabovestatusbar` defaults to on.
+        if let Some(rank) = (details.rank as usize)
+            .checked_sub(1)
+            .and_then(|index| entities.strings.get(index))
+            .filter(|rank| !rank.is_empty())
+        {
+            let size = width / 2.0;
+            sprites.push(Sprite {
+                name: Cow::Owned(format!("ranks/{rank}.png")),
+                anchor: [x, y + details.bar_offset + 0.1, z],
+                x0: -size / 2.0,
+                y0: yoffset,
+                x1: size / 2.0,
+                y1: size + yoffset,
+                color: WHITE,
+            });
+        }
+    }
+    sprites
 }
 
 fn entity_dot(entities: &Entities, id: u32) -> Option<&Dot> {
