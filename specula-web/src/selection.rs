@@ -129,8 +129,9 @@ impl Selection {
     /// `addList`. A broadcast viewer observes, so the engine's refusal to
     /// add to a lone entity of another player is left out: every entity
     /// belongs to another player. Gaia still stays out of a selection of
-    /// several, as the engine's `isUnowned` for an observer.
-    pub fn add_list(&mut self, ids: &[u32], look: Lookup) {
+    /// several, as the engine's `isUnowned` for an observer. Returns the
+    /// first entity added, whose select sound the engine plays.
+    pub fn add_list(&mut self, ids: &[u32], look: Lookup) -> Option<u32> {
         let mut added = Vec::new();
         for &id in ids {
             if self.selected.len() >= MAX_SELECTION {
@@ -149,6 +150,7 @@ impl Selection {
             self.selected.push(id);
         }
         self.set_highlight(&added, 1.0, true, look);
+        added.first().copied()
     }
 
     /// `removeList`.
@@ -210,6 +212,7 @@ impl Selection {
                 }
             }
             self.reset(look);
+            // `rebuildSelection` adds quietly.
             self.add_list(&ids, look);
         }
         self.selected.retain(|id| look(*id).is_some());

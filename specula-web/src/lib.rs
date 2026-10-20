@@ -166,6 +166,15 @@ pub struct AnimationSound {
     pub position: [f32; 3],
 }
 
+/// The select sound of an entity a selection just added.
+pub struct SelectSound {
+    /// The sound group, relative to audio/.
+    pub group: String,
+    pub owner: i32,
+    /// In metres.
+    pub position: [f32; 3],
+}
+
 /// What draws the match: the minimap view of `/map.html` or the 3D view
 /// of `/`. The stream, playback and controls are the same.
 trait View {
@@ -262,6 +271,10 @@ trait View {
     }
     /// The animation sounds due since the last call.
     fn take_animation_sounds(&mut self, _progress: f32) -> Vec<AnimationSound> {
+        Vec::new()
+    }
+    /// The select sounds of the selections made since the last call.
+    fn take_select_sounds(&mut self) -> Vec<SelectSound> {
         Vec::new()
     }
     /// Where the camera is, for the benchmark to hold it there.
@@ -602,6 +615,8 @@ impl App {
     }
 
     fn play_sounds(&mut self, now: f64, progress: f32) {
+        // Taken even when nothing plays them, so they do not pile up.
+        let selects = self.renderer.take_select_sounds();
         let Some(sound) = &mut self.sound else {
             return;
         };
@@ -617,6 +632,14 @@ impl App {
                         .play_group(group, animation.position, owned, now);
                 }
             }
+        }
+        // `CCmpSoundManager::PlaySoundGroup` with no LOS test: selection
+        // under a player perspective works as under Observer.
+        for select in selects {
+            let owned = matches!(self.perspective, Perspective::Player(shown) if usize::try_from(select.owner) == Ok(shown));
+            sound
+                .audio
+                .play_group(&select.group, select.position, owned, now);
         }
         let (civ, kind) = music_for(&self.scene, self.perspective);
         sound.audio.set_music(civ, kind);

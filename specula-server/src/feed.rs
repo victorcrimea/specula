@@ -204,6 +204,10 @@ pub struct TemplateDetails {
     pub visible_classes: Option<u32>,
     /// Relative to audio/.
     pub select_sound: Option<u32>,
+    /// Identity's Lang and Phenotype tokens, for the select group's
+    /// `{lang}` and `{phenotype}`.
+    pub lang: Option<u32>,
+    pub phenotypes: Option<u32>,
     /// Bit i for the i-th of Health, Capturable, ResourceSupply,
     /// ProductionQueue, GarrisonHolder, Promotion, ResourceGatherer,
     /// Foundation, Repairable, UnitAI, Trainer, Researcher, Pack, Upgrade,
@@ -941,7 +945,7 @@ fn decode_variable_set(payload: &[u8]) -> io::Result<Record> {
 fn decode_template_details(payload: &[u8]) -> io::Result<Record> {
     let mut cursor = Cursor(payload);
     let index = cursor.u32()?;
-    let details = TemplateDetails {
+    let mut details = TemplateDetails {
         flags: cursor.u16()?,
         overlay_texture: optional(cursor.u32()?),
         overlay_mask: optional(cursor.u32()?),
@@ -962,8 +966,16 @@ fn decode_template_details(payload: &[u8]) -> io::Result<Record> {
         classes: optional(cursor.u32()?),
         visible_classes: optional(cursor.u32()?),
         select_sound: optional(cursor.u32()?),
+        lang: None,
+        phenotypes: None,
         components: cursor.u32()?,
     };
+    // A hook from before lang and phenotypes ends here; the feed version
+    // stayed, so both lengths are read.
+    if !cursor.0.is_empty() {
+        details.lang = optional(cursor.u32()?);
+        details.phenotypes = optional(cursor.u32()?);
+    }
     if !cursor.0.is_empty() {
         return Err(invalid("template details record longer than its contents"));
     }

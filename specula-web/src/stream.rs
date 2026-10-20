@@ -18,7 +18,7 @@ pub const ENVELOPE_ENDED: u8 = 4;
 const MESSAGE_KEYFRAME: u8 = 1;
 const MESSAGE_DELTA: u8 = 2;
 const MESSAGE_ENDED: u8 = 3;
-const WIRE_VERSION: u8 = 14;
+const WIRE_VERSION: u8 = 15;
 const CHANGED_POSITION: u64 = 1;
 const CHANGED_COLOR: u64 = 2;
 const CHANGED_ICON: u64 = 4;
@@ -351,6 +351,10 @@ pub struct TemplateDetails {
     pub visible_classes: u32,
     /// Relative to audio/.
     pub select_sound: u32,
+    /// Identity's Lang and Phenotype tokens, for the select group's
+    /// `{lang}` and `{phenotype}`.
+    pub lang: u32,
+    pub phenotypes: u32,
     /// Bit i for the i-th of the hook's detail components, Health first.
     pub components: u32,
 }
@@ -911,6 +915,8 @@ impl Scene {
                 details.classes,
                 details.visible_classes,
                 details.select_sound,
+                details.lang,
+                details.phenotypes,
             ] {
                 out.varint(u64::from(string));
             }
@@ -1460,6 +1466,8 @@ impl<'a> Cursor<'a> {
             classes: self.varint_u32()?,
             visible_classes: self.varint_u32()?,
             select_sound: self.varint_u32()?,
+            lang: self.varint_u32()?,
+            phenotypes: self.varint_u32()?,
             components: self.varint_u32()?,
         })
     }

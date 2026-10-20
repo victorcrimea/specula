@@ -50,6 +50,7 @@ use web_sys::WheelEvent;
 
 use crate::AnimationSound;
 use crate::Listener;
+use crate::SelectSound;
 use crate::StreamBytes;
 use crate::TURN_MS;
 use crate::View;
@@ -611,6 +612,8 @@ pub struct Field {
     last_fade: f64,
     /// The animation time each entity's sound was last checked at.
     sound_clocks: HashMap<u32, SoundClock>,
+    /// The select sounds of the selections made since the last call.
+    select_sounds: Vec<SelectSound>,
     shots: HashMap<u32, Flying>,
     shot_models: HashMap<ShotModelKey, Option<Rc<Model>>>,
     /// By 1-based string index of the impact actor.
@@ -1258,6 +1261,7 @@ impl Field {
                 .and_then(|element| element.dyn_into::<HtmlElement>().ok()),
             last_fade: now(),
             sound_clocks: HashMap::new(),
+            select_sounds: Vec::new(),
             shots: HashMap::new(),
             shot_models: HashMap::new(),
             impact_models: HashMap::new(),
@@ -1690,13 +1694,17 @@ impl Field {
                 } => (self.in_band(view_proj, from, to), add, remove),
                 PickInput::Clear => (Vec::new(), false, false),
             };
-            if add {
-                self.selection.add_list(&ids, look);
+            let first = if add {
+                self.selection.add_list(&ids, look)
             } else if remove {
                 self.selection.remove_list(&ids, look);
+                None
             } else {
                 self.selection.reset(look);
-                self.selection.add_list(&ids, look);
+                self.selection.add_list(&ids, look)
+            };
+            if let Some(sound) = first.and_then(|id| select_sound(entities, &self.pickables, id)) {
+                self.select_sounds.push(sound);
             }
         }
         let highlighted = match (band, hover) {
@@ -3825,6 +3833,10 @@ impl View for Field {
         self.animation_sounds(progress)
     }
 
+    fn take_select_sounds(&mut self) -> Vec<SelectSound> {
+        std::mem::take(&mut self.select_sounds)
+    }
+
     fn set_selection_atlas(&mut self, bytes: &[u8]) {
         if let Err(error) = self.overlays.set_atlas(&self.device, &self.queue, bytes) {
             web_sys::console::error_1(&format!("selection.bin: {error}").into());
@@ -5618,6 +5630,44 @@ fn selectee(entities: &Entities, id: u32) -> Option<Selectee> {
     Some(Selectee {
         owner: dot.owner,
         always_visible: flags & pick::FLAG_ALWAYS_VISIBLE != 0,
+    })
+}
+
+/// The select sound of entity `id` where it is drawn, its group filled as
+/// `Sound.js` fills it: `{lang}` with the template's Lang, `{phenotype}`
+/// with the one `Identity.Init` picks by the entity id.
+fn select_sound(entities: &Entities, pickables: &[Pickable], id: u32) -> Option<SelectSound> {
+    let dot = entity_dot(entities, id)?;
+    let details = entities
+        .template_details
+        .get(dot.template as usize)?
+        .as_ref()?;
+    let string = |index: u32| {
+        (index as usize)
+            .checked_sub(1)
+            .and_then(|index| entities.strings.get(index))
+            .map(String::as_str)
+    };
+    let group = string(details.select_sound)?;
+    let lang = string(details.lang).unwrap_or("greek");
+    let phenotypes: Vec<&str> = string(details.phenotypes)
+        .map(|tokens| tokens.split_whitespace().collect())
+        .unwrap_or_default();
+    let phenotype = if phenotypes.is_empty() {
+        "default"
+    } else {
+        phenotypes[id as usize % phenotypes.len()]
+    };
+    let position = pickables
+        .iter()
+        .find(|pickable| pickable.id == id)?
+        .position;
+    Some(SelectSound {
+        group: group
+            .replace("{lang}", lang)
+            .replace("{phenotype}", phenotype),
+        owner: dot.owner,
+        position,
     })
 }
 

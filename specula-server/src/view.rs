@@ -1,8 +1,8 @@
-//! The viewer stream, wire format v14: messages for each keyframe, turn or
+//! The viewer stream, wire format v15: messages for each keyframe, turn or
 //! match end, varints and zigzag as in `wire.rs`, positions and heights in
 //! 1/16 m, carried brotli-compressed as below.
 //!
-//! - kind 1 keyframe: varint turn, u8 wire version (14; a viewer stops
+//! - kind 1 keyframe: varint turn, u8 wire version (15; a viewer stops
 //!   at any other, since nothing after it would read right), u64 match id, f32 game speed (the
 //!   match's sim rate), varint first turn of the match's history, varint
 //!   turns per segment, varint map size in metres, u64 terrain id (0: none
@@ -182,8 +182,8 @@
 //! bar height, f32 status bar height offset, varint generic name, varint
 //! specific name, varint icon, varint selection group name, varint rank,
 //! varint classes, varint visible classes, varint select sound group,
-//! varint components}. The flags and component bits are those of the
-//! hook's template details (`SpeculaFeed.h`, kind 11), and so are the
+//! varint lang, varint phenotypes, varint components}. The flags and
+//! component bits are those of the hook's template details (`SpeculaFeed.h`, kind 11), and so are the
 //! meanings of the strings, which are 1-based indices into the string
 //! table, 0 for none. A template the hook had no details for has none; the
 //! details arrive in the same message as the template's name, so before
@@ -278,7 +278,7 @@ const MESSAGE_KEYFRAME: u8 = 1;
 const MESSAGE_DELTA: u8 = 2;
 const MESSAGE_ENDED: u8 = 3;
 /// In every keyframe; deltas follow one, so they need none.
-const WIRE_VERSION: u8 = 14;
+const WIRE_VERSION: u8 = 15;
 const CHANGED_POSITION: u64 = 1;
 const CHANGED_COLOR: u64 = 2;
 const CHANGED_ICON: u64 = 4;
@@ -1965,6 +1965,8 @@ fn write_templates(out: &mut Writer, templates: &[Template]) {
             details.classes,
             details.visible_classes,
             details.select_sound,
+            details.lang,
+            details.phenotypes,
         ] {
             out.varint(one_based(string));
         }
