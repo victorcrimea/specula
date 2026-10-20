@@ -167,20 +167,16 @@ html, body { margin: 0; height: 100%; background: #0f1214; }
 #details-count { inset: 0; }
 #details-health-multiple { left: 187px; top: 40px; width: 8px; height: 114px; }
 #details-capture-multiple { left: 199px; top: 40px; width: 8px; height: 114px; }
-/* Not the engine's: on a phone the panel is scaled up to be read, sits
-   over the playback bar with the minimap above it, and folds to a strip. */
+/* Not the engine's: on a phone both panels are scaled down to leave the
+   view free, the details sit right of the minimap so neither moves when
+   the selection changes, and the details fold to a strip. */
 #details-toggle { display: none; }
 #details-strip { display: none; }
 @media (max-width: 700px) {
-  :root { --details-scale: 1.4; }
+  :root { --details-scale: 0.8; }
   #minimap-panel { left: 8px; transform: scale(0.72); }
-  #details { left: 50%; translate: -50% 0;
-    width: calc(228px * var(--details-scale)); height: calc(164px * var(--details-scale)); }
-  #details-panel, #details-strip { zoom: var(--details-scale); }
-  body:has(#details:not([hidden])) #minimap-panel {
-    bottom: calc(var(--panel-bottom) + 164px * var(--details-scale) + 8px); }
-  body:has(#details.collapsed:not([hidden])) #minimap-panel {
-    bottom: calc(var(--panel-bottom) + 32px * var(--details-scale) + 8px); }
+  /* 8 px gutter, the minimap's 200 px at 0.72, 8 px gap. */
+  #details { left: 160px; transform: scale(var(--details-scale)); transform-origin: 0 100%; }
   #details-toggle { display: block; position: absolute; left: 50%; top: -14px;
     width: 40px; height: 14px; translate: -50% 0; padding: 0; border: 1px solid #3a4248;
     border-bottom: none; border-radius: 4px 4px 0 0; background: rgba(15, 18, 20, 0.9); }
@@ -188,7 +184,7 @@ html, body { margin: 0; height: 100%; background: #0f1214; }
     width: 6px; height: 6px; translate: -50% 0; rotate: 45deg;
     border-right: 2px solid #e6e9eb; border-bottom: 2px solid #e6e9eb; }
   #details.collapsed #details-toggle::before { top: 6px; rotate: 225deg; }
-  #details.collapsed { height: calc(32px * var(--details-scale)); }
+  #details.collapsed { height: 32px; }
   #details.collapsed #details-panel { display: none; }
   #details.collapsed #details-strip { display: block; position: absolute; left: 0; top: 0;
     width: 228px; height: 32px; box-sizing: border-box;
@@ -198,7 +194,8 @@ html, body { margin: 0; height: 100%; background: #0f1214; }
   #details-strip-name { left: 34px; top: 1px; right: 6px; height: 16px; justify-content: flex-start; }
   #details-strip .bar { position: absolute; left: 35px; right: 7px; top: 20px; height: 6px; }
 }
-@media (max-width: 340px) { :root { --details-scale: 1.25; } }
+/* 0.8 needs 350 px; narrower phones keep the 8 px gutter on the right. */
+@media (max-width: 349px) { :root { --details-scale: 0.66; } }
 #errors { max-width: 100%;
   box-sizing: border-box; max-height: 40vh;
   overflow: auto; margin: 0; padding: 6px 8px; white-space: pre-wrap;
