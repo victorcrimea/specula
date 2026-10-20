@@ -1,21 +1,21 @@
-//! The viewer stream, wire format v13: messages for each keyframe, turn or
+//! The viewer stream, wire format v14: messages for each keyframe, turn or
 //! match end, varints and zigzag as in `wire.rs`, positions and heights in
 //! 1/16 m, carried brotli-compressed as below.
 //!
-//! - kind 1 keyframe: varint turn, u8 wire version (13; a viewer stops
+//! - kind 1 keyframe: varint turn, u8 wire version (14; a viewer stops
 //!   at any other, since nothing after it would read right), u64 match id, f32 game speed (the
 //!   match's sim rate), varint first turn of the match's history, varint
 //!   turns per segment, varint map size in metres, u64 terrain id (0: none
 //!   yet, else fetch `/terrain/<id as 16 hex digits>`), icon table, player
 //!   table, territory, template table, string table, variant set table,
-//!   variable set table, varint n, n x economy (every player's, by index),
+//!   variable set table, range set table, varint n, n x economy (every player's, by index),
 //!   varint count, then count x {varint id delta, entity}, then the
 //!   projectiles in flight or lying on the ground: varint count, count x
 //!   {varint id delta, projectile, varint turns since the launch}.
 //! - kind 2 delta: varint turn, icons added to the table, u8 1 if a new
 //!   player table follows (it replaces the old one) else 0, u8 1 if a new
 //!   territory follows (likewise) else 0, templates,
-//!   strings, variant sets and variable sets added to their tables, u8 1
+//!   strings, variant sets, variable sets and range sets added to their tables, u8 1
 //!   if economies follow else 0, then varint count, count x {varint player
 //!   index, economy} of the players whose economy changed, varint spawned,
 //!   destroyed and changed counts. Spawned entries are keyframe entries,
@@ -27,7 +27,7 @@
 //!   repeat, zigzag sync offset; 256 zigzag owner; 512 varint template,
 //!   varint actor, zigzag seed - id; 1024 varint variant set; 2048 u8
 //!   construction; 4096 varint visibility; 8192 nothing; 32768 varint
-//!   variable set; 65536 u8 hitpoints; 131072 capture}, then the sounds
+//!   variable set; 65536 u8 hitpoints; 131072 capture; 262144 varint range set}, then the sounds
 //!   of the turn: varint count, count x sound, in the order the simulation
 //!   played them, then the projectiles launched in the turn: varint count,
 //!   count x {varint id delta, launch}, then the ids of the projectiles
@@ -64,7 +64,7 @@
 //!
 //! An entity is {zigzag x, zigzag z, zigzag y, u8 angle, u32 colour, varint
 //! icon, varint player, zigzag owner, varint template, varint actor, zigzag
-//! seed - id, varint variant set, varint variable set, varint animation,
+//! seed - id, varint variant set, varint variable set, varint range set, varint animation,
 //! u8 animation flags,
 //! varint sound group, varint animation speed, varint turns since the
 //! animation started, varint sync repeat, zigzag sync offset, varint turns
@@ -85,6 +85,8 @@
 //!   selections;
 //! - variable set is a 1-based index into the variable set table, 0 for
 //!   no entity variables;
+//! - range set is a 1-based index into the range set table, 0 for no
+//!   range circles;
 //! - animation flags: 1 plays once rather than loops;
 //! - sound group is a 1-based index into the string table, 0 for none: the
 //!   group, relative to audio/, the animation plays at its sound or event
@@ -202,6 +204,12 @@
 //! name, f32 value}}, 0-based string indices, sorted by name: the entity
 //! variables the simulation gave `ICmpVisual::SetVariable` (Foundation.js
 //! sets "numbuilders"), which particle emitters read.
+//! A range set table is varint count, count x {varint n, n x {u8 kind (0
+//! attack, 1 aura, 2 heal), f32 radius, varint texture, varint mask, f32
+//! thickness}}: the circles the game draws round a selected entity, with
+//! the texture and mask as 1-based string indices (0 for none), relative to
+//! art/textures/selection/. The server numbers the sets itself, in the
+//! order it first sees them.
 //! Tables only grow during a match, so an index once sent stays valid.
 //! Ids in each list are sorted and delta-coded from 0.
 //!
@@ -270,7 +278,7 @@ const MESSAGE_KEYFRAME: u8 = 1;
 const MESSAGE_DELTA: u8 = 2;
 const MESSAGE_ENDED: u8 = 3;
 /// In every keyframe; deltas follow one, so they need none.
-const WIRE_VERSION: u8 = 13;
+const WIRE_VERSION: u8 = 14;
 const CHANGED_POSITION: u64 = 1;
 const CHANGED_COLOR: u64 = 2;
 const CHANGED_ICON: u64 = 4;
@@ -289,6 +297,7 @@ const CHANGED_HEIGHT: u64 = 16384;
 const CHANGED_VARIABLES: u64 = 32768;
 const CHANGED_HITPOINTS: u64 = 65536;
 const CHANGED_CAPTURE: u64 = 131072;
+const CHANGED_RANGES: u64 = 262144;
 const MOTION_GROUNDED: u8 = 1;
 const MOTION_HITPOINTS: u8 = 2;
 const MOTION_CAPTURE: u8 = 4;
@@ -333,6 +342,20 @@ pub type VariantSet = Vec<(u32, u32)>;
 /// (name string index, value), sorted by name.
 pub type VariableSet = Vec<(u32, f32)>;
 
+/// One range circle; the radius and thickness are f32 bits so that sets can
+/// be compared and hashed.
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub struct RangeCircle {
+    kind: u8,
+    radius: u32,
+    /// 1-based string index, 0 for none.
+    texture: u32,
+    mask: u32,
+    thickness: u32,
+}
+
+pub type RangeSet = Vec<RangeCircle>;
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct Dot {
     x: i32,
@@ -348,6 +371,8 @@ struct Dot {
     seed: u32,
     variants: u32,
     variables: u32,
+    /// 1-based index into the range set table, 0 for none.
+    ranges: u32,
     animation: u32,
     once: bool,
     speed: u32,
@@ -372,7 +397,14 @@ struct Dot {
 }
 
 impl Dot {
-    fn new(entity: &Entity, icon: u32, player_color: bool, turn: u32, hitpoints: u8) -> Self {
+    fn new(
+        entity: &Entity,
+        icon: u32,
+        player_color: bool,
+        turn: u32,
+        hitpoints: u8,
+        ranges: u32,
+    ) -> Self {
         // Gaia keeps its colour in every diplomacy mode, as in the game.
         let player = match u32::try_from(entity.owner) {
             Ok(owner) if player_color && owner > 0 && entity.color.is_some() => owner,
@@ -394,6 +426,7 @@ impl Dot {
             seed: visual.map_or(entity.id, |visual| visual.seed),
             variants: one_based(visual.and_then(|visual| visual.variants)),
             variables: one_based(visual.and_then(|visual| visual.variables)),
+            ranges,
             animation: one_based(visual.and_then(|visual| visual.animation)),
             once: visual.is_some_and(|visual| visual.once),
             speed: visual.map_or(0, |visual| quantize_speed(visual.speed)),
@@ -604,6 +637,7 @@ struct Tables<'a> {
     strings: &'a [String],
     variant_sets: &'a [VariantSet],
     variable_sets: &'a [VariableSet],
+    range_sets: &'a [RangeSet],
 }
 
 pub struct Hub {
@@ -669,6 +703,9 @@ struct State {
     strings: Table<String>,
     variant_sets: Table<VariantSet>,
     variable_sets: Table<VariableSet>,
+    range_sets: Table<RangeSet>,
+    /// Index in `range_sets`, for finding a set again.
+    range_set_ids: HashMap<RangeSet, u32>,
     /// Template index to 1-based icon index.
     template_icons: HashMap<u32, u32>,
     /// Templates whose minimap colour is the owner's.
@@ -716,6 +753,7 @@ impl State {
             strings: sent(&self.strings, with_unsent),
             variant_sets: sent(&self.variant_sets, with_unsent),
             variable_sets: sent(&self.variable_sets, with_unsent),
+            range_sets: sent(&self.range_sets, with_unsent),
         }
     }
 }
@@ -743,6 +781,8 @@ impl Hub {
                 strings: Table::new(),
                 variant_sets: Table::new(),
                 variable_sets: Table::new(),
+                range_sets: Table::new(),
+                range_set_ids: HashMap::new(),
                 template_icons: HashMap::new(),
                 player_color_templates: HashSet::new(),
                 players: Vec::new(),
@@ -774,6 +814,8 @@ impl Hub {
         state.strings.clear();
         state.variant_sets.clear();
         state.variable_sets.clear();
+        state.range_sets.clear();
+        state.range_set_ids.clear();
         state.template_icons.clear();
         state.player_color_templates.clear();
         state.players.clear();
@@ -972,6 +1014,32 @@ impl Hub {
     /// `details` is the feed's state as of this turn.
     pub fn publish(&self, turn: u32, entities: &[Entity], details: &Details) -> io::Result<()> {
         let state = &mut *self.state.lock().unwrap();
+        let ranges: HashMap<u32, u32> = entities
+            .iter()
+            .filter_map(|entity| {
+                let overlays = details.entities.get(&entity.id)?.ranges.as_ref()?;
+                if overlays.is_empty() {
+                    return None;
+                }
+                let one_based = |index: Option<u32>| index.map_or(0, |index| index + 1);
+                let set: RangeSet = overlays
+                    .iter()
+                    .map(|overlay| RangeCircle {
+                        kind: overlay.kind,
+                        radius: overlay.radius.to_bits(),
+                        texture: one_based(overlay.texture),
+                        mask: one_based(overlay.mask),
+                        thickness: overlay.thickness.to_bits(),
+                    })
+                    .collect();
+                let next = state.range_sets.items.len() as u32 + 1;
+                let index = *state.range_set_ids.entry(set.clone()).or_insert(next);
+                if index == next {
+                    state.range_sets.items.push(set);
+                }
+                Some((entity.id, index))
+            })
+            .collect();
         let dots: BTreeMap<u32, Dot> = entities
             .iter()
             .map(|entity| {
@@ -985,8 +1053,15 @@ impl Hub {
                     .entities
                     .get(&entity.id)
                     .and_then(|groups| groups.health);
-                let mut dot =
-                    Dot::new(entity, icon, player_color, turn, quantize_hitpoints(health));
+                let ranges = ranges.get(&entity.id).copied().unwrap_or(0);
+                let mut dot = Dot::new(
+                    entity,
+                    icon,
+                    player_color,
+                    turn,
+                    quantize_hitpoints(health),
+                    ranges,
+                );
                 // The hook only sees the state after each turn, so an
                 // animation counts as started on the turn it first shows.
                 // The old match's ids are unrelated to the new one's.
@@ -1063,6 +1138,7 @@ impl Hub {
                     strings: state.strings.unsent(),
                     variant_sets: state.variant_sets.unsent(),
                     variable_sets: state.variable_sets.unsent(),
+                    range_sets: state.range_sets.unsent(),
                 },
                 state.players_changed.then_some(&state.players[..]),
                 state
@@ -1117,6 +1193,7 @@ impl Hub {
         state.strings.sent = state.strings.items.len();
         state.variant_sets.sent = state.variant_sets.items.len();
         state.variable_sets.sent = state.variable_sets.items.len();
+        state.range_sets.sent = state.range_sets.items.len();
         state.players_changed = false;
         state.territory_changed = false;
         state.economy_shown = state.economy.clone();
@@ -1278,6 +1355,7 @@ fn encode_keyframe(
     write_strings(&mut out, tables.strings);
     write_variant_sets(&mut out, tables.variant_sets);
     write_variable_sets(&mut out, tables.variable_sets);
+    write_range_sets(&mut out, tables.range_sets);
     out.varint(state.economy.len() as u64);
     for funds in &state.economy {
         write_funds(&mut out, funds);
@@ -1366,6 +1444,7 @@ fn encode_delta(
     write_strings(&mut out, new_tables.strings);
     write_variant_sets(&mut out, new_tables.variant_sets);
     write_variable_sets(&mut out, new_tables.variable_sets);
+    write_range_sets(&mut out, new_tables.range_sets);
     let funds: Vec<(usize, &Funds)> = status
         .economy
         .iter()
@@ -1653,6 +1732,7 @@ fn exact_changes(before: &Dot, now: &Dot) -> u64 {
         ),
         (CHANGED_VISIBILITY, before.visibility != now.visibility),
         (CHANGED_VARIABLES, before.variables != now.variables),
+        (CHANGED_RANGES, before.ranges != now.ranges),
         (CHANGED_HITPOINTS, before.hitpoints != now.hitpoints),
     ];
     changes
@@ -1790,6 +1870,9 @@ fn write_change(out: &mut Writer, id: u32, change: &Change, now: &Dot, capture: 
     if mask & CHANGED_VARIABLES != 0 {
         out.varint(u64::from(now.variables));
     }
+    if mask & CHANGED_RANGES != 0 {
+        out.varint(u64::from(now.ranges));
+    }
     if mask & CHANGED_HITPOINTS != 0 {
         out.u8(now.hitpoints);
     }
@@ -1908,6 +1991,20 @@ fn write_variant_sets(out: &mut Writer, sets: &[VariantSet]) {
     }
 }
 
+fn write_range_sets(out: &mut Writer, sets: &[RangeSet]) {
+    out.varint(sets.len() as u64);
+    for set in sets {
+        out.varint(set.len() as u64);
+        for circle in set {
+            out.u8(circle.kind);
+            out.f32(f32::from_bits(circle.radius));
+            out.varint(u64::from(circle.texture));
+            out.varint(u64::from(circle.mask));
+            out.f32(f32::from_bits(circle.thickness));
+        }
+    }
+}
+
 fn write_variable_sets(out: &mut Writer, sets: &[VariableSet]) {
     out.varint(sets.len() as u64);
     for set in sets {
@@ -1936,6 +2033,7 @@ fn write_dot(out: &mut Writer, id: u32, turn: u32, dot: &Dot, hitpoints: u8, cap
     out.zigzag(i64::from(dot.seed) - i64::from(id));
     out.varint(u64::from(dot.variants));
     out.varint(u64::from(dot.variables));
+    out.varint(u64::from(dot.ranges));
     out.varint(u64::from(dot.animation));
     out.u8(animation_flags(dot));
     out.varint(u64::from(dot.sound_group));

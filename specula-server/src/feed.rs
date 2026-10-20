@@ -51,6 +51,7 @@ const DETAIL_RESEARCHABLE: u32 = 4096;
 const DETAIL_PROGRESS: u32 = 8192;
 const DETAIL_HOLDER: u32 = 16384;
 const DETAIL_TRADER: u32 = 32768;
+const DETAIL_RANGES: u32 = 65536;
 const QUEUE_UNIT: u8 = 0;
 const QUEUE_TECHNOLOGY: u8 = 1;
 
@@ -206,7 +207,7 @@ pub struct TemplateDetails {
     /// Bit i for the i-th of Health, Capturable, ResourceSupply,
     /// ProductionQueue, GarrisonHolder, Promotion, ResourceGatherer,
     /// Foundation, Repairable, UnitAI, Trainer, Researcher, Pack, Upgrade,
-    /// Trader, Garrisonable, Turretable.
+    /// Trader, Garrisonable, Turretable, Attack, Auras, Heal.
     pub components: u32,
 }
 
@@ -236,6 +237,7 @@ pub struct EntityDetails {
     /// The entity it is garrisoned in or a turret on, 0 for none.
     pub holder: Option<u32>,
     pub trader: Option<Trader>,
+    pub ranges: Option<Vec<RangeOverlay>>,
 }
 
 impl EntityDetails {
@@ -262,6 +264,7 @@ impl EntityDetails {
         take(&mut self.progress, changed.progress);
         take(&mut self.holder, changed.holder);
         take(&mut self.trader, changed.trader);
+        take(&mut self.ranges, changed.ranges);
     }
 }
 
@@ -338,6 +341,18 @@ pub struct Trader {
     /// String record index.
     pub goods: Option<u32>,
     pub gain: f32,
+}
+
+/// A range circle the selection shows, as `RangeOverlayManager` hands it to
+/// the renderer.
+pub struct RangeOverlay {
+    /// 0 attack, 1 aura, 2 heal.
+    pub kind: u8,
+    pub radius: f32,
+    /// String record indices, relative to art/textures/selection/.
+    pub texture: Option<u32>,
+    pub mask: Option<u32>,
+    pub thickness: f32,
 }
 
 /// A player's top panel numbers; index 0 is gaia.
@@ -1092,6 +1107,20 @@ fn decode_groups(cursor: &mut Cursor, mask: u32) -> io::Result<EntityDetails> {
             goods: optional(cursor.u32()?),
             gain: cursor.f32()?,
         });
+    }
+    if mask & DETAIL_RANGES != 0 {
+        let count = cursor.u8()?;
+        let mut ranges = Vec::with_capacity(usize::from(count));
+        for _ in 0..count {
+            ranges.push(RangeOverlay {
+                kind: cursor.u8()?,
+                radius: cursor.f32()?,
+                texture: optional(cursor.u32()?),
+                mask: optional(cursor.u32()?),
+                thickness: cursor.f32()?,
+            });
+        }
+        details.ranges = Some(ranges);
     }
     Ok(details)
 }

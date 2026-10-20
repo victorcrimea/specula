@@ -18,7 +18,7 @@ pub const ENVELOPE_ENDED: u8 = 4;
 const MESSAGE_KEYFRAME: u8 = 1;
 const MESSAGE_DELTA: u8 = 2;
 const MESSAGE_ENDED: u8 = 3;
-const WIRE_VERSION: u8 = 13;
+const WIRE_VERSION: u8 = 14;
 const CHANGED_POSITION: u64 = 1;
 const CHANGED_COLOR: u64 = 2;
 const CHANGED_ICON: u64 = 4;
@@ -37,6 +37,7 @@ const CHANGED_HEIGHT: u64 = 16384;
 const CHANGED_VARIABLES: u64 = 32768;
 const CHANGED_HITPOINTS: u64 = 65536;
 const CHANGED_CAPTURE: u64 = 131072;
+const CHANGED_RANGES: u64 = 262144;
 const MOTION_GROUNDED: u8 = 1;
 const MOTION_HITPOINTS: u8 = 2;
 const MOTION_CAPTURE: u8 = 4;
@@ -93,6 +94,8 @@ pub struct Dot {
     pub variants: u32,
     /// 1-based index into `Scene::variable_sets`, or 0 for none.
     pub variables: u32,
+    /// 1-based index into `Scene::range_sets`, or 0 for none.
+    pub ranges: u32,
     /// 1-based index into `Scene::strings`, or 0 for none.
     pub animation: u32,
     /// Plays once rather than loops.
@@ -302,6 +305,21 @@ pub type VariantSet = Vec<(u32, u32)>;
 /// variables particle emitters read.
 pub type VariableSet = Vec<(u32, f32)>;
 
+/// A range circle the selection shows, as `RangeOverlayManager` hands it to
+/// the renderer. The strings are 1-based indices into `Scene::strings`, 0
+/// for none, relative to art/textures/selection/.
+#[derive(Clone, Copy)]
+pub struct RangeCircle {
+    /// 0 attack, 1 aura, 2 heal.
+    pub kind: u8,
+    pub radius: f32,
+    pub texture: u32,
+    pub mask: u32,
+    pub thickness: f32,
+}
+
+pub type RangeSet = Vec<RangeCircle>;
+
 /// What a template gives the selection overlay, the status bars and the
 /// panels, as the hook reads it from the template (`SpeculaFeed.h`, kind
 /// 11). Strings are 1-based indices into `Scene::strings`, 0 for none.
@@ -391,6 +409,7 @@ pub struct Scene {
     pub strings: Vec<String>,
     pub variant_sets: Vec<VariantSet>,
     pub variable_sets: Vec<VariableSet>,
+    pub range_sets: Vec<RangeSet>,
     pub dots: BTreeMap<u32, Dot>,
     /// Each player's share of an entity's max capture points, in 1/255, by
     /// id; an entity without Capturable has no entry.
@@ -507,6 +526,7 @@ impl Scene {
         self.strings.clear();
         self.variant_sets.clear();
         self.variable_sets.clear();
+        self.range_sets.clear();
         self.read_tables(cursor)?;
         let count = cursor.varint_u32()?;
         self.economy = (0..count)
@@ -677,7 +697,7 @@ impl Scene {
         Ok(())
     }
 
-    /// Templates, strings, variant and variable sets, appended to what the scene has.
+    /// Templates, strings, variant, variable and range sets, appended to what the scene has.
     fn read_tables(&mut self, cursor: &mut Cursor) -> Result<(), &'static str> {
         let count = cursor.varint_u32()?;
         for _ in 0..count {
@@ -708,6 +728,22 @@ impl Scene {
                 .map(|_| Ok((cursor.varint_u32()?, f32::from_bits(cursor.u32()?))))
                 .collect::<Result<_, &'static str>>()?;
             self.variable_sets.push(set);
+        }
+        let count = cursor.varint_u32()?;
+        for _ in 0..count {
+            let circles = cursor.varint_u32()?;
+            let set = (0..circles)
+                .map(|_| {
+                    Ok(RangeCircle {
+                        kind: cursor.u8()?,
+                        radius: f32::from_bits(cursor.u32()?),
+                        texture: cursor.varint_u32()?,
+                        mask: cursor.varint_u32()?,
+                        thickness: f32::from_bits(cursor.u32()?),
+                    })
+                })
+                .collect::<Result<_, &'static str>>()?;
+            self.range_sets.push(set);
         }
         Ok(())
     }
@@ -900,6 +936,17 @@ impl Scene {
                 out.u32(value.to_bits());
             }
         }
+        out.varint(self.range_sets.len() as u64);
+        for set in &self.range_sets {
+            out.varint(set.len() as u64);
+            for circle in set {
+                out.u8(circle.kind);
+                out.u32(circle.radius.to_bits());
+                out.varint(u64::from(circle.texture));
+                out.varint(u64::from(circle.mask));
+                out.u32(circle.thickness.to_bits());
+            }
+        }
         out.varint(self.economy.len() as u64);
         for economy in &self.economy {
             out.zigzag(economy.population);
@@ -937,6 +984,7 @@ impl Scene {
             out.zigzag_i64(i64::from(dot.seed) - i64::from(*id));
             out.varint(u64::from(dot.variants));
             out.varint(u64::from(dot.variables));
+            out.varint(u64::from(dot.ranges));
             out.varint(u64::from(dot.animation));
             out.u8(if dot.once { ANIMATION_ONCE } else { 0 });
             out.varint(u64::from(dot.sound_group));
@@ -1074,6 +1122,9 @@ fn advance(dot: &mut Dot, change: Option<&Change>, ground: Option<&Ground>, turn
         }
         if mask & CHANGED_VARIABLES != 0 {
             dot.variables = values.variables;
+        }
+        if mask & CHANGED_RANGES != 0 {
+            dot.ranges = values.ranges;
         }
         if mask & CHANGED_HITPOINTS != 0 {
             dot.hitpoints = values.hitpoints;
@@ -1451,6 +1502,7 @@ impl<'a> Cursor<'a> {
             seed: self.seed(id)?,
             variants: self.varint_u32()?,
             variables: self.varint_u32()?,
+            ranges: self.varint_u32()?,
             animation: self.varint_u32()?,
             once: self.u8()? & ANIMATION_ONCE != 0,
             sound_group: self.varint_u32()?,
@@ -1585,6 +1637,9 @@ impl<'a> Cursor<'a> {
         }
         if mask & CHANGED_VARIABLES != 0 {
             values.variables = self.varint_u32()?;
+        }
+        if mask & CHANGED_RANGES != 0 {
+            values.ranges = self.varint_u32()?;
         }
         if mask & CHANGED_HITPOINTS != 0 {
             values.hitpoints = self.u8()?;

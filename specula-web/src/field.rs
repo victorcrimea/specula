@@ -91,6 +91,7 @@ use crate::shadow;
 use crate::shadow::Shadow;
 use crate::sky::Sky;
 use crate::stream::Dot;
+use crate::stream::RangeSet;
 use crate::stream::Scene;
 use crate::stream::Shot;
 use crate::stream::TemplateDetails;
@@ -338,6 +339,10 @@ struct Camera {
     /// The engine's m_BirdsEyeView: looking straight down, the tilt keys
     /// idle.
     birds_eye: bool,
+    /// Whether the attack, aura and heal range circles show, as the
+    /// engine's `gui.session.attackrange`, `aurasrange` and `healrange`,
+    /// all on by default.
+    ranges: [bool; 3],
     /// What the stepped controls (Shift+wheel, X1/X2, reset, bird's eye)
     /// have yet to add to `yaw`, `pitch` and `distance`; apart from them, so
     /// held keys and drags still act at once, as the engine's `Add` beside
@@ -443,6 +448,7 @@ struct Entities {
     strings: Vec<String>,
     variant_sets: Vec<VariantSet>,
     variable_sets: Vec<VariableSet>,
+    range_sets: Vec<RangeSet>,
 }
 
 pub struct Field {
@@ -1118,6 +1124,7 @@ impl Field {
             pitch: START_PITCH,
             distance: START_DISTANCE,
             birds_eye: false,
+            ranges: [true; 3],
             yaw_ahead: 0.0,
             pitch_ahead: 0.0,
             distance_ahead: 0.0,
@@ -3632,6 +3639,7 @@ impl View for Field {
             entities.strings.clear();
             entities.variant_sets.clear();
             entities.variable_sets.clear();
+            entities.range_sets.clear();
             self.particles.clear();
             self.camera.borrow_mut().placed = false;
             self.selection = Selection::default();
@@ -3669,6 +3677,13 @@ impl View for Field {
         entities
             .variable_sets
             .extend(scene.variable_sets[known..].iter().cloned());
+        if scene.range_sets.len() < entities.range_sets.len() {
+            entities.range_sets.clear();
+        }
+        let known = entities.range_sets.len();
+        entities
+            .range_sets
+            .extend(scene.range_sets[known..].iter().cloned());
         entities.turn = scene.turn;
         entities.map_size = scene.map_size;
         entities.dots.clear();
@@ -3897,11 +3912,13 @@ impl View for Field {
         self.selection
             .tick(((time - self.last_fade) / 1000.0) as f32);
         self.last_fade = time;
+        let ranges = self.camera.borrow().ranges;
         let marks = overlay_marks(
             &self.pickables,
             &self.entities,
             &self.selection,
             &self.palette,
+            ranges,
         );
         self.overlays.prepare(
             &self.device,
@@ -5463,12 +5480,62 @@ fn overlay_marks<'a>(
     entities: &'a Entities,
     selection: &Selection,
     palette: &[u32],
+    ranges: [bool; 3],
 ) -> Vec<Mark<'a>> {
     let mut marks = Vec::new();
+    // White without an owner.
+    let owner_rgb = |owner: i32| {
+        usize::try_from(owner)
+            .ok()
+            .and_then(|owner| palette.get(owner))
+            .map_or([1.0; 3], |color| {
+                let argb = color.to_be_bytes();
+                [argb[1], argb[2], argb[3]].map(|value| f32::from(value) / 255.0)
+            })
+    };
+    let packed = |rgb: [f32; 3], alpha: f32| {
+        let [r, g, b, a] = [rgb[0], rgb[1], rgb[2], alpha]
+            .map(|value| (value.clamp(0.0, 1.0) * 255.0).round() as u32);
+        a << 24 | r << 16 | g << 8 | b
+    };
     for pickable in pickables {
         let Some(dot) = entity_dot(entities, pickable.id) else {
             continue;
         };
+        // The circles of `RangeOverlayRenderer`, in the owner's colour and
+        // not faded.
+        if dot.ranges != 0
+            && ranges.contains(&true)
+            && selection.shows_ranges(pickable.id)
+            && let Some(set) = (dot.ranges as usize)
+                .checked_sub(1)
+                .and_then(|index| entities.range_sets.get(index))
+        {
+            for circle in set {
+                let Some(shown) = ranges.get(usize::from(circle.kind)) else {
+                    continue;
+                };
+                let Some(texture) = (circle.texture as usize)
+                    .checked_sub(1)
+                    .and_then(|index| entities.strings.get(index))
+                else {
+                    continue;
+                };
+                if !shown {
+                    continue;
+                }
+                marks.push(Mark {
+                    texture,
+                    outline: Some(circle.thickness),
+                    shape: OverlayShape::Circle {
+                        radius: circle.radius,
+                    },
+                    centre: [pickable.position[0], pickable.position[2]],
+                    facing: [1.0, 0.0],
+                    color: packed(owner_rgb(dot.owner), 1.0),
+                });
+            }
+        }
         let Some(details) = entities
             .template_details
             .get(dot.template as usize)
@@ -5490,27 +5557,18 @@ fn overlay_marks<'a>(
         else {
             continue;
         };
-        // White without an owner.
-        let mut rgb = usize::try_from(dot.owner)
-            .ok()
-            .and_then(|owner| palette.get(owner))
-            .map_or([1.0; 3], |color| {
-                let argb = color.to_be_bytes();
-                [argb[1], argb[2], argb[3]].map(|value| f32::from(value) / 255.0)
-            });
+        let mut rgb = owner_rgb(dot.owner);
         if always_visible && !overlay.selected {
             let max = rgb[0].max(rgb[1]).max(rgb[2]);
             rgb = rgb.map(|value| value + (max - value) * RGB_DESATURATION);
         }
-        let [r, g, b, a] = [rgb[0], rgb[1], rgb[2], overlay.alpha]
-            .map(|value| (value.clamp(0.0, 1.0) * 255.0).round() as u32);
         marks.push(Mark {
             texture,
             outline: (details.flags & pick::FLAG_OUTLINE != 0).then_some(details.line_thickness),
             shape,
             centre: [pickable.position[0], pickable.position[2]],
             facing: pickable.facing,
-            color: a << 24 | r << 16 | g << 8 | b,
+            color: packed(rgb, overlay.alpha),
         });
     }
     marks
@@ -5848,6 +5906,23 @@ fn wire_camera(canvas: &HtmlCanvasElement, camera: &Rc<RefCell<Camera>>) -> Resu
                 .map(|element| text(&element, "tagName"))
                 .unwrap_or_default();
             let control = matches!(tag.as_str(), "INPUT" | "SELECT" | "TEXTAREA");
+            // The engine's session.toggleattackrange, toggleaurasrange and
+            // togglehealrange.
+            if !control && flag("altKey") && !flag("ctrlKey") && !flag("metaKey") {
+                let kind = match code.as_str() {
+                    "KeyC" => Some(0),
+                    "KeyV" => Some(1),
+                    "KeyB" => Some(2),
+                    _ => None,
+                };
+                if let Some(kind) = kind {
+                    event.prevent_default();
+                    if !flag("repeat") {
+                        camera.ranges[kind] = !camera.ranges[kind];
+                    }
+                    return;
+                }
+            }
             if control || flag("metaKey") || flag("altKey") {
                 return;
             }

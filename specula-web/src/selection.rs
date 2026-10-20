@@ -108,6 +108,12 @@ impl Selection {
             .unwrap_or_else(|| Overlay::idle(always_visible))
     }
 
+    /// Whether `id` is selected or highlighted, as the engine's
+    /// `RangeOverlayManager` is told to show its range circles.
+    pub fn shows_ranges(&self, id: u32) -> bool {
+        self.highlighted.contains(&id) || self.selected.contains(&id)
+    }
+
     fn set_highlight(&mut self, ids: &[u32], alpha: f32, selected: bool, look: Lookup) {
         for &id in ids {
             let Some(entity) = look(id) else {
