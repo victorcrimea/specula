@@ -30,6 +30,7 @@ path = "src/bake_assets/main.rs"
 
 [dependencies]
 brotli = "9"
+fast_image_resize = "6.1.0"
 lewton = "0.10"
 meshopt = "0.6"
 mikktspace = { version = "0.3", default-features = false, features = ["glam"] }
@@ -39,3 +40,4 @@ png = "0.18"
 roxmltree = "0.21"
 rubato = "5"
 specula-assets = { path = "../specula-assets" }
+webp = { version = "0.3.1", default-features = false }

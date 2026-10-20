@@ -6,7 +6,8 @@
 //! terrain's textures and the blend mask atlas for the ground, and
 //! every sound group, the session music and the ambient loop, their Ogg
 //! Vorbis files transcoded to Ogg Opus, and the water's normal maps and
-//! shore wave textures and the sky cubes the map environment names.
+//! shore wave textures and the sky cubes the map environment names, and
+//! the session portraits as lossy WebP.
 //!
 //! Usage: bake-assets [output dir]
 //! Default: specula-web. MOD_DIR overrides the mod,
@@ -19,8 +20,8 @@
 //!
 //! The files go to `<output dir>/assets/`; `<output dir>/assets.txt`
 //! names the index and is written last. Next to the index goes the list
-//! of every file in the bake, and next to each file but the sounds (Opus
-//! does not shrink) its brotli copy `<name>.br`, which the server sends to
+//! of every file in the bake, and next to each file but the sounds and
+//! portraits (Opus and WebP do not shrink) its brotli copy `<name>.br`, which the server sends to
 //! browsers that take it. A brotli copy left by an earlier bake is kept, as
 //! the name says its content. Files of earlier bakes that this one did not
 //! write are removed.
@@ -30,6 +31,7 @@ mod environment;
 mod material;
 mod mesh;
 mod particle;
+mod portrait;
 mod sound;
 mod templates;
 mod terrain;
@@ -143,7 +145,7 @@ impl Output {
                 .map_err(|error| format!("cannot write {}: {error}", path.display()))?;
             self.bytes += bytes.len() as u64;
             self.hashes.insert(hash);
-            if kind != Kind::Sound {
+            if kind != Kind::Sound && kind != Kind::Portrait {
                 self.compress.push(name);
             }
         }
@@ -268,6 +270,7 @@ fn run() -> Result<(), String> {
         ambient: None,
         civs: Vec::new(),
         sinking: Vec::new(),
+        portraits: Vec::new(),
     };
     let mut skipped = Vec::new();
     for name in &names {
@@ -324,6 +327,7 @@ fn run() -> Result<(), String> {
     write_environment(&mods, &waters, &pieces, &mut index, &mut output)?;
     write_sounds(&mod_dir, &mut index, &mut output)?;
     add_civs(&mod_dir, &mut index);
+    write_portraits(&mod_dir, &mut index, &mut output)?;
     let index_file = output.write(Kind::Index, &index.encode())?;
     print_sample(&index, &asset_dir);
     write_file_list(&mut output, index_file.hash)?;
@@ -440,6 +444,30 @@ fn write_sounds(mod_dir: &Path, index: &mut Index, output: &mut Output) -> Resul
         index.sound_groups.len(),
         civ_music.len()
     );
+    Ok(())
+}
+
+fn write_portraits(mod_dir: &Path, index: &mut Index, output: &mut Output) -> Result<(), String> {
+    let start = Instant::now();
+    let (portraits, errors) = portrait::bake(mod_dir);
+    let mut bytes = 0;
+    for (icon, webp) in &portraits {
+        bytes += webp.len();
+        index
+            .portraits
+            .push((icon.clone(), output.write(Kind::Portrait, webp)?));
+    }
+    println!(
+        "{} portraits, {:.2} MB, {:.1} KB each, in {:.0} s; {} could not be baked",
+        portraits.len(),
+        bytes as f64 / 1e6,
+        bytes as f64 / 1e3 / portraits.len().max(1) as f64,
+        start.elapsed().as_secs_f32(),
+        errors.len()
+    );
+    for error in &errors {
+        println!("  {error}");
+    }
     Ok(())
 }
 

@@ -54,6 +54,8 @@ const WASM: &str = "specula_web_bg.wasm";
 const GLUE_PLACEHOLDER: &str = "specula_web.js?v=GLUE";
 const WASM_PLACEHOLDER: &str = "specula_web_bg.wasm?v=WASM";
 const ASSETS_SIZE_PLACEHOLDER: &str = "ASSETS_SIZE";
+/// specula-assets' `Kind::Portrait` file names, WebP images.
+const PORTRAIT_PREFIX: &str = "portrait-";
 const ICONS: &str = "icons.bin";
 const SELECTION: &str = "selection.bin";
 /// Each versioned atlas under its page placeholder.
@@ -437,10 +439,17 @@ pub async fn asset(name: &str, accepts: AcceptsBrotli) -> Option<Encoded<NamedFi
     }
     // Baked assets are named by their content, so a copy never goes stale.
     // bake-assets leaves the brotli copy out when it would not be smaller.
+    // Portraits are shown by an `<img>`, which wants an image type.
+    let content_type = if name.starts_with(PORTRAIT_PREFIX) {
+        ContentType::WEBP
+    } else {
+        ContentType::Binary
+    };
     with_brotli(
         &Path::new(WEB_ROOT).join("assets").join(name),
         accepts,
         IMMUTABLE,
+        content_type,
     )
     .await
 }
@@ -480,7 +489,13 @@ async fn atlas(
     } else {
         REVALIDATE
     };
-    with_brotli(&Path::new(WEB_ROOT).join(name), accepts, cache).await
+    with_brotli(
+        &Path::new(WEB_ROOT).join(name),
+        accepts,
+        cache,
+        ContentType::Binary,
+    )
+    .await
 }
 
 /// `path`, or its brotli copy when the request takes one and it is there.
@@ -488,6 +503,7 @@ async fn with_brotli(
     path: &Path,
     accepts: AcceptsBrotli,
     cache: &'static str,
+    content_type: ContentType,
 ) -> Option<Encoded<NamedFile>> {
     let compressed = if accepts.0 {
         NamedFile::open(brotli_path(path)).await.ok()
@@ -501,7 +517,7 @@ async fn with_brotli(
     };
     Some(Encoded {
         body,
-        content_type: ContentType::Binary,
+        content_type,
         brotli,
         cache,
     })

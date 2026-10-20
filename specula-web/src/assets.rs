@@ -519,8 +519,13 @@ impl Store {
                     Kind::Texture => fail(&mut self.textures, hash),
                     Kind::SoundGroup => fail(&mut self.sound_group_files, hash),
                     // The coarse value stays, and is not asked again; sounds
-                    // are fetched by the audio, not here.
-                    Kind::MeshDetail | Kind::TextureDetail | Kind::Index | Kind::Sound => {}
+                    // are fetched by the audio and portraits by an `<img>`,
+                    // not here.
+                    Kind::MeshDetail
+                    | Kind::TextureDetail
+                    | Kind::Index
+                    | Kind::Sound
+                    | Kind::Portrait => {}
                 }
             }
         }
@@ -665,6 +670,7 @@ fn decode(kind: Kind, bytes: &[u8]) -> Result<Decoded, &'static str> {
         Kind::SoundGroup => Decoded::SoundGroup(Rc::new(SoundGroup::decode(bytes)?)),
         Kind::Index => return Err("the index is not fetched by hash"),
         Kind::Sound => return Err("sounds are decoded by the browser"),
+        Kind::Portrait => return Err("portraits are decoded by the browser"),
     })
 }
 

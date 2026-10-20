@@ -1,4 +1,4 @@
-//! The split asset files, format v11. Little-endian; every file starts with
+//! The split asset files, format v12. Little-endian; every file starts with
 //! a 4-byte magic and a u8 version. Strings are u16 length and UTF-8,
 //! counts are u32. A file is served as `assets/<kind>-<16 hex>.bin`, the
 //! hex being a hash of its content, so a cached copy is never stale and
@@ -37,7 +37,9 @@
 //!   viewer can fetch a match's assets ahead of time. Then count x
 //!   {template name, f32 delay in seconds, f32 sink rate in m/s, f32 sink
 //!   acceleration in m/s^2, u8 1 when it sinks like a ship}: every
-//!   template's `Decay`, how its corpse or rubble sinks and goes.
+//!   template's `Decay`, how its corpse or rubble sinks and goes. Then
+//!   count x {path under art/textures/ui/session/portraits, as Identity's
+//!   Icon names it, file ref of a portrait}.
 //! - actor manifest "SPCA": count x object. Object 0 is the actor, the rest
 //!   every actor it can prop, transitively, so one fetch resolves an
 //!   entity. An object is {name, count x definition, count x {u8 quality,
@@ -96,6 +98,9 @@
 //! - sound: an Ogg Opus stream as is (RFC 7845), so a browser decodes it
 //!   directly; it starts with Ogg's own "OggS" and version 0, not this
 //!   format's version.
+//! - portrait: a lossy WebP image as is, at most 128 px on a side, so a
+//!   page shows it in an `<img>`; it starts with RIFF's own "RIFF" and a
+//!   size, not this format's version.
 //!
 //! A file ref is {u64 hash, u32 byte size}; the size lets a viewer show
 //! download progress before it has the files. An optional file ref is a
@@ -104,7 +109,7 @@
 use crate::half::f16_bits;
 use crate::half::f16_to_f32;
 
-pub const VERSION: u8 = 11;
+pub const VERSION: u8 = 12;
 /// The largest side of each texture detail tier, which a viewer's
 /// texture quality picks from: low, medium and the whole chain as the
 /// engine uploads it at its default quality.
@@ -165,6 +170,7 @@ pub enum Kind {
     TextureDetail,
     SoundGroup,
     Sound,
+    Portrait,
 }
 
 impl Kind {
@@ -180,6 +186,7 @@ impl Kind {
             Kind::TextureDetail => b"SPTD",
             Kind::SoundGroup => b"SPCG",
             Kind::Sound => b"OggS",
+            Kind::Portrait => b"RIFF",
         }
     }
 
@@ -195,6 +202,7 @@ impl Kind {
             Kind::TextureDetail => "texturedetail",
             Kind::SoundGroup => "soundgroup",
             Kind::Sound => "sound",
+            Kind::Portrait => "portrait",
         }
     }
 
@@ -240,6 +248,8 @@ pub struct Index {
     pub civs: Vec<(String, CivAssets)>,
     /// By template name, without filters.
     pub sinking: Vec<(String, Sinking)>,
+    /// By Identity's Icon, relative to art/textures/ui/session/portraits.
+    pub portraits: Vec<(String, FileRef)>,
 }
 
 /// A template's `Decay`, as `CCmpDecay` sinks a local entity of it.
@@ -576,6 +586,11 @@ impl Index {
             out.f32s(&[sinking.delay, sinking.rate, sinking.acceleration]);
             out.u8(u8::from(sinking.ship));
         }
+        out.count(self.portraits.len());
+        for (icon, portrait) in &self.portraits {
+            out.string(icon);
+            out.file(*portrait);
+        }
         out.0
     }
 
@@ -679,6 +694,9 @@ impl Index {
                 ))
             })
             .collect::<Result<_, &'static str>>()?;
+        let portraits = (0..input.count()?)
+            .map(|_| Ok((input.string()?, input.file()?)))
+            .collect::<Result<_, &'static str>>()?;
         input.finish()?;
         Ok(Index {
             actors,
@@ -693,6 +711,7 @@ impl Index {
             ambient,
             civs,
             sinking,
+            portraits,
         })
     }
 }
