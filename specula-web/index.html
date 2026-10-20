@@ -154,19 +154,36 @@ html, body { margin: 0; height: 100%; background: #0f1214; }
 #details-multiple { left: 6px; top: 6px; width: 216px; height: 154px; }
 /* iconButton: portrait_black.dds, 42 added to each channel under the
    mouse (snIconPortraitOver). */
-#details .group { position: absolute; width: 38px; height: 38px; padding: 0; margin: 0;
-  border: 0; background: var(--gui-portrait-black) 0 0 / 100% 100%; cursor: pointer; }
+#details .group, #details .cell { position: absolute; width: 38px; height: 38px;
+  padding: 0; margin: 0; border: 0;
+  background: var(--gui-portrait-black) 0 0 / 100% 100%; }
+#details .group { cursor: pointer; }
 #details .group:hover::after { content: ""; position: absolute; inset: 0;
   background: rgb(42, 42, 42); mix-blend-mode: plus-lighter; pointer-events: none; }
-#details .group > .owner { position: absolute; inset: 0; }
-#details .group > img { position: absolute; left: 3px; top: 3px; width: 32px; height: 32px;
-  display: block; }
-#details .group > .text { inset: 0; }
+#details :is(.group, .cell) > .owner { position: absolute; inset: 0; }
+#details :is(.group, .cell) > img { position: absolute; left: 3px; top: 3px;
+  width: 32px; height: 32px; display: block; }
+#details :is(.group, .cell) > .text { inset: 0; }
 #details-count-badge { left: 181px; top: 4px; width: 32px; height: 32px;
   background: var(--gui-groups) 0 0 / 100% 100% no-repeat; }
 #details-count { inset: 0; }
 #details-health-multiple { left: 187px; top: 40px; width: 8px; height: 114px; }
 #details-capture-multiple { left: 199px; top: 40px; width: 8px; height: 114px; }
+/* supplementalSelectionDetails, 50%-316 of the bottom bar and 166 px
+   high, so 202 px left of the details and 2 px taller; for an observer
+   the garrison buttons are disabled with sprite_disabled = sprite, so
+   they have no hover. */
+#garrison { position: absolute; left: -202px; bottom: 0; width: 206px; height: 166px; }
+/* hud_panels.png's 314 98 512 256 at its own size. */
+#garrison-background { position: absolute; left: 4px; top: 4px; right: 4px; bottom: 4px;
+  background: var(--gui-hud-panels) -314px -98px / 512px 256px no-repeat; }
+#garrison > .top-right { background-image: var(--gui-line-corner-middle-left); }
+#garrison > .bottom-right, #garrison > .bottom-left {
+  background-image: var(--gui-line-corner-bottom-middle); }
+#garrison > .top-left { background-image: var(--gui-line-corner-middle-right); }
+/* unitGarrisonPanel at 20 6, healthGarrison at -14 1 -7 100%-49 of it. */
+#garrison-cells { position: absolute; left: 20px; top: 6px; }
+#garrison-health { left: 6px; top: 7px; width: 7px; height: 110px; }
 /* Not the engine's: on a phone both panels are scaled down to leave the
    view free, the details sit right of the minimap so neither moves when
    the selection changes, and the details fold to a strip. */
@@ -177,6 +194,18 @@ html, body { margin: 0; height: 100%; background: #0f1214; }
   #minimap-panel { left: 8px; transform: scale(0.72); }
   /* 8 px gutter, the minimap's 200 px at 0.72, 8 px gap. */
   #details { left: 160px; transform: scale(var(--details-scale)); transform-origin: 0 100%; }
+  /* Above the details and their fold tab. */
+  #garrison { left: 0; bottom: 178px; height: auto; }
+  /* As tall as its rows rather than the engine's three. The rows of
+     hud_panels.png it shows end at the texture's bottom, so 100% puts
+     them there at any height. */
+  #garrison-background { background-size: 512px calc(100% * 256 / 158);
+    background-position: -314px 100%; }
+  #garrison-cells { position: relative; left: 0; top: 0; display: grid;
+    grid-template-columns: repeat(4, 38px); gap: 1px; padding: 6px 13px 7px 20px; }
+  #garrison-cells > .cell { position: relative; left: 0 !important; top: 0 !important; }
+  #garrison-health { height: auto; bottom: 7px; }
+  #details.collapsed #garrison { display: none; }
   #details-toggle { display: block; position: absolute; left: 50%; top: -14px;
     width: 40px; height: 14px; translate: -50% 0; padding: 0; border: 1px solid #3a4248;
     border-bottom: none; border-radius: 4px 4px 0 0; background: rgba(15, 18, 20, 0.9); }
@@ -354,6 +383,13 @@ body:not([data-debug="storage"]) #stats-storage { display: none; }
 <div id="details-health-multiple" class="box bar"><div class="border"></div><div class="health-bg"></div><div id="details-health-multiple-bar" class="health-fg"></div><div class="shine vertical"></div></div>
 <div id="details-capture-multiple" class="box bar"><div class="border"></div><div class="segments"></div><div class="shine vertical"></div></div>
 </div>
+<span class="edge top"></span><span class="edge right"></span><span class="edge bottom"></span><span class="edge left"></span>
+<span class="edge corner top-right"></span><span class="edge corner bottom-right"></span><span class="edge corner bottom-left"></span><span class="edge corner top-left"></span>
+</div>
+<div id="garrison" class="gui-frame" hidden>
+<div id="garrison-background"></div>
+<div id="garrison-cells"></div>
+<div id="garrison-health" class="box bar"><div class="border"></div><div class="health-bg"></div><div id="garrison-health-bar" class="health-fg"></div><div class="shine vertical"></div></div>
 <span class="edge top"></span><span class="edge right"></span><span class="edge bottom"></span><span class="edge left"></span>
 <span class="edge corner top-right"></span><span class="edge corner bottom-right"></span><span class="edge corner bottom-left"></span><span class="edge corner top-left"></span>
 </div>

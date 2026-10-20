@@ -53,6 +53,7 @@ const DETAIL_PROGRESS: u32 = 8192;
 const DETAIL_HOLDER: u32 = 16384;
 const DETAIL_TRADER: u32 = 32768;
 const DETAIL_RANGES: u32 = 65536;
+const DETAIL_GARRISON_OWNERS: u32 = 131072;
 const QUEUE_UNIT: u8 = 0;
 const QUEUE_TECHNOLOGY: u8 = 1;
 
@@ -243,6 +244,9 @@ pub struct EntityDetails {
     pub holder: Option<u32>,
     pub trader: Option<Trader>,
     pub ranges: Option<Vec<RangeOverlay>>,
+    /// The owner of each entity of `garrison`, in its order, -1 for none.
+    /// Older hooks do not send it.
+    pub garrison_owners: Option<Vec<i8>>,
 }
 
 impl EntityDetails {
@@ -270,6 +274,7 @@ impl EntityDetails {
         take(&mut self.holder, changed.holder);
         take(&mut self.trader, changed.trader);
         take(&mut self.ranges, changed.ranges);
+        take(&mut self.garrison_owners, changed.garrison_owners);
     }
 }
 
@@ -1139,6 +1144,14 @@ fn decode_groups(cursor: &mut Cursor, mask: u32) -> io::Result<EntityDetails> {
             });
         }
         details.ranges = Some(ranges);
+    }
+    if mask & DETAIL_GARRISON_OWNERS != 0 {
+        let count = cursor.u16()?;
+        details.garrison_owners = Some(
+            (0..count)
+                .map(|_| Ok(cursor.u8()? as i8))
+                .collect::<io::Result<_>>()?,
+        );
     }
     Ok(details)
 }

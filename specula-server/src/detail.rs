@@ -2,9 +2,9 @@
 //! show beyond the status bars, for every entity, sent only to viewers that
 //! have something selected. Varints and zigzag as in `wire.rs`.
 //!
-//! - kind 1 keyframe: varint turn, u8 detail version (1; a viewer ignores
-//!   the stream at any other), u64 match id (the visual stream's), list
-//!   table, varint n, n x {varint template, varint mask, groups}: each
+//! - kind 1 keyframe: varint turn, u8 detail version (2; a viewer also
+//!   reads 1, which had no garrison owners, and ignores the stream at any
+//!   other), u64 match id (the visual stream's), list table, varint n, n x {varint template, varint mask, groups}: each
 //!   template's defaults, then varint count, count x {varint id delta,
 //!   varint mask, groups}. A keyframe leaves out a group equal to the
 //!   default of the entity's template (the template of the visual stream's
@@ -37,7 +37,8 @@
 //!   count, u8 paused, varint missing population, varint time remaining,
 //!   varint total time, both in 100 ms};
 //! - 128 garrison: varint capacity, varint occupied slots, varint n, n x
-//!   {zigzag id minus the one before (from 0), varint template};
+//!   {zigzag id minus the one before (from 0), varint template, zigzag
+//!   owner, -1 for none or unknown};
 //! - 256 foundation, 512 repair: u8 builders, varint seconds remaining in
 //!   1/10;
 //! - 1024 unit AI: u8 idle, varint stance, varint formation controller id
@@ -77,7 +78,7 @@ use crate::wire::Writer;
 
 const MESSAGE_KEYFRAME: u8 = 1;
 const MESSAGE_DELTA: u8 = 2;
-const DETAIL_VERSION: u8 = 1;
+const DETAIL_VERSION: u8 = 2;
 const HEALTH: usize = 0;
 const CAPTURE: usize = 1;
 const SUPPLY: usize = 2;
@@ -197,11 +198,19 @@ fn encode_group(slot: usize, details: &EntityDetails) -> Option<Vec<u8>> {
             out.varint(u64::from(garrison.capacity));
             out.varint(u64::from(garrison.occupied));
             out.varint(garrison.entities.len() as u64);
+            let owners = details.garrison_owners.as_deref().unwrap_or_default();
             let mut previous = 0i64;
-            for (id, template) in &garrison.entities {
+            for (index, (id, template)) in garrison.entities.iter().enumerate() {
                 out.zigzag(i64::from(*id) - previous);
                 previous = i64::from(*id);
                 out.varint(u64::from(*template));
+                // An older hook sends no owners.
+                let owner = if owners.len() == garrison.entities.len() {
+                    owners[index]
+                } else {
+                    -1
+                };
+                out.zigzag(i64::from(owner));
             }
         }
         FOUNDATION | REPAIR => {

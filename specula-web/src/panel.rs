@@ -1,7 +1,8 @@
 //! The selection details panel, a port of gui/session/selection_details.js
 //! (`displaySingle`, `displayMultiple`) and of the selection panel's group
-//! buttons (`g_SelectionPanels.Selection` in selection_panels.js), drawn
-//! into the page's `#details`. The engine's tooltips are left out.
+//! buttons (`g_SelectionPanels.Selection` in selection_panels.js) and
+//! garrison buttons (`g_SelectionPanels.Garrison`), drawn into the page's
+//! `#details`. The engine's tooltips are left out.
 //!
 //! Each element keeps what was last written to it, so an update that
 //! changes nothing touches no DOM.
@@ -27,6 +28,9 @@ const MAX_GROUPS: usize = 16;
 const GROUP_ROW: usize = 4;
 /// `setPanelObjectPosition`: a 38 px button and a 1 px margin.
 const GROUP_STEP: usize = 39;
+/// `g_SelectionPanels.Garrison.getMaxNumberOfItems`, in rows of
+/// `GROUP_ROW`.
+const MAX_GARRISONED: usize = 12;
 /// `captureBar[n]` and `captureBarMultiple[n]`, `g_MaxPlayers + 1`.
 const CAPTURE_SEGMENTS: usize = 9;
 /// `getPlayerColor(id, 128)` and `(id, 160)`, as CSS alphas.
@@ -154,12 +158,69 @@ impl CaptureBar {
     }
 }
 
-/// One of the selection panel's group buttons.
+/// One of the selection panel's group buttons, or a garrison button.
 struct GroupButton {
     button: Out,
     owner: Out,
     icon: Out,
     count: Out,
+}
+
+impl GroupButton {
+    /// The `i`-th of a grid, a `tag` of `class` at `setPanelObjectPosition`.
+    fn new(
+        document: &Document,
+        grid: &HtmlElement,
+        tag: &str,
+        class: &str,
+        i: usize,
+    ) -> Result<Self, String> {
+        let button: HtmlElement = create(document, tag)?;
+        if tag == "button" {
+            let _ = button.set_attribute("type", "button");
+        }
+        let _ = button.set_attribute("class", class);
+        let _ = button.set_attribute(
+            "style",
+            &format!(
+                "left: {}px; top: {}px",
+                i % GROUP_ROW * GROUP_STEP,
+                i / GROUP_ROW * GROUP_STEP
+            ),
+        );
+        let owner: HtmlElement = create(document, "div")?;
+        let _ = owner.set_attribute("class", "owner");
+        let icon: HtmlElement = create(document, "img")?;
+        let _ = icon.set_attribute("alt", "");
+        let count: HtmlElement = create(document, "div")?;
+        let _ = count.set_attribute("class", "text center sans-bold-stroke-14");
+        for child in [&owner, &icon, &count] {
+            button
+                .append_child(child)
+                .map_err(|_| "cannot build a group button")?;
+        }
+        grid.append_child(&button)
+            .map_err(|_| "cannot add a group button")?;
+        Ok(GroupButton {
+            button: Out::new(button),
+            owner: Out::new(owner),
+            icon: Out::new(icon),
+            count: Out::new(count),
+        })
+    }
+
+    /// `setupButton`'s owner colour, icon and count, for observers.
+    fn show(&mut self, icon: Option<String>, color: u32, count: usize) {
+        self.icon.src(icon);
+        self.owner
+            .style(format!("background: {}", css_color(color, GROUP_ALPHA)));
+        self.count.text(&if count > 1 {
+            count.to_string()
+        } else {
+            String::new()
+        });
+        self.button.hidden(false);
+    }
 }
 
 /// The `#details` panel. Its buttons ask for camera and selection changes,
@@ -199,10 +260,20 @@ pub struct DetailsPanel {
     strip_name: Out,
     strip_health: Out,
     minimap_background: Out,
+    /// `None` on a page from before the garrison panel.
+    garrison: Option<GarrisonPanel>,
     /// The entity the portrait follows, and the ids of each group button.
     portrait_id: Option<u32>,
     group_ids: Vec<Vec<u32>>,
     requests: RefCell<Vec<Request>>,
+}
+
+/// `unitGarrisonPanel` and `healthGarrison` in the supplemental panel.
+struct GarrisonPanel {
+    root: Out,
+    cells: Vec<GroupButton>,
+    health: Out,
+    health_bar: Out,
 }
 
 /// What a click on the panel asks of the page.
@@ -225,39 +296,20 @@ impl DetailsPanel {
     pub fn new(document: &Document) -> Result<Self, String> {
         let find = |id: &str| Out::find(document, id);
         let grid: HtmlElement = crate::element(document, "details-groups")?;
-        let mut groups = Vec::new();
-        for i in 0..MAX_GROUPS {
-            let button: HtmlElement = create(document, "button")?;
-            let _ = button.set_attribute("type", "button");
-            let _ = button.set_attribute("class", "group");
-            let _ = button.set_attribute(
-                "style",
-                &format!(
-                    "left: {}px; top: {}px",
-                    i % GROUP_ROW * GROUP_STEP,
-                    i / GROUP_ROW * GROUP_STEP
-                ),
-            );
-            let owner: HtmlElement = create(document, "div")?;
-            let _ = owner.set_attribute("class", "owner");
-            let icon: HtmlElement = create(document, "img")?;
-            let _ = icon.set_attribute("alt", "");
-            let count: HtmlElement = create(document, "div")?;
-            let _ = count.set_attribute("class", "text center sans-bold-stroke-14");
-            for child in [&owner, &icon, &count] {
-                button
-                    .append_child(child)
-                    .map_err(|_| "cannot build a group button")?;
-            }
-            grid.append_child(&button)
-                .map_err(|_| "cannot add a group button")?;
-            groups.push(GroupButton {
-                button: Out::new(button),
-                owner: Out::new(owner),
-                icon: Out::new(icon),
-                count: Out::new(count),
-            });
-        }
+        let groups = (0..MAX_GROUPS)
+            .map(|i| GroupButton::new(document, &grid, "button", "group", i))
+            .collect::<Result<_, _>>()?;
+        let garrison = match crate::element::<HtmlElement>(document, "garrison-cells") {
+            Ok(grid) => Some(GarrisonPanel {
+                root: find("garrison")?,
+                cells: (0..MAX_GARRISONED)
+                    .map(|i| GroupButton::new(document, &grid, "div", "cell", i))
+                    .collect::<Result<_, _>>()?,
+                health: find("garrison-health")?,
+                health_bar: find("garrison-health-bar")?,
+            }),
+            Err(_) => None,
+        };
         Ok(DetailsPanel {
             root: find("details")?,
             single: find("details-single")?,
@@ -293,6 +345,7 @@ impl DetailsPanel {
             strip_name: find("details-strip-name")?,
             strip_health: find("details-strip-health")?,
             minimap_background: find("minimap-background")?,
+            garrison,
             portrait_id: None,
             group_ids: Vec::new(),
             requests: RefCell::new(Vec::new()),
@@ -365,6 +418,9 @@ impl DetailsPanel {
                 self.multiple.hidden(false);
                 self.show_multiple(view, &entities);
             }
+        }
+        if let Some(garrison) = &mut self.garrison {
+            garrison.show(view, &entities);
         }
     }
 
@@ -691,16 +747,7 @@ impl DetailsPanel {
 
         let grouped = crate::selection::groups(entities, |id| {
             let dot = scene.dots.get(&id)?;
-            let name = template_details(scene, dot.template)
-                .and_then(|template| string(scene, template.group_name))
-                .filter(|name| !name.is_empty())
-                .or_else(|| {
-                    scene
-                        .templates
-                        .get(dot.template as usize)
-                        .map(String::as_str)
-                })?;
-            Some((dot.owner, name.to_string()))
+            Some((dot.owner, group_name(scene, dot.template)?.to_string()))
         });
         self.group_ids.clear();
         let mut first_icon = None;
@@ -719,26 +766,87 @@ impl DetailsPanel {
             if index == 0 {
                 first_icon.clone_from(&icon);
             }
-            button.icon.src(icon);
             // The owner's colour shows to observers only, which a viewer
             // always is.
-            let color = usize::try_from(dot.owner)
-                .ok()
-                .and_then(|owner| view.palette.get(owner))
-                .copied()
-                .unwrap_or(0);
-            button
-                .owner
-                .style(format!("background: {}", css_color(color, GROUP_ALPHA)));
-            button.count.text(&if ids.len() > 1 {
-                ids.len().to_string()
-            } else {
-                String::new()
-            });
-            button.button.hidden(false);
+            button.show(icon, player_color(view.palette, dot.owner), ids.len());
             self.group_ids.push(ids.clone());
         }
         self.strip_icon.src(first_icon);
+    }
+}
+
+impl GarrisonPanel {
+    /// `g_SelectionPanels.Garrison` and `updateGarrisonHealthBar`.
+    fn show(&mut self, view: &View, entities: &[u32]) {
+        let scene = view.scene;
+        // (id, template, owner) of every entity the selection holds.
+        let mut held: Vec<(u32, u32, i32)> = Vec::new();
+        let mut first_holds = false;
+        for (index, &id) in entities.iter().enumerate() {
+            let Some(dot) = scene.dots.get(&id) else {
+                continue;
+            };
+            let groups = entity_groups(scene, id, dot.template);
+            let Some(Group::Garrison {
+                entities: garrisoned,
+                ..
+            }) = &groups[detail::GARRISON]
+            else {
+                continue;
+            };
+            first_holds |= index == 0;
+            // A stream without owners: most garrisons are the holder's.
+            held.extend(garrisoned.iter().map(|entity| {
+                (
+                    entity.id,
+                    entity.template,
+                    entity.owner.unwrap_or(dot.owner),
+                )
+            }));
+        }
+        let find = |id: u32| held.iter().find(|entity| entity.0 == id).copied();
+        let ids: Vec<u32> = held.iter().map(|entity| entity.0).collect();
+        let grouped = crate::selection::groups(&ids, |id| {
+            let (_, template, owner) = find(id)?;
+            Some((owner, group_name(scene, template)?.to_string()))
+        });
+        self.root.hidden(grouped.is_empty());
+        for (index, cell) in self.cells.iter_mut().enumerate() {
+            let Some((_, template, owner)) = grouped
+                .get(index)
+                .and_then(|(_, ids)| ids.first())
+                .and_then(|id| find(*id))
+            else {
+                cell.button.hidden(true);
+                continue;
+            };
+            let icon = template_details(scene, template)
+                .and_then(|template| string(scene, template.icon))
+                .and_then(|icon| (view.portrait)(icon));
+            cell.show(
+                icon,
+                player_color(view.palette, owner),
+                grouped[index].1.len(),
+            );
+        }
+
+        let mut health = 0.0;
+        let mut max_health = 0.0;
+        if first_holds {
+            for &(id, template, _) in &held {
+                if let Some(Group::Health { hitpoints, max }) =
+                    &entity_groups(scene, id, template)[detail::HEALTH]
+                {
+                    health += f64::from(*hitpoints);
+                    max_health += f64::from(*max);
+                }
+            }
+        }
+        self.health.hidden(health <= 0.0);
+        self.health_bar.style(format!(
+            "top: {}%",
+            100.0 - 100.0 * fraction(health, max_health)
+        ));
     }
 }
 
@@ -753,6 +861,22 @@ fn create<T: JsCast>(document: &Document, tag: &str) -> Result<T, String> {
 fn string(scene: &Scene, index: u32) -> Option<&str> {
     let index = (index as usize).checked_sub(1)?;
     scene.strings.get(index).map(String::as_str)
+}
+
+/// `EntityGroups`' name: the selection group name, else the template.
+fn group_name(scene: &Scene, template: u32) -> Option<&str> {
+    template_details(scene, template)
+        .and_then(|details| string(scene, details.group_name))
+        .filter(|name| !name.is_empty())
+        .or_else(|| scene.templates.get(template as usize).map(String::as_str))
+}
+
+fn player_color(palette: &[u32], owner: i32) -> u32 {
+    usize::try_from(owner)
+        .ok()
+        .and_then(|owner| palette.get(owner))
+        .copied()
+        .unwrap_or(0)
 }
 
 fn template_details(scene: &Scene, template: u32) -> Option<&TemplateDetails> {

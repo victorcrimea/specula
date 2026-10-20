@@ -11,7 +11,9 @@ use crate::stream::Writer;
 
 const MESSAGE_KEYFRAME: u8 = 1;
 const MESSAGE_DELTA: u8 = 2;
-const DETAIL_VERSION: u8 = 1;
+const DETAIL_VERSION: u8 = 2;
+/// Archived matches keep it; it has no garrison owners.
+const DETAIL_VERSION_NO_OWNERS: u8 = 1;
 /// Slots of `Groups`, the hook's group bits.
 pub const HEALTH: usize = 0;
 pub const CAPTURE: usize = 1;
@@ -20,7 +22,7 @@ pub const GATHERERS: usize = 3;
 pub const CARRYING: usize = 4;
 pub const EXPERIENCE: usize = 5;
 const QUEUE: usize = 6;
-const GARRISON: usize = 7;
+pub const GARRISON: usize = 7;
 pub const FOUNDATION: usize = 8;
 pub const REPAIR: usize = 9;
 const UNIT_AI: usize = 10;
@@ -64,8 +66,7 @@ pub enum Group {
     Garrison {
         capacity: u32,
         occupied: u32,
-        /// (id, 0-based template index).
-        entities: Vec<(u32, u32)>,
+        entities: Vec<Garrisoned>,
     },
     /// A foundation or a repair.
     Building(Building),
@@ -89,6 +90,15 @@ pub enum Group {
         goods: u32,
         gain: u32,
     },
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Garrisoned {
+    pub id: u32,
+    /// 0-based index into `Scene::templates`.
+    pub template: u32,
+    /// `None` for none, or from a stream without owners.
+    pub owner: Option<i32>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -166,6 +176,8 @@ pub struct Details {
     pub known: bool,
     pub turn: u32,
     pub match_id: u64,
+    /// Whether its garrisons carry owners, which a delta does not say.
+    pub owners: bool,
     /// Lists of 1-based strings.
     pub lists: Vec<Vec<u32>>,
     /// By template index: the groups an entity of it has when its own
@@ -192,25 +204,28 @@ impl Details {
 
     fn apply_keyframe(&mut self, cursor: &mut Cursor) -> Result<(), &'static str> {
         let turn = cursor.varint_u32()?;
-        if cursor.u8()? != DETAIL_VERSION {
-            return Err("unknown detail version, reload the page");
-        }
+        let owners = match cursor.u8()? {
+            DETAIL_VERSION => true,
+            DETAIL_VERSION_NO_OWNERS => false,
+            _ => return Err("unknown detail version, reload the page"),
+        };
         *self = Details {
             known: true,
             turn,
             match_id: cursor.u64()?,
+            owners,
             ..Details::default()
         };
         self.read_lists(cursor)?;
         for _ in 0..cursor.varint()? {
             let template = cursor.varint_u32()?;
-            let groups = read_groups(cursor, turn, false)?;
+            let groups = read_groups(cursor, turn, false, owners)?;
             self.defaults.insert(template, groups);
         }
         let mut id = 0u32;
         for _ in 0..cursor.varint()? {
             id = next_id(id, cursor)?;
-            let groups = read_groups(cursor, turn, true)?;
+            let groups = read_groups(cursor, turn, true, owners)?;
             self.entities.insert(id, groups);
         }
         Ok(())
@@ -225,7 +240,7 @@ impl Details {
         let mut id = 0u32;
         for _ in 0..cursor.varint()? {
             id = next_id(id, cursor)?;
-            let changed = read_groups(cursor, self.turn, false)?;
+            let changed = read_groups(cursor, self.turn, false, self.owners)?;
             let groups = self
                 .entities
                 .entry(id)
@@ -260,7 +275,12 @@ impl Details {
         let mut out = Writer::default();
         out.u8(MESSAGE_KEYFRAME);
         out.varint(u64::from(self.turn));
-        out.u8(DETAIL_VERSION);
+        // The deltas that follow it are still in its source's version.
+        out.u8(if self.owners {
+            DETAIL_VERSION
+        } else {
+            DETAIL_VERSION_NO_OWNERS
+        });
         out.u64(self.match_id);
         out.varint(self.lists.len() as u64);
         for list in &self.lists {
@@ -272,14 +292,14 @@ impl Details {
         out.varint(self.defaults.len() as u64);
         for (template, groups) in &self.defaults {
             out.varint(u64::from(*template));
-            write_groups(&mut out, groups, None);
+            write_groups(&mut out, groups, None, self.owners);
         }
         out.varint(self.entities.len() as u64);
         let mut previous = 0u32;
         for (id, groups) in &self.entities {
             out.varint(u64::from(id - previous));
             previous = *id;
-            write_groups(&mut out, groups, Some(self.turn));
+            write_groups(&mut out, groups, Some(self.turn), self.owners);
         }
         out.0
     }
@@ -316,6 +336,7 @@ fn read_groups(
     cursor: &mut Cursor,
     turn: u32,
     keyframe_entity: bool,
+    owners: bool,
 ) -> Result<Groups, &'static str> {
     let mask = cursor.varint()?;
     if mask >> SLOTS != 0 {
@@ -326,7 +347,7 @@ fn read_groups(
         if mask & 1 << slot == 0 {
             continue;
         }
-        let mut read = read_group(cursor, slot, turn)?;
+        let mut read = read_group(cursor, slot, turn, owners)?;
         if keyframe_entity && is_reckoned(slot) {
             let since = cursor.varint_u32()?;
             let sent = turn
@@ -343,7 +364,12 @@ fn read_groups(
     Ok(groups)
 }
 
-fn read_group(cursor: &mut Cursor, slot: usize, turn: u32) -> Result<Group, &'static str> {
+fn read_group(
+    cursor: &mut Cursor,
+    slot: usize,
+    turn: u32,
+    owners: bool,
+) -> Result<Group, &'static str> {
     Ok(match slot {
         HEALTH => Group::Health {
             hitpoints: cursor.varint_u32()?,
@@ -411,7 +437,17 @@ fn read_group(cursor: &mut Cursor, slot: usize, turn: u32) -> Result<Group, &'st
                 .map(|_| {
                     previous += cursor.zigzag_i64()?;
                     let id = u32::try_from(previous).map_err(|_| "id out of range")?;
-                    Ok((id, cursor.varint_u32()?))
+                    let template = cursor.varint_u32()?;
+                    let owner = if owners {
+                        Some(cursor.zigzag()?).filter(|owner| *owner >= 0)
+                    } else {
+                        None
+                    };
+                    Ok(Garrisoned {
+                        id,
+                        template,
+                        owner,
+                    })
                 })
                 .collect::<Result<_, &'static str>>()?;
             Group::Garrison {
@@ -447,7 +483,7 @@ fn read_group(cursor: &mut Cursor, slot: usize, turn: u32) -> Result<Group, &'st
 
 /// As `read_groups` reads them; `keyframe_turn` is set for a keyframe's
 /// entities.
-fn write_groups(out: &mut Writer, groups: &Groups, keyframe_turn: Option<u32>) {
+fn write_groups(out: &mut Writer, groups: &Groups, keyframe_turn: Option<u32>, owners: bool) {
     let mask = groups
         .iter()
         .enumerate()
@@ -455,7 +491,7 @@ fn write_groups(out: &mut Writer, groups: &Groups, keyframe_turn: Option<u32>) {
         .fold(0u64, |mask, (slot, _)| mask | 1 << slot);
     out.varint(mask);
     for group in groups.iter().flatten() {
-        write_group(out, group);
+        write_group(out, group, owners);
         if let Some(turn) = keyframe_turn {
             match group {
                 Group::Queue(queue) => out.varint(u64::from(turn - queue.turn)),
@@ -466,7 +502,7 @@ fn write_groups(out: &mut Writer, groups: &Groups, keyframe_turn: Option<u32>) {
     }
 }
 
-fn write_group(out: &mut Writer, group: &Group) {
+fn write_group(out: &mut Writer, group: &Group, owners: bool) {
     match group {
         Group::Health { hitpoints, max } => {
             out.varint(u64::from(*hitpoints));
@@ -525,10 +561,13 @@ fn write_group(out: &mut Writer, group: &Group) {
             out.varint(u64::from(*occupied));
             out.varint(entities.len() as u64);
             let mut previous = 0i64;
-            for (id, template) in entities {
-                out.zigzag_i64(i64::from(*id) - previous);
-                previous = i64::from(*id);
-                out.varint(u64::from(*template));
+            for entity in entities {
+                out.zigzag_i64(i64::from(entity.id) - previous);
+                previous = i64::from(entity.id);
+                out.varint(u64::from(entity.template));
+                if owners {
+                    out.zigzag(entity.owner.unwrap_or(-1));
+                }
             }
         }
         Group::Building(building) => {
