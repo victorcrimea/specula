@@ -3844,6 +3844,10 @@ impl View for Field {
         std::mem::take(&mut self.select_sounds)
     }
 
+    fn selected(&self) -> &[u32] {
+        self.selection.selected()
+    }
+
     fn set_selection_atlas(&mut self, bytes: &[u8]) {
         if let Err(error) = self.overlays.set_atlas(&self.device, &self.queue, bytes) {
             web_sys::console::error_1(&format!("selection.bin: {error}").into());
@@ -4521,6 +4525,16 @@ impl Field {
             0.0
         };
         let peak_kbps = stream.peak_window as f64 * 8.0 / (PEAK_WINDOW_S as f64 * 1000.0);
+        let detail_ms = if stream.detail_on {
+            stream.detail_ms + (now - stream.received_at)
+        } else {
+            stream.detail_ms
+        };
+        let detail_kbps = if detail_ms > 0.0 {
+            stream.detail_live as f64 * 8.0 / detail_ms
+        } else {
+            0.0
+        };
         let (held, held_bytes, waiting) = self.far.held();
         let seconds = span / 1000.0;
         let uploads = f64::from(std::mem::take(&mut self.far.uploads)) / seconds;
@@ -4590,6 +4604,23 @@ impl Field {
             format!("{peak_kbps:.0}"),
             "kbit/s",
         );
+        pane.row(
+            "Details",
+            format!("{:.2}", mb(stream.detail_live + stream.detail_segments)),
+            "MB",
+        );
+        pane.row("  live", format!("{:.2}", mb(stream.detail_live)), "MB");
+        pane.row(
+            "  history",
+            format!("{:.2}", mb(stream.detail_segments)),
+            "MB",
+        );
+        pane.row(
+            "  followed",
+            format!("{:.0}", detail_ms / 1000.0),
+            if stream.detail_on { "s, on" } else { "s, off" },
+        );
+        pane.row("  live average", format!("{detail_kbps:.0}"), "kbit/s");
         pane.row(
             "Assets downloaded",
             format!("{:.1}", mb(assets.downloaded)),

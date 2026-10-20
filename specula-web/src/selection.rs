@@ -101,6 +101,11 @@ pub struct Selection {
 }
 
 impl Selection {
+    /// In the order added.
+    pub fn selected(&self) -> &[u32] {
+        &self.selected
+    }
+
     pub fn overlay(&self, id: u32, always_visible: bool) -> Overlay {
         self.overlays
             .get(&id)

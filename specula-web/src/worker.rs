@@ -21,7 +21,18 @@
 //! messages and u64 bytes of segments received for the shown match, u32 ms
 //! until the move to the next match (0 once due; meaningful with
 //! `STATUS_ENDED`), u64 bytes of terrain, f64 ms since the counts began and
-//! u64 most live bytes in `PEAK_WINDOW_S` seconds.
+//! u64 most live bytes in `PEAK_WINDOW_S` seconds, then for the detail
+//! stream u64 bytes of live messages and u64 bytes of segments received for
+//! the shown match, f64 ms it has been followed since the counts began and
+//! u8 1 while it is followed; or u8 `POST_DETAIL`,
+//! then a detail stream message (`detail.rs`), none to clear the details.
+//!
+//! While the page has something selected (`COMMAND_DETAIL` 1) and for
+//! `DETAIL_LINGER_MS` after (`COMMAND_DETAIL` 0), the worker also follows
+//! the detail stream: live over `/detail`, and from its segments for turns
+//! the live deltas do not reach. The page is handed the detail state of the
+//! turn it shows, never of a later one, so the details step with the
+//! visuals: deltas when they follow on, else a keyframe.
 
 use std::cell::Cell;
 use std::cell::RefCell;
@@ -41,6 +52,7 @@ use web_sys::WebSocket;
 use web_sys::WorkerGlobalScope;
 
 use crate::TURN_MS;
+use crate::detail::Details;
 use crate::stream;
 use crate::stream::FrameDecoder;
 use crate::stream::Ground;
@@ -49,6 +61,7 @@ use crate::stream::Scene;
 pub const POST_SCENE: u8 = 1;
 pub const POST_STATUS: u8 = 2;
 pub const POST_TERRAIN: u8 = 3;
+pub const POST_DETAIL: u8 = 4;
 pub const STATUS_LIVE: u8 = 1;
 pub const STATUS_PAUSED: u8 = 2;
 /// The shown match has ended.
@@ -66,6 +79,8 @@ pub const COMMAND_SPEED: u8 = 5;
 pub const COMMAND_LIVE: u8 = 6;
 /// Leaves an ended match for the one being played now.
 pub const COMMAND_CURRENT_MATCH: u8 = 7;
+/// 1 while the page has something selected, else 0.
+pub const COMMAND_DETAIL: u8 = 8;
 
 /// Only a few segments around the playhead are decoded at a time
 /// (init.md 2.4).
@@ -83,6 +98,9 @@ const RECONNECT_MIN_MS: f64 = 1000.0;
 const RECONNECT_MAX_MS: f64 = 10_000.0;
 /// The live match's, the next one's and one spare.
 const KEPT_TERRAINS: usize = 3;
+/// How long the detail stream is followed after the selection is cleared,
+/// so that clicking around does not fetch it again each time.
+const DETAIL_LINGER_MS: f64 = 10_000.0;
 /// Seconds of live bytes the peak rate is taken over, in 1 s steps, so a
 /// burst across a window edge still counts whole.
 pub const PEAK_WINDOW_S: u64 = 5;
@@ -164,6 +182,13 @@ struct Playback {
     /// `PEAK_WINDOW_S` seconds only.
     live_window: VecDeque<(u64, u64)>,
     peak_window_bytes: u64,
+    /// The detail stream's, likewise, apart from the visual stream's.
+    detail_live_bytes: u64,
+    detail_segment_bytes: u64,
+    /// How long it was followed since the counts began, up to
+    /// `detail_since`, and when it was last taken up, while it is followed.
+    detail_ms: f64,
+    detail_since: Option<f64>,
     /// Fetched terrains, oldest first: the heightmap and the resource.
     terrains: Vec<(Rc<Ground>, Rc<[u8]>)>,
     /// Live messages waiting, by WebSocket message, from the first
@@ -171,6 +196,33 @@ struct Playback {
     held: Vec<Vec<Vec<u8>>>,
     /// The terrain the page was last handed.
     page_terrain: Cell<u64>,
+    /// The turn of the last scene message the page was handed.
+    page_turn: Cell<u32>,
+    /// The page has something selected, or had until less than
+    /// `DETAIL_LINGER_MS` ago.
+    detail_wanted: bool,
+    detail_linger: Option<i32>,
+    /// Calls `detail_linger_due`, for the linger timer.
+    detail_linger_wake: js_sys::Function,
+    detail_socket: Option<WebSocket>,
+    detail_handlers: Option<SocketHandlers>,
+    /// Goes up with every detail socket, so that an old one's close does
+    /// not reconnect.
+    detail_generation: u32,
+    detail_frame: Option<FrameDecoder>,
+    detail_reconnect_ms: f64,
+    /// Every live detail message applied; it may belong to the match after
+    /// the shown one.
+    live_details: Details,
+    /// The last live detail keyframe and its turn, and the live deltas
+    /// since, without a gap.
+    live_detail_keyframe: (u32, Vec<u8>),
+    recent_details: VecDeque<(u32, Vec<u8>)>,
+    /// Least recently used first, all of the shown match.
+    detail_segments: Vec<Segment>,
+    detail_fetching: Option<u32>,
+    /// The match and turn of the detail state the page holds.
+    page_details: Option<(u64, u32)>,
 }
 
 impl Playback {
@@ -257,6 +309,12 @@ impl Playback {
         self.counted_since = self.now();
         self.live_window.clear();
         self.peak_window_bytes = 0;
+        self.detail_live_bytes = 0;
+        self.detail_segment_bytes = 0;
+        self.detail_ms = 0.0;
+        if self.detail_since.is_some() {
+            self.detail_since = Some(self.counted_since);
+        }
     }
 
     fn read_socket(&mut self, bytes: Vec<u8>) {
@@ -325,7 +383,9 @@ impl Playback {
                 Ok((Rc::new(ground), Rc::from(bytes)))
             });
             if let Some(playback) = this.upgrade() {
-                playback.borrow_mut().terrain_arrived(id, result);
+                let mut playback = playback.borrow_mut();
+                playback.terrain_arrived(id, result);
+                playback.sync_details();
             }
         });
     }
@@ -437,6 +497,7 @@ impl Playback {
             if self.live_scene.match_id != previous_match {
                 // Nothing cached or shown belongs to the new match.
                 self.segments.clear();
+                self.detail_segments.clear();
                 // The first join has nothing to reset, and its bytes are
                 // only counted after it.
                 if previous_match != 0 {
@@ -513,6 +574,7 @@ impl Playback {
         // is dropped on arrival.
         self.recent.clear();
         self.segments.clear();
+        self.detail_segments.clear();
         self.reset_counts();
         self.live = false;
         self.go_live(true);
@@ -528,6 +590,7 @@ impl Playback {
             COMMAND_SPEED => self.set_speed(value as f32),
             COMMAND_LIVE => self.go_live(true),
             COMMAND_CURRENT_MATCH => self.switch_match(),
+            COMMAND_DETAIL => self.set_detail_wanted(value != 0.0),
             _ => {}
         }
     }
@@ -785,6 +848,7 @@ impl Playback {
                 let mut playback = playback.borrow_mut();
                 playback.segment_bytes += size;
                 playback.segment_arrived(match_id, index, result);
+                playback.sync_details();
             }
         });
     }
@@ -846,6 +910,9 @@ impl Playback {
             self.post(&out);
             self.page_terrain.set(id);
         }
+        if let Ok(turn) = stream::message_turn(message) {
+            self.page_turn.set(turn);
+        }
         let mut out = Vec::with_capacity(9 + message.len());
         out.push(POST_SCENE);
         out.extend_from_slice(&turn_ms.to_le_bytes());
@@ -887,6 +954,11 @@ impl Playback {
         out.extend_from_slice(&self.terrain_bytes.to_le_bytes());
         out.extend_from_slice(&(self.now() - self.counted_since).to_le_bytes());
         out.extend_from_slice(&self.peak_window_bytes.to_le_bytes());
+        out.extend_from_slice(&self.detail_live_bytes.to_le_bytes());
+        out.extend_from_slice(&self.detail_segment_bytes.to_le_bytes());
+        let detail_ms = self.detail_ms + self.detail_since.map_or(0.0, |since| self.now() - since);
+        out.extend_from_slice(&detail_ms.to_le_bytes());
+        out.push(u8::from(self.detail_since.is_some()));
         self.post(&out);
     }
 
@@ -894,6 +966,441 @@ impl Playback {
         let array = js_sys::Uint8Array::from(bytes);
         let transfer = js_sys::Array::of1(&array.buffer());
         let _ = self.scope.post_message_with_transfer(&array, &transfer);
+    }
+
+    fn post_detail(&self, message: &[u8]) {
+        let mut out = Vec::with_capacity(1 + message.len());
+        out.push(POST_DETAIL);
+        out.extend_from_slice(message);
+        self.post(&out);
+    }
+
+    fn set_detail_wanted(&mut self, wanted: bool) {
+        if wanted {
+            if let Some(timer) = self.detail_linger.take() {
+                self.scope.clear_timeout_with_handle(timer);
+            }
+            if !self.detail_wanted {
+                self.detail_wanted = true;
+                self.detail_since = Some(self.now());
+                self.detail_reconnect_ms = RECONNECT_MIN_MS;
+                self.connect_detail();
+                self.post_status();
+            }
+        } else if self.detail_wanted && self.detail_linger.is_none() {
+            self.detail_linger = self
+                .scope
+                .set_timeout_with_callback_and_timeout_and_arguments_0(
+                    &self.detail_linger_wake,
+                    DETAIL_LINGER_MS as i32,
+                )
+                .ok();
+        }
+    }
+
+    fn detail_linger_due(&mut self) {
+        self.detail_linger = None;
+        self.detail_wanted = false;
+        if let Some(since) = self.detail_since.take() {
+            self.detail_ms += self.now() - since;
+        }
+        self.detail_generation += 1;
+        if let Some(socket) = self.detail_socket.take() {
+            let _ = socket.close();
+        }
+        self.detail_handlers = None;
+        self.detail_frame = None;
+        self.live_details = Details::default();
+        self.recent_details.clear();
+        self.detail_segments.clear();
+        self.page_details = None;
+        self.post_detail(&[]);
+        self.post_status();
+    }
+
+    /// Opens the detail socket; a closed one is opened again after a
+    /// growing pause, as the visual one is, while the details are wanted.
+    fn connect_detail(&mut self) {
+        self.detail_generation += 1;
+        let generation = self.detail_generation;
+        let location = self.scope.location();
+        let scheme = match location.protocol().as_str() {
+            "https:" => "wss",
+            _ => "ws",
+        };
+        let url = format!("{scheme}://{}/detail", location.host());
+        let Ok(socket) = WebSocket::new(&url) else {
+            web_sys::console::error_1(&format!("cannot open {url}").into());
+            return;
+        };
+        socket.set_binary_type(BinaryType::Arraybuffer);
+
+        let receiver = self.this.clone();
+        let on_message = Closure::<dyn FnMut(MessageEvent)>::new(move |event: MessageEvent| {
+            let Ok(buffer) = event.data().dyn_into::<js_sys::ArrayBuffer>() else {
+                return;
+            };
+            let bytes = js_sys::Uint8Array::new(&buffer).to_vec();
+            if let Some(playback) = receiver.upgrade() {
+                let mut playback = playback.borrow_mut();
+                if playback.detail_generation == generation {
+                    playback.on_detail_socket(bytes);
+                    playback.sync_details();
+                }
+            }
+        });
+        socket.set_onmessage(Some(on_message.as_ref().unchecked_ref()));
+
+        let target = self.this.clone();
+        let on_close = Closure::<dyn FnMut()>::new(move || {
+            let Some(strong) = target.upgrade() else {
+                return;
+            };
+            let (scope, delay) = {
+                let mut playback = strong.borrow_mut();
+                if playback.detail_generation != generation || !playback.detail_wanted {
+                    return;
+                }
+                let delay = playback.detail_reconnect_ms;
+                playback.detail_reconnect_ms = (delay * 2.0).min(RECONNECT_MAX_MS);
+                (playback.scope.clone(), delay)
+            };
+            crate::log(&format!("detail stream closed, reconnecting in {delay} ms"));
+            let again = target.clone();
+            let retry = Closure::once_into_js(move || {
+                if let Some(playback) = again.upgrade() {
+                    let mut playback = playback.borrow_mut();
+                    if playback.detail_generation == generation && playback.detail_wanted {
+                        playback.connect_detail();
+                    }
+                }
+            });
+            let _ = scope.set_timeout_with_callback_and_timeout_and_arguments_0(
+                retry.unchecked_ref(),
+                delay as i32,
+            );
+        });
+        socket.set_onclose(Some(on_close.as_ref().unchecked_ref()));
+
+        self.detail_frame = None;
+        self.detail_socket = Some(socket);
+        self.detail_handlers = Some(SocketHandlers {
+            _on_message: on_message,
+            _on_close: on_close,
+        });
+    }
+
+    fn on_detail_socket(&mut self, bytes: Vec<u8>) {
+        let size = bytes.len() as u64;
+        let Some((&envelope, body)) = bytes.split_first() else {
+            self.drop_detail_stream("empty message");
+            return;
+        };
+        let messages = match envelope {
+            stream::ENVELOPE_JOIN => stream::read_join(body).map(|(frame, messages)| {
+                self.detail_frame = Some(frame);
+                messages
+            }),
+            stream::ENVELOPE_FRAME => {
+                let frame = self.detail_frame.insert(FrameDecoder::new());
+                frame.feed(body)
+            }
+            stream::ENVELOPE_MORE => match &mut self.detail_frame {
+                Some(frame) => frame.feed(body),
+                None => Err("frame continued before it started"),
+            },
+            _ => Err("unknown envelope"),
+        };
+        let applied = messages.and_then(|messages| {
+            for message in messages {
+                self.apply_live_detail(message)?;
+            }
+            Ok(())
+        });
+        match applied {
+            Ok(()) => self.detail_reconnect_ms = RECONNECT_MIN_MS,
+            Err(error) => self.drop_detail_stream(error),
+        }
+        self.detail_live_bytes += size;
+    }
+
+    fn apply_live_detail(&mut self, message: Vec<u8>) -> Result<(), &'static str> {
+        if stream::is_keyframe(&message) {
+            let mut details = Details::default();
+            details.apply(&message)?;
+            self.live_detail_keyframe = (details.turn, message);
+            self.live_details = details;
+            self.recent_details.clear();
+            return Ok(());
+        }
+        self.live_details.apply(&message)?;
+        if self.recent_details.len() == RECENT_DELTAS {
+            self.recent_details.pop_front();
+        }
+        self.recent_details
+            .push_back((self.live_details.turn, message));
+        Ok(())
+    }
+
+    /// The reconnect starts again from a keyframe.
+    fn drop_detail_stream(&mut self, error: &str) {
+        web_sys::console::error_1(&format!("bad detail stream message: {error}").into());
+        self.detail_frame = None;
+        self.live_details = Details::default();
+        self.recent_details.clear();
+        if let Some(socket) = &self.detail_socket {
+            let _ = socket.close();
+        }
+    }
+
+    /// Hands the page the detail state of the turn it shows, if it is
+    /// here; otherwise asks for what is missing, whose arrival calls this
+    /// again.
+    fn sync_details(&mut self) {
+        if !self.detail_wanted || !self.has_match() {
+            return;
+        }
+        let match_id = self.live_scene.match_id;
+        let target = self.page_turn.get();
+        let live = self.live_details.known && self.live_details.match_id == match_id;
+        let at = self
+            .page_details
+            .filter(|(shown, _)| *shown == match_id)
+            .map(|(_, turn)| turn);
+        if at == Some(target) {
+            return;
+        }
+        if let Some(at) = at.filter(|at| *at < target) {
+            let reaches = live
+                && at >= self.live_detail_keyframe.0
+                && self
+                    .recent_details
+                    .front()
+                    .is_none_or(|(front, _)| *front <= at + 1);
+            let deltas = if reaches {
+                // Up to the newest the socket brought, which may be short of
+                // the page's turn; the rest follows as it arrives.
+                Some(
+                    self.recent_details
+                        .iter()
+                        .filter(|(turn, _)| *turn > at && *turn <= target)
+                        .cloned()
+                        .collect(),
+                )
+            } else if self.index_of(at + 1) == self.index_of(target) {
+                self.segment_deltas(at, target)
+            } else {
+                // A jump past a whole segment starts again from a keyframe.
+                None
+            };
+            if let Some(deltas) = deltas {
+                let mut reached = at;
+                for (turn, message) in deltas {
+                    self.post_detail(&message);
+                    reached = turn;
+                }
+                self.page_details = Some((match_id, reached));
+                return;
+            }
+            if reaches || self.index_of(at + 1) == self.index_of(target) {
+                return;
+            }
+        }
+        let keyframe = if live && target >= self.live_details.turn {
+            self.live_details.encode_keyframe()
+        } else {
+            let from_live = if live && target >= self.live_detail_keyframe.0 {
+                self.live_details_at(target)
+            } else {
+                None
+            };
+            let details = if from_live.is_some() {
+                from_live
+            } else if self.live && self.detail_socket.is_some() && !live {
+                // The socket's join is on its way and is newer than any
+                // segment.
+                return;
+            } else {
+                self.segment_details(target)
+            };
+            match details {
+                Some(details) => details.encode_keyframe(),
+                None => return,
+            }
+        };
+        if let Ok(turn) = stream::message_turn(&keyframe) {
+            self.post_detail(&keyframe);
+            self.page_details = Some((match_id, turn));
+        }
+    }
+
+    /// The live detail state at `turn`, from the last live keyframe and
+    /// the deltas since; `None` when they do not reach it.
+    fn live_details_at(&self, turn: u32) -> Option<Details> {
+        let (keyframe_turn, keyframe) = &self.live_detail_keyframe;
+        if self
+            .recent_details
+            .front()
+            .is_some_and(|(front, _)| *front > keyframe_turn + 1)
+        {
+            return None;
+        }
+        let mut details = Details::default();
+        details.apply(keyframe).ok()?;
+        for (message_turn, message) in &self.recent_details {
+            if *message_turn > turn {
+                break;
+            }
+            details.apply(message).ok()?;
+        }
+        Some(details)
+    }
+
+    /// The detail deltas after turn `after` up to `upto`, from the
+    /// segments; `None` while a segment is fetched.
+    fn segment_deltas(&mut self, after: u32, upto: u32) -> Option<Vec<(u32, Vec<u8>)>> {
+        let newest_index = self.index_of(self.newest_turn);
+        let mut deltas = Vec::new();
+        let mut reached = after;
+        for index in self.index_of(after + 1)..=self.index_of(upto) {
+            let Some(position) = self.cached_detail(index) else {
+                self.request_detail_segment(index);
+                return None;
+            };
+            // Skipping the keyframe leaves the delta into its turn, as in
+            // `next_message`.
+            for (turn, message) in &self.detail_segments[position].messages[1..] {
+                if *turn > reached && *turn <= upto {
+                    deltas.push((*turn, message.clone()));
+                    reached = *turn;
+                }
+            }
+            if index == newest_index && reached < upto {
+                // The open segment has grown since it was fetched.
+                self.detail_segments.remove(position);
+                self.request_detail_segment(index);
+                return None;
+            }
+        }
+        Some(deltas)
+    }
+
+    /// The detail state at `turn` from its segment, then the live deltas if
+    /// the segment ends before it, as `rebuild`; `None` while the segment is
+    /// fetched.
+    fn segment_details(&mut self, turn: u32) -> Option<Details> {
+        let index = self.index_of(turn);
+        let Some(position) = self.cached_detail(index) else {
+            self.request_detail_segment(index);
+            return None;
+        };
+        let mut details = Details::default();
+        let applied = (|| {
+            let messages = &self.detail_segments[position].messages;
+            let keyframe_turn = messages[0].0;
+            details.apply(&messages[0].1)?;
+            for (message_turn, message) in &messages[1..] {
+                if *message_turn == keyframe_turn {
+                    continue;
+                }
+                if *message_turn > turn {
+                    break;
+                }
+                details.apply(message)?;
+            }
+            if self.live_details.match_id == details.match_id
+                && self
+                    .recent_details
+                    .front()
+                    .is_some_and(|(front, _)| *front <= details.turn + 1)
+            {
+                for (message_turn, message) in &self.recent_details {
+                    if *message_turn > turn {
+                        break;
+                    }
+                    if *message_turn > details.turn {
+                        details.apply(message)?;
+                    }
+                }
+            }
+            Ok::<(), &'static str>(())
+        })();
+        if let Err(error) = applied {
+            web_sys::console::error_1(&format!("bad detail segment {index}: {error}").into());
+            self.detail_segments.remove(position);
+            return None;
+        }
+        if details.turn < turn && index == self.index_of(self.newest_turn) {
+            self.detail_segments.remove(position);
+            self.request_detail_segment(index);
+            return None;
+        }
+        Some(details)
+    }
+
+    fn cached_detail(&mut self, index: u32) -> Option<usize> {
+        let position = self
+            .detail_segments
+            .iter()
+            .position(|segment| segment.index == index)?;
+        let segment = self.detail_segments.remove(position);
+        self.detail_segments.push(segment);
+        Some(self.detail_segments.len() - 1)
+    }
+
+    /// One fetch at a time, as `request_segment`.
+    fn request_detail_segment(&mut self, index: u32) {
+        if self.detail_fetching.is_some() {
+            return;
+        }
+        self.detail_fetching = Some(index);
+        let match_id = self.live_scene.match_id;
+        let url = format!("/match/{match_id:016x}/detail/{index}");
+        let this = self.this.clone();
+        wasm_bindgen_futures::spawn_local(async move {
+            let fetched = fetch_bytes(&url).await;
+            let size = fetched.as_ref().map_or(0, |bytes| bytes.len() as u64);
+            let result = fetched
+                .and_then(|bytes| stream::read_segment(&bytes).map_err(String::from))
+                .and_then(|messages| {
+                    messages
+                        .into_iter()
+                        .map(|message| Ok((stream::message_turn(&message)?, message)))
+                        .collect::<Result<Vec<_>, &'static str>>()
+                        .map_err(String::from)
+                });
+            if let Some(playback) = this.upgrade() {
+                let mut playback = playback.borrow_mut();
+                playback.detail_segment_bytes += size;
+                playback.detail_segment_arrived(match_id, index, result);
+                playback.post_status();
+                playback.sync_details();
+            }
+        });
+    }
+
+    fn detail_segment_arrived(
+        &mut self,
+        match_id: u64,
+        index: u32,
+        result: Result<Vec<(u32, Vec<u8>)>, String>,
+    ) {
+        self.detail_fetching = None;
+        if match_id != self.live_scene.match_id || !self.detail_wanted {
+            return;
+        }
+        match result {
+            Ok(messages) => {
+                if self.detail_segments.len() == CACHED_SEGMENTS {
+                    self.detail_segments.remove(0);
+                }
+                self.detail_segments.push(Segment { index, messages });
+            }
+            // The next turn the page is handed asks again.
+            Err(error) => {
+                web_sys::console::error_1(&format!("detail segment {index}: {error}").into());
+            }
+        }
     }
 }
 
@@ -915,7 +1422,9 @@ fn start() -> Result<(), String> {
         let target = this.clone();
         let wake = Closure::<dyn FnMut()>::new(move || {
             if let Some(playback) = target.upgrade() {
-                playback.borrow_mut().resume();
+                let mut playback = playback.borrow_mut();
+                playback.resume();
+                playback.sync_details();
             }
         });
         let function = wake.as_ref().unchecked_ref::<js_sys::Function>().clone();
@@ -926,6 +1435,7 @@ fn start() -> Result<(), String> {
                 let mut playback = playback.borrow_mut();
                 playback.switch_timer = None;
                 playback.switch_due();
+                playback.sync_details();
             }
         });
         let switch_function = switch_wake
@@ -933,6 +1443,17 @@ fn start() -> Result<(), String> {
             .unchecked_ref::<js_sys::Function>()
             .clone();
         switch_wake.forget();
+        let target = this.clone();
+        let detail_linger_wake = Closure::<dyn FnMut()>::new(move || {
+            if let Some(playback) = target.upgrade() {
+                playback.borrow_mut().detail_linger_due();
+            }
+        });
+        let detail_linger_function = detail_linger_wake
+            .as_ref()
+            .unchecked_ref::<js_sys::Function>()
+            .clone();
+        detail_linger_wake.forget();
         RefCell::new(Playback {
             this: this.clone(),
             scope: scope.clone(),
@@ -968,9 +1489,28 @@ fn start() -> Result<(), String> {
                 .map_or_else(js_sys::Date::now, |performance| performance.now()),
             live_window: VecDeque::new(),
             peak_window_bytes: 0,
+            detail_live_bytes: 0,
+            detail_segment_bytes: 0,
+            detail_ms: 0.0,
+            detail_since: None,
             terrains: Vec::new(),
             held: Vec::new(),
             page_terrain: Cell::new(0),
+            page_turn: Cell::new(0),
+            detail_wanted: false,
+            detail_linger: None,
+            detail_linger_wake: detail_linger_function,
+            detail_socket: None,
+            detail_handlers: None,
+            detail_generation: 0,
+            detail_frame: None,
+            detail_reconnect_ms: RECONNECT_MIN_MS,
+            live_details: Details::default(),
+            live_detail_keyframe: (0, Vec::new()),
+            recent_details: VecDeque::new(),
+            detail_segments: Vec::new(),
+            detail_fetching: None,
+            page_details: None,
         })
     });
     connect(&Rc::downgrade(&playback))?;
@@ -983,9 +1523,9 @@ fn start() -> Result<(), String> {
         let Some(value) = rest.first_chunk::<8>() else {
             return;
         };
-        playback
-            .borrow_mut()
-            .on_command(command, f64::from_le_bytes(*value));
+        let mut playback = playback.borrow_mut();
+        playback.on_command(command, f64::from_le_bytes(*value));
+        playback.sync_details();
     });
     scope.set_onmessage(Some(on_command.as_ref().unchecked_ref()));
     on_command.forget();
@@ -1020,7 +1560,9 @@ fn connect(playback: &Weak<RefCell<Playback>>) -> Result<(), String> {
         };
         let bytes = js_sys::Uint8Array::new(&buffer).to_vec();
         if let Some(playback) = receiver.upgrade() {
-            playback.borrow_mut().on_socket(bytes);
+            let mut playback = playback.borrow_mut();
+            playback.on_socket(bytes);
+            playback.sync_details();
         }
     });
     socket.set_onmessage(Some(on_message.as_ref().unchecked_ref()));

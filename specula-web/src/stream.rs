@@ -9,6 +9,7 @@ use brotli_decompressor::BrotliResult;
 use brotli_decompressor::BrotliState;
 use brotli_decompressor::StandardAlloc;
 
+use crate::detail::Details;
 use crate::terrain;
 
 pub const ENVELOPE_JOIN: u8 = 1;
@@ -434,6 +435,9 @@ pub struct Scene {
     /// The heightmap of `terrain_id`, which must be set before a keyframe
     /// naming it is applied.
     pub ground: Option<Rc<Ground>>,
+    /// The detail stream's state at `turn`, while the viewer has something
+    /// selected; the visual messages leave it alone.
+    pub details: Details,
 }
 
 /// `ICmpTerritoryManager`'s grid, a tile per `territory::TILE_SIZE`.
@@ -1343,22 +1347,22 @@ fn inflate(
 }
 
 #[derive(Default)]
-struct Writer(Vec<u8>);
+pub(crate) struct Writer(pub(crate) Vec<u8>);
 
 impl Writer {
-    fn u8(&mut self, value: u8) {
+    pub(crate) fn u8(&mut self, value: u8) {
         self.0.push(value);
     }
 
-    fn u32(&mut self, value: u32) {
+    pub(crate) fn u32(&mut self, value: u32) {
         self.0.extend_from_slice(&value.to_le_bytes());
     }
 
-    fn u64(&mut self, value: u64) {
+    pub(crate) fn u64(&mut self, value: u64) {
         self.0.extend_from_slice(&value.to_le_bytes());
     }
 
-    fn varint(&mut self, mut value: u64) {
+    pub(crate) fn varint(&mut self, mut value: u64) {
         while value >= 0x80 {
             self.0.push(value as u8 | 0x80);
             value >>= 7;
@@ -1366,24 +1370,24 @@ impl Writer {
         self.0.push(value as u8);
     }
 
-    fn zigzag(&mut self, value: i32) {
+    pub(crate) fn zigzag(&mut self, value: i32) {
         self.zigzag_i64(i64::from(value));
     }
 
-    fn text(&mut self, text: &str) {
+    pub(crate) fn text(&mut self, text: &str) {
         self.varint(text.len() as u64);
         self.0.extend_from_slice(text.as_bytes());
     }
 
-    fn zigzag_i64(&mut self, value: i64) {
+    pub(crate) fn zigzag_i64(&mut self, value: i64) {
         self.varint(((value << 1) ^ (value >> 63)) as u64);
     }
 }
 
-struct Cursor<'a>(&'a [u8]);
+pub(crate) struct Cursor<'a>(pub(crate) &'a [u8]);
 
 impl<'a> Cursor<'a> {
-    fn take(&mut self, length: usize) -> Result<&'a [u8], &'static str> {
+    pub(crate) fn take(&mut self, length: usize) -> Result<&'a [u8], &'static str> {
         if self.0.len() < length {
             return Err("message truncated");
         }
@@ -1392,25 +1396,25 @@ impl<'a> Cursor<'a> {
         Ok(bytes)
     }
 
-    fn u8(&mut self) -> Result<u8, &'static str> {
+    pub(crate) fn u8(&mut self) -> Result<u8, &'static str> {
         let (&value, rest) = self.0.split_first().ok_or("message truncated")?;
         self.0 = rest;
         Ok(value)
     }
 
-    fn u32(&mut self) -> Result<u32, &'static str> {
+    pub(crate) fn u32(&mut self) -> Result<u32, &'static str> {
         let (bytes, rest) = self.0.split_first_chunk::<4>().ok_or("message truncated")?;
         self.0 = rest;
         Ok(u32::from_le_bytes(*bytes))
     }
 
-    fn u64(&mut self) -> Result<u64, &'static str> {
+    pub(crate) fn u64(&mut self) -> Result<u64, &'static str> {
         let (bytes, rest) = self.0.split_first_chunk::<8>().ok_or("message truncated")?;
         self.0 = rest;
         Ok(u64::from_le_bytes(*bytes))
     }
 
-    fn varint(&mut self) -> Result<u64, &'static str> {
+    pub(crate) fn varint(&mut self) -> Result<u64, &'static str> {
         let mut value = 0u64;
         for shift in (0..64).step_by(7) {
             let byte = self.u8()?;
@@ -1422,25 +1426,25 @@ impl<'a> Cursor<'a> {
         Err("varint too long")
     }
 
-    fn varint_u32(&mut self) -> Result<u32, &'static str> {
+    pub(crate) fn varint_u32(&mut self) -> Result<u32, &'static str> {
         u32::try_from(self.varint()?).map_err(|_| "varint out of range")
     }
 
-    fn zigzag_i64(&mut self) -> Result<i64, &'static str> {
+    pub(crate) fn zigzag_i64(&mut self) -> Result<i64, &'static str> {
         let raw = self.varint()?;
         Ok((raw >> 1) as i64 ^ -((raw & 1) as i64))
     }
 
-    fn zigzag(&mut self) -> Result<i32, &'static str> {
+    pub(crate) fn zigzag(&mut self) -> Result<i32, &'static str> {
         i32::try_from(self.zigzag_i64()?).map_err(|_| "zigzag out of range")
     }
 
-    fn f32(&mut self) -> Result<f32, &'static str> {
+    pub(crate) fn f32(&mut self) -> Result<f32, &'static str> {
         self.u32().map(f32::from_bits)
     }
 
     /// varint length, UTF-8.
-    fn text(&mut self) -> Result<String, &'static str> {
+    pub(crate) fn text(&mut self) -> Result<String, &'static str> {
         let length = self.varint()? as usize;
         let text = std::str::from_utf8(self.take(length)?).map_err(|_| "string not UTF-8")?;
         Ok(text.to_string())

@@ -2,6 +2,7 @@ mod assets;
 mod audio;
 mod bench;
 mod blend;
+mod detail;
 mod diplomacy;
 mod far;
 mod field;
@@ -64,6 +65,7 @@ use crate::audio::Settings;
 use crate::bench::Bench;
 use crate::bench::BenchInfo;
 use crate::bench::CameraPose;
+use crate::detail::Details;
 use crate::diplomacy::Perspective;
 use crate::field::Field;
 use crate::icons::IconAtlas;
@@ -78,12 +80,14 @@ use crate::stream::SoundTarget;
 use crate::terrain::TerrainImage;
 use crate::warmup::Warmup;
 use crate::worker::COMMAND_CURRENT_MATCH;
+use crate::worker::COMMAND_DETAIL;
 use crate::worker::COMMAND_LIVE;
 use crate::worker::COMMAND_PAUSE;
 use crate::worker::COMMAND_PLAY;
 use crate::worker::COMMAND_SCRUB;
 use crate::worker::COMMAND_SEEK;
 use crate::worker::COMMAND_SPEED;
+use crate::worker::POST_DETAIL;
 use crate::worker::POST_SCENE;
 use crate::worker::POST_STATUS;
 use crate::worker::POST_TERRAIN;
@@ -273,6 +277,10 @@ trait View {
     fn take_animation_sounds(&mut self, _progress: f32) -> Vec<AnimationSound> {
         Vec::new()
     }
+    /// The entities selected, in the order added.
+    fn selected(&self) -> &[u32] {
+        &[]
+    }
     /// The select sounds of the selections made since the last call.
     fn take_select_sounds(&mut self) -> Vec<SelectSound> {
         Vec::new()
@@ -289,7 +297,7 @@ trait View {
 }
 
 /// Bytes for the shown match, as the worker counts them: live messages,
-/// history segments and the terrain.
+/// history segments and the terrain, and the detail stream's apart.
 #[derive(Clone, Copy, Default)]
 struct StreamBytes {
     live: u64,
@@ -301,6 +309,12 @@ struct StreamBytes {
     received_at: f64,
     /// The most live bytes in `worker::PEAK_WINDOW_S` seconds.
     peak_window: u64,
+    /// The detail stream's live and history bytes, and how long it was
+    /// followed as of `received_at`, which goes on while `detail_on`.
+    detail_live: u64,
+    detail_segments: u64,
+    detail_ms: f64,
+    detail_on: bool,
 }
 
 impl View for Renderer {
@@ -427,6 +441,10 @@ struct App {
     sound: Option<SoundControls>,
     /// Only the 3D page has assets to warm up.
     warmup: Option<Warmup>,
+    /// The worker was last told that something is selected.
+    detail_wanted: bool,
+    /// The details last logged, until the panel shows them (C24).
+    logged_details: String,
 }
 
 /// The sound toggle and volumes, and what they play.
@@ -593,7 +611,35 @@ impl App {
             }
         }
         self.play_sounds(now, progress);
+        self.follow_selection();
         timing::frame(page_now() - start, drew);
+    }
+
+    /// Asks for the detail stream while something is selected.
+    fn follow_selection(&mut self) {
+        let selected = self.renderer.selected();
+        let wanted = !selected.is_empty();
+        if wanted != self.detail_wanted {
+            self.detail_wanted = wanted;
+            self.command(COMMAND_DETAIL, f64::from(u8::from(wanted)));
+        }
+        // Temporary, until the details panel (C24) shows them.
+        let logged = match selected {
+            [id] if self.scene.details.known => {
+                let template = self.scene.dots.get(id).map(|dot| dot.template);
+                format!(
+                    "details of {id}: {:?}",
+                    self.scene.details.resolved(*id, template)
+                )
+            }
+            _ => String::new(),
+        };
+        if logged != self.logged_details {
+            if !logged.is_empty() {
+                log(&logged);
+            }
+            self.logged_details = logged;
+        }
     }
 
     /// Covers the civs, the terrains and the entities on the map now.
@@ -948,6 +994,8 @@ async fn run(
         },
         sound,
         warmup,
+        detail_wanted: false,
+        logged_details: String::new(),
     }));
     wire_controls(&app);
     if page == Page::Observer {
@@ -1934,6 +1982,7 @@ fn connect(app: &Rc<RefCell<App>>) {
                     receive(&receiver, f64::from_le_bytes(*turn_ms), message);
                 }
             }
+            Some((&POST_DETAIL, message)) => receive_detail(&receiver, message),
             Some((&POST_TERRAIN, rest)) => {
                 if let Some((id, resource)) = rest.split_first_chunk::<8>() {
                     receive_terrain(&receiver, u64::from_le_bytes(*id), resource);
@@ -1965,8 +2014,21 @@ fn connect(app: &Rc<RefCell<App>>) {
                     Some(terrain),
                     Some(live_ms),
                     Some(peak_window),
-                ) = (u64_at(17), u64_at(25), u64_at(37), u64_at(45), u64_at(53))
-                {
+                    Some(detail_live),
+                    Some(detail_segments),
+                    Some(detail_ms),
+                    Some(&detail_on),
+                ) = (
+                    u64_at(17),
+                    u64_at(25),
+                    u64_at(37),
+                    u64_at(45),
+                    u64_at(53),
+                    u64_at(61),
+                    u64_at(69),
+                    u64_at(77),
+                    rest.get(85),
+                ) {
                     receiver.borrow_mut().stream_bytes = StreamBytes {
                         live,
                         segments,
@@ -1974,6 +2036,10 @@ fn connect(app: &Rc<RefCell<App>>) {
                         live_ms: f64::from_bits(live_ms),
                         received_at: now,
                         peak_window,
+                        detail_live,
+                        detail_segments,
+                        detail_ms: f64::from_bits(detail_ms),
+                        detail_on: detail_on != 0,
                     };
                 }
                 receiver
@@ -2000,6 +2066,17 @@ fn connect(app: &Rc<RefCell<App>>) {
     });
     worker.set_onerror(Some(on_error.as_ref().unchecked_ref()));
     on_error.forget();
+}
+
+/// None clears them.
+fn receive_detail(app: &Rc<RefCell<App>>, message: &[u8]) {
+    let details = &mut app.borrow_mut().scene.details;
+    if message.is_empty() {
+        *details = Details::default();
+    } else if let Err(error) = details.apply(message) {
+        web_sys::console::error_1(&format!("bad detail message: {error}").into());
+        *details = Details::default();
+    }
 }
 
 /// `turn_ms` is the real time per turn when played back, 0 when live.
