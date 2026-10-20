@@ -1,5 +1,6 @@
 mod classify;
 mod delta;
+mod detail;
 mod feed;
 mod observer;
 mod terrain;
@@ -22,6 +23,7 @@ use rocket::fs::FileServer;
 use rocket::futures::SinkExt;
 use rocket::futures::StreamExt;
 use rocket::http::Header;
+use rocket::tokio::sync::broadcast::Receiver;
 use rocket::tokio::sync::broadcast::error::RecvError;
 use rocket_ws::Channel;
 use rocket_ws::WebSocket;
@@ -31,6 +33,7 @@ use crate::delta::DeltaMeter;
 use crate::feed::Record;
 use crate::terrain::Ground;
 use crate::view::Hub;
+use crate::view::Message;
 
 const DEFAULT_SOCKET: &str = "/tmp/specula-feed.sock";
 /// Relative to the working directory, so the server runs from the repo root.
@@ -80,8 +83,10 @@ async fn main() {
             "/",
             rocket::routes![
                 viewer,
+                detail_viewer,
                 web::terrain,
                 segment_file,
+                detail_segment_file,
                 web::index,
                 web::page,
                 web::pkg_file,
@@ -136,9 +141,24 @@ fn accept_observers(listener: UnixListener, hub: &Hub) {
 #[rocket::get("/ws")]
 fn viewer(socket: WebSocket, hub: &State<Arc<Hub>>) -> Channel<'static> {
     let hub = Arc::clone(hub);
+    relay(socket, move || hub.subscribe())
+}
+
+/// The detail stream, which viewers hold open only while they have
+/// something selected.
+#[rocket::get("/detail")]
+fn detail_viewer(socket: WebSocket, hub: &State<Arc<Hub>>) -> Channel<'static> {
+    let hub = Arc::clone(hub);
+    relay(socket, move || hub.subscribe_detail())
+}
+
+fn relay(
+    socket: WebSocket,
+    subscribe: impl Fn() -> (Vec<Message>, Receiver<Message>) + Send + 'static,
+) -> Channel<'static> {
     socket.channel(move |mut stream| {
         Box::pin(async move {
-            let (mut first, mut receiver) = hub.subscribe();
+            let (mut first, mut receiver) = subscribe();
             loop {
                 for message in first.drain(..) {
                     stream.send(rocket_ws::Message::binary(&*message)).await?;
@@ -148,7 +168,7 @@ fn viewer(socket: WebSocket, hub: &State<Arc<Hub>>) -> Channel<'static> {
                         Ok(message) => stream.send(rocket_ws::Message::binary(&*message)).await?,
                         // Missed deltas cannot be patched over; start again
                         // from a fresh keyframe.
-                        Err(RecvError::Lagged(_)) => (first, receiver) = hub.subscribe(),
+                        Err(RecvError::Lagged(_)) => (first, receiver) = subscribe(),
                         Err(RecvError::Closed) => return Ok(()),
                     },
                     incoming = stream.next() => match incoming {
@@ -170,7 +190,15 @@ struct SegmentBytes(Vec<u8>, Header<'static>);
 
 #[rocket::get("/match/<id>/seg/<index>")]
 fn segment_file(id: &str, index: usize, hub: &State<Arc<Hub>>) -> Option<SegmentBytes> {
-    let (bytes, closed) = hub.segment(u64::from_str_radix(id, 16).ok()?, index)?;
+    segment_bytes(hub.segment(u64::from_str_radix(id, 16).ok()?, index)?)
+}
+
+#[rocket::get("/match/<id>/detail/<index>")]
+fn detail_segment_file(id: &str, index: usize, hub: &State<Arc<Hub>>) -> Option<SegmentBytes> {
+    segment_bytes(hub.detail_segment(u64::from_str_radix(id, 16).ok()?, index)?)
+}
+
+fn segment_bytes((bytes, closed): (Message, bool)) -> Option<SegmentBytes> {
     // The match id is in the URL, so a closed segment never changes; the
     // open one grows every turn.
     let cache = if closed {

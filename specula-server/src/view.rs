@@ -242,6 +242,11 @@
 //!
 //! So the compression is done once per match, not per viewer, and a
 //! viewer joins at the open segment's keyframe (init.md 4).
+//!
+//! The detail stream (`detail.rs`) is cut into segments on the same turns,
+//! served at `/match/<match id>/detail/<n>`, and sent over its own
+//! WebSocket with the same envelopes 1 to 3; a viewer joining it between
+//! matches gets the ended match's final detail keyframe.
 
 use std::collections::BTreeMap;
 use std::collections::HashMap;
@@ -258,6 +263,7 @@ use std::time::UNIX_EPOCH;
 
 use rocket::tokio::sync::broadcast;
 
+use crate::detail::DetailEncoder;
 use crate::feed::Details;
 use crate::feed::Economy;
 use crate::feed::Entity;
@@ -656,6 +662,7 @@ pub struct TerrainFile {
 struct Archive {
     match_id: u64,
     segments: Vec<Message>,
+    detail_segments: Vec<Message>,
     terrain: Option<(u64, TerrainFile)>,
 }
 
@@ -665,9 +672,110 @@ struct Ended {
     /// match: the tables a keyframe would be built from belong to the next
     /// feed by then.
     keyframe: Message,
+    detail_keyframe: Message,
 }
 
 type Frame = brotli::CompressorWriter<Vec<u8>>;
+
+/// One stream's segments and live subscribers: the visual stream, and the
+/// detail stream (`detail.rs`), which is cut on the same turns.
+struct Track {
+    /// Closed segments, as served.
+    segments: Vec<Message>,
+    /// The open segment, index `segments.len()`: its compressed keyframe,
+    /// and its frame once a delta has gone into it. The frame's output is
+    /// kept whole, since it is the segment's body and what a joining viewer
+    /// is sent.
+    open_keyframe: Message,
+    frame: Option<Frame>,
+    sender: broadcast::Sender<Message>,
+}
+
+impl Track {
+    fn new() -> Self {
+        Track {
+            segments: Vec::new(),
+            open_keyframe: Arc::new([]),
+            frame: None,
+            sender: broadcast::channel(BACKLOG_MESSAGES).0,
+        }
+    }
+
+    /// Starts a new match's history at `keyframe`; returns the message
+    /// every viewer is sent.
+    fn restart(&mut self, keyframe: &[u8]) -> Message {
+        self.segments.clear();
+        self.frame = None;
+        self.open_keyframe = compress(keyframe).into();
+        envelope_join(&self.open_keyframe, &[]).into()
+    }
+
+    /// Adds a turn's delta, after starting a new segment at `keyframe` if
+    /// there is one; returns the message every viewer is sent.
+    fn push(&mut self, delta: &[u8], keyframe: Option<&[u8]>) -> io::Result<Message> {
+        if let Some(keyframe) = keyframe {
+            self.close();
+            self.open_keyframe = compress(keyframe).into();
+        }
+        let (envelope, frame) = match &mut self.frame {
+            Some(frame) => (ENVELOPE_MORE, frame),
+            None => (
+                ENVELOPE_FRAME,
+                self.frame.insert(Frame::new(
+                    Vec::new(),
+                    4096,
+                    BROTLI_QUALITY,
+                    BROTLI_WINDOW_BITS,
+                )),
+            ),
+        };
+        let before = frame.get_ref().len();
+        let mut entry = Vec::with_capacity(delta.len() + 5);
+        append_framed(&mut entry, delta);
+        frame.write_all(&entry)?;
+        frame.flush()?;
+        let mut message = vec![envelope];
+        message.extend_from_slice(&frame.get_ref()[before..]);
+        Ok(message.into())
+    }
+
+    /// Finishes the open segment's frame and keeps the segment.
+    fn close(&mut self) {
+        let mut segment = Vec::new();
+        append_framed(&mut segment, &self.open_keyframe);
+        if let Some(frame) = self.frame.take() {
+            segment.extend_from_slice(&frame.into_inner());
+        }
+        self.segments.push(segment.into());
+    }
+
+    /// The open segment as served: its frame so far, unfinished.
+    fn open_segment(&self) -> Vec<u8> {
+        let mut segment = Vec::new();
+        append_framed(&mut segment, &self.open_keyframe);
+        if let Some(frame) = &self.frame {
+            segment.extend_from_slice(frame.get_ref());
+        }
+        segment
+    }
+
+    /// A segment of the current match, and whether it is closed.
+    fn segment(&self, index: usize) -> Option<(Message, bool)> {
+        if let Some(closed) = self.segments.get(index) {
+            return Some((Arc::clone(closed), true));
+        }
+        if index != self.segments.len() {
+            return None;
+        }
+        Some((self.open_segment().into(), false))
+    }
+
+    /// The open segment's keyframe and its frame so far.
+    fn join(&self) -> Message {
+        let frame = self.frame.as_ref().map_or(&[][..], |frame| frame.get_ref());
+        envelope_join(&self.open_keyframe, frame).into()
+    }
+}
 
 struct State {
     turn: u32,
@@ -679,14 +787,9 @@ struct State {
     match_id: u64,
     /// The turn segment 0 starts at.
     first_turn: u32,
-    /// Closed segments, as served.
-    segments: Vec<Message>,
-    /// The open segment, index `segments.len()`: its compressed keyframe,
-    /// and its frame once a delta has gone into it. The frame's output is
-    /// kept whole, since it is the segment's body and what a joining viewer
-    /// is sent.
-    open_keyframe: Message,
-    frame: Option<Frame>,
+    visual: Track,
+    detail: Track,
+    detail_encoder: DetailEncoder,
     terrain: Option<(u64, TerrainFile)>,
     ground: Option<Ground>,
     /// What viewers hold after the last turn, which the next delta builds
@@ -733,7 +836,6 @@ struct State {
     /// When the feed last connected or sent a turn, for the observer
     /// watchdog.
     feed_activity: Option<Instant>,
-    sender: broadcast::Sender<Message>,
 }
 
 impl State {
@@ -767,9 +869,9 @@ impl Hub {
                 game_speed: 1.0,
                 match_id: 0,
                 first_turn: 0,
-                segments: Vec::new(),
-                open_keyframe: Arc::new([]),
-                frame: None,
+                visual: Track::new(),
+                detail: Track::new(),
+                detail_encoder: DetailEncoder::new(),
                 terrain: None,
                 ground: None,
                 dots: BTreeMap::new(),
@@ -798,7 +900,6 @@ impl Hub {
                 ended: None,
                 previous: None,
                 feed_activity: None,
-                sender: broadcast::channel(BACKLOG_MESSAGES).0,
             }),
         }
     }
@@ -981,7 +1082,8 @@ impl Hub {
         if !state.has_turn || state.ended.is_some() {
             return;
         }
-        close_segment(state);
+        state.visual.close();
+        state.detail.close();
         let keyframe: Message = compress(&encode_keyframe(
             state,
             state.turn,
@@ -990,17 +1092,26 @@ impl Hub {
             &state.shots,
         ))
         .into();
+        let detail_keyframe: Message = compress(&state.detail_encoder.keyframe(
+            state.turn,
+            state.match_id,
+            |id| state.dots.get(&id).map(|dot| dot.template),
+        ))
+        .into();
         state.previous = Some(Archive {
             match_id: state.match_id,
-            segments: std::mem::take(&mut state.segments),
+            segments: std::mem::take(&mut state.visual.segments),
+            detail_segments: std::mem::take(&mut state.detail.segments),
             terrain: state.terrain.clone(),
         });
         state.ended = Some(Ended {
             at: Instant::now(),
             keyframe,
+            detail_keyframe,
         });
         println!("match {:016x} ended at turn {}", state.match_id, state.turn);
         let _ = state
+            .visual
             .sender
             .send(envelope_ended(&encode_ended(state.match_id, 0)).into());
     }
@@ -1112,82 +1223,90 @@ impl Hub {
             launches.push((launch.id, shot));
         }
         launches.sort_unstable_by_key(|(id, _)| *id);
-        let (message, shown): (Message, BTreeMap<u32, Dot>) = if state.new_feed {
-            // The history restarts only now, so until the new match's first
-            // turn, viewers and segment requests still get the old one.
-            state.match_id = new_match_id(state.match_id);
-            state.ended = None;
-            state.first_turn = turn;
-            state.segments.clear();
-            state.frame = None;
-            let ground = state.ground.as_ref();
-            let shown = dots
-                .iter()
-                .map(|(id, dot)| (*id, arrive(ground, dot)))
-                .collect();
-            state.captures = captures;
-            let keyframe = encode_keyframe(state, turn, &state.tables(true), &shown, &shots);
-            state.open_keyframe = compress(&keyframe).into();
-            (envelope_join(&state.open_keyframe, &[]).into(), shown)
-        } else {
-            let (delta, shown) = encode_delta(
-                turn,
-                &Tables {
-                    icons: state.icons.unsent(),
-                    templates: state.templates.unsent(),
-                    strings: state.strings.unsent(),
-                    variant_sets: state.variant_sets.unsent(),
-                    variable_sets: state.variable_sets.unsent(),
-                    range_sets: state.range_sets.unsent(),
-                },
-                state.players_changed.then_some(&state.players[..]),
-                state
-                    .territory_changed
-                    .then_some(state.territory.as_ref())
-                    .flatten(),
-                state.ground.as_ref(),
-                &state.dots,
-                &dots,
-                &state.sounds,
-                &launches,
-                &removals,
-                &Status {
-                    templates: &state.templates.items,
-                    previous_captures: &state.captures,
-                    captures: &captures,
-                    economy: &state.economy,
-                    economy_shown: &state.economy_shown,
-                    renames: &details.renames,
-                },
-            );
-            state.captures = captures;
-            let next_start = state.first_turn + SEGMENT_TURNS * (state.segments.len() as u32 + 1);
-            if turn >= next_start {
-                close_segment(state);
+        let (message, detail_message, shown): (Message, Message, BTreeMap<u32, Dot>) =
+            if state.new_feed {
+                // The history restarts only now, so until the new match's first
+                // turn, viewers and segment requests still get the old one.
+                state.match_id = new_match_id(state.match_id);
+                state.ended = None;
+                state.first_turn = turn;
+                let ground = state.ground.as_ref();
+                let shown: BTreeMap<u32, Dot> = dots
+                    .iter()
+                    .map(|(id, dot)| (*id, arrive(ground, dot)))
+                    .collect();
+                state.captures = captures;
                 let keyframe = encode_keyframe(state, turn, &state.tables(true), &shown, &shots);
-                state.open_keyframe = compress(&keyframe).into();
-            }
-            let (envelope, frame) = match &mut state.frame {
-                Some(frame) => (ENVELOPE_MORE, frame),
-                None => (
-                    ENVELOPE_FRAME,
-                    state.frame.insert(Frame::new(
-                        Vec::new(),
-                        4096,
-                        BROTLI_QUALITY,
-                        BROTLI_WINDOW_BITS,
-                    )),
-                ),
+                let message = state.visual.restart(&keyframe);
+                // The keyframe holds what the turn's delta would bring.
+                state.detail_encoder.reset();
+                state
+                    .detail_encoder
+                    .delta(turn, details, |id| shown.contains_key(&id));
+                let detail_keyframe = state.detail_encoder.keyframe(turn, state.match_id, |id| {
+                    shown.get(&id).map(|dot| dot.template)
+                });
+                let detail_message = state.detail.restart(&detail_keyframe);
+                (message, detail_message, shown)
+            } else {
+                let (delta, shown) = encode_delta(
+                    turn,
+                    &Tables {
+                        icons: state.icons.unsent(),
+                        templates: state.templates.unsent(),
+                        strings: state.strings.unsent(),
+                        variant_sets: state.variant_sets.unsent(),
+                        variable_sets: state.variable_sets.unsent(),
+                        range_sets: state.range_sets.unsent(),
+                    },
+                    state.players_changed.then_some(&state.players[..]),
+                    state
+                        .territory_changed
+                        .then_some(state.territory.as_ref())
+                        .flatten(),
+                    state.ground.as_ref(),
+                    &state.dots,
+                    &dots,
+                    &state.sounds,
+                    &launches,
+                    &removals,
+                    &Status {
+                        templates: &state.templates.items,
+                        previous_captures: &state.captures,
+                        captures: &captures,
+                        economy: &state.economy,
+                        economy_shown: &state.economy_shown,
+                        renames: &details.renames,
+                    },
+                );
+                state.captures = captures;
+                let detail_delta = state
+                    .detail_encoder
+                    .delta(turn, details, |id| dots.contains_key(&id));
+                let next_start =
+                    state.first_turn + SEGMENT_TURNS * (state.visual.segments.len() as u32 + 1);
+                let (keyframe, detail_keyframe) = if turn >= next_start {
+                    (
+                        Some(encode_keyframe(
+                            state,
+                            turn,
+                            &state.tables(true),
+                            &shown,
+                            &shots,
+                        )),
+                        Some(state.detail_encoder.keyframe(turn, state.match_id, |id| {
+                            shown.get(&id).map(|dot| dot.template)
+                        })),
+                    )
+                } else {
+                    (None, None)
+                };
+                let message = state.visual.push(&delta, keyframe.as_deref())?;
+                let detail_message = state
+                    .detail
+                    .push(&detail_delta, detail_keyframe.as_deref())?;
+                (message, detail_message, shown)
             };
-            let before = frame.get_ref().len();
-            let mut entry = Vec::with_capacity(delta.len() + 5);
-            append_framed(&mut entry, &delta);
-            frame.write_all(&entry)?;
-            frame.flush()?;
-            let mut message = vec![envelope];
-            message.extend_from_slice(&frame.get_ref()[before..]);
-            (message.into(), shown)
-        };
         state.icons.sent = state.icons.items.len();
         state.templates.sent = state.templates.items.len();
         state.strings.sent = state.strings.items.len();
@@ -1209,13 +1328,23 @@ impl Hub {
         state.new_feed = false;
         state.feed_activity = Some(Instant::now());
         // No receivers is not an error: nobody is watching yet.
-        let _ = state.sender.send(message);
+        let _ = state.visual.sender.send(message);
+        let _ = state.detail.sender.send(detail_message);
         Ok(())
     }
 
     /// A segment of the current or the previous match, and whether it is
     /// closed.
     pub fn segment(&self, match_id: u64, index: usize) -> Option<(Message, bool)> {
+        self.track_segment(match_id, index, false)
+    }
+
+    /// A detail stream segment, as `segment`.
+    pub fn detail_segment(&self, match_id: u64, index: usize) -> Option<(Message, bool)> {
+        self.track_segment(match_id, index, true)
+    }
+
+    fn track_segment(&self, match_id: u64, index: usize, detail: bool) -> Option<(Message, bool)> {
         let state = self.state.lock().unwrap();
         // An ended match is archived but keeps its id until the next one
         // starts, so the archive is asked first.
@@ -1224,18 +1353,21 @@ impl Hub {
             .as_ref()
             .filter(|archive| archive.match_id == match_id)
         {
-            return Some((Arc::clone(archive.segments.get(index)?), true));
+            let segments = if detail {
+                &archive.detail_segments
+            } else {
+                &archive.segments
+            };
+            return Some((Arc::clone(segments.get(index)?), true));
         }
         if match_id != state.match_id || !state.has_turn {
             return None;
         }
-        if let Some(closed) = state.segments.get(index) {
-            return Some((Arc::clone(closed), true));
+        if detail {
+            state.detail.segment(index)
+        } else {
+            state.visual.segment(index)
         }
-        if index != state.segments.len() {
-            return None;
-        }
-        Some((open_segment(&state).into(), false))
     }
 
     /// What a new viewer is sent first (nothing before the first turn) and
@@ -1250,15 +1382,25 @@ impl Hub {
                 envelope_ended(&encode_ended(state.match_id, since)).into(),
             ]
         } else if state.has_turn {
-            let frame = state
-                .frame
-                .as_ref()
-                .map_or(&[][..], |frame| frame.get_ref());
-            vec![envelope_join(&state.open_keyframe, frame).into()]
+            vec![state.visual.join()]
         } else {
             Vec::new()
         };
-        (first, state.sender.subscribe())
+        (first, state.visual.sender.subscribe())
+    }
+
+    /// As `subscribe`, for the detail stream; an ended match's viewers get
+    /// its final state.
+    pub fn subscribe_detail(&self) -> (Vec<Message>, broadcast::Receiver<Message>) {
+        let state = self.state.lock().unwrap();
+        let first = if let Some(ended) = &state.ended {
+            vec![envelope_join(&ended.detail_keyframe, &[]).into()]
+        } else if state.has_turn {
+            vec![state.detail.join()]
+        } else {
+            Vec::new()
+        };
+        (first, state.detail.sender.subscribe())
     }
 }
 
@@ -1302,26 +1444,6 @@ fn envelope_ended(message: &[u8]) -> Vec<u8> {
     let mut out = vec![ENVELOPE_ENDED];
     out.extend_from_slice(message);
     out
-}
-
-/// The open segment as served: its frame so far, unfinished.
-fn open_segment(state: &State) -> Vec<u8> {
-    let mut segment = Vec::new();
-    append_framed(&mut segment, &state.open_keyframe);
-    if let Some(frame) = &state.frame {
-        segment.extend_from_slice(frame.get_ref());
-    }
-    segment
-}
-
-/// Finishes the open segment's frame and keeps the segment.
-fn close_segment(state: &mut State) {
-    let mut segment = Vec::new();
-    append_framed(&mut segment, &state.open_keyframe);
-    if let Some(frame) = state.frame.take() {
-        segment.extend_from_slice(&frame.into_inner());
-    }
-    state.segments.push(segment.into());
 }
 
 fn append_framed(segment: &mut Vec<u8>, message: &[u8]) {

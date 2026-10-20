@@ -2,6 +2,7 @@
 //! `source/network/SpeculaFeed.cpp` in the `specula` branch of 0ad-specula.
 
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::io;
 use std::io::ErrorKind;
 use std::io::Read;
@@ -278,7 +279,6 @@ pub struct Capture {
     pub max: f32,
 }
 
-#[expect(dead_code, reason = "the wire carries them from C20 on")]
 pub struct Carried {
     /// String record index.
     pub kind: Option<u32>,
@@ -286,13 +286,11 @@ pub struct Carried {
     pub capacity: f32,
 }
 
-#[expect(dead_code, reason = "the wire carries them from C20 on")]
 pub struct Queue {
     pub autoqueue: bool,
     pub items: Vec<QueueItem>,
 }
 
-#[expect(dead_code, reason = "the wire carries them from C20 on")]
 pub struct QueueItem {
     pub id: u32,
     pub technology: bool,
@@ -307,7 +305,6 @@ pub struct QueueItem {
     pub missing_population: u16,
 }
 
-#[expect(dead_code, reason = "the wire carries them from C20 on")]
 pub struct Garrison {
     pub capacity: u16,
     pub occupied: u16,
@@ -316,22 +313,23 @@ pub struct Garrison {
 }
 
 /// A foundation or a repair.
-#[expect(dead_code, reason = "the wire carries them from C20 on")]
 pub struct Building {
     pub builders: u8,
     pub seconds_remaining: f32,
 }
 
-#[expect(dead_code, reason = "the wire carries them from C20 on")]
 pub struct UnitAi {
     /// String record indices.
+    #[expect(
+        dead_code,
+        reason = "changes with every order step and no panel shows it, so the detail stream leaves it out"
+    )]
     pub state: Option<u32>,
     pub idle: bool,
     pub stance: Option<u32>,
     pub formation_controller: u32,
 }
 
-#[expect(dead_code, reason = "the wire carries them from C20 on")]
 pub struct Progress {
     /// -1 when not packing or upgrading.
     pub pack: f32,
@@ -340,7 +338,6 @@ pub struct Progress {
     pub upgrade_target: Option<u32>,
 }
 
-#[expect(dead_code, reason = "the wire carries them from C20 on")]
 pub struct Trader {
     /// String record index.
     pub goods: Option<u32>,
@@ -389,15 +386,22 @@ pub struct Details {
     /// (old id, new id) of the next turn record.
     pub renames: Vec<(u32, u32)>,
     pub economy: Vec<Economy>,
+    /// The entities whose groups changed, and those gone, before the next
+    /// turn record.
+    pub changed: HashSet<u32>,
+    pub gone: Vec<u32>,
 }
 
 impl Details {
     pub fn apply(&mut self, changed: Vec<(u32, EntityDetails)>, gone: Vec<u32>) {
         for (id, groups) in changed {
             self.entities.entry(id).or_default().merge(groups);
+            self.changed.insert(id);
         }
         for id in gone {
             self.entities.remove(&id);
+            self.changed.remove(&id);
+            self.gone.push(id);
         }
     }
 
@@ -413,9 +417,11 @@ impl Details {
         self.economy = economy;
     }
 
-    /// The renames belong to the turn just read.
+    /// The renames and changes belong to the turn just read.
     pub fn end_turn(&mut self) {
         self.renames.clear();
+        self.changed.clear();
+        self.gone.clear();
     }
 }
 
