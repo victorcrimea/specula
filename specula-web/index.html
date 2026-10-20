@@ -73,10 +73,11 @@ html, body { margin: 0; height: 100%; background: #0f1214; }
 /* selectionDetails, 50%-114 of the bottom bar, without the command row
    (unit_commands.xml) under the details: 164 px rather than 204. */
 #details { position: fixed; left: calc(50% - 114px); bottom: var(--panel-bottom);
-  width: 228px; height: 164px; font-family: "0ad sans", "0ad sans fallback", sans-serif;
+  --details-height: 164px;
+  width: 228px; height: var(--details-height); font-family: "0ad sans", "0ad sans fallback", sans-serif;
   color: white; user-select: none; -webkit-user-select: none; }
 #details[hidden], #details [hidden] { display: none; }
-#details-panel { left: 0; top: 0; width: 228px; height: 164px; position: absolute;
+#details-panel { left: 0; top: 0; width: 228px; height: var(--details-height); position: absolute;
   /* The sub-rectangle 0 0 220 192 of hud_panels.png, stretched over the
      engine's 228x204, of which the top 164 px show. */
   background: var(--gui-hud-panels) 0 0 / 530.618px 272px no-repeat; }
@@ -187,15 +188,21 @@ html, body { margin: 0; height: 100%; background: #0f1214; }
 /* Not the engine's: on a phone both panels are scaled down to leave the
    view free, the details sit right of the minimap so neither moves when
    the selection changes, and the details fold to a strip. */
-#details-toggle { display: none; }
+#details-toggle, #minimap-toggle, #menu-open { display: none; }
+#settings #fps-setting { display: none; }
 #details-strip { display: none; }
 @media (max-width: 700px) {
   :root { --details-scale: 0.8; }
   #minimap-panel { left: 8px; transform: scale(0.72); }
+  /* Folded, only its tab shows, at the bottom where the map was. */
+  #minimap-panel.collapsed { visibility: hidden; }
+  #minimap-panel.collapsed #minimap-toggle { visibility: visible; top: auto; bottom: 0;
+    border-bottom: 1px solid #3a4248; border-radius: 4px; height: 28px; }
+  #minimap-panel.collapsed #minimap-toggle::before { top: 10px; rotate: 225deg; }
   /* 8 px gutter, the minimap's 200 px at 0.72, 8 px gap. */
   #details { left: 160px; transform: scale(var(--details-scale)); transform-origin: 0 100%; }
   /* Above the details and their fold tab. */
-  #garrison { left: 0; bottom: 178px; height: auto; }
+  #garrison { left: 0; bottom: calc(var(--details-height) + 14px); height: auto; }
   /* As tall as its rows rather than the engine's three. The rows of
      hud_panels.png it shows end at the texture's bottom, so 100% puts
      them there at any height. */
@@ -206,13 +213,54 @@ html, body { margin: 0; height: 100%; background: #0f1214; }
   #garrison-cells > .cell { position: relative; left: 0 !important; top: 0 !important; }
   #garrison-health { height: auto; bottom: 7px; }
   #details.collapsed #garrison { display: none; }
-  #details-toggle { display: block; position: absolute; left: 50%; top: -14px;
+  #details-toggle, #minimap-toggle { display: block; position: absolute; left: 50%; top: -14px;
     width: 40px; height: 14px; translate: -50% 0; padding: 0; border: 1px solid #3a4248;
     border-bottom: none; border-radius: 4px 4px 0 0; background: rgba(15, 18, 20, 0.9); }
-  #details-toggle::before { content: ""; position: absolute; left: 50%; top: 3px;
-    width: 6px; height: 6px; translate: -50% 0; rotate: 45deg;
+  /* The minimap is scaled 0.72, so its tab is drawn larger to match. */
+  #minimap-toggle { top: -20px; width: 56px; height: 20px; }
+  #details-toggle::before, #minimap-toggle::before { content: ""; position: absolute;
+    left: 50%; top: 3px; width: 6px; height: 6px; translate: -50% 0; rotate: 45deg;
     border-right: 2px solid #e6e9eb; border-bottom: 2px solid #e6e9eb; }
+  #minimap-toggle::before { top: 4px; width: 8px; height: 8px; }
   #details.collapsed #details-toggle::before { top: 6px; rotate: 225deg; }
+  /* A single selection without the line under the bars: the portrait
+     shrinks to the bars' height and the names move up, 31 px shorter. */
+  #details:has(#details-multiple[hidden]):has(#details-carrying-text[hidden]) {
+    --details-height: 133px; }
+  #details-single:has(#details-carrying-text[hidden]) #details-stats { top: 65px; }
+  #details-single:has(#details-carrying-text[hidden]) #details-portrait { width: 64px; height: 64px; }
+  #details-single:has(#details-carrying-text[hidden]) #details-icon { width: 62px; height: 62px; }
+  #details-single:has(#details-carrying-text[hidden]) #details-experience { height: 60px; }
+  #details-single:has(#details-carrying-text[hidden]) .section { left: 66px; width: 154px; }
+  #details-single:has(#details-carrying-text[hidden]) .section > .text { width: 154px; }
+  #details-single:has(#details-carrying-text[hidden]) .section > .bar { width: 153px; }
+  /* The other controls fold into a menu, the perspective stays out. */
+  #menu-open { display: block; }
+  #controls { right: auto; max-width: calc(100vw - 96px); }
+  #controls:not(.open) > :not(#menu-open, #perspective) { display: none; }
+  #controls.open { flex-direction: column; align-items: stretch; padding: 6px;
+    background: rgba(15, 18, 20, 0.95); border: 1px solid #3a4248; border-radius: 4px;
+    margin: -7px 0 0 -7px; }
+  #controls.open > #menu-open { border-color: #8fa3b0; }
+  /* Frame stats only when asked for, or with the debug panes. */
+  #settings #fps-setting { display: flex; }
+  body:not(.show-fps):not(.debug) #fps { display: none; }
+  #clock { font-size: 13px; padding: 3px 6px; }
+  /* Icons for play, pause and live; the speed only matters off live. */
+  #playback:has(#live[aria-pressed="true"]) #speed { display: none; }
+  /* Under #playback, to win over the shared button rule's font. */
+  #playback #play, #playback #live { position: relative; width: 34px; height: 28px;
+    padding: 0; font-size: 0; }
+  #play::before { content: ""; position: absolute; left: 50%; top: 50%;
+    translate: -50% -50%; width: 4px; height: 12px;
+    border-left: 3px solid #e6e9eb; border-right: 3px solid #e6e9eb; }
+  #play[data-paused="true"]::before { width: 0; height: 0; translate: -35% -50%;
+    border-left: 11px solid #e6e9eb; border-right: none;
+    border-top: 7px solid transparent; border-bottom: 7px solid transparent; }
+  #live::before { content: ""; position: absolute; left: 50%; top: 50%;
+    translate: -50% -50%; width: 10px; height: 10px; border-radius: 50%;
+    background: #8a9298; }
+  #live[aria-pressed="true"]::before { background: #e04040; }
   #details.collapsed { height: 32px; }
   #details.collapsed #details-panel { display: none; }
   #details.collapsed #details-strip { display: block; position: absolute; left: 0; top: 0;
@@ -317,6 +365,7 @@ body:not([data-debug="storage"]) #stats-storage { display: none; }
 <canvas id="view"></canvas>
 <div id="bandbox" hidden></div>
 <div id="controls">
+<button id="menu-open" type="button" aria-expanded="false" aria-controls="controls">Menu</button>
 <button id="settings-open" type="button" aria-expanded="false" aria-controls="settings">Graphics</button>
 <button id="diplomacy" type="button" aria-pressed="false">Diplomacy colours</button>
 <select id="perspective" aria-label="Perspective">
@@ -335,6 +384,7 @@ body:not([data-debug="storage"]) #stats-storage { display: none; }
 <div id="minimap-background"></div>
 <div id="minimap-circle"></div>
 <canvas id="minimap" aria-label="Minimap"></canvas>
+<button id="minimap-toggle" type="button" aria-expanded="true" aria-label="Fold the minimap"></button>
 <span class="edge top"></span><span class="edge right"></span><span class="edge bottom"></span><span class="edge left"></span>
 <span class="edge corner top-right"></span><span class="edge corner bottom-right"></span><span class="edge corner bottom-left"></span><span class="edge corner top-left"></span>
 </div>
@@ -441,6 +491,7 @@ body:not([data-debug="storage"]) #stats-storage { display: none; }
 <a id="bench-download" class="button" hidden>Download report</a>
 </div>
 <p id="bench-status" role="status"></p>
+<label id="fps-setting">Frame stats <input id="show-fps" type="checkbox"></label>
 <h3>Textures</h3>
 <label>Textures <select id="textures" data-balanced="3">
 <option value="1">Low</option>
@@ -711,6 +762,52 @@ settings.</p>
     try { localStorage.setItem(key, collapsed ? "1" : "0"); } catch {}
   });
   document.getElementById("details-strip").addEventListener("click", () => toggle.click());
+})();
+</script>
+<script>
+// Phone chrome: the control menu, the minimap fold and the frame stats
+// setting. Folds and the setting are remembered where storage works.
+(() => {
+  const get = (key) => { try { return localStorage.getItem(key); } catch { return null; } };
+  const set = (key, value) => { try { localStorage.setItem(key, value); } catch {} };
+
+  const controls = document.getElementById("controls");
+  const menu = document.getElementById("menu-open");
+  const showMenu = (open) => {
+    controls.classList.toggle("open", open);
+    menu.setAttribute("aria-expanded", String(open));
+  };
+  menu.addEventListener("click", () => showMenu(!controls.classList.contains("open")));
+  // Graphics opens its own panel over the menu, so the menu gets out of
+  // the way; a tap anywhere else closes it as well.
+  document.getElementById("settings-open").addEventListener("click", () => showMenu(false));
+  document.addEventListener("pointerdown", (event) => {
+    if (!controls.contains(event.target)) showMenu(false);
+  });
+
+  const minimap = document.getElementById("minimap-panel");
+  const minimapToggle = document.getElementById("minimap-toggle");
+  const minimapKey = "specula.minimap.collapsed";
+  const showMinimap = (collapsed) => {
+    minimap.classList.toggle("collapsed", collapsed);
+    minimapToggle.setAttribute("aria-expanded", String(!collapsed));
+    minimapToggle.setAttribute("aria-label", collapsed ? "Unfold the minimap" : "Fold the minimap");
+  };
+  showMinimap(get(minimapKey) === "1");
+  minimapToggle.addEventListener("click", () => {
+    const collapsed = !minimap.classList.contains("collapsed");
+    showMinimap(collapsed);
+    set(minimapKey, collapsed ? "1" : "0");
+  });
+
+  const fps = document.getElementById("show-fps");
+  const fpsKey = "specula.fps";
+  fps.checked = get(fpsKey) === "1";
+  document.body.classList.toggle("show-fps", fps.checked);
+  fps.addEventListener("change", () => {
+    document.body.classList.toggle("show-fps", fps.checked);
+    set(fpsKey, fps.checked ? "1" : "0");
+  });
 })();
 </script>
 <script type="module">

@@ -806,6 +806,9 @@ impl App {
         self.play_button.set_disabled(false);
         self.play_button
             .set_text_content(Some(if self.paused { "Play" } else { "Pause" }));
+        // For the phone layout's icon, which CSS cannot take from the text.
+        let paused = if self.paused { "true" } else { "false" };
+        let _ = self.play_button.set_attribute("data-paused", paused);
         self.live_button.set_disabled(false);
         let pressed = if self.live { "true" } else { "false" };
         let _ = self.live_button.set_attribute("aria-pressed", pressed);
