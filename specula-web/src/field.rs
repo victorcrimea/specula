@@ -372,6 +372,10 @@ struct Camera {
     hover: Option<[f32; 2]>,
     /// The left button's drag past `DRAG_DELTA` while it is held.
     band: Option<Band>,
+    /// The entity the camera keeps over, as `CCameraController`'s
+    /// `m_FollowEntity`, until a pan, a move to a point or the entity
+    /// leaving the world.
+    follow: Option<u32>,
 }
 
 /// A left click or drag on the canvas, points 0..1 across it from its top
@@ -391,6 +395,12 @@ enum PickInput {
         remove: bool,
     },
     Clear,
+    /// A selection panel group button: `makePrimarySelection`, or with
+    /// `remove` `removeGroupFromSelection`.
+    Group {
+        ids: Vec<u32>,
+        remove: bool,
+    },
 }
 
 /// A bandbox being drawn: its corners 0..1 across the canvas, and in
@@ -1145,6 +1155,7 @@ impl Field {
             picks: Vec::new(),
             hover: None,
             band: None,
+            follow: None,
         }));
         wire_camera(&canvas, &camera)?;
         let document = web_sys::window()
@@ -1699,6 +1710,7 @@ impl Field {
                     remove,
                 } => (self.in_band(view_proj, from, to), add, remove),
                 PickInput::Clear => (Vec::new(), false, false),
+                PickInput::Group { ids, remove } => (ids, false, remove),
             };
             let first = if add {
                 self.selection.add_list(&ids, look)
@@ -1844,6 +1856,22 @@ impl Field {
             .enumerate()
             .filter(|(_, planes)| !outside(planes, centre, radius))
             .fold(0, |casting, (cascade, _)| casting | 1 << cascade)
+    }
+
+    /// Keeps the camera over the followed entity where it is drawn, or
+    /// stops once it has left the world (died, garrisoned).
+    fn follow_entity(&mut self, progress: f32) {
+        let Some(id) = self.camera.borrow().follow else {
+            return;
+        };
+        let position = self
+            .entity_dot(id)
+            .map(|dot| self.entity_position(dot, progress));
+        let camera = &mut *self.camera.borrow_mut();
+        match position {
+            Some([x, _, z]) => camera.target = [x, z],
+            None => camera.follow = None,
+        }
     }
 
     /// Where the entity is drawn this frame, in metres.
@@ -3782,7 +3810,20 @@ impl View for Field {
     }
 
     fn move_to(&mut self, x: f32, z: f32) {
-        self.camera.borrow_mut().target = [x, z];
+        let camera = &mut *self.camera.borrow_mut();
+        camera.target = [x, z];
+        camera.follow = None;
+    }
+
+    fn follow(&mut self, id: u32) {
+        self.camera.borrow_mut().follow = Some(id);
+    }
+
+    fn select_group(&mut self, ids: &[u32], remove: bool) {
+        self.camera.borrow_mut().picks.push(PickInput::Group {
+            ids: ids.to_vec(),
+            remove,
+        });
     }
 
     fn asset_store(&self) -> Option<Rc<RefCell<Store>>> {
@@ -3811,6 +3852,7 @@ impl View for Field {
         camera.pitch_ahead = 0.0;
         camera.distance_ahead = 0.0;
         camera.keys = 0;
+        camera.follow = None;
     }
 
     fn bench_info(&self) -> BenchInfo {
@@ -3883,6 +3925,7 @@ impl View for Field {
         let bakes = self.far.drawn;
         let uploads = self.far.from_storage as u64 + self.uploads;
         self.camera.borrow_mut().step(now());
+        self.follow_entity(progress);
         let (view_proj, eye, right, up) = self.view_projection();
         let wind = self.wind(progress);
         self.write_view(&self.view_buffer, &view_proj, [right, up, eye], wind);
@@ -5376,6 +5419,7 @@ impl Camera {
     /// Moves the ground under the pointer along with it, `dx`, `dy` CSS
     /// pixels.
     fn pan(&mut self, dx: f32, dy: f32) {
+        self.follow = None;
         // About a pixel's worth of ground at the target per pixel.
         let scale = self.distance * 0.0015;
         let (sin, cos) = self.yaw.sin_cos();
@@ -5488,6 +5532,9 @@ impl Camera {
         if !self.birds_eye {
             self.pitch = (self.pitch - axis(KEY_TILT_UP, KEY_TILT_DOWN) * KEY_TILT_SPEED * seconds)
                 .clamp(MIN_PITCH, MAX_PITCH);
+        }
+        if ahead != 0.0 || side != 0.0 {
+            self.follow = None;
         }
         let metres = self.distance * KEY_PAN_SPEED * seconds;
         let (sin, cos) = self.yaw.sin_cos();

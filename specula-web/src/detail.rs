@@ -12,22 +12,23 @@ use crate::stream::Writer;
 const MESSAGE_KEYFRAME: u8 = 1;
 const MESSAGE_DELTA: u8 = 2;
 const DETAIL_VERSION: u8 = 1;
-const HEALTH: usize = 0;
-const CAPTURE: usize = 1;
-const SUPPLY: usize = 2;
-const GATHERERS: usize = 3;
-const CARRYING: usize = 4;
-const EXPERIENCE: usize = 5;
+/// Slots of `Groups`, the hook's group bits.
+pub const HEALTH: usize = 0;
+pub const CAPTURE: usize = 1;
+pub const SUPPLY: usize = 2;
+pub const GATHERERS: usize = 3;
+pub const CARRYING: usize = 4;
+pub const EXPERIENCE: usize = 5;
 const QUEUE: usize = 6;
 const GARRISON: usize = 7;
-const FOUNDATION: usize = 8;
-const REPAIR: usize = 9;
+pub const FOUNDATION: usize = 8;
+pub const REPAIR: usize = 9;
 const UNIT_AI: usize = 10;
 const TRAINABLE: usize = 11;
 const RESEARCHABLE: usize = 12;
 const PROGRESS: usize = 13;
 const HOLDER: usize = 14;
-const TRADER: usize = 15;
+pub const TRADER: usize = 15;
 const SLOTS: usize = 16;
 
 /// By group bit; `None` is a group not sent.
@@ -145,7 +146,6 @@ pub struct Building {
 
 impl Building {
     /// At `turn`; it goes down only while someone builds.
-    #[expect(dead_code, reason = "the details panel (C24) reads them")]
     pub fn seconds_remaining(&self, turn: u32) -> f64 {
         let sent = f64::from(self.remaining) / 10.0;
         if self.builders == 0 {

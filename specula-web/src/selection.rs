@@ -1,9 +1,7 @@
 //! What is selected and hovered, a port of `EntitySelection` of
-//! gui/session/selection.js, and the fade of each entity's selection
-//! overlay, as `CCmpSelectable` keeps it.
-//!
-//! `EntityGroups` is left to the details panel, the only thing that reads
-//! it.
+//! gui/session/selection.js, its `EntityGroups` as the details panel reads
+//! it, and the fade of each entity's selection overlay, as
+//! `CCmpSelectable` keeps it.
 
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -86,6 +84,35 @@ impl Overlay {
     fn is_idle(&self) -> bool {
         self.delta == 0.0 && self.alpha == self.min && !self.selected
     }
+}
+
+/// `EntityGroups.getEntsGrouped` of the selection: (key, ids) by key, ids
+/// rising, as the engine's string keys and integer object keys iterate.
+/// `key_of` gives an entity's owner and its template's selection group name
+/// or else template name, `None` for one that does not exist. The engine
+/// keeps the groups as the selection changes; built afresh they are the
+/// same, renames and removals included.
+pub fn groups(
+    selected: &[u32],
+    key_of: impl Fn(u32) -> Option<(i32, String)>,
+) -> Vec<(String, Vec<u32>)> {
+    let mut groups: Vec<(String, Vec<u32>)> = Vec::new();
+    for &id in selected {
+        let Some((owner, name)) = key_of(id) else {
+            continue;
+        };
+        let key = format!("p{owner}&{name}");
+        match groups.iter_mut().find(|(other, _)| *other == key) {
+            Some((_, ids)) => ids.push(id),
+            None => groups.push((key, vec![id])),
+        }
+    }
+    // `getKeys` sorts the keys as strings, all ASCII here but the names.
+    groups.sort_by(|a, b| a.0.encode_utf16().cmp(b.0.encode_utf16()));
+    for (_, ids) in &mut groups {
+        ids.sort_unstable();
+    }
+    groups
 }
 
 /// Looks up an entity, `None` when it does not exist.

@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Specula</title>
+<link rel="stylesheet" href="./gui/session.css?v=SESSION">
 <style>
 html, body { margin: 0; height: 100%; background: #0f1214; }
 #view { display: block; width: 100vw; height: 100vh; }
@@ -38,10 +39,166 @@ html, body { margin: 0; height: 100%; background: #0f1214; }
 #bandbox { position: fixed; box-sizing: border-box; border: 1px solid black;
   box-shadow: inset 0 0 0 1px white; pointer-events: none; }
 #bandbox[hidden] { display: none; }
-#minimap { position: fixed; left: 8px; bottom: 52px;
-  width: min(220px, 40vw); height: min(220px, 40vw);
-  border: 1px solid #3a4248; border-radius: 4px; background: #0f1214;
+/* The session GUI's bottom panels, laid out in the engine's pixels at
+   gui.scale 1 (gui/session/session.xml, selection_panels_middle/), their
+   sprites from gui/session/sprites.xml with the textures of gui/session.css.
+   The bottom bar is 1024 px wide and centred; it sits above the playback
+   bar rather than on the screen's edge. */
+:root { --panel-bottom: 44px; --gui-gold: rgb(237, 227, 167); }
+.gui-frame { box-sizing: border-box; }
+.gui-frame > .edge { position: absolute; pointer-events: none; }
+.gui-frame > .top, .gui-frame > .bottom { left: 4px; right: 4px; height: 4px;
+  background: var(--gui-line-horiz) 0 0 / 64px 4px repeat-x; }
+.gui-frame > .top { top: 0; }
+.gui-frame > .bottom { bottom: 0; }
+.gui-frame > .left, .gui-frame > .right { top: 4px; bottom: 4px; width: 4px;
+  background: var(--gui-line-vert) 0 0 / 4px 64px repeat-y; }
+.gui-frame > .left { left: 0; }
+.gui-frame > .right { right: 0; }
+.gui-frame > .corner { width: 4px; height: 4px; background-size: 4px 4px; }
+.gui-frame > .top-left { left: 0; top: 0; background-image: var(--gui-line-corner-top-left); }
+.gui-frame > .top-right { right: 0; top: 0; background-image: var(--gui-line-corner-top-right); }
+.gui-frame > .bottom-left { left: 0; bottom: 0; background-image: var(--gui-line-corner-bottom-left); }
+.gui-frame > .bottom-right { right: 0; bottom: 0; background-image: var(--gui-line-corner-bottom-right); }
+/* mapPanel and minimap/MiniMap.xml, at 50%-512 of the bottom bar. */
+#minimap-panel { position: fixed; bottom: var(--panel-bottom);
+  left: max(8px, calc(50% - 512px)); width: 200px; height: 204px;
+  background: black; transform-origin: 0 100%; }
+#minimap-background { position: absolute; left: 4px; top: 4px; right: 4px; bottom: 4px;
+  background: var(--gui-minimap-background-gaia) 0 0 / 100% 100%; pointer-events: none; }
+#minimap-circle { position: absolute; left: 4px; top: 6px; right: 4px; bottom: 6px;
+  background: var(--gui-minimap-circle) 0 0 / 100% 100%; pointer-events: none; }
+#minimap { position: absolute; left: 8px; top: 10px; width: 184px; height: 184px;
   cursor: pointer; touch-action: none; }
+/* selectionDetails, 50%-114 of the bottom bar, without the command row
+   (unit_commands.xml) under the details: 164 px rather than 204. */
+#details { position: fixed; left: calc(50% - 114px); bottom: var(--panel-bottom);
+  width: 228px; height: 164px; font-family: "0ad sans", "0ad sans fallback", sans-serif;
+  color: white; user-select: none; -webkit-user-select: none; }
+#details[hidden], #details [hidden] { display: none; }
+#details-panel { left: 0; top: 0; width: 228px; height: 164px; position: absolute;
+  /* The sub-rectangle 0 0 220 192 of hud_panels.png, stretched over the
+     engine's 228x204, of which the top 164 px show. */
+  background: var(--gui-hud-panels) 0 0 / 530.618px 272px no-repeat; }
+#details .box { position: absolute; }
+#details .fill { position: absolute; left: 0; top: 0; right: 0; bottom: 0; }
+/* edgedPanelShader, topEdgedPanelShader and bottomEdgedPanelShader; CSS
+   draws the first background on top, the engine the last image. */
+#details .edged { background:
+  var(--gui-panel-shader-bottom-edge) 0 calc(100% + 3px) / 100% 8px no-repeat,
+  var(--gui-panel-shader) 0 0 / 100% calc(100% - 5px) no-repeat,
+  var(--gui-panel-shader-top-edge) 0 0 / 100% 1px no-repeat; }
+#details .top-edged { background:
+  var(--gui-panel-shader-bottom-edge) 0 calc(100% + 3px) / 100% 8px no-repeat,
+  var(--gui-panel-shader) 0 0 / 100% calc(100% - 5px) no-repeat; }
+#details .bottom-edged { background:
+  var(--gui-panel-shader) 0 0 / 100% 100% no-repeat,
+  var(--gui-panel-shader-top-edge) 0 0 / 100% 1px no-repeat; }
+/* The engine's `-stroke` fonts: a 1 px black outline. */
+#details .text { position: absolute; display: flex; align-items: center;
+  white-space: pre; overflow: hidden; line-height: 1.1;
+  -webkit-text-stroke: 2px black; paint-order: stroke fill; }
+#details .center { justify-content: center; text-align: center; }
+#details .right { justify-content: flex-end; text-align: right; }
+#details .sans-stroke-12 { font-size: 12px; font-weight: 400; }
+#details .sans-bold-stroke-13 { font-size: 13px; font-weight: 700; }
+#details .sans-bold-stroke-14 { font-size: 14px; font-weight: 700; }
+#details .gold { color: var(--gui-gold); }
+/* A bar: barBorder around it, the background, the foreground and
+   statsBarShaderHorizontal or ...Vertical over them. */
+#details .bar > * { position: absolute; left: 0; top: 0; right: 0; bottom: 0; }
+#details .bar > .border { left: -1px; top: -1px; right: -1px; bottom: -1px;
+  background: rgba(0, 0, 0, 0.502); }
+#details .bar > .shine.horizontal { background: var(--gui-bar-lighting-horizontal)
+  0 0 / 170.667% 114.286% no-repeat; }
+#details .bar > .shine.vertical { background: var(--gui-bar-lighting-vertical)
+  0 0 / 114.286% 170.667% no-repeat; }
+#details .health-bg { background: rgb(255, 0, 0); }
+#details .health-fg { background: rgb(0, 200, 0); }
+#details .resource-bg, #details .experience-bg { background: rgb(43, 42, 40); }
+#details .resource-fg { background: rgb(255, 165, 0); }
+#details .experience-fg { background: white; }
+#details .segments > div { position: absolute; }
+/* detailsAreaSingle at 4 4 100%-4 100%-44. */
+#details-single { left: 4px; top: 4px; width: 220px; height: 156px; }
+#details-stats { left: 0; top: 96px; width: 220px; height: 60px; }
+#details-civ { left: 0; top: 38px; width: 220px; height: 24px; }
+#details-emblem { left: 46px; top: 2px; width: 128px; height: 20px;
+  background: none 50% 50% / 128px 128px no-repeat; }
+#details-phase { background: none 0 0 / 100% 100% no-repeat; }
+#details-player { left: 0; top: 2px; width: 220px; height: 20px; }
+#details-primary { left: 0; top: 3px; width: 220px; height: 17px; }
+#details-primary.alone { height: 34px; }
+#details-secondary { left: 0; top: 19px; width: 220px; height: 18px; }
+#details-bars { left: 0; top: 0; width: 220px; height: 65px; }
+#details .section { left: 96px; width: 124px; }
+#details .section-top { top: 2px; height: 22px; }
+#details .section-middle { top: 12px; height: 22px; }
+#details .section-bottom { top: 35px; height: 20px; }
+#details .section > .text { left: 0; top: 0; width: 124px; height: 14px; }
+#details .section > .bar { left: 1px; top: 14px; width: 123px; height: 7px; }
+#details-lower { left: 0; top: 63px; width: 220px; height: 35px; }
+#details-carrying-text { left: 124px; top: 0; width: 63px; height: 32px; }
+#details-carrying-icon { left: 188px; top: 0; width: 32px; height: 32px;
+  background: none 0 0 / 100% 100% no-repeat; }
+/* iconBorder: a 1 px gold frame; clicking follows the entity. */
+#details-portrait { left: 0; top: 0; width: 96px; height: 96px; padding: 0; margin: 0;
+  border: 1px solid var(--gui-gold); box-sizing: border-box; background: none;
+  cursor: pointer; }
+#details-icon { position: absolute; left: 0; top: 0; width: 94px; height: 94px;
+  display: block; background: black; }
+#details-experience { left: 1px; top: 1px; width: 4px; height: 92px; }
+#details-rank { left: 3px; top: 3px; width: 16px; height: 16px;
+  background: none 0 0 / 100% 100% no-repeat; }
+/* detailsAreaMultiple at 6 6 100%-6 100%-44. */
+#details-multiple { left: 6px; top: 6px; width: 216px; height: 154px; }
+/* iconButton: portrait_black.dds, 42 added to each channel under the
+   mouse (snIconPortraitOver). */
+#details .group { position: absolute; width: 38px; height: 38px; padding: 0; margin: 0;
+  border: 0; background: var(--gui-portrait-black) 0 0 / 100% 100%; cursor: pointer; }
+#details .group:hover::after { content: ""; position: absolute; inset: 0;
+  background: rgb(42, 42, 42); mix-blend-mode: plus-lighter; pointer-events: none; }
+#details .group > .owner { position: absolute; inset: 0; }
+#details .group > img { position: absolute; left: 3px; top: 3px; width: 32px; height: 32px;
+  display: block; }
+#details .group > .text { inset: 0; }
+#details-count-badge { left: 181px; top: 4px; width: 32px; height: 32px;
+  background: var(--gui-groups) 0 0 / 100% 100% no-repeat; }
+#details-count { inset: 0; }
+#details-health-multiple { left: 187px; top: 40px; width: 8px; height: 114px; }
+#details-capture-multiple { left: 199px; top: 40px; width: 8px; height: 114px; }
+/* Not the engine's: on a phone the panel is scaled up to be read, sits
+   over the playback bar with the minimap above it, and folds to a strip. */
+#details-toggle { display: none; }
+#details-strip { display: none; }
+@media (max-width: 700px) {
+  :root { --details-scale: 1.4; }
+  #minimap-panel { left: 8px; transform: scale(0.72); }
+  #details { left: 50%; translate: -50% 0;
+    width: calc(228px * var(--details-scale)); height: calc(164px * var(--details-scale)); }
+  #details-panel, #details-strip { zoom: var(--details-scale); }
+  body:has(#details:not([hidden])) #minimap-panel {
+    bottom: calc(var(--panel-bottom) + 164px * var(--details-scale) + 8px); }
+  body:has(#details.collapsed:not([hidden])) #minimap-panel {
+    bottom: calc(var(--panel-bottom) + 32px * var(--details-scale) + 8px); }
+  #details-toggle { display: block; position: absolute; left: 50%; top: -14px;
+    width: 40px; height: 14px; translate: -50% 0; padding: 0; border: 1px solid #3a4248;
+    border-bottom: none; border-radius: 4px 4px 0 0; background: rgba(15, 18, 20, 0.9); }
+  #details-toggle::before { content: ""; position: absolute; left: 50%; top: 3px;
+    width: 6px; height: 6px; translate: -50% 0; rotate: 45deg;
+    border-right: 2px solid #e6e9eb; border-bottom: 2px solid #e6e9eb; }
+  #details.collapsed #details-toggle::before { top: 6px; rotate: 225deg; }
+  #details.collapsed { height: calc(32px * var(--details-scale)); }
+  #details.collapsed #details-panel { display: none; }
+  #details.collapsed #details-strip { display: block; position: absolute; left: 0; top: 0;
+    width: 228px; height: 32px; box-sizing: border-box;
+    background: rgba(15, 18, 20, 0.9); border: 1px solid #3a4248; border-radius: 4px; }
+  #details-strip > img { position: absolute; left: 2px; top: 2px; width: 26px; height: 26px;
+    display: block; background: black; border: 1px solid var(--gui-gold); box-sizing: border-box; }
+  #details-strip-name { left: 34px; top: 1px; right: 6px; height: 16px; justify-content: flex-start; }
+  #details-strip .bar { position: absolute; left: 35px; right: 7px; top: 20px; height: 6px; }
+}
+@media (max-width: 340px) { :root { --details-scale: 1.25; } }
 #errors { max-width: 100%;
   box-sizing: border-box; max-height: 40vh;
   overflow: auto; margin: 0; padding: 6px 8px; white-space: pre-wrap;
@@ -148,7 +305,67 @@ body:not([data-debug="storage"]) #stats-storage { display: none; }
 </div>
 </div>
 <div id="clock" aria-label="Match time">0:00</div>
+<div id="minimap-panel" class="gui-frame">
+<div id="minimap-background"></div>
+<div id="minimap-circle"></div>
 <canvas id="minimap" aria-label="Minimap"></canvas>
+<span class="edge top"></span><span class="edge right"></span><span class="edge bottom"></span><span class="edge left"></span>
+<span class="edge corner top-right"></span><span class="edge corner bottom-right"></span><span class="edge corner bottom-left"></span><span class="edge corner top-left"></span>
+</div>
+<div id="details" hidden>
+<button id="details-toggle" type="button" aria-expanded="true" aria-controls="details-panel" aria-label="Fold the details"></button>
+<div id="details-panel" class="gui-frame">
+<div id="details-single" class="box">
+<div id="details-stats" class="box edged">
+<div id="details-civ" class="box">
+<div id="details-emblem" class="box"></div>
+<div id="details-player-color" class="fill"></div>
+<div id="details-phase" class="fill"></div>
+<div class="fill bottom-edged"></div>
+<div id="details-player" class="text center sans-bold-stroke-14"></div>
+</div>
+<div id="details-primary" class="text center sans-bold-stroke-13 gold"></div>
+<div id="details-secondary" class="text center sans-stroke-12"></div>
+</div>
+<div id="details-bars" class="box top-edged">
+<div id="details-capture-section" class="box section">
+<div id="details-capture-stats" class="text right sans-stroke-12"></div>
+<div id="details-capture" class="box bar"><div class="border"></div><div class="segments"></div><div class="shine horizontal"></div></div>
+</div>
+<div id="details-health-section" class="box section">
+<div id="details-health-stats" class="text right sans-stroke-12"></div>
+<div class="box bar"><div class="border"></div><div class="health-bg"></div><div id="details-health-bar" class="health-fg"></div><div class="shine horizontal"></div></div>
+</div>
+<div id="details-resource-section" class="box section">
+<div id="details-resource-stats" class="text right sans-stroke-12"></div>
+<div class="box bar"><div class="border"></div><div class="resource-bg"></div><div id="details-resource-bar" class="resource-fg"></div><div class="shine horizontal"></div></div>
+</div>
+</div>
+<div id="details-lower" class="box edged">
+<div id="details-carrying-text" class="text right sans-bold-stroke-13"></div>
+<div id="details-carrying-icon" class="box"></div>
+</div>
+<button id="details-portrait" class="box" type="button" aria-label="Follow with the camera">
+<img id="details-icon" alt="">
+<div id="details-experience" class="box bar"><div class="border"></div><div class="experience-bg"></div><div id="details-experience-bar" class="experience-fg"></div><div class="shine vertical"></div></div>
+<div id="details-rank" class="box"></div>
+</button>
+</div>
+<div id="details-multiple" class="box">
+<div id="details-groups"></div>
+<div id="details-count-badge" class="box"><div id="details-count" class="text center sans-bold-stroke-14"></div></div>
+<div id="details-health-multiple" class="box bar"><div class="border"></div><div class="health-bg"></div><div id="details-health-multiple-bar" class="health-fg"></div><div class="shine vertical"></div></div>
+<div id="details-capture-multiple" class="box bar"><div class="border"></div><div class="segments"></div><div class="shine vertical"></div></div>
+</div>
+<span class="edge top"></span><span class="edge right"></span><span class="edge bottom"></span><span class="edge left"></span>
+<span class="edge corner top-right"></span><span class="edge corner bottom-right"></span><span class="edge corner bottom-left"></span><span class="edge corner top-left"></span>
+</div>
+<div id="details-strip">
+<img id="details-strip-icon" alt="">
+<div id="details-strip-name" class="text sans-bold-stroke-13 gold"></div>
+<div class="bar"><div class="border"></div><div class="health-bg"></div><div id="details-strip-health" class="health-fg"></div><div class="shine horizontal"></div></div>
+</div>
+</div>
 <div id="hud">
 <div id="fps" aria-label="Frames per second">- FPS</div>
 <pre id="stats-network" class="stats" aria-label="Network statistics"></pre>
@@ -440,6 +657,27 @@ settings.</p>
     document.getElementById(`preset-${preset}`)
       .addEventListener("click", () => applyPreset(preset));
   }
+})();
+</script>
+<script>
+// Folding the details panel is page chrome too; the wasm only fills it.
+// The fold is remembered, but a browser without storage still folds.
+(() => {
+  const panel = document.getElementById("details");
+  const toggle = document.getElementById("details-toggle");
+  const key = "specula.details.collapsed";
+  const show = (collapsed) => {
+    panel.classList.toggle("collapsed", collapsed);
+    toggle.setAttribute("aria-expanded", String(!collapsed));
+    toggle.setAttribute("aria-label", collapsed ? "Unfold the details" : "Fold the details");
+  };
+  try { show(localStorage.getItem(key) === "1"); } catch { show(false); }
+  toggle.addEventListener("click", () => {
+    const collapsed = !panel.classList.contains("collapsed");
+    show(collapsed);
+    try { localStorage.setItem(key, collapsed ? "1" : "0"); } catch {}
+  });
+  document.getElementById("details-strip").addEventListener("click", () => toggle.click());
 })();
 </script>
 <script type="module">

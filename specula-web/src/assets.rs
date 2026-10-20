@@ -123,6 +123,9 @@ pub struct Store {
     civs: HashMap<String, CivAssets>,
     /// Template name -> how its corpse or rubble sinks.
     sinking: HashMap<String, Sinking>,
+    /// Identity's Icon, relative to art/textures/ui/session/portraits/ ->
+    /// its portrait.
+    portraits: HashMap<String, FileRef>,
     index_failed: bool,
     /// The index's path, `assets/index-<hash>.bin`, once loaded.
     index_name: Option<String>,
@@ -325,6 +328,13 @@ impl Store {
     pub fn sinking(&self, template: &str) -> Option<Sinking> {
         let name = template.rsplit('|').next().unwrap_or(template);
         self.sinking.get(name).copied()
+    }
+
+    /// Where an `<img>` finds the portrait of Identity's `icon`; `None`
+    /// before the index or for an icon the bake has none for.
+    pub fn portrait_url(&self, icon: &str) -> Option<String> {
+        let file = self.portraits.get(icon)?;
+        Some(format!("/assets/{}", Kind::Portrait.file_name(file.hash)))
     }
 
     /// The session's ambient loop, `None` before the index or without one.
@@ -697,6 +707,7 @@ async fn load_index(store: Rc<RefCell<Store>>) {
                 store.ambient = index.ambient;
                 store.civs = index.civs.into_iter().collect();
                 store.sinking = index.sinking.into_iter().collect();
+                store.portraits = index.portraits.into_iter().collect();
                 store.index_name = Some(name.clone());
             }
             crate::stored::prune(&name).await;

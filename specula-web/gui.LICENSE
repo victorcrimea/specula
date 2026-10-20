@@ -1,0 +1,21 @@
+gui/ holds the session GUI textures of 0 A.D.
+(binaries/data/mods/public/art/textures/ui/: the panel, border, shader and
+bar textures, resource, rank, group and repair icons, phase emblems, the
+minimap circle and civ backgrounds, the portrait background, and the civ
+emblems, these turned grey), made by Wildfire Games,
+http://www.wildfiregames.com/
+
+They are licensed under Creative Commons Attribution-Share Alike 3.0,
+http://creativecommons.org/licenses/by-sa/3.0/, and so are the converted
+copies in gui/.
+
+It also holds the fonts the engine draws its sans text with
+(binaries/data/mods/mod/fonts/), as they are:
+- LinBiolinum_Rah.ttf and LinBiolinum_RBah.ttf, Linux Biolinum, under the
+  licence in LibBiolinum-LICENSE.txt there (GNU General Public License
+  version 3 or later with the font exception);
+- FreeSans.ttf and FreeSansBold.ttf, GNU FreeFont, under the GNU General
+  Public License version 3 or later with the font exception, as in
+  FreeFont-LICENSE.txt there.
+
+Rebuild them with: cargo run -p specula-tools --release --bin session-gui

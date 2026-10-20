@@ -13,6 +13,7 @@ mod march;
 mod minimap;
 mod opfs;
 mod overlay;
+mod panel;
 mod particles;
 mod pick;
 mod pose;
@@ -52,6 +53,7 @@ use web_sys::HtmlInputElement;
 use web_sys::HtmlOptionElement;
 use web_sys::HtmlSelectElement;
 use web_sys::MessageEvent;
+use web_sys::MouseEvent;
 use web_sys::Response;
 use web_sys::Worker;
 use web_sys::WorkerOptions;
@@ -70,6 +72,8 @@ use crate::diplomacy::Perspective;
 use crate::field::Field;
 use crate::icons::IconAtlas;
 use crate::minimap::Minimap;
+use crate::panel::DetailsPanel;
+use crate::panel::Request;
 use crate::postproc::Upscale;
 use crate::render::Renderer;
 use crate::stream::Ground;
@@ -266,6 +270,11 @@ trait View {
     }
     /// Looks at the ground point `x`, `z` in metres.
     fn move_to(&mut self, _x: f32, _z: f32) {}
+    /// Keeps the camera over entity `id`, as `setCameraFollow`.
+    fn follow(&mut self, _id: u32) {}
+    /// Selects only `ids`, or with `remove` leaves them out of the
+    /// selection: a selection panel group button.
+    fn select_group(&mut self, _ids: &[u32], _remove: bool) {}
     /// The asset bake it draws from, which also holds the sounds.
     fn asset_store(&self) -> Option<Rc<RefCell<Store>>> {
         None
@@ -443,8 +452,13 @@ struct App {
     warmup: Option<Warmup>,
     /// The worker was last told that something is selected.
     detail_wanted: bool,
-    /// The details last logged, until the panel shows them (C24).
-    logged_details: String,
+    /// Only the 3D page has the selection details panel.
+    details: Option<DetailsPanel>,
+    /// What the panel was last filled from changed: a turn, the palette or
+    /// the perspective; the selection and the portrait index are compared.
+    details_dirty: bool,
+    details_selected: Vec<u32>,
+    details_index: bool,
 }
 
 /// The sound toggle and volumes, and what they play.
@@ -576,6 +590,7 @@ impl App {
             self.renderer.set_renames(&self.renames);
             self.renames.clear();
             self.renderer.set_scene(&self.scene, &self.palette);
+            self.details_dirty = true;
             if let Some(minimap) = &mut self.minimap {
                 minimap.set_scene(&self.scene, &self.palette);
             }
@@ -623,23 +638,34 @@ impl App {
             self.detail_wanted = wanted;
             self.command(COMMAND_DETAIL, f64::from(u8::from(wanted)));
         }
-        // Temporary, until the details panel (C24) shows them.
-        let logged = match selected {
-            [id] if self.scene.details.known => {
-                let template = self.scene.dots.get(id).map(|dot| dot.template);
-                format!(
-                    "details of {id}: {:?}",
-                    self.scene.details.resolved(*id, template)
-                )
-            }
-            _ => String::new(),
+        let Some(details) = &mut self.details else {
+            return;
         };
-        if logged != self.logged_details {
-            if !logged.is_empty() {
-                log(&logged);
+        for request in details.take_requests() {
+            match request {
+                Request::Follow(id) => self.renderer.follow(id),
+                Request::Group { ids, remove } => self.renderer.select_group(&ids, remove),
             }
-            self.logged_details = logged;
         }
+        let store = self.renderer.asset_store();
+        let index = store
+            .as_ref()
+            .is_some_and(|store| store.borrow().index_name().is_some());
+        let selected = self.renderer.selected();
+        if !self.details_dirty && index == self.details_index && selected == self.details_selected {
+            return;
+        }
+        self.details_dirty = false;
+        self.details_index = index;
+        self.details_selected = selected.to_vec();
+        let portrait = |icon: &str| store.as_ref()?.borrow().portrait_url(icon);
+        details.update(&panel::View {
+            scene: &self.scene,
+            selected,
+            palette: &self.palette,
+            perspective: self.perspective,
+            portrait: &portrait,
+        });
     }
 
     /// Covers the civs, the terrains and the entities on the map now.
@@ -932,6 +958,13 @@ async fn run(
         }),
         _ => None,
     };
+    let details = match page {
+        Page::Map => None,
+        // An older page has no panel; the match still shows.
+        Page::Observer => DetailsPanel::new(&document)
+            .inspect_err(|error| web_sys::console::error_1(&format!("details: {error}").into()))
+            .ok(),
+    };
     let warmup = match page {
         Page::Map => None,
         Page::Observer => Some(Warmup::new(element(&document, "warmup")?)),
@@ -995,9 +1028,13 @@ async fn run(
         sound,
         warmup,
         detail_wanted: false,
-        logged_details: String::new(),
+        details,
+        details_dirty: true,
+        details_selected: Vec::new(),
+        details_index: false,
     }));
     wire_controls(&app);
+    wire_details(&app);
     if page == Page::Observer {
         let shadows: HtmlSelectElement = element(&document, "shadows")?;
         wire_shadows(&app, shadows.clone());
@@ -1162,6 +1199,50 @@ fn element<T: JsCast>(document: &Document, id: &str) -> Result<T, String> {
         .get_element_by_id(id)
         .and_then(|element| element.dyn_into().ok())
         .ok_or_else(|| format!("no element #{id} of the right kind"))
+}
+
+/// The details panel's portrait follows its entity; a group button
+/// selects its group, or with Ctrl (session.deselectgroup) or the right
+/// button removes it.
+fn wire_details(app: &Rc<RefCell<App>>) {
+    let (portrait, buttons) = {
+        let app = app.borrow();
+        let Some(details) = &app.details else {
+            return;
+        };
+        (
+            details.portrait_button().clone(),
+            details.group_buttons().cloned().collect::<Vec<_>>(),
+        )
+    };
+    let target = Rc::clone(app);
+    let on_click = Closure::<dyn FnMut()>::new(move || {
+        if let Some(details) = &target.borrow().details {
+            details.portrait_clicked();
+        }
+    });
+    portrait.set_onclick(Some(on_click.as_ref().unchecked_ref()));
+    // The panel lives as long as the page, so its handlers do too.
+    on_click.forget();
+    for (index, button) in buttons.into_iter().enumerate() {
+        let target = Rc::clone(app);
+        let on_click = Closure::<dyn FnMut(MouseEvent)>::new(move |event: MouseEvent| {
+            if let Some(details) = &target.borrow().details {
+                details.group_clicked(index, event.ctrl_key());
+            }
+        });
+        button.set_onclick(Some(on_click.as_ref().unchecked_ref()));
+        on_click.forget();
+        let target = Rc::clone(app);
+        let on_menu = Closure::<dyn FnMut(MouseEvent)>::new(move |event: MouseEvent| {
+            event.prevent_default();
+            if let Some(details) = &target.borrow().details {
+                details.group_clicked(index, true);
+            }
+        });
+        button.set_oncontextmenu(Some(on_menu.as_ref().unchecked_ref()));
+        on_menu.forget();
+    }
 }
 
 fn wire_controls(app: &Rc<RefCell<App>>) {

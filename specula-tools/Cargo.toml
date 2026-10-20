@@ -21,6 +21,10 @@ name = "selection-atlas"
 path = "src/selection_atlas.rs"
 
 [[bin]]
+name = "session-gui"
+path = "src/session_gui.rs"
+
+[[bin]]
 name = "bake-unit"
 path = "src/bake_unit/main.rs"
 

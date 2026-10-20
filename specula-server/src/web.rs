@@ -14,7 +14,9 @@
 //! can store in a viewer's browser, worked out once per bake. The pages
 //! name `icons.bin?v=ICONS` and `selection.bin?v=SELECTION`, which become
 //! a hash of each atlas, so a cache in front of the server cannot keep an
-//! atlas a rebuilt client does not read.
+//! atlas a rebuilt client does not read. `/` names
+//! `gui/session.css?v=SESSION` the same way; the textures and fonts it
+//! names are named by their content.
 
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -58,10 +60,14 @@ const ASSETS_SIZE_PLACEHOLDER: &str = "ASSETS_SIZE";
 const PORTRAIT_PREFIX: &str = "portrait-";
 const ICONS: &str = "icons.bin";
 const SELECTION: &str = "selection.bin";
+/// specula-tools' session-gui output, and the stylesheet naming the rest.
+const GUI: &str = "gui";
+const SESSION_CSS: &str = "gui/session.css";
 /// Each versioned atlas under its page placeholder.
-const ATLAS_PLACEHOLDERS: [(&str, &str); 2] = [
+const ATLAS_PLACEHOLDERS: [(&str, &str); 3] = [
     ("icons.bin?v=ICONS", ICONS),
     ("selection.bin?v=SELECTION", SELECTION),
+    ("gui/session.css?v=SESSION", SESSION_CSS),
 ];
 /// Highest quality: a build or a terrain is compressed once and served
 /// many times.
@@ -462,7 +468,7 @@ pub async fn selection_atlas(
     accepts: AcceptsBrotli,
     atlases: &State<AtlasVersions>,
 ) -> Option<Encoded<NamedFile>> {
-    atlas(SELECTION, v, accepts, atlases).await
+    atlas(SELECTION, v, accepts, atlases, ContentType::Binary).await
 }
 
 /// The minimap icons.
@@ -472,7 +478,35 @@ pub async fn icon_atlas(
     accepts: AcceptsBrotli,
     atlases: &State<AtlasVersions>,
 ) -> Option<Encoded<NamedFile>> {
-    atlas(ICONS, v, accepts, atlases).await
+    atlas(ICONS, v, accepts, atlases, ContentType::Binary).await
+}
+
+/// The session panels' stylesheet, kept for good only under its current
+/// version, and the files it names, which are named by their content.
+#[rocket::get("/gui/<name>?<v>")]
+pub async fn gui_file(
+    name: &str,
+    v: Option<&str>,
+    accepts: AcceptsBrotli,
+    atlases: &State<AtlasVersions>,
+) -> Option<Encoded<NamedFile>> {
+    if !plain_name(name) {
+        return None;
+    }
+    if Path::new(GUI).join(name) == Path::new(SESSION_CSS) {
+        return atlas(SESSION_CSS, v, accepts, atlases, ContentType::CSS).await;
+    }
+    let content_type = Path::new(name)
+        .extension()
+        .and_then(|ext| ContentType::from_extension(&ext.to_string_lossy()))
+        .unwrap_or(ContentType::Binary);
+    with_brotli(
+        &Path::new(WEB_ROOT).join(GUI).join(name),
+        accepts,
+        IMMUTABLE,
+        content_type,
+    )
+    .await
 }
 
 /// Atlas `name`, kept for good only under its current version, as a
@@ -482,6 +516,7 @@ async fn atlas(
     v: Option<&str>,
     accepts: AcceptsBrotli,
     atlases: &AtlasVersions,
+    content_type: ContentType,
 ) -> Option<Encoded<NamedFile>> {
     let version = atlases.get(name).await;
     let cache = if !version.is_empty() && v == Some(version.as_str()) {
@@ -493,7 +528,7 @@ async fn atlas(
         &Path::new(WEB_ROOT).join(name),
         accepts,
         cache,
-        ContentType::Binary,
+        content_type,
     )
     .await
 }

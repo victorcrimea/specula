@@ -92,7 +92,8 @@ async fn main() {
                 web::pkg_file,
                 web::asset,
                 web::selection_atlas,
-                web::icon_atlas
+                web::icon_atlas,
+                web::gui_file
             ],
         )
         .mount("/", FileServer::from(WEB_ROOT))
