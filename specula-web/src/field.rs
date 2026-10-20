@@ -372,6 +372,11 @@ struct Camera {
     hover: Option<[f32; 2]>,
     /// The left button's drag past `DRAG_DELTA` while it is held.
     band: Option<Band>,
+    /// A lone finger's press, which ends as a tap, a pan or a bandbox.
+    touch: Option<TouchPress>,
+    /// The last tap's end time, client point and click count, so taps in
+    /// quick succession count as the mouse's double and triple clicks.
+    last_tap: Option<(f64, [f32; 2], u32)>,
     /// The entity the camera keeps over, as `CCameraController`'s
     /// `m_FollowEntity`, until a pan, a move to a point or the entity
     /// leaving the world.
@@ -412,6 +417,42 @@ struct Band {
     client_from: [f32; 2],
     client_to: [f32; 2],
 }
+
+/// A finger's press on the canvas: its pointer id, client point, the
+/// canvas's client offset and the event time then, and what it became.
+struct TouchPress {
+    id: i32,
+    from: [f32; 2],
+    offset: [f32; 2],
+    since: f64,
+    gesture: Gesture,
+}
+
+/// The engine has no touch input, so a finger tells a click from a drag by
+/// how long it is held: a press that stays within `TAP_SLOP` is a tap, one
+/// that leaves it at once pans, and one held `LONG_PRESS_MS` first draws a
+/// bandbox.
+#[derive(Clone, Copy, PartialEq)]
+enum Gesture {
+    Pending,
+    Pan,
+    Band,
+}
+
+/// Wider than `DRAG_DELTA`: a fingertip jitters more than a mouse, and a
+/// tap that slipped would pan instead of select. Android's touch slop is
+/// of this order.
+const TAP_SLOP: f32 = 10.0;
+
+/// Android's long press timeout, the hold users know from other apps.
+const LONG_PRESS_MS: f64 = 500.0;
+
+/// Android's `DOUBLE_TAP_TIMEOUT`.
+const DOUBLE_TAP_MS: f64 = 300.0;
+
+/// How far apart two taps may land and still count as a double tap, in CSS
+/// pixels; a second tap rarely hits the very same spot.
+const DOUBLE_TAP_SLOP: f32 = 30.0;
 
 /// `CCmpSelectable`'s `RGB_DESATURATION`: how far an unselected always
 /// visible overlay's colour moves towards its largest channel.
@@ -1155,6 +1196,8 @@ impl Field {
             picks: Vec::new(),
             hover: None,
             band: None,
+            touch: None,
+            last_tap: None,
             follow: None,
         }));
         wire_camera(&canvas, &camera)?;
@@ -5570,8 +5613,19 @@ impl Camera {
             self.zoom(zoom);
             self.pan(dx, dy);
         } else {
+            let gesture = self
+                .touch
+                .as_ref()
+                .filter(|touch| touch.id == id)
+                .map(|touch| touch.gesture);
+            // Kept where the press began while it may still be a tap, so
+            // the pan that follows catches up and the ground stays under
+            // the finger.
+            if gesture == Some(Gesture::Pending) {
+                return;
+            }
             let (dx, dy) = (x - pointer.x, y - pointer.y);
-            if !pointer.mouse || buttons & BUTTONS_MIDDLE != 0 {
+            if gesture != Some(Gesture::Band) && (!pointer.mouse || buttons & BUTTONS_MIDDLE != 0) {
                 self.pan(dx, dy);
             }
         }
@@ -5939,13 +5993,27 @@ fn wire_camera(canvas: &HtmlCanvasElement, camera: &Rc<RefCell<Camera>>) -> Resu
                 x: event.client_x() as f32,
                 y: event.client_y() as f32,
             });
+            let at = [event.client_x() as f32, event.client_y() as f32];
+            let offset = [
+                at[0] - event.offset_x() as f32,
+                at[1] - event.offset_y() as f32,
+            ];
             if mouse && event.button() == 0 {
-                let at = [event.client_x() as f32, event.client_y() as f32];
-                let offset = [
-                    at[0] - event.offset_x() as f32,
-                    at[1] - event.offset_y() as f32,
-                ];
                 camera.press = Some((id, at, offset));
+            } else if !mouse {
+                // A second finger makes a pinch of the first one's press.
+                let fingers = camera.pointers.iter().filter(|pointer| !pointer.mouse);
+                let previous = camera.touch.take();
+                camera.touch = (fingers.count() == 1).then(|| TouchPress {
+                    id,
+                    from: at,
+                    offset,
+                    since: event.time_stamp(),
+                    gesture: Gesture::Pending,
+                });
+                if previous.is_some_and(|touch| touch.gesture == Gesture::Band) {
+                    camera.band = None;
+                }
             }
         }),
     );
@@ -5959,10 +6027,49 @@ fn wire_camera(canvas: &HtmlCanvasElement, camera: &Rc<RefCell<Camera>>) -> Resu
         "pointerup",
         Closure::new(move |event: MouseEvent| {
             let camera = &mut *target.borrow_mut();
+            let to = [event.client_x() as f32, event.client_y() as f32];
+            if camera
+                .touch
+                .as_ref()
+                .is_some_and(|touch| touch.id == pointer_id(&event))
+                && let Some(touch) = camera.touch.take()
+            {
+                match touch.gesture {
+                    Gesture::Pending => {
+                        let now = event.time_stamp();
+                        let count = match camera.last_tap {
+                            Some((when, at, count))
+                                if now - when < DOUBLE_TAP_MS
+                                    && (to[0] - at[0]).hypot(to[1] - at[1]) < DOUBLE_TAP_SLOP =>
+                            {
+                                (count + 1).min(3)
+                            }
+                            _ => 1,
+                        };
+                        camera.last_tap = Some((now, to, count));
+                        camera.picks.push(PickInput::Click {
+                            at: on_canvas(&up_canvas, touch.from, touch.offset),
+                            count,
+                            add: false,
+                            remove: false,
+                        });
+                    }
+                    Gesture::Band => {
+                        camera.band = None;
+                        camera.picks.push(PickInput::Rect {
+                            from: on_canvas(&up_canvas, touch.from, touch.offset),
+                            to: on_canvas(&up_canvas, to, touch.offset),
+                            add: false,
+                            remove: false,
+                        });
+                    }
+                    Gesture::Pan => {}
+                }
+                return;
+            }
             let Some((id, from, offset)) = camera.press else {
                 return;
             };
-            let to = [event.client_x() as f32, event.client_y() as f32];
             if id != pointer_id(&event) || !dragged(from, to) {
                 return;
             }
@@ -6058,6 +6165,29 @@ fn wire_camera(canvas: &HtmlCanvasElement, camera: &Rc<RefCell<Camera>>) -> Resu
             let camera = &mut *target.borrow_mut();
             let id = pointer_id(&event);
             let at = [event.client_x() as f32, event.client_y() as f32];
+            // Decided before the move is applied, so the move that leaves
+            // the slop already pans or draws.
+            if let Some(touch) = camera.touch.as_mut()
+                && touch.id == id
+            {
+                if touch.gesture == Gesture::Pending
+                    && (at[0] - touch.from[0]).hypot(at[1] - touch.from[1]) >= TAP_SLOP
+                {
+                    touch.gesture = if event.time_stamp() - touch.since >= LONG_PRESS_MS {
+                        Gesture::Band
+                    } else {
+                        Gesture::Pan
+                    };
+                }
+                if touch.gesture == Gesture::Band {
+                    camera.band = Some(Band {
+                        from: on_canvas(&move_canvas, touch.from, touch.offset),
+                        to: on_canvas(&move_canvas, at, touch.offset),
+                        client_from: touch.from,
+                        client_to: at,
+                    });
+                }
+            }
             camera.pointer_moved(id, event.buttons(), at[0], at[1]);
             if let Some((pressed, from, offset)) = camera.press
                 && pressed == id
@@ -6103,11 +6233,17 @@ fn wire_camera(canvas: &HtmlCanvasElement, camera: &Rc<RefCell<Camera>>) -> Resu
             &window,
             name,
             Closure::new(move |event: MouseEvent| {
+                let camera = &mut *target.borrow_mut();
                 let id = pointer_id(&event);
-                target
-                    .borrow_mut()
-                    .pointers
-                    .retain(|pointer| pointer.id != id);
+                camera.pointers.retain(|pointer| pointer.id != id);
+                // A cancelled press (the browser took the gesture) picks
+                // nothing; one that ended was handled on pointerup.
+                if camera.touch.as_ref().is_some_and(|touch| touch.id == id)
+                    && let Some(touch) = camera.touch.take()
+                    && touch.gesture == Gesture::Band
+                {
+                    camera.band = None;
+                }
             }),
         );
     }
