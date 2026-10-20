@@ -75,6 +75,7 @@ async fn main() {
         .manage(hub)
         .manage(web::Pkg::default())
         .manage(web::AssetsSize::default())
+        .manage(web::AtlasVersions::default())
         .mount(
             "/",
             rocket::routes![
@@ -85,7 +86,8 @@ async fn main() {
                 web::page,
                 web::pkg_file,
                 web::asset,
-                web::selection_atlas
+                web::selection_atlas,
+                web::icon_atlas
             ],
         )
         .mount("/", FileServer::from(WEB_ROOT))

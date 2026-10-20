@@ -781,12 +781,13 @@ fn set_panic_hook() {
 }
 
 /// Entry point of map.html; the stream worker's is `worker::worker_main`.
-/// `glue_url` and `wasm_url` as for `observer_main`.
+/// `glue_url`, `wasm_url` and `icons_url` as for `observer_main`.
 #[wasm_bindgen]
-pub fn page_main(glue_url: String, wasm_url: String) {
+pub fn page_main(glue_url: String, wasm_url: String, icons_url: Option<String>) {
     set_panic_hook();
+    let icons_url = icons_url.unwrap_or_else(|| "/icons.bin".to_string());
     wasm_bindgen_futures::spawn_local(async move {
-        if let Err(error) = run(Page::Map, glue_url, wasm_url).await {
+        if let Err(error) = run(Page::Map, glue_url, wasm_url, icons_url, None).await {
             web_sys::console::error_1(&error.into());
         }
     });
@@ -796,11 +797,28 @@ pub fn page_main(glue_url: String, wasm_url: String) {
 /// page's, drawn in 3D. `glue_url` and `wasm_url` are the URLs the page loaded
 /// this module from; the stream worker loads the same ones, so a cached
 /// older worker can never pair an old glue with this wasm.
+/// `selection_url` and `icons_url` name the selection and minimap icon
+/// atlases by their versions; a page from before them passes none.
 #[wasm_bindgen]
-pub fn observer_main(glue_url: String, wasm_url: String) {
+pub fn observer_main(
+    glue_url: String,
+    wasm_url: String,
+    selection_url: Option<String>,
+    icons_url: Option<String>,
+) {
     set_panic_hook();
+    let selection_url = selection_url.unwrap_or_else(|| "/selection.bin".to_string());
+    let icons_url = icons_url.unwrap_or_else(|| "/icons.bin".to_string());
     wasm_bindgen_futures::spawn_local(async move {
-        if let Err(error) = run(Page::Observer, glue_url, wasm_url).await {
+        if let Err(error) = run(
+            Page::Observer,
+            glue_url,
+            wasm_url,
+            icons_url,
+            Some(selection_url),
+        )
+        .await
+        {
             web_sys::console::error_1(&error.into());
         }
     });
@@ -817,7 +835,15 @@ pub fn unit_main() {
     });
 }
 
-async fn run(page: Page, glue_url: String, wasm_url: String) -> Result<(), String> {
+/// `icons_url` is the minimap icon atlas, `selection_url` the selection
+/// atlas to draw selections with, if any.
+async fn run(
+    page: Page,
+    glue_url: String,
+    wasm_url: String,
+    icons_url: String,
+    selection_url: Option<String>,
+) -> Result<(), String> {
     let window = web_sys::window().ok_or("no window")?;
     let canvas: HtmlCanvasElement = window
         .document()
@@ -1075,9 +1101,9 @@ async fn run(page: Page, glue_url: String, wasm_url: String) -> Result<(), Strin
         }
     };
     connect(&app);
-    wasm_bindgen_futures::spawn_local(load_icons(Rc::clone(&app)));
-    if matches!(page, Page::Observer) {
-        wasm_bindgen_futures::spawn_local(load_selection_atlas(Rc::clone(&app)));
+    wasm_bindgen_futures::spawn_local(load_icons(Rc::clone(&app), icons_url));
+    if let Some(url) = selection_url {
+        wasm_bindgen_futures::spawn_local(load_selection_atlas(Rc::clone(&app), url));
     }
     animate(app, bench);
     Ok(())
@@ -2062,8 +2088,8 @@ fn receive_terrain(app_rc: &Rc<RefCell<App>>, id: u64, resource: &[u8]) {
     }
 }
 
-async fn load_icons(app: Rc<RefCell<App>>) {
-    let atlas = fetch_bytes("/icons.bin")
+async fn load_icons(app: Rc<RefCell<App>>, url: String) {
+    let atlas = fetch_bytes(&url)
         .await
         .and_then(|bytes| icons::decode(&bytes).map_err(String::from));
     match atlas {
@@ -2080,8 +2106,8 @@ async fn load_icons(app: Rc<RefCell<App>>) {
     }
 }
 
-async fn load_selection_atlas(app: Rc<RefCell<App>>) {
-    match fetch_bytes("/selection.bin").await {
+async fn load_selection_atlas(app: Rc<RefCell<App>>, url: String) {
+    match fetch_bytes(&url).await {
         Ok(bytes) => app.borrow_mut().renderer.set_selection_atlas(&bytes),
         // Not fatal: the selection works, only unseen.
         Err(error) => web_sys::console::error_1(&format!("selection.bin: {error}").into()),

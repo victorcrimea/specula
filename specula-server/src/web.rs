@@ -11,7 +11,10 @@
 //! changes. A server that does not fill them in still serves working pages.
 //!
 //! `/` also names `ASSETS_SIZE`, which becomes how much the current bake
-//! can store in a viewer's browser, worked out once per bake.
+//! can store in a viewer's browser, worked out once per bake. The pages
+//! name `icons.bin?v=ICONS` and `selection.bin?v=SELECTION`, which become
+//! a hash of each atlas, so a cache in front of the server cannot keep an
+//! atlas a rebuilt client does not read.
 
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -51,6 +54,13 @@ const WASM: &str = "specula_web_bg.wasm";
 const GLUE_PLACEHOLDER: &str = "specula_web.js?v=GLUE";
 const WASM_PLACEHOLDER: &str = "specula_web_bg.wasm?v=WASM";
 const ASSETS_SIZE_PLACEHOLDER: &str = "ASSETS_SIZE";
+const ICONS: &str = "icons.bin";
+const SELECTION: &str = "selection.bin";
+/// Each versioned atlas under its page placeholder.
+const ATLAS_PLACEHOLDERS: [(&str, &str); 2] = [
+    ("icons.bin?v=ICONS", ICONS),
+    ("selection.bin?v=SELECTION", SELECTION),
+];
 /// Highest quality: a build or a terrain is compressed once and served
 /// many times.
 const BROTLI_QUALITY: u32 = 11;
@@ -238,6 +248,49 @@ impl AssetsSize {
     }
 }
 
+/// The hash an atlas's `?v=` names, of the file and its brotli copy as
+/// both are served, by file name, reread when either changes on disk.
+#[derive(Default)]
+pub struct AtlasVersions {
+    last: Mutex<HashMap<&'static str, (Vec<Stamp>, String)>>,
+}
+
+/// A file's modification time and length, `None` when it is missing.
+type Stamp = Option<(SystemTime, u64)>;
+
+impl AtlasVersions {
+    /// Empty when the atlas is missing, as `Pkg::version`.
+    async fn get(&self, name: &'static str) -> String {
+        let path = Path::new(WEB_ROOT).join(name);
+        let files = [brotli_path(&path), path];
+        let mut stamps = Vec::new();
+        for file in &files {
+            let metadata = rocket::tokio::fs::metadata(file).await.ok();
+            stamps.push(
+                metadata.and_then(|metadata| Some((metadata.modified().ok()?, metadata.len()))),
+            );
+        }
+        if stamps[1].is_none() {
+            return String::new();
+        }
+        if let Some((last, hash)) = self.last.lock().unwrap().get(name)
+            && *last == stamps
+        {
+            return hash.clone();
+        }
+        let mut hasher = DefaultHasher::new();
+        for file in &files {
+            rocket::tokio::fs::read(file).await.ok().hash(&mut hasher);
+        }
+        let hash = format!("{:016x}", hasher.finish());
+        self.last
+            .lock()
+            .unwrap()
+            .insert(name, (stamps, hash.clone()));
+        hash
+    }
+}
+
 /// `index` is `assets/index-<hash>.bin`; its `files-<hash>.bin` lists the
 /// hash of every file of the bake, so files of older bakes left in the
 /// directory are not counted.
@@ -280,8 +333,12 @@ fn format_size(bytes: u64) -> String {
 }
 
 #[rocket::get("/")]
-pub async fn index(pkg: &State<Pkg>, assets: &State<AssetsSize>) -> Option<RawHtml<String>> {
-    page(Page("index.html"), pkg, assets).await
+pub async fn index(
+    pkg: &State<Pkg>,
+    assets: &State<AssetsSize>,
+    atlases: &State<AtlasVersions>,
+) -> Option<RawHtml<String>> {
+    page(Page("index.html"), pkg, assets, atlases).await
 }
 
 #[rocket::get("/<page>")]
@@ -289,6 +346,7 @@ pub async fn page(
     page: Page,
     pkg: &State<Pkg>,
     assets: &State<AssetsSize>,
+    atlases: &State<AtlasVersions>,
 ) -> Option<RawHtml<String>> {
     let path = Path::new(WEB_ROOT).join(page.0);
     let html = rocket::tokio::fs::read_to_string(path).await.ok()?;
@@ -305,6 +363,12 @@ pub async fn page(
             .await
             .map_or_else(|| "a few GB".to_string(), format_size);
         html = html.replace(ASSETS_SIZE_PLACEHOLDER, &size);
+    }
+    for (placeholder, name) in ATLAS_PLACEHOLDERS {
+        if html.contains(placeholder) {
+            let version = atlases.get(name).await;
+            html = html.replace(placeholder, &format!("{name}?v={version}"));
+        }
     }
     Some(RawHtml(html))
 }
@@ -382,15 +446,41 @@ pub async fn asset(name: &str, accepts: AcceptsBrotli) -> Option<Encoded<NamedFi
 }
 
 /// The selection overlay textures, with the brotli copy selection-atlas
-/// writes next to them, 60 times smaller. The name stays across rebuilds.
-#[rocket::get("/selection.bin")]
-pub async fn selection_atlas(accepts: AcceptsBrotli) -> Option<Encoded<NamedFile>> {
-    with_brotli(
-        &Path::new(WEB_ROOT).join("selection.bin"),
-        accepts,
-        REVALIDATE,
-    )
-    .await
+/// writes next to them, 60 times smaller.
+#[rocket::get("/selection.bin?<v>")]
+pub async fn selection_atlas(
+    v: Option<&str>,
+    accepts: AcceptsBrotli,
+    atlases: &State<AtlasVersions>,
+) -> Option<Encoded<NamedFile>> {
+    atlas(SELECTION, v, accepts, atlases).await
+}
+
+/// The minimap icons.
+#[rocket::get("/icons.bin?<v>")]
+pub async fn icon_atlas(
+    v: Option<&str>,
+    accepts: AcceptsBrotli,
+    atlases: &State<AtlasVersions>,
+) -> Option<Encoded<NamedFile>> {
+    atlas(ICONS, v, accepts, atlases).await
+}
+
+/// Atlas `name`, kept for good only under its current version, as a
+/// `pkg/` file.
+async fn atlas(
+    name: &'static str,
+    v: Option<&str>,
+    accepts: AcceptsBrotli,
+    atlases: &AtlasVersions,
+) -> Option<Encoded<NamedFile>> {
+    let version = atlases.get(name).await;
+    let cache = if !version.is_empty() && v == Some(version.as_str()) {
+        IMMUTABLE
+    } else {
+        REVALIDATE
+    };
+    with_brotli(&Path::new(WEB_ROOT).join(name), accepts, cache).await
 }
 
 /// `path`, or its brotli copy when the request takes one and it is there.

@@ -445,9 +445,11 @@ settings.</p>
 <script type="module">
 const glue = "./pkg/specula_web.js?v=GLUE";
 const wasm = "./pkg/specula_web_bg.wasm?v=WASM";
+const selection = "./selection.bin?v=SELECTION";
+const icons = "./icons.bin?v=ICONS";
 const { default: init, observer_main } = await import(glue);
 await init({ module_or_path: wasm });
-observer_main(glue, wasm);
+observer_main(glue, wasm, selection, icons);
 </script>
 </body>
 </html>

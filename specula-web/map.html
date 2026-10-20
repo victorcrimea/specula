@@ -58,9 +58,10 @@ html, body { margin: 0; height: 100%; background: #0f1214; }
 <script type="module">
 const glue = "./pkg/specula_web.js?v=GLUE";
 const wasm = "./pkg/specula_web_bg.wasm?v=WASM";
+const icons = "./icons.bin?v=ICONS";
 const { default: init, page_main } = await import(glue);
 await init({ module_or_path: wasm });
-page_main(glue, wasm);
+page_main(glue, wasm, icons);
 </script>
 </body>
 </html>
