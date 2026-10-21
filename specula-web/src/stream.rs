@@ -9,8 +9,11 @@ use brotli_decompressor::BrotliResult;
 use brotli_decompressor::BrotliState;
 use brotli_decompressor::StandardAlloc;
 
+use specula_assets::bytes::ByteReader;
+use specula_assets::wire::TERRAIN_VERSION;
+use specula_assets::wire::WIRE_VERSION;
+
 use crate::detail::Details;
-use crate::terrain;
 
 pub const ENVELOPE_JOIN: u8 = 1;
 pub const ENVELOPE_FRAME: u8 = 2;
@@ -19,7 +22,6 @@ pub const ENVELOPE_ENDED: u8 = 4;
 const MESSAGE_KEYFRAME: u8 = 1;
 const MESSAGE_DELTA: u8 = 2;
 const MESSAGE_ENDED: u8 = 3;
-const WIRE_VERSION: u8 = 16;
 const CHANGED_POSITION: u64 = 1;
 const CHANGED_COLOR: u64 = 2;
 const CHANGED_ICON: u64 = 4;
@@ -162,8 +164,8 @@ impl Ground {
 
     /// From a `/terrain/<id>` resource, read up to its heights.
     pub fn from_resource(id: u64, resource: &[u8]) -> Result<Self, &'static str> {
-        let mut cursor = Cursor(resource);
-        if cursor.u8()? != terrain::VERSION {
+        let mut cursor = ByteReader(resource);
+        if cursor.u8()? != TERRAIN_VERSION {
             return Err("unknown terrain version");
         }
         let tiles = cursor.u32()?;
@@ -500,7 +502,7 @@ impl Scene {
     /// current turn, 0..=1.
     pub fn apply(&mut self, message: &[u8], progress: f32) -> Result<(), &'static str> {
         let (&kind, body) = message.split_first().ok_or("empty message")?;
-        let mut cursor = Cursor(body);
+        let mut cursor = ByteReader(body);
         self.sounds.clear();
         self.renames.clear();
         match kind {
@@ -514,7 +516,7 @@ impl Scene {
         Ok(())
     }
 
-    fn apply_keyframe(&mut self, cursor: &mut Cursor) -> Result<(), &'static str> {
+    fn apply_keyframe(&mut self, cursor: &mut ByteReader) -> Result<(), &'static str> {
         self.turn = cursor.varint_u32()?;
         if cursor.u8()? != WIRE_VERSION {
             return Err("unknown wire version, reload the page");
@@ -579,7 +581,7 @@ impl Scene {
         Ok(())
     }
 
-    fn apply_delta(&mut self, cursor: &mut Cursor, progress: f32) -> Result<(), &'static str> {
+    fn apply_delta(&mut self, cursor: &mut ByteReader, progress: f32) -> Result<(), &'static str> {
         if self.map_size == 0 {
             return Err("delta before the first keyframe");
         }
@@ -717,7 +719,7 @@ impl Scene {
     }
 
     /// Templates, strings, variant, variable and range sets, appended to what the scene has.
-    fn read_tables(&mut self, cursor: &mut Cursor) -> Result<(), &'static str> {
+    fn read_tables(&mut self, cursor: &mut ByteReader) -> Result<(), &'static str> {
         let count = cursor.varint_u32()?;
         for _ in 0..count {
             self.templates.push(cursor.text()?);
@@ -767,7 +769,7 @@ impl Scene {
         Ok(())
     }
 
-    fn read_icons(&mut self, cursor: &mut Cursor) -> Result<(), &'static str> {
+    fn read_icons(&mut self, cursor: &mut ByteReader) -> Result<(), &'static str> {
         let count = cursor.varint_u32()?;
         for _ in 0..count {
             let length = cursor.varint()? as usize;
@@ -780,7 +782,7 @@ impl Scene {
         Ok(())
     }
 
-    fn read_players(&mut self, cursor: &mut Cursor) -> Result<(), &'static str> {
+    fn read_players(&mut self, cursor: &mut ByteReader) -> Result<(), &'static str> {
         let count = cursor.varint()? as usize;
         self.players.clear();
         for _ in 0..count {
@@ -825,7 +827,7 @@ impl Scene {
         Ok(())
     }
 
-    fn read_territory(&mut self, cursor: &mut Cursor) -> Result<(), &'static str> {
+    fn read_territory(&mut self, cursor: &mut ByteReader) -> Result<(), &'static str> {
         let width = cursor.varint_u32()?;
         let height = cursor.varint_u32()?;
         let count = width as usize * height as usize;
@@ -1202,13 +1204,13 @@ pub fn turn_towards(from: f32, to: u8) -> f32 {
 /// The turn a keyframe or delta is for, without decoding the rest.
 pub fn message_turn(message: &[u8]) -> Result<u32, &'static str> {
     let (_, body) = message.split_first().ok_or("empty message")?;
-    Cursor(body).varint_u32()
+    ByteReader(body).varint_u32()
 }
 
 /// The terrain a keyframe names, 0 for none, without decoding the rest.
 pub fn keyframe_terrain(message: &[u8]) -> Result<u64, &'static str> {
     let (_, body) = message.split_first().ok_or("empty message")?;
-    let mut cursor = Cursor(body);
+    let mut cursor = ByteReader(body);
     // Turn, wire version, match id, game speed, first turn, turns per
     // segment, map size.
     cursor.varint()?;
@@ -1232,7 +1234,7 @@ pub fn is_ended(message: &[u8]) -> bool {
 /// An ended message's match id and ms since the match ended.
 pub fn read_ended(message: &[u8]) -> Result<(u64, u64), &'static str> {
     let (_, body) = message.split_first().ok_or("empty message")?;
-    let mut cursor = Cursor(body);
+    let mut cursor = ByteReader(body);
     let match_id = cursor.u64()?;
     let since_ms = cursor.varint()?;
     if !cursor.0.is_empty() {
@@ -1264,7 +1266,7 @@ pub fn read_join(body: &[u8]) -> Result<(FrameDecoder, Vec<Vec<u8>>), &'static s
 
 /// varint n, n bytes of a compressed keyframe, then (part of) a frame.
 fn read_keyframe_and_frame(bytes: &[u8]) -> Result<(FrameDecoder, Vec<Vec<u8>>), &'static str> {
-    let mut cursor = Cursor(bytes);
+    let mut cursor = ByteReader(bytes);
     let length = cursor.varint()? as usize;
     let keyframe = decompress(cursor.take(length)?)?;
     if !is_keyframe(&keyframe) {
@@ -1294,7 +1296,7 @@ impl FrameDecoder {
     pub fn feed(&mut self, chunk: &[u8]) -> Result<Vec<Vec<u8>>, &'static str> {
         let mut bytes = Vec::new();
         inflate(&mut self.state, chunk, &mut bytes)?;
-        let mut cursor = Cursor(&bytes);
+        let mut cursor = ByteReader(&bytes);
         let mut messages = Vec::new();
         while !cursor.0.is_empty() {
             let length = cursor.varint()? as usize;
@@ -1398,72 +1400,31 @@ impl Writer {
     }
 }
 
-pub(crate) struct Cursor<'a>(pub(crate) &'a [u8]);
+/// What only the visual stream records are read with.
+trait Records {
+    fn template_details(&mut self) -> Result<TemplateDetails, &'static str>;
+    fn seed(&mut self, id: u32) -> Result<u32, &'static str>;
+    fn dot(
+        &mut self,
+        id: u32,
+        turn: u32,
+        details: &[Option<TemplateDetails>],
+    ) -> Result<(Dot, Vec<u8>), &'static str>;
+    fn capture(&mut self) -> Result<Vec<u8>, &'static str>;
+    fn economy(&mut self) -> Result<Economy, &'static str>;
+    fn change(&mut self, id: u32, dot: &Dot) -> Result<Change, &'static str>;
+    fn shot(&mut self, turn: u32) -> Result<Shot, &'static str>;
+    fn launch<'b>(
+        &mut self,
+        turn: u32,
+        known: impl Fn(u32) -> Option<&'b Dot>,
+    ) -> Result<Shot, &'static str>;
+    fn shot_origin(&mut self, shooter: u32, turn: u32) -> Result<Shot, &'static str>;
+    fn shot_flight(&mut self, shot: &mut Shot) -> Result<(), &'static str>;
+    fn point(&mut self) -> Result<[i32; 3], &'static str>;
+}
 
-impl<'a> Cursor<'a> {
-    pub(crate) fn take(&mut self, length: usize) -> Result<&'a [u8], &'static str> {
-        if self.0.len() < length {
-            return Err("message truncated");
-        }
-        let (bytes, rest) = self.0.split_at(length);
-        self.0 = rest;
-        Ok(bytes)
-    }
-
-    pub(crate) fn u8(&mut self) -> Result<u8, &'static str> {
-        let (&value, rest) = self.0.split_first().ok_or("message truncated")?;
-        self.0 = rest;
-        Ok(value)
-    }
-
-    pub(crate) fn u32(&mut self) -> Result<u32, &'static str> {
-        let (bytes, rest) = self.0.split_first_chunk::<4>().ok_or("message truncated")?;
-        self.0 = rest;
-        Ok(u32::from_le_bytes(*bytes))
-    }
-
-    pub(crate) fn u64(&mut self) -> Result<u64, &'static str> {
-        let (bytes, rest) = self.0.split_first_chunk::<8>().ok_or("message truncated")?;
-        self.0 = rest;
-        Ok(u64::from_le_bytes(*bytes))
-    }
-
-    pub(crate) fn varint(&mut self) -> Result<u64, &'static str> {
-        let mut value = 0u64;
-        for shift in (0..64).step_by(7) {
-            let byte = self.u8()?;
-            value |= u64::from(byte & 0x7F) << shift;
-            if byte & 0x80 == 0 {
-                return Ok(value);
-            }
-        }
-        Err("varint too long")
-    }
-
-    pub(crate) fn varint_u32(&mut self) -> Result<u32, &'static str> {
-        u32::try_from(self.varint()?).map_err(|_| "varint out of range")
-    }
-
-    pub(crate) fn zigzag_i64(&mut self) -> Result<i64, &'static str> {
-        let raw = self.varint()?;
-        Ok((raw >> 1) as i64 ^ -((raw & 1) as i64))
-    }
-
-    pub(crate) fn zigzag(&mut self) -> Result<i32, &'static str> {
-        i32::try_from(self.zigzag_i64()?).map_err(|_| "zigzag out of range")
-    }
-
-    pub(crate) fn f32(&mut self) -> Result<f32, &'static str> {
-        self.u32().map(f32::from_bits)
-    }
-
-    /// varint length, UTF-8.
-    pub(crate) fn text(&mut self) -> Result<String, &'static str> {
-        let length = self.varint()? as usize;
-        let text = std::str::from_utf8(self.take(length)?).map_err(|_| "string not UTF-8")?;
-        Ok(text.to_string())
-    }
-
+impl Records for ByteReader<'_> {
     fn template_details(&mut self) -> Result<TemplateDetails, &'static str> {
         Ok(TemplateDetails {
             flags: self.varint_u32()?,

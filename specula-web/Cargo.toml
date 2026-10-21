@@ -50,7 +50,6 @@ features = [
     "Location",
     "MessageEvent",
     "MouseEvent",
-    "Navigator",
     "Performance",
     "Request",
     "Response",

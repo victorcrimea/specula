@@ -16,7 +16,7 @@ use specula_tools::psa::Animation;
 
 use crate::actor::Part;
 use crate::texture;
-use crate::texture::Image;
+use specula_tools::image::Image;
 
 /// `REQUIRE_ALPHA_GEQUAL` of the opaque pass in
 /// shaders/effects/model_transparent.xml. The engine also draws a blended

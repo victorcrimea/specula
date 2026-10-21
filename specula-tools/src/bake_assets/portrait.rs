@@ -17,7 +17,7 @@ const TECHNOLOGIES: &str = "simulation/data/technologies";
 /// Larger sources are scaled down to this, smaller ones kept: one file per
 /// portrait, sharp enough for the panel on a high density screen.
 const SIDE: u32 = 128;
-/// About 2.6 KB a portrait (CONTROL-IMPL.md 5.3), against 20 KB lossless.
+/// About 2.6 KB a portrait at this quality, against 20 KB lossless.
 const QUALITY: f32 = 85.0;
 /// Holds only the sheets for the GUI's own sprites, no PNG portraits.
 const SHEETS: &str = "sheets";

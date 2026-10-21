@@ -174,7 +174,13 @@ impl Kit {
         let mips = Mips::new(device);
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("impostor"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("impostor.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(
+                concat!(
+                    include_str!("impostor.wgsl"),
+                    include_str!("shared/turn.wgsl"),
+                )
+                .into(),
+            ),
         });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("impostor"),

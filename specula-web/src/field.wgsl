@@ -53,125 +53,13 @@ override TRIPLANAR: bool = true;
 @group(2) @binding(0) var alpha_maps: texture_2d<f32>;
 @group(2) @binding(1) var alpha_sampler: sampler;
 
-struct Light {
-    sun_color: vec4<f32>,
-    ambient: vec4<f32>,
-    // World to the shadow map: texels in xy, depth in z (shadow.rs).
-    shadow_matrix: mat4x4<f32>,
-    // The camera, then the shadow cutoff distance in metres.
-    eye: vec4<f32>,
-    // The camera's forward, then one over the shadow map's size.
-    forward: vec4<f32>,
-    // Depth bias for models, for the ground, 1 when shadows are on, then
-    // the number of cascades.
-    shadow: vec4<f32>,
-    // CLightEnv::m_FogColor.
-    fog_color: vec4<f32>,
-    // The engine's fogParams: factor, then max, which is 1 with fog off.
-    fog: vec4<f32>,
-    // Very High's cascades: world to the map's texels in each one's quarter
-    // (shadow.rs), then where each ends, in metres along the view.
-    cascades: array<mat4x4<f32>, 4>,
-    cascade_ends: vec4<f32>,
-}
-
 @group(3) @binding(0) var<uniform> light: Light;
 @group(3) @binding(1) var shadow_map: texture_depth_2d;
 @group(3) @binding(2) var shadow_sampler: sampler_comparison;
 
-// Which side of the water this pass keeps, as the engine's water cameras
-// clip (SceneRenderer's oblique near planes): 0 everything, for the view;
-// 1 what is under the water, for the refraction; 2 what is over it, for
-// the mirrored reflection.
-override WATER_CLIP: u32 = 0u;
-
 fn water_clipped(height: f32) -> bool {
     return (WATER_CLIP == 1u && height > view.water.x + 2.0)
         || (WATER_CLIP == 2u && height < view.water.x - 0.5);
-}
-
-// The camera this pass sees from, for fog and highlights: the view's, or
-// for the reflection its mirror image under the water, so that a
-// reflected fragment is as far and lit from where the engine's
-// reflection camera sees it.
-fn pass_eye() -> vec3<f32> {
-    if WATER_CLIP == 2u {
-        return vec3<f32>(light.eye.x, 2.0 * view.water.x - light.eye.y, light.eye.z);
-    }
-    return light.eye.xyz;
-}
-
-fn pass_forward() -> vec3<f32> {
-    if WATER_CLIP == 2u {
-        return vec3<f32>(light.forward.x, -light.forward.y, light.forward.z);
-    }
-    return light.forward.xyz;
-}
-
-// common/fog.h applyFog. Its depth, gl_FragCoord.z / gl_FragCoord.w, is
-// the GL window depth times clip w under the engine's default planes (2
-// and 4096 m), rebuilt here from the view depth so a map's fog factor
-// reaches as far as in the game.
-fn apply_fog(color: vec3<f32>, world: vec3<f32>) -> vec3<f32> {
-    let w = dot(world - pass_eye(), pass_forward());
-    let z = 4096.0 * (w - 2.0) / (4096.0 - 2.0);
-    let density = light.fog.x;
-    let max_fog = light.fog.y;
-    let factor = exp2(-density * density * z * z * 1.442695) * (1.0 - max_fog) + max_fog;
-    return mix(light.fog_color.rgb, color, clamp(factor, 0.0, 1.0));
-}
-
-// shadows_fragment.h getShadowWithFade: faded out over the last 8 m before
-// the cutoff, or with Very High's cascades from the first that reaches the
-// point, blended into the next over the last eighth of its reach. The
-// Level form: it may follow a discard.
-fn shadow_at(world: vec3<f32>, bias: f32) -> f32 {
-    if light.shadow.z < 0.5 {
-        return 1.0;
-    }
-    let depth = dot(world - light.eye.xyz, light.forward.xyz);
-    if light.shadow.w < 1.5 {
-        let fade = clamp((light.eye.w - depth - 8.0) / 8.0, 0.0, 1.0);
-        if fade <= 0.0 {
-            return 1.0;
-        }
-        return mix(1.0, shadow_in(light.shadow_matrix, world, bias), fade);
-    }
-    var cascade = 0;
-    while cascade < 4 && depth > light.cascade_ends[cascade] {
-        cascade += 1;
-    }
-    if cascade == 4 {
-        return 1.0;
-    }
-    let end = light.cascade_ends[cascade];
-    let shadow = shadow_in(light.cascades[cascade], world, bias);
-    let width = clamp(end / 8.0, 2.0, 32.0);
-    let blend = clamp((end - depth - width) / width, 0.0, 1.0);
-    if cascade == 3 {
-        return mix(1.0, shadow, blend);
-    }
-    if blend >= 1.0 {
-        return shadow;
-    }
-    return mix(shadow_in(light.cascades[cascade + 1], world, bias), shadow, blend);
-}
-
-// shadows_fragment.h getShadowImpl with its PCF: four bilinear comparisons
-// weighted into a tent over 3x3 texels.
-fn shadow_in(matrix: mat4x4<f32>, world: vec3<f32>, bias: f32) -> f32 {
-    let projected = matrix * vec4<f32>(world, 1.0);
-    let reference = projected.z - bias;
-    let offset = fract(projected.xy - 0.5);
-    let size = vec4<f32>(offset + 1.0, 2.0 - offset);
-    let weight = (vec4<f32>(1.0, 1.0, -0.5, -0.5) + (projected.xy - 0.5 * offset).xyxy) * light.forward.w;
-    let taps = vec4<f32>(
-        textureSampleCompareLevel(shadow_map, shadow_sampler, weight.zw, reference),
-        textureSampleCompareLevel(shadow_map, shadow_sampler, weight.xw, reference),
-        textureSampleCompareLevel(shadow_map, shadow_sampler, weight.zy, reference),
-        textureSampleCompareLevel(shadow_map, shadow_sampler, weight.xy, reference),
-    );
-    return dot(size.zxzx * size.wwyy, taps) / 9.0;
 }
 
 @vertex

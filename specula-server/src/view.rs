@@ -267,6 +267,7 @@ use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
 use rocket::tokio::sync::broadcast;
+use specula_assets::wire::WIRE_VERSION;
 
 use crate::detail::DetailEncoder;
 use crate::feed::Details;
@@ -288,8 +289,6 @@ use crate::wire::quantize_position;
 const MESSAGE_KEYFRAME: u8 = 1;
 const MESSAGE_DELTA: u8 = 2;
 const MESSAGE_ENDED: u8 = 3;
-/// In every keyframe; deltas follow one, so they need none.
-const WIRE_VERSION: u8 = 16;
 const CHANGED_POSITION: u64 = 1;
 const CHANGED_COLOR: u64 = 2;
 const CHANGED_ICON: u64 = 4;

@@ -5,13 +5,14 @@
 
 use std::collections::BTreeMap;
 
+use specula_assets::bytes::ByteReader;
+use specula_assets::wire::DETAIL_VERSION;
+
 use crate::TURN_MS;
-use crate::stream::Cursor;
 use crate::stream::Writer;
 
 const MESSAGE_KEYFRAME: u8 = 1;
 const MESSAGE_DELTA: u8 = 2;
-const DETAIL_VERSION: u8 = 7;
 /// Archived matches keep it; it has no buildable lists.
 const DETAIL_VERSION_NO_BUILDABLE: u8 = 6;
 /// Archived matches keep it; it also has no stats.
@@ -257,7 +258,7 @@ pub struct Details {
 impl Details {
     pub fn apply(&mut self, message: &[u8]) -> Result<(), &'static str> {
         let (&kind, body) = message.split_first().ok_or("empty message")?;
-        let mut cursor = Cursor(body);
+        let mut cursor = ByteReader(body);
         match kind {
             MESSAGE_KEYFRAME => self.apply_keyframe(&mut cursor)?,
             MESSAGE_DELTA => self.apply_delta(&mut cursor)?,
@@ -269,7 +270,7 @@ impl Details {
         Ok(())
     }
 
-    fn apply_keyframe(&mut self, cursor: &mut Cursor) -> Result<(), &'static str> {
+    fn apply_keyframe(&mut self, cursor: &mut ByteReader) -> Result<(), &'static str> {
         let turn = cursor.varint_u32()?;
         let version = cursor.u8()?;
         if !matches!(
@@ -308,7 +309,7 @@ impl Details {
         Ok(())
     }
 
-    fn apply_delta(&mut self, cursor: &mut Cursor) -> Result<(), &'static str> {
+    fn apply_delta(&mut self, cursor: &mut ByteReader) -> Result<(), &'static str> {
         if !self.known {
             return Err("detail delta before a keyframe");
         }
@@ -343,7 +344,7 @@ impl Details {
         self.version != DETAIL_VERSION_NO_OWNERS
     }
 
-    fn read_data(&mut self, cursor: &mut Cursor) -> Result<(), &'static str> {
+    fn read_data(&mut self, cursor: &mut ByteReader) -> Result<(), &'static str> {
         if self.version < DETAIL_VERSION_NO_STATS {
             return Ok(());
         }
@@ -371,7 +372,7 @@ impl Details {
         self.version >= DETAIL_VERSION_NO_RALLY
     }
 
-    fn read_lists(&mut self, cursor: &mut Cursor) -> Result<(), &'static str> {
+    fn read_lists(&mut self, cursor: &mut ByteReader) -> Result<(), &'static str> {
         for _ in 0..cursor.varint()? {
             let list = (0..cursor.varint()?)
                 .map(|_| {
@@ -491,7 +492,7 @@ impl Details {
     }
 }
 
-fn next_id(previous: u32, cursor: &mut Cursor) -> Result<u32, &'static str> {
+fn next_id(previous: u32, cursor: &mut ByteReader) -> Result<u32, &'static str> {
     previous
         .checked_add(cursor.varint_u32()?)
         .ok_or("id out of range")
@@ -500,7 +501,7 @@ fn next_id(previous: u32, cursor: &mut Cursor) -> Result<u32, &'static str> {
 /// The mask, then the groups; a keyframe's entities' reckoned groups are
 /// each followed by the turns since they were sent.
 fn read_groups(
-    cursor: &mut Cursor,
+    cursor: &mut ByteReader,
     turn: u32,
     keyframe_entity: bool,
     owners: bool,
@@ -532,7 +533,7 @@ fn read_groups(
 }
 
 fn read_group(
-    cursor: &mut Cursor,
+    cursor: &mut ByteReader,
     slot: usize,
     turn: u32,
     owners: bool,

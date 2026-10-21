@@ -8,3 +8,4 @@ license.workspace = true
 rocket = "0.5.1"
 rocket_ws = "0.1.1"
 brotli = "9"
+specula-assets = { path = "../specula-assets" }

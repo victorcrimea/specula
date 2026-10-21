@@ -744,11 +744,25 @@ impl Field {
             .contains(wgpu::Features::TEXTURE_COMPRESSION_BC);
         let model_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("model"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("model.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(
+                concat!(
+                    include_str!("model.wgsl"),
+                    include_str!("shared/light.wgsl"),
+                    include_str!("shared/pass_fog.wgsl"),
+                )
+                .into(),
+            ),
         });
         let field_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("field"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("field.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(
+                concat!(
+                    include_str!("field.wgsl"),
+                    include_str!("shared/light.wgsl"),
+                    include_str!("shared/pass_fog.wgsl"),
+                )
+                .into(),
+            ),
         });
 
         let view_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -1036,7 +1050,14 @@ impl Field {
         });
         let decal_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("decal"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("decal.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(
+                concat!(
+                    include_str!("decal.wgsl"),
+                    include_str!("shared/light.wgsl"),
+                    include_str!("shared/fog.wgsl"),
+                )
+                .into(),
+            ),
         });
         let decal_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("decal"),
@@ -1824,7 +1845,8 @@ impl Field {
     }
 
     /// `PickSimilarEntities` for a double click, or with `exact` a triple
-    /// one: on screen, of the clicked entity's owner only (CONTROL.md 5),
+    /// one: on screen, of the clicked entity's owner only, as the
+    /// engine does,
     /// of its selection group, or of its template when it has none or
     /// `exact`.
     fn similar(&self, clicked: u32, exact: bool, view_proj: &[[f32; 4]; 4]) -> Vec<u32> {

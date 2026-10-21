@@ -20,6 +20,7 @@
 
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::fs::Metadata;
 use std::hash::DefaultHasher;
 use std::hash::Hash;
 use std::hash::Hasher;
@@ -45,6 +46,8 @@ use rocket::request::Outcome;
 use rocket::response;
 use rocket::response::Responder;
 use rocket::response::content::RawHtml;
+use specula_assets::files::file_list_name;
+use specula_assets::files::hash_of_name;
 
 use crate::WEB_ROOT;
 use crate::view::Hub;
@@ -152,8 +155,7 @@ impl<'r> Responder<'r, 'static> for Shared {
 /// One `pkg/` file as last read, with its hash and, once compressed, its
 /// brotli copy.
 struct Build {
-    modified: SystemTime,
-    len: u64,
+    stamp: (SystemTime, u64),
     raw: Shared,
     hash: String,
     brotli: OnceLock<Shared>,
@@ -170,10 +172,9 @@ impl Pkg {
     async fn get(&self, name: &str) -> Option<Arc<Build>> {
         let path = Path::new(WEB_ROOT).join("pkg").join(name);
         let metadata = rocket::tokio::fs::metadata(&path).await.ok()?;
-        let modified = metadata.modified().ok()?;
+        let stamp = stamp(&metadata)?;
         if let Some(build) = self.builds.lock().unwrap().get(name)
-            && build.modified == modified
-            && build.len == metadata.len()
+            && build.stamp == stamp
         {
             return Some(Arc::clone(build));
         }
@@ -181,10 +182,9 @@ impl Pkg {
         let mut hasher = DefaultHasher::new();
         raw.hash(&mut hasher);
         let build = Arc::new(Build {
-            modified,
-            len: raw.len() as u64,
+            stamp: (stamp.0, raw.len() as u64),
             raw: Shared(Arc::new(raw)),
-            hash: format!("{:016x}", hasher.finish()),
+            hash: hex(hasher),
             brotli: OnceLock::new(),
             compressing: AtomicBool::new(false),
         });
@@ -266,6 +266,16 @@ pub struct AtlasVersions {
 /// A file's modification time and length, `None` when it is missing.
 type Stamp = Option<(SystemTime, u64)>;
 
+/// What a cached read of a file is checked against.
+fn stamp(metadata: &Metadata) -> Option<(SystemTime, u64)> {
+    Some((metadata.modified().ok()?, metadata.len()))
+}
+
+/// The hash as the sixteen hex digits the `?v=` names carry.
+fn hex(hasher: DefaultHasher) -> String {
+    format!("{:016x}", hasher.finish())
+}
+
 impl AtlasVersions {
     /// Empty when the atlas is missing, as `Pkg::version`.
     async fn get(&self, name: &'static str) -> String {
@@ -274,9 +284,7 @@ impl AtlasVersions {
         let mut stamps = Vec::new();
         for file in &files {
             let metadata = rocket::tokio::fs::metadata(file).await.ok();
-            stamps.push(
-                metadata.and_then(|metadata| Some((metadata.modified().ok()?, metadata.len()))),
-            );
+            stamps.push(metadata.as_ref().and_then(stamp));
         }
         if stamps[1].is_none() {
             return String::new();
@@ -290,7 +298,7 @@ impl AtlasVersions {
         for file in &files {
             rocket::tokio::fs::read(file).await.ok().hash(&mut hasher);
         }
-        let hash = format!("{:016x}", hasher.finish());
+        let hash = hex(hasher);
         self.last
             .lock()
             .unwrap()
@@ -303,9 +311,9 @@ impl AtlasVersions {
 /// hash of every file of the bake, so files of older bakes left in the
 /// directory are not counted.
 fn bake_size(index: &str) -> Option<u64> {
-    let hash = asset_hash(index.rsplit('/').next()?)?;
+    let hash = hash_of_name(index.rsplit('/').next()?)?;
     let dir = Path::new(WEB_ROOT).join("assets");
-    let list = std::fs::read(dir.join(format!("files-{hash:016x}.bin"))).ok()?;
+    let list = std::fs::read(dir.join(file_list_name(hash))).ok()?;
     let keep: HashSet<u64> = list
         .chunks_exact(8)
         .map(|chunk| u64::from_le_bytes(chunk.try_into().unwrap()))
@@ -315,20 +323,14 @@ fn bake_size(index: &str) -> Option<u64> {
         let Ok(entry) = entry else {
             continue;
         };
-        if asset_hash(&entry.file_name().to_string_lossy()).is_some_and(|hash| keep.contains(&hash))
+        if hash_of_name(&entry.file_name().to_string_lossy())
+            .is_some_and(|hash| keep.contains(&hash))
             && let Ok(metadata) = entry.metadata()
         {
             size += metadata.len();
         }
     }
     Some(size)
-}
-
-/// The hash in `<kind>-<hash>.bin`; brotli copies are left out, since the
-/// browser keeps the decoded bytes.
-fn asset_hash(name: &str) -> Option<u64> {
-    let (_, hash) = name.strip_suffix(".bin")?.rsplit_once('-')?;
-    u64::from_str_radix(hash, 16).ok()
 }
 
 /// Rounded up, so the page never promises less than is stored.

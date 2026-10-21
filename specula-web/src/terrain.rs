@@ -2,9 +2,10 @@
 //! `specula-server/src/terrain.rs`), and the minimap-style picture made
 //! from it.
 
-pub const VERSION: u8 = 4;
-/// Engine heights are u16 in these units (HEIGHT_UNITS_PER_METRE).
-const HEIGHT_UNITS_PER_METRE: f32 = 92.0;
+use specula_assets::bytes::ByteReader;
+use specula_assets::wire::HEIGHT_UNITS_PER_METRE;
+use specula_assets::wire::TERRAIN_VERSION;
+
 const NO_TEXTURE: u16 = 0xFFFF;
 /// The minimap's fallback for a tile without a texture.
 const UNKNOWN_COLOR: u32 = 0xFF_FF_FF;
@@ -204,8 +205,8 @@ impl TerrainImage {
 /// Follows CMiniMapTexture::RebuildTerrainTexture, so the background looks
 /// like the in-game minimap.
 pub fn build(resource: &[u8]) -> Result<TerrainImage, &'static str> {
-    let mut cursor = Cursor(resource);
-    if cursor.u8()? != VERSION {
+    let mut cursor = ByteReader(resource);
+    if cursor.u8()? != TERRAIN_VERSION {
         return Err("unknown terrain version");
     }
     let tiles = cursor.u32()? as usize;
@@ -274,9 +275,9 @@ pub fn build(resource: &[u8]) -> Result<TerrainImage, &'static str> {
         waviness,
         murkiness,
         wind_angle,
-        kind: cursor.string()?,
+        kind: cursor.string16()?,
     };
-    let sky = cursor.string()?;
+    let sky = cursor.string16()?;
     let palette_size = cursor.u32()? as usize;
     let mut palette = Vec::with_capacity(palette_size);
     let mut names = Vec::with_capacity(palette_size);
@@ -360,36 +361,4 @@ pub fn build(resource: &[u8]) -> Result<TerrainImage, &'static str> {
             .map(|quad| u32::from_le_bytes(quad.try_into().unwrap()))
             .collect(),
     })
-}
-
-struct Cursor<'a>(&'a [u8]);
-
-impl<'a> Cursor<'a> {
-    fn take(&mut self, length: usize) -> Result<&'a [u8], &'static str> {
-        if self.0.len() < length {
-            return Err("terrain resource truncated");
-        }
-        let (bytes, rest) = self.0.split_at(length);
-        self.0 = rest;
-        Ok(bytes)
-    }
-
-    fn u8(&mut self) -> Result<u8, &'static str> {
-        Ok(self.take(1)?[0])
-    }
-
-    fn u16(&mut self) -> Result<u16, &'static str> {
-        Ok(u16::from_le_bytes(self.take(2)?.try_into().unwrap()))
-    }
-
-    fn u32(&mut self) -> Result<u32, &'static str> {
-        Ok(u32::from_le_bytes(self.take(4)?.try_into().unwrap()))
-    }
-
-    /// u16 length and UTF-8.
-    fn string(&mut self) -> Result<String, &'static str> {
-        let length = usize::from(self.u16()?);
-        let bytes = self.take(length)?;
-        String::from_utf8(bytes.to_vec()).map_err(|_| "terrain resource name not UTF-8")
-    }
 }

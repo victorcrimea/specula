@@ -242,7 +242,14 @@ impl Far {
         let mips = Mips::new(device);
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("far"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("far.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(
+                concat!(
+                    include_str!("far.wgsl"),
+                    include_str!("shared/turn.wgsl"),
+                    include_str!("shared/fog.wgsl"),
+                )
+                .into(),
+            ),
         });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("far"),

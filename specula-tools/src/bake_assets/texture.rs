@@ -8,20 +8,17 @@ use specula_assets::bc;
 use specula_assets::files::Texture;
 use specula_assets::files::TextureFormat;
 use specula_assets::files::level_extent;
+use specula_tools::dds;
 
 /// The largest mip of the coarse file: enough for a unit a few dozen
 /// pixels tall and for its impostor cells, and a few KB.
 const COARSE_SIDE: u32 = 64;
-const HEADER_SIZE: usize = 128;
 const DDSD_MIPMAPCOUNT: u32 = 0x2_0000;
 const DDPF_ALPHAPIXELS: u32 = 0x1;
-const DDPF_FOURCC: u32 = 0x4;
 
 pub fn convert(bytes: &[u8]) -> Result<Texture, String> {
-    if bytes.len() < HEADER_SIZE || &bytes[..4] != b"DDS " {
-        return Err("not a DDS file".into());
-    }
-    let u32_at = |offset: usize| u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap());
+    dds::check(bytes)?;
+    let u32_at = |offset: usize| dds::u32_at(bytes, offset);
     let flags = u32_at(8);
     let height = u32_at(12);
     let width = u32_at(16);
@@ -34,24 +31,14 @@ pub fn convert(bytes: &[u8]) -> Result<Texture, String> {
     if width == 0 || height == 0 {
         return Err("empty DDS".into());
     }
-    let format = if pixel_flags & DDPF_FOURCC != 0 {
-        match &bytes[84..88] {
-            b"DXT1" => Some(bc::Format::Bc1),
-            b"DXT3" => Some(bc::Format::Bc2),
-            b"DXT5" => Some(bc::Format::Bc3),
-            other => {
-                return Err(format!(
-                    "DDS format {} is not supported",
-                    String::from_utf8_lossy(other)
-                ));
-            }
-        }
+    let format = if pixel_flags & dds::DDPF_FOURCC != 0 {
+        Some(dds::block_format(bytes)?)
     } else {
         None
     };
 
     // Each level in RGBA8 if uncompressed, else as blocks.
-    let mut data = &bytes[HEADER_SIZE..];
+    let mut data = &bytes[dds::HEADER_SIZE..];
     let mut levels = Vec::new();
     for level in 0..mip_count {
         let (w, h) = level_extent(width, height, level);

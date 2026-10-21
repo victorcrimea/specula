@@ -30,11 +30,6 @@ struct Varyings {
     @location(1) heading: vec2<f32>,
 }
 
-// The heading rotation of unit.wgsl.
-fn turn(v: vec3<f32>, sine: f32, cosine: f32) -> vec3<f32> {
-    return vec3<f32>(v.x * cosine + v.z * sine, v.y, -v.x * sine + v.z * cosine);
-}
-
 @vertex
 fn vs_impostor(
     @builtin(vertex_index) corner: u32,

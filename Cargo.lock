@@ -1930,6 +1930,7 @@ dependencies = [
  "brotli",
  "rocket",
  "rocket_ws",
+ "specula-assets",
 ]
 
 [[package]]

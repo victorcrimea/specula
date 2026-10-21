@@ -37,11 +37,13 @@
 //! art/textures/ui/session/icons/, as `StatusBars.js` builds its paths.
 
 use std::fs;
-use std::io::Cursor;
 use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::ExitCode;
+
+use specula_tools::image::Image;
+use specula_tools::image::decode_png;
 
 const DEFAULT_MOD: &str = "../0ad/binaries/data/mods/public";
 const DEFAULT_OUTPUT: &str = "specula-web/selection.bin";
@@ -75,12 +77,6 @@ const ATLAS_WIDTH: u32 = 1024;
 const ATLAS_HEIGHT_STEP: u32 = 512;
 const BROTLI_QUALITY: u32 = 11;
 const BROTLI_WINDOW_BITS: u32 = 22;
-
-struct Image {
-    width: u32,
-    height: u32,
-    rgba: Vec<u8>,
-}
 
 struct Texture {
     name: String,
@@ -338,39 +334,6 @@ fn read_png(path: &Path) -> Result<Image, String> {
         .map_err(|error| error.to_string())
         .and_then(|bytes| decode_png(&bytes))
         .map_err(|error| format!("{}: {error}", path.display()))
-}
-
-fn decode_png(bytes: &[u8]) -> Result<Image, String> {
-    let mut decoder = png::Decoder::new(Cursor::new(bytes));
-    decoder.set_transformations(png::Transformations::normalize_to_color8());
-    let mut reader = decoder.read_info().map_err(|error| error.to_string())?;
-    let size = reader.output_buffer_size().ok_or("image too large")?;
-    let mut pixels = vec![0; size];
-    let info = reader
-        .next_frame(&mut pixels)
-        .map_err(|error| error.to_string())?;
-    let pixels = &pixels[..info.buffer_size()];
-    let channels = match info.color_type {
-        png::ColorType::Grayscale => 1,
-        png::ColorType::GrayscaleAlpha => 2,
-        png::ColorType::Rgb => 3,
-        png::ColorType::Rgba => 4,
-        png::ColorType::Indexed => return Err("palette left unexpanded".into()),
-    };
-    let rgba = pixels
-        .chunks_exact(channels)
-        .flat_map(|pixel| match channels {
-            1 => [pixel[0], pixel[0], pixel[0], 0xFF],
-            2 => [pixel[0], pixel[0], pixel[0], pixel[1]],
-            3 => [pixel[0], pixel[1], pixel[2], 0xFF],
-            _ => [pixel[0], pixel[1], pixel[2], pixel[3]],
-        })
-        .collect();
-    Ok(Image {
-        width: info.width,
-        height: info.height,
-        rgba,
-    })
 }
 
 /// Each item sits at a multiple of its own width and height, and the sizes

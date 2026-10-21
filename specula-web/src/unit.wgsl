@@ -45,11 +45,6 @@ fn texel(frame: f32, vertex: u32) -> vec2<i32> {
     return vec2<i32>(i32(index % width), i32(index / width));
 }
 
-// A rotation about y by the instance's heading, as sine and cosine.
-fn turn(v: vec3<f32>, sine: f32, cosine: f32) -> vec3<f32> {
-    return vec3<f32>(v.x * cosine + v.z * sine, v.y, -v.x * sine + v.z * cosine);
-}
-
 @vertex
 fn vs_unit(
     @builtin(vertex_index) vertex: u32,

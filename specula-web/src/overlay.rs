@@ -13,6 +13,8 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use std::f32::consts::PI;
 
+use specula_assets::bytes::ByteReader;
+
 use crate::terrain::TILE_SIZE;
 use crate::terrain::TerrainImage;
 use crate::territory;
@@ -640,7 +642,7 @@ struct Line {
 }
 
 fn decode(bytes: &[u8]) -> Result<Atlas, &'static str> {
-    let mut cursor = Cursor(bytes);
+    let mut cursor = ByteReader(bytes);
     if cursor.u8()? != ATLAS_VERSION {
         return Err("unknown selection.bin version");
     }
@@ -648,14 +650,14 @@ fn decode(bytes: &[u8]) -> Result<Atlas, &'static str> {
     let height = cursor.u32()?;
     let mut quads = HashMap::new();
     for _ in 0..cursor.u32()? {
-        let name = cursor.name()?;
-        cursor.name()?;
-        quads.insert(name, cursor.rect(width, height)?);
+        let name = cursor.string16()?;
+        cursor.string16()?;
+        quads.insert(name, rect(&mut cursor, width, height)?);
     }
     let mut sizes = Vec::new();
     for _ in 0..cursor.u32()? {
-        let name = cursor.name()?;
-        cursor.name()?;
+        let name = cursor.string16()?;
+        cursor.string16()?;
         sizes.push((name, cursor.u32()?, cursor.u32()?));
     }
     let texels = width as usize * height as usize;
@@ -676,8 +678,8 @@ fn decode(bytes: &[u8]) -> Result<Atlas, &'static str> {
     let sprite_height = cursor.u32()?;
     let mut sprites = HashMap::new();
     for _ in 0..cursor.u32()? {
-        let name = cursor.name()?;
-        sprites.insert(name, cursor.rect(sprite_width, sprite_height)?);
+        let name = cursor.string16()?;
+        sprites.insert(name, rect(&mut cursor, sprite_width, sprite_height)?);
     }
     let sprite_rgba = cursor
         .take(sprite_width as usize * sprite_height as usize * 4)?
@@ -699,42 +701,9 @@ fn decode(bytes: &[u8]) -> Result<Atlas, &'static str> {
     })
 }
 
-struct Cursor<'a>(&'a [u8]);
-
-impl<'a> Cursor<'a> {
-    fn take(&mut self, length: usize) -> Result<&'a [u8], &'static str> {
-        if self.0.len() < length {
-            return Err("selection.bin is cut short");
-        }
-        let (bytes, rest) = self.0.split_at(length);
-        self.0 = rest;
-        Ok(bytes)
-    }
-
-    fn u8(&mut self) -> Result<u8, &'static str> {
-        Ok(self.take(1)?[0])
-    }
-
-    fn u16(&mut self) -> Result<u16, &'static str> {
-        Ok(u16::from_le_bytes(self.take(2)?.try_into().unwrap()))
-    }
-
-    fn u32(&mut self) -> Result<u32, &'static str> {
-        Ok(u32::from_le_bytes(self.take(4)?.try_into().unwrap()))
-    }
-
-    /// A u16 x, y, width and height in an atlas this size, as u0, v0, u1,
-    /// v1.
-    fn rect(&mut self, width: u32, height: u32) -> Result<[f32; 4], &'static str> {
-        let [x, y, w, h] = [self.u16()?, self.u16()?, self.u16()?, self.u16()?].map(f32::from);
-        let (width, height) = (width as f32, height as f32);
-        Ok([x / width, y / height, (x + w) / width, (y + h) / height])
-    }
-
-    fn name(&mut self) -> Result<String, &'static str> {
-        let length = usize::from(self.u16()?);
-        std::str::from_utf8(self.take(length)?)
-            .map(str::to_string)
-            .map_err(|_| "selection.bin name not UTF-8")
-    }
+/// A u16 x, y, width and height in an atlas this size, as u0, v0, u1, v1.
+fn rect(cursor: &mut ByteReader, width: u32, height: u32) -> Result<[f32; 4], &'static str> {
+    let [x, y, w, h] = [cursor.u16()?, cursor.u16()?, cursor.u16()?, cursor.u16()?].map(f32::from);
+    let (width, height) = (width as f32, height as f32);
+    Ok([x / width, y / height, (x + w) / width, (y + h) / height])
 }

@@ -3,6 +3,8 @@
 //! the BC decoder for devices without BC textures.
 
 pub mod bc;
+pub mod bytes;
 pub mod files;
 pub mod half;
 pub mod math;
+pub mod wire;

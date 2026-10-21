@@ -1,4 +1,4 @@
-//! The detail stream (stream 2, CONTROL.md 8.1): what the selection panels
+//! The detail stream (stream 2): what the selection panels
 //! show beyond the status bars, for every entity, sent only to viewers that
 //! have something selected. Varints and zigzag as in `wire.rs`.
 //!
@@ -90,7 +90,7 @@
 //! foundation or repair has builders, its seconds remaining go down by 0.2
 //! a turn. The server resends a group when the reckoning is more than
 //! `SLACK_MS` off. Resource supplies, carried resources and experience are
-//! sent at most every `SLOW_TURNS` turns (CONTROL.md 8.4).
+//! sent at most every `SLOW_TURNS` turns.
 //!
 //! It is cut into segments and served as the visual stream is (`view.rs`),
 //! at `/match/<match id>/detail/<n>` and over the `/detail` WebSocket.
@@ -98,6 +98,8 @@
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::collections::HashMap;
+
+use specula_assets::wire::DETAIL_VERSION;
 
 use crate::feed::Building;
 use crate::feed::DataKey;
@@ -109,7 +111,6 @@ use crate::wire::Writer;
 
 const MESSAGE_KEYFRAME: u8 = 1;
 const MESSAGE_DELTA: u8 = 2;
-const DETAIL_VERSION: u8 = 7;
 const HEALTH: usize = 0;
 const CAPTURE: usize = 1;
 const SUPPLY: usize = 2;

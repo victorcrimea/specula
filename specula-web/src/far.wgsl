@@ -41,19 +41,6 @@ struct Light {
 
 @group(2) @binding(0) var<uniform> light: Light;
 
-// common/fog.h applyFog. Its depth, gl_FragCoord.z / gl_FragCoord.w, is
-// the GL window depth times clip w under the engine's default planes (2
-// and 4096 m), rebuilt here from the view depth so a map's fog factor
-// reaches as far as in the game.
-fn apply_fog(color: vec3<f32>, world: vec3<f32>) -> vec3<f32> {
-    let w = dot(world - light.eye.xyz, light.forward.xyz);
-    let z = 4096.0 * (w - 2.0) / (4096.0 - 2.0);
-    let density = light.fog.x;
-    let max_fog = light.fog.y;
-    let factor = exp2(-density * density * z * z * 1.442695) * (1.0 - max_fog) + max_fog;
-    return mix(light.fog_color.rgb, color, clamp(factor, 0.0, 1.0));
-}
-
 // shading.h calculateShading, without specular and ambient occlusion, and
 // unshadowed: an impostor is too small on screen for a shadow on it to
 // show.
@@ -82,11 +69,6 @@ struct ImpostorVaryings {
     @location(1) @interpolate(flat) turn: vec2<f32>,
     @location(2) @interpolate(flat) color: vec3<f32>,
     @location(3) world: vec3<f32>,
-}
-
-// The y rotation of the model transform, as impostor.wgsl `turn`.
-fn turn(v: vec3<f32>, sine: f32, cosine: f32) -> vec3<f32> {
-    return vec3<f32>(v.x * cosine + v.z * sine, v.y, -v.x * sine + v.z * cosine);
 }
 
 @vertex

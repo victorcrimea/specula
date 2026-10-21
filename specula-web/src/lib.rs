@@ -1435,6 +1435,28 @@ fn wire_top(app: &Rc<RefCell<App>>) {
     }
 }
 
+/// The controls live as long as the page, so their handlers do too: the
+/// closure is leaked rather than dropped with this call.
+fn on_change(target: &HtmlElement, handler: impl FnMut() + 'static) {
+    let closure = Closure::<dyn FnMut()>::new(handler);
+    target.set_onchange(Some(closure.as_ref().unchecked_ref()));
+    closure.forget();
+}
+
+/// As `on_change`.
+fn on_click(target: &HtmlElement, handler: impl FnMut() + 'static) {
+    let closure = Closure::<dyn FnMut()>::new(handler);
+    target.set_onclick(Some(closure.as_ref().unchecked_ref()));
+    closure.forget();
+}
+
+/// As `on_change`.
+fn on_input(target: &HtmlElement, handler: impl FnMut() + 'static) {
+    let closure = Closure::<dyn FnMut()>::new(handler);
+    target.set_oninput(Some(closure.as_ref().unchecked_ref()));
+    closure.forget();
+}
+
 fn wire_controls(app: &Rc<RefCell<App>>) {
     let (button, select) = {
         let app = app.borrow();
@@ -1442,18 +1464,15 @@ fn wire_controls(app: &Rc<RefCell<App>>) {
     };
 
     let target = Rc::clone(app);
-    let on_click = Closure::<dyn FnMut()>::new(move || {
+    on_click(&button, move || {
         let app = &mut *target.borrow_mut();
         app.diplomacy_colors = !app.diplomacy_colors;
         app.show_controls();
         app.update_palette();
     });
-    button.set_onclick(Some(on_click.as_ref().unchecked_ref()));
-    // The controls live as long as the page, so their handlers do too.
-    on_click.forget();
 
     let target = Rc::clone(app);
-    let on_change = Closure::<dyn FnMut()>::new(move || {
+    on_change(&select, move || {
         let app = &mut *target.borrow_mut();
         app.perspective = match app.perspective_select.value().parse() {
             Ok(0) | Err(_) => Perspective::Observer,
@@ -1461,8 +1480,6 @@ fn wire_controls(app: &Rc<RefCell<App>>) {
         };
         app.update_palette();
     });
-    select.set_onchange(Some(on_change.as_ref().unchecked_ref()));
-    on_change.forget();
 
     app.borrow().show_controls();
 }
@@ -1480,7 +1497,7 @@ fn wire_projectiles(app: &Rc<RefCell<App>>, select: HtmlSelectElement) {
 
     let target = Rc::clone(app);
     let list = select.clone();
-    let on_change = Closure::<dyn FnMut()>::new(move || {
+    on_change(&select, move || {
         let on = list.value() == "1";
         // Best effort: without storage the choice lasts only this visit.
         if let Some(storage) =
@@ -1492,9 +1509,6 @@ fn wire_projectiles(app: &Rc<RefCell<App>>, select: HtmlSelectElement) {
         app.renderer.set_projectiles(on);
         app.dirty = true;
     });
-    select.set_onchange(Some(on_change.as_ref().unchecked_ref()));
-    // The controls live as long as the page, so their handlers do too.
-    on_change.forget();
 }
 
 /// The detailed tooltips list, kept across visits; off unless turned on,
@@ -1514,7 +1528,7 @@ fn wire_detailed_tooltips(app: &Rc<RefCell<App>>, select: HtmlSelectElement) {
 
     let target = Rc::clone(app);
     let list = select.clone();
-    let on_change = Closure::<dyn FnMut()>::new(move || {
+    on_change(&select, move || {
         let on = list.value() == "1";
         // Best effort: without storage the choice lasts only this visit.
         if let Some(storage) =
@@ -1526,9 +1540,6 @@ fn wire_detailed_tooltips(app: &Rc<RefCell<App>>, select: HtmlSelectElement) {
         app.detailed_tooltips = on;
         app.details_dirty = true;
     });
-    select.set_onchange(Some(on_change.as_ref().unchecked_ref()));
-    // The controls live as long as the page, so their handlers do too.
-    on_change.forget();
 }
 
 /// The range overlay lists, kept across visits; on unless turned off, as the
@@ -1557,7 +1568,7 @@ fn wire_ranges(app: &Rc<RefCell<App>>, selects: [HtmlSelectElement; 3]) {
     for (kind, select) in selects.into_iter().enumerate() {
         let target = Rc::clone(app);
         let list = select.clone();
-        let on_change = Closure::<dyn FnMut()>::new(move || {
+        on_change(&select, move || {
             let app = &mut *target.borrow_mut();
             let mut ranges = app.renderer.ranges();
             ranges[kind] = list.value() == "1";
@@ -1567,9 +1578,6 @@ fn wire_ranges(app: &Rc<RefCell<App>>, selects: [HtmlSelectElement; 3]) {
             }
             app.dirty = true;
         });
-        select.set_onchange(Some(on_change.as_ref().unchecked_ref()));
-        // The controls live as long as the page, so their handlers do too.
-        on_change.forget();
     }
 }
 
@@ -1601,7 +1609,7 @@ fn wire_textures(app: &Rc<RefCell<App>>, select: HtmlSelectElement) {
 
     let target = Rc::clone(app);
     let list = select.clone();
-    let on_change = Closure::<dyn FnMut()>::new(move || {
+    on_change(&select, move || {
         let tiers = parse(&list.value()).unwrap_or(max).min(max);
         // Best effort: without storage the choice lasts only this visit.
         if let Some(storage) =
@@ -1613,9 +1621,6 @@ fn wire_textures(app: &Rc<RefCell<App>>, select: HtmlSelectElement) {
         app.renderer.set_texture_tiers(tiers);
         app.dirty = true;
     });
-    select.set_onchange(Some(on_change.as_ref().unchecked_ref()));
-    // The controls live as long as the page, so their handlers do too.
-    on_change.forget();
 }
 
 /// The material maps list, kept across visits; off unless chosen, as
@@ -1630,7 +1635,7 @@ fn wire_maps(app: &Rc<RefCell<App>>, select: HtmlSelectElement) {
 
     let target = Rc::clone(app);
     let list = select.clone();
-    let on_change = Closure::<dyn FnMut()>::new(move || {
+    on_change(&select, move || {
         let on = list.value() == "1";
         // Best effort: without storage the choice lasts only this visit.
         if let Some(storage) =
@@ -1642,9 +1647,6 @@ fn wire_maps(app: &Rc<RefCell<App>>, select: HtmlSelectElement) {
         app.renderer.set_material_maps(on);
         app.dirty = true;
     });
-    select.set_onchange(Some(on_change.as_ref().unchecked_ref()));
-    // The controls live as long as the page, so their handlers do too.
-    on_change.forget();
 }
 
 /// An off/on list, kept across visits under `key`; off unless chosen, as
@@ -1670,7 +1672,7 @@ fn wire_switch(
 
     let target = Rc::clone(app);
     let list = select.clone();
-    let on_change = Closure::<dyn FnMut()>::new(move || {
+    on_change(&select, move || {
         let on = list.value() == "1";
         // Best effort: without storage the choice lasts only this visit.
         if let Some(storage) =
@@ -1685,9 +1687,6 @@ fn wire_switch(
         apply(&mut *app.renderer, on);
         app.dirty = true;
     });
-    select.set_onchange(Some(on_change.as_ref().unchecked_ref()));
-    // The controls live as long as the page, so their handlers do too.
-    on_change.forget();
 }
 
 /// Disables `select` while any of `parents` is off, as the game's options
@@ -1720,7 +1719,7 @@ fn wire_triplanar(app: &Rc<RefCell<App>>, select: HtmlSelectElement) {
 
     let target = Rc::clone(app);
     let list = select.clone();
-    let on_change = Closure::<dyn FnMut()>::new(move || {
+    on_change(&select, move || {
         let on = list.value() == "1";
         // Best effort: without storage the choice lasts only this visit.
         if let Some(storage) =
@@ -1732,9 +1731,6 @@ fn wire_triplanar(app: &Rc<RefCell<App>>, select: HtmlSelectElement) {
         app.renderer.set_triplanar(on);
         app.dirty = true;
     });
-    select.set_onchange(Some(on_change.as_ref().unchecked_ref()));
-    // The controls live as long as the page, so their handlers do too.
-    on_change.forget();
 }
 
 /// The wind list, kept across visits; on unless turned off, as the game
@@ -1749,7 +1745,7 @@ fn wire_wind(app: &Rc<RefCell<App>>, select: HtmlSelectElement) {
 
     let target = Rc::clone(app);
     let list = select.clone();
-    let on_change = Closure::<dyn FnMut()>::new(move || {
+    on_change(&select, move || {
         let on = list.value() == "1";
         // Best effort: without storage the choice lasts only this visit.
         if let Some(storage) =
@@ -1761,9 +1757,6 @@ fn wire_wind(app: &Rc<RefCell<App>>, select: HtmlSelectElement) {
         app.renderer.set_wind(on);
         app.dirty = true;
     });
-    select.set_onchange(Some(on_change.as_ref().unchecked_ref()));
-    // The controls live as long as the page, so their handlers do too.
-    on_change.forget();
 }
 
 /// The shadow list, kept across visits.
@@ -1779,7 +1772,7 @@ fn wire_shadows(app: &Rc<RefCell<App>>, select: HtmlSelectElement) {
 
     let target = Rc::clone(app);
     let list = select.clone();
-    let on_change = Closure::<dyn FnMut()>::new(move || {
+    on_change(&select, move || {
         let size = list
             .value()
             .parse::<u32>()
@@ -1796,9 +1789,6 @@ fn wire_shadows(app: &Rc<RefCell<App>>, select: HtmlSelectElement) {
         app.renderer.set_shadows(size);
         app.dirty = true;
     });
-    select.set_onchange(Some(on_change.as_ref().unchecked_ref()));
-    // The controls live as long as the page, so their handlers do too.
-    on_change.forget();
 }
 
 /// The resolution scale and upscale technique lists, kept across visits;
@@ -1865,7 +1855,7 @@ fn wire_list(
 
     let target = Rc::clone(app);
     let list = select.clone();
-    let on_change = Closure::<dyn FnMut()>::new(move || {
+    on_change(select, move || {
         let value = list.value();
         // Best effort: without storage the choice lasts only this visit.
         if let Some(storage) =
@@ -1877,9 +1867,6 @@ fn wire_list(
         apply(&mut *app.renderer, &value);
         app.dirty = true;
     });
-    select.set_onchange(Some(on_change.as_ref().unchecked_ref()));
-    // The controls live as long as the page, so their handlers do too.
-    on_change.forget();
 }
 
 /// The shadow cutoff slider, kept across visits, applied as it is
@@ -1903,7 +1890,7 @@ fn wire_shadow_cutoff(
 
     let target = Rc::clone(app);
     let input = slider.clone();
-    let on_input = Closure::<dyn FnMut()>::new(move || {
+    on_input(&slider, move || {
         let metres = input
             .value()
             .parse::<f32>()
@@ -1915,13 +1902,10 @@ fn wire_shadow_cutoff(
         app.renderer.set_shadow_cutoff(metres);
         app.dirty = true;
     });
-    slider.set_oninput(Some(on_input.as_ref().unchecked_ref()));
-    // The controls live as long as the page, so their handlers do too.
-    on_input.forget();
 
     // Saved on release only, so a drag does not write storage per step.
     let input = slider.clone();
-    let on_change = Closure::<dyn FnMut()>::new(move || {
+    on_change(&slider, move || {
         // Best effort: without storage the choice lasts only this visit.
         if let Some(storage) =
             web_sys::window().and_then(|window| window.local_storage().ok().flatten())
@@ -1929,8 +1913,6 @@ fn wire_shadow_cutoff(
             let _ = storage.set_item(SHADOW_CUTOFF_SETTINGS_KEY, &input.value());
         }
     });
-    slider.set_onchange(Some(on_change.as_ref().unchecked_ref()));
-    on_change.forget();
 
     let update = {
         let shadows = shadows.clone();
@@ -1964,7 +1946,7 @@ fn wire_sharpness(
 
     let target = Rc::clone(app);
     let input = slider.clone();
-    let on_input = Closure::<dyn FnMut()>::new(move || {
+    on_input(&slider, move || {
         let sharpness = input
             .value()
             .parse::<f32>()
@@ -1976,13 +1958,10 @@ fn wire_sharpness(
         app.renderer.set_sharpness(sharpness);
         app.dirty = true;
     });
-    slider.set_oninput(Some(on_input.as_ref().unchecked_ref()));
-    // The controls live as long as the page, so their handlers do too.
-    on_input.forget();
 
     // Saved on release only, so a drag does not write storage per step.
     let input = slider.clone();
-    let on_change = Closure::<dyn FnMut()>::new(move || {
+    on_change(&slider, move || {
         // Best effort: without storage the choice lasts only this visit.
         if let Some(storage) =
             web_sys::window().and_then(|window| window.local_storage().ok().flatten())
@@ -1990,8 +1969,6 @@ fn wire_sharpness(
             let _ = storage.set_item(SHARPNESS_SETTINGS_KEY, &input.value());
         }
     });
-    slider.set_onchange(Some(on_change.as_ref().unchecked_ref()));
-    on_change.forget();
 
     let update = {
         let parents = parents.clone();
@@ -2016,15 +1993,13 @@ fn wire_warmup(app: &Rc<RefCell<App>>) {
         return;
     };
     let target = Rc::clone(app);
-    let on_click = Closure::<dyn FnMut()>::new(move || {
+    on_click(&button, move || {
         let app = &mut *target.borrow_mut();
         if app.renderer.asset_store().is_some() && app.warmup.is_some() {
             app.start_warmup();
             stored::persist();
         }
     });
-    button.set_onclick(Some(on_click.as_ref().unchecked_ref()));
-    on_click.forget();
 }
 
 /// Explains what the page stores and what Warm up is for, on the first
@@ -2050,12 +2025,10 @@ fn wire_storage_notice(app: &Rc<RefCell<App>>, document: &Document) -> Result<()
     notice.set_hidden(false);
 
     let popup = notice.clone();
-    let on_ok = Closure::<dyn FnMut()>::new(move || popup.set_hidden(true));
-    ok.set_onclick(Some(on_ok.as_ref().unchecked_ref()));
-    on_ok.forget();
+    on_click(&ok, move || popup.set_hidden(true));
 
     let target = Rc::clone(app);
-    let on_warm = Closure::<dyn FnMut()>::new(move || {
+    on_click(&warm, move || {
         notice.set_hidden(true);
         if let Some(warmup) = &mut target.borrow_mut().warmup {
             warmup.request();
@@ -2064,8 +2037,6 @@ fn wire_storage_notice(app: &Rc<RefCell<App>>, document: &Document) -> Result<()
         // and only from a click.
         stored::persist();
     });
-    warm.set_onclick(Some(on_warm.as_ref().unchecked_ref()));
-    on_warm.forget();
     Ok(())
 }
 
@@ -2088,15 +2059,12 @@ fn wire_sound(app: &Rc<RefCell<App>>, window: &web_sys::Window) {
     let (button, sliders) = controls;
 
     let target = Rc::clone(app);
-    let on_click = Closure::<dyn FnMut()>::new(move || {
+    on_click(&button, move || {
         if let Some(sound) = &mut target.borrow_mut().sound {
             let on = !sound.audio.settings().on;
             sound.changed(on);
         }
     });
-    button.set_onclick(Some(on_click.as_ref().unchecked_ref()));
-    // The controls live as long as the page, so their handlers do too.
-    on_click.forget();
 
     let target = Rc::clone(app);
     let on_input = Closure::<dyn FnMut()>::new(move || {
@@ -2240,7 +2208,7 @@ fn wire_playback(app: &Rc<RefCell<App>>) {
     };
 
     let target = Rc::clone(app);
-    let on_play = Closure::<dyn FnMut()>::new(move || {
+    on_click(&play, move || {
         let app = target.borrow();
         let command = if app.paused {
             COMMAND_PLAY
@@ -2249,50 +2217,39 @@ fn wire_playback(app: &Rc<RefCell<App>>) {
         };
         app.command(command, 0.0);
     });
-    play.set_onclick(Some(on_play.as_ref().unchecked_ref()));
-    // The controls live as long as the page, so their handlers do too.
-    on_play.forget();
 
     let target = Rc::clone(app);
-    let on_speed = Closure::<dyn FnMut()>::new(move || {
+    on_change(&speed, move || {
         let app = target.borrow();
         if let Ok(speed) = app.speed_select.value().parse::<f64>() {
             app.command(COMMAND_SPEED, speed);
         }
     });
-    speed.set_onchange(Some(on_speed.as_ref().unchecked_ref()));
-    on_speed.forget();
 
     // While dragging only keyframes are shown; the exact turn is decoded on
     // release (init.md 3).
     let target = Rc::clone(app);
-    let on_drag = Closure::<dyn FnMut()>::new(move || {
+    on_input(&timeline, move || {
         let app = &mut *target.borrow_mut();
         app.dragging = true;
         if let Ok(turn) = app.timeline.value().parse::<f64>() {
             app.command(COMMAND_SCRUB, turn);
         }
     });
-    timeline.set_oninput(Some(on_drag.as_ref().unchecked_ref()));
-    on_drag.forget();
 
     let target = Rc::clone(app);
-    let on_release = Closure::<dyn FnMut()>::new(move || {
+    on_change(&timeline, move || {
         let app = &mut *target.borrow_mut();
         app.dragging = false;
         if let Ok(turn) = app.timeline.value().parse::<f64>() {
             app.command(COMMAND_SEEK, turn);
         }
     });
-    timeline.set_onchange(Some(on_release.as_ref().unchecked_ref()));
-    on_release.forget();
 
     let target = Rc::clone(app);
-    let on_live = Closure::<dyn FnMut()>::new(move || {
+    on_click(&live, move || {
         target.borrow().command(COMMAND_LIVE, 0.0);
     });
-    live.set_onclick(Some(on_live.as_ref().unchecked_ref()));
-    on_live.forget();
 
     let (current, popup_current, close) = {
         let app = app.borrow();
@@ -2311,11 +2268,9 @@ fn wire_playback(app: &Rc<RefCell<App>>) {
     on_current.forget();
 
     let target = Rc::clone(app);
-    let on_close = Closure::<dyn FnMut()>::new(move || {
+    on_click(&close, move || {
         target.borrow_mut().match_over.close();
     });
-    close.set_onclick(Some(on_close.as_ref().unchecked_ref()));
-    on_close.forget();
 }
 
 fn connect(app: &Rc<RefCell<App>>) {

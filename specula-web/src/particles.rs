@@ -444,7 +444,13 @@ impl Pipelines {
     ) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("particles"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("particles.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(
+                concat!(
+                    include_str!("particles.wgsl"),
+                    include_str!("shared/pass_fog.wgsl"),
+                )
+                .into(),
+            ),
         });
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("particles"),

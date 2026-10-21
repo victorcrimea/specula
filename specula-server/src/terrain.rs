@@ -25,10 +25,11 @@ use std::hash::Hasher;
 use std::sync::LazyLock;
 use std::sync::Mutex;
 
+use specula_assets::wire::TERRAIN_VERSION;
+
 use crate::feed::Terrain;
 use crate::wire::Writer;
 
-const VERSION: u8 = 4;
 /// What the minimap shows for a tile without a known texture.
 const UNKNOWN_COLOR: u32 = 0xFF_FF_FF;
 
@@ -71,7 +72,7 @@ pub fn encode(terrain: &Terrain) -> Resource {
         .collect();
 
     let mut out = Writer::default();
-    out.u8(VERSION);
+    out.u8(TERRAIN_VERSION);
     out.u32(terrain.tiles_per_side);
     out.f32(terrain.water_level as f32 / 65536.0);
     out.f32(terrain.shallow_depth);

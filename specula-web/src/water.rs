@@ -17,12 +17,11 @@ use std::rc::Rc;
 
 use specula_assets::files::FileRef;
 use specula_assets::files::Texture;
+use specula_assets::wire::HEIGHT_UNITS_PER_METRE;
 
 use crate::terrain::TILE_SIZE;
 use crate::terrain::TerrainImage;
 
-/// Engine heights are u16 in these units.
-const HEIGHT_UNITS_PER_METRE: f32 = 92.0;
 /// `WaterManager`'s m_NormalMap.
 pub const FRAMES: usize = 60;
 /// `GetCurrentTextureIndex(8.0)`: 60 frames over 8 s of sim time.
@@ -851,7 +850,14 @@ impl Water {
     ) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("water"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("water.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(
+                concat!(
+                    include_str!("water.wgsl"),
+                    include_str!("shared/light.wgsl"),
+                    include_str!("shared/fog.wgsl"),
+                )
+                .into(),
+            ),
         });
         let texture_entry = |binding, view_dimension, filterable| wgpu::BindGroupLayoutEntry {
             binding,

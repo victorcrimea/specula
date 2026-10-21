@@ -38,34 +38,6 @@ struct Light {
 
 @group(2) @binding(0) var<uniform> light: Light;
 
-// model.wgsl `WATER_CLIP`: 0 the view, 2 the mirrored reflection.
-override WATER_CLIP: u32 = 0u;
-
-// model.wgsl `pass_eye` and `pass_forward`.
-fn pass_eye() -> vec3<f32> {
-    if WATER_CLIP == 2u {
-        return vec3<f32>(light.eye.x, 2.0 * view.water.x - light.eye.y, light.eye.z);
-    }
-    return light.eye.xyz;
-}
-
-fn pass_forward() -> vec3<f32> {
-    if WATER_CLIP == 2u {
-        return vec3<f32>(light.forward.x, -light.forward.y, light.forward.z);
-    }
-    return light.forward.xyz;
-}
-
-// common/fog.h applyFog, as model.wgsl's.
-fn apply_fog(color: vec3<f32>, world: vec3<f32>) -> vec3<f32> {
-    let w = dot(world - pass_eye(), pass_forward());
-    let z = 4096.0 * (w - 2.0) / (4096.0 - 2.0);
-    let density = light.fog.x;
-    let max_fog = light.fog.y;
-    let factor = exp2(-density * density * z * z * 1.442695) * (1.0 - max_fog) + max_fog;
-    return mix(light.fog_color.rgb, color, clamp(factor, 0.0, 1.0));
-}
-
 struct ParticleVaryings {
     @builtin(position) position: vec4<f32>,
     @location(0) uv: vec2<f32>,
