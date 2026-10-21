@@ -1,9 +1,10 @@
 //! The selection details panel, a port of gui/session/selection_details.js
 //! (`displaySingle`, `displayMultiple`) and of the selection panel's group
 //! buttons (`g_SelectionPanels.Selection` in selection_panels.js), garrison
-//! buttons (`g_SelectionPanels.Garrison`) and production queue
-//! (`g_SelectionPanels.Queue`), drawn into the page's `#details`. The
-//! engine's tooltips are left out.
+//! buttons (`g_SelectionPanels.Garrison`), production queue
+//! (`g_SelectionPanels.Queue`) and training and research buttons
+//! (`g_SelectionPanels.Training` and `Research`), drawn into the page's
+//! `#details`. The engine's tooltips are left out.
 //!
 //! Each element keeps what was last written to it, so an update that
 //! changes nothing touches no DOM.
@@ -17,6 +18,7 @@ use web_sys::HtmlElement;
 use crate::detail;
 use crate::detail::Group;
 use crate::detail::Groups;
+use crate::detail::ListItem;
 use crate::diplomacy::Perspective;
 use crate::pick;
 use crate::stream::Scene;
@@ -36,6 +38,20 @@ const MAX_GARRISONED: usize = 12;
 const MAX_QUEUED: usize = 16;
 /// `rowLength || 8` in `setupUnitPanel`.
 const QUEUE_ROW: usize = 8;
+/// `g_SelectionPanels.Training.getMaxNumberOfItems` with no other right
+/// panel drawn, in rows of its `rowLength`.
+const MAX_TRAINABLE: usize = 40;
+const TRAINING_ROW: usize = 10;
+/// `g_SelectionPanels.Research.getMaxNumberOfItems`: columns of a pair's
+/// top over its bottom.
+const MAX_RESEARCHABLE: usize = 10;
+/// A research column's bottom button, a row below its top.
+const RESEARCH_BOTTOM: usize = 39;
+/// `resourcesToAlphaMask`: the red's alpha, of 255.
+const NEEDED_ALPHA_BASE: f64 = 50.0;
+const NEEDED_ALPHA_MAX: f64 = 125.0;
+/// Pack and upgrade progress when not running.
+const PROGRESS_NONE: u8 = 255;
 /// The slider's `3 3 35 35` in its button.
 const SLIDER_INSET: f64 = 3.0;
 const SLIDER_SIDE: f64 = 32.0;
@@ -276,6 +292,8 @@ pub struct DetailsPanel {
     garrison: Option<GarrisonPanel>,
     /// `None` on a page from before the queue panel.
     queue: Option<QueuePanel>,
+    /// `None` on a page from before the production panel.
+    commands: Option<CommandsPanel>,
     /// The entity the portrait follows, and the ids of each group button.
     portrait_id: Option<u32>,
     group_ids: Vec<Vec<u32>>,
@@ -294,6 +312,8 @@ struct GarrisonPanel {
 struct QueuePanel {
     root: Out,
     time: Out,
+    /// The first item's progress, drawn only in the folded phone strip.
+    progress: Out,
     cells: Vec<QueueCell>,
     /// What each shown cell is, and the queues of the selection by
     /// producer, for `tick`.
@@ -308,6 +328,63 @@ struct QueueCell {
     slider: Out,
     paused: Out,
     count: Out,
+}
+
+/// `unitCommands`' training and research buttons.
+struct CommandsPanel {
+    root: Out,
+    training: Vec<CommandCell>,
+    research: Vec<ResearchColumn>,
+}
+
+/// One `unitTrainingButton` or `unitResearchButton`.
+struct CommandCell {
+    cell: Out,
+    icon: Out,
+    tint: Out,
+    count: Out,
+}
+
+/// The research buttons of one `unitResearchPair` place.
+struct ResearchColumn {
+    column: Out,
+    top: CommandCell,
+    bottom: CommandCell,
+    pair: Out,
+}
+
+/// `setupButton`'s sprite modifier.
+#[derive(Clone, Copy)]
+enum Modifier {
+    None,
+    /// "color:0 0 0 127:grayscale:".
+    Grey,
+    /// `resourcesToAlphaMask`, the alpha as a fraction.
+    Needed(f64),
+}
+
+/// A selected entity, as the training and research panels read it.
+struct Producer<'a> {
+    owner: i32,
+    upgrading: bool,
+    queued: usize,
+    trainable: &'a [ListItem],
+    researchable: &'a [ListItem],
+}
+
+/// A technology of a research slot.
+#[derive(Clone, Copy)]
+struct Tech<'a> {
+    name: &'a str,
+    item: &'a ListItem,
+}
+
+/// An item of `Researcher.GetTechnologiesList`.
+#[derive(Clone, Copy)]
+enum Slot<'a> {
+    Empty,
+    Single(Tech<'a>),
+    Pair { top: Tech<'a>, bottom: Tech<'a> },
 }
 
 /// An item of `getItems`: its producer, its index in that queue, and
@@ -345,6 +422,9 @@ pub struct View<'a> {
     pub portrait: &'a dyn Fn(&str) -> Option<String>,
     /// A technology's name -> where an `<img>` finds its icon.
     pub technology_portrait: &'a dyn Fn(&str) -> Option<String>,
+    /// An entity template's name -> where an `<img>` finds its icon, for
+    /// a template no entity of which has been seen.
+    pub template_portrait: &'a dyn Fn(&str) -> Option<String>,
 }
 
 impl DetailsPanel {
@@ -365,10 +445,26 @@ impl DetailsPanel {
             }),
             Err(_) => None,
         };
+        let commands = match (
+            crate::element::<HtmlElement>(document, "commands-training"),
+            crate::element::<HtmlElement>(document, "commands-research"),
+        ) {
+            (Ok(training), Ok(research)) => Some(CommandsPanel {
+                root: find("commands")?,
+                training: (0..MAX_TRAINABLE)
+                    .map(|i| CommandCell::new(document, &training, &grid_position(i, TRAINING_ROW)))
+                    .collect::<Result<_, _>>()?,
+                research: (0..MAX_RESEARCHABLE)
+                    .map(|i| ResearchColumn::new(document, &research, i))
+                    .collect::<Result<_, _>>()?,
+            }),
+            _ => None,
+        };
         let queue = match crate::element::<HtmlElement>(document, "queue-cells") {
             Ok(grid) => Some(QueuePanel {
                 root: find("queue")?,
                 time: find("queue-time")?,
+                progress: find("queue-progress")?,
                 cells: (0..MAX_QUEUED)
                     .map(|i| QueueCell::new(document, &grid, i))
                     .collect::<Result<_, _>>()?,
@@ -414,6 +510,7 @@ impl DetailsPanel {
             minimap_background: find("minimap-background")?,
             garrison,
             queue,
+            commands,
             portrait_id: None,
             group_ids: Vec::new(),
             requests: RefCell::new(Vec::new()),
@@ -493,6 +590,9 @@ impl DetailsPanel {
         if let Some(queue) = &mut self.queue {
             queue.show(view, &entities);
             queue.tick(f64::from(view.scene.turn));
+        }
+        if let Some(commands) = &mut self.commands {
+            commands.show(view, &entities);
         }
     }
 
@@ -923,8 +1023,9 @@ impl GarrisonPanel {
             }
         }
         self.health.hidden(health <= 0.0);
+        // A variable, since the folded phone strip lays the bar flat.
         self.health_bar.style(format!(
-            "top: {}%",
+            "--lost: {}%",
             100.0 - 100.0 * fraction(health, max_health)
         ));
     }
@@ -1033,10 +1134,7 @@ impl QueuePanel {
             let icon = if queued.technology {
                 (view.technology_portrait)(name)
             } else {
-                template_index(scene, name)
-                    .and_then(|template| template_details(scene, template))
-                    .and_then(|template| string(scene, template.icon))
-                    .and_then(|icon| (view.portrait)(icon))
+                unit_portrait(view, name)
             };
             cell.icon.src(icon);
             cell.count.text(&if queued.count > 1 {
@@ -1068,6 +1166,8 @@ impl QueuePanel {
     /// The sliders and `queueTimeRemaining` at `turn`.
     fn tick(&mut self, turn: f64) {
         let mut time = String::new();
+        // The undone part, as the sliders show it; nothing when no item runs.
+        let mut undone = 0.0;
         for (i, (item, cell)) in self.shown.iter().zip(&mut self.cells).enumerate() {
             if item.ghost {
                 continue;
@@ -1091,10 +1191,395 @@ impl QueuePanel {
             ));
             if i == 0 {
                 time = minutes_seconds(remaining / 1000.0);
+                undone = 1.0 - progress;
             }
         }
         self.time.text(&time);
+        self.progress
+            .style(format!("width: {:.1}%", undone * 100.0));
     }
+}
+
+impl CommandCell {
+    fn new(document: &Document, parent: &HtmlElement, position: &str) -> Result<Self, String> {
+        let cell: HtmlElement = create(document, "div")?;
+        let _ = cell.set_attribute("class", "item");
+        let _ = cell.set_attribute("style", position);
+        let icon: HtmlElement = create(document, "img")?;
+        let _ = icon.set_attribute("alt", "");
+        let tint: HtmlElement = create(document, "div")?;
+        let _ = tint.set_attribute("class", "tint");
+        let count: HtmlElement = create(document, "div")?;
+        let _ = count.set_attribute("class", "text center sans-bold-stroke-14");
+        for child in [&icon, &tint, &count] {
+            cell.append_child(child)
+                .map_err(|_| "cannot build a production button")?;
+        }
+        parent
+            .append_child(&cell)
+            .map_err(|_| "cannot add a production button")?;
+        let mut cell = CommandCell {
+            cell: Out::new(cell),
+            icon: Out::new(icon),
+            tint: Out::new(tint),
+            count: Out::new(count),
+        };
+        cell.cell.hidden(true);
+        Ok(cell)
+    }
+
+    fn show(&mut self, icon: Option<String>, modifier: Modifier, count: u32) {
+        self.icon.src(icon);
+        self.cell.class(String::from(match modifier {
+            Modifier::Grey => "item grey",
+            _ => "item",
+        }));
+        self.tint.style(match modifier {
+            Modifier::Needed(alpha) => format!("background: rgba(255, 0, 0, {alpha:.3})"),
+            _ => String::new(),
+        });
+        self.count.text(&if count > 1 {
+            count.to_string()
+        } else {
+            String::new()
+        });
+        self.cell.hidden(false);
+    }
+}
+
+impl ResearchColumn {
+    fn new(document: &Document, parent: &HtmlElement, i: usize) -> Result<Self, String> {
+        let column: HtmlElement = create(document, "div")?;
+        let _ = column.set_attribute("class", "column");
+        let _ = column.set_attribute("style", &grid_position(i, MAX_RESEARCHABLE));
+        parent
+            .append_child(&column)
+            .map_err(|_| "cannot add a research column")?;
+        let top = CommandCell::new(document, &column, "left: 0; top: 0")?;
+        let bottom = CommandCell::new(
+            document,
+            &column,
+            &format!("left: 0; top: {RESEARCH_BOTTOM}px"),
+        )?;
+        // Over both buttons, as the pairs come after them in the XML.
+        let pair: HtmlElement = create(document, "div")?;
+        let _ = pair.set_attribute("class", "pair");
+        column
+            .append_child(&pair)
+            .map_err(|_| "cannot add a research pair")?;
+        let mut column = ResearchColumn {
+            column: Out::new(column),
+            top,
+            bottom,
+            pair: Out::new(pair),
+        };
+        column.column.hidden(true);
+        Ok(column)
+    }
+}
+
+impl CommandsPanel {
+    /// `setupUnitPanel` of `Training`, then of `Research`, for an observer.
+    fn show(&mut self, view: &View, entities: &[u32]) {
+        let scene = view.scene;
+        let mut producers = Vec::new();
+        for &id in entities {
+            let Some(dot) = scene.dots.get(&id) else {
+                continue;
+            };
+            let groups = entity_groups(scene, id, dot.template);
+            let list = |slot: usize| match &groups[slot] {
+                Some(Group::List(index)) => scene
+                    .details
+                    .lists
+                    .get(*index as usize)
+                    .map_or(&[][..], Vec::as_slice),
+                _ => &[][..],
+            };
+            producers.push(Producer {
+                owner: dot.owner,
+                upgrading: matches!(
+                    groups[detail::PROGRESS],
+                    Some(Group::Progress { upgrade, .. }) if upgrade != PROGRESS_NONE
+                ),
+                queued: match &groups[detail::QUEUE] {
+                    Some(Group::Queue(queue)) => queue.items.len(),
+                    _ => 0,
+                },
+                trainable: list(detail::TRAINABLE),
+                researchable: list(detail::RESEARCHABLE),
+            });
+        }
+        // `data.player`: the first selected entity's owner.
+        let player = producers.first().map_or(-1, |producer| producer.owner);
+        let all_upgrading = producers.iter().all(|producer| producer.upgrading);
+
+        let trainable = trainable_items(scene, &producers, player);
+        let mut drawn = false;
+        for (i, cell) in self.training.iter_mut().enumerate() {
+            let Some(&(name, item)) = trainable.get(i) else {
+                cell.cell.hidden(true);
+                continue;
+            };
+            if item.flags & ListItem::HIDDEN != 0 {
+                cell.cell.hidden(true);
+                continue;
+            }
+            // `getTrainingStatus` without the batch key: one each in the
+            // producers that can train it, as far as the limit allows.
+            let producing = producers
+                .iter()
+                .filter(|producer| {
+                    !producer.upgrading
+                        && producer
+                            .trainable
+                            .iter()
+                            .any(|other| string(scene, other.name) == Some(name))
+                })
+                .count() as u32;
+            let count = item
+                .can_be_added
+                .map_or(producing, |limit| producing.min(limit));
+            let modifier = if all_upgrading {
+                Modifier::Grey
+            } else if item.flags & ListItem::UNKNOWN != 0 {
+                Modifier::None
+            } else if item.flags & ListItem::REQUIREMENTS_MET == 0 || item.can_be_added == Some(0) {
+                Modifier::Grey
+            } else {
+                // `multiplyEntityCosts`: floored after the multiplication.
+                needed(scene, player, item, |cost| {
+                    (u64::from(cost) * u64::from(count) / 100) as f64
+                })
+            };
+            cell.show(unit_portrait(view, name), modifier, count);
+            drawn = true;
+        }
+
+        let research = research_items(scene, &producers, trainable.len().min(MAX_TRAINABLE));
+        for (i, column) in self.research.iter_mut().enumerate() {
+            let Some(&(slot, producer)) = research.get(i) else {
+                column.column.hidden(true);
+                continue;
+            };
+            let techs: Vec<Tech> = match slot {
+                Slot::Empty => Vec::new(),
+                Slot::Single(tech) => vec![tech],
+                Slot::Pair { top, bottom } => vec![bottom, top],
+            };
+            // A hidden one is left out, and what remains starts from the
+            // bottom; the pair sign needs both.
+            let shown: Vec<Tech> = techs
+                .iter()
+                .copied()
+                .filter(|tech| tech.item.flags & ListItem::HIDDEN == 0)
+                .collect();
+            column.column.hidden(shown.is_empty());
+            drawn |= !shown.is_empty();
+            column
+                .pair
+                .hidden(!matches!(slot, Slot::Pair { .. }) || shown.len() < 2);
+            let upgrading = producers
+                .get(producer)
+                .is_some_and(|producer| producer.upgrading);
+            for (index, cell) in [&mut column.bottom, &mut column.top]
+                .into_iter()
+                .enumerate()
+            {
+                let Some(tech) = shown.get(index) else {
+                    cell.cell.hidden(true);
+                    continue;
+                };
+                let modifier = if upgrading {
+                    Modifier::Grey
+                } else if tech.item.flags & ListItem::UNKNOWN != 0 {
+                    Modifier::None
+                } else if tech.item.flags & ListItem::REQUIREMENTS_MET == 0 {
+                    Modifier::Grey
+                } else {
+                    needed(scene, player, tech.item, |cost| f64::from(cost) / 100.0)
+                };
+                cell.show((view.technology_portrait)(tech.name), modifier, 0);
+            }
+        }
+
+        // Unlike vanilla's always-framed `unitCommands`, an empty frame
+        // (and on phones its fold tab) would only take space here. Lists
+        // of only hidden items or empty slots draw nothing either.
+        self.root.hidden(!drawn);
+    }
+}
+
+/// `getAllTrainableEntities`: every producer's list in selection order,
+/// duplicates dropped, each read as the first selected entity's owner
+/// reads it where a producer of that owner lists it.
+fn trainable_items<'a>(
+    scene: &'a Scene,
+    producers: &[Producer<'a>],
+    player: i32,
+) -> Vec<(&'a str, &'a ListItem)> {
+    let mut items: Vec<(&str, &ListItem, i32)> = Vec::new();
+    for producer in producers {
+        for item in producer.trainable {
+            let Some(name) = string(scene, item.name).filter(|name| !name.is_empty()) else {
+                continue;
+            };
+            match items.iter_mut().find(|(other, _, _)| *other == name) {
+                Some(entry) => {
+                    if entry.2 != player && producer.owner == player {
+                        *entry = (name, item, producer.owner);
+                    }
+                }
+                None => items.push((name, item, producer.owner)),
+            }
+        }
+    }
+    items.truncate(MAX_TRAINABLE);
+    items
+        .into_iter()
+        .map(|(name, item, _)| (name, item))
+        .collect()
+}
+
+/// A list's slots: a pair is its top, flagged, then its bottom; an older
+/// stream sends a pair as one "top bottom" name.
+fn research_slots<'a>(scene: &'a Scene, list: &'a [ListItem]) -> Vec<Slot<'a>> {
+    let mut slots = Vec::new();
+    let mut items = list.iter();
+    while let Some(item) = items.next() {
+        let name = string(scene, item.name).unwrap_or_default();
+        let tech = |name| Tech { name, item };
+        if item.flags & ListItem::PAIR_TOP != 0 {
+            let Some(bottom) = items.next() else {
+                break;
+            };
+            slots.push(Slot::Pair {
+                top: tech(name),
+                bottom: Tech {
+                    name: string(scene, bottom.name).unwrap_or_default(),
+                    item: bottom,
+                },
+            });
+        } else if name.is_empty() {
+            slots.push(Slot::Empty);
+        } else if let Some((top, bottom)) = name
+            .split_once(' ')
+            .filter(|_| item.flags & ListItem::UNKNOWN != 0)
+        {
+            slots.push(Slot::Pair {
+                top: tech(top),
+                bottom: tech(bottom),
+            });
+        } else {
+            slots.push(Slot::Single(tech(name)));
+        }
+    }
+    slots
+}
+
+/// The same technology or pair at the same costs, which are the
+/// producer's `techCostMultiplier` applied.
+fn same_slot(a: &Slot, b: &Slot) -> bool {
+    let same = |a: &Tech, b: &Tech| a.name == b.name && a.item.costs == b.item.costs;
+    match (a, b) {
+        (Slot::Single(a), Slot::Single(b)) => same(a, b),
+        (
+            Slot::Pair {
+                top: a_top,
+                bottom: a_bottom,
+            },
+            Slot::Pair {
+                top: b_top,
+                bottom: b_bottom,
+            },
+        ) => same(a_top, b_top) && same(a_bottom, b_bottom),
+        _ => false,
+    }
+}
+
+/// `g_SelectionPanels.Research.getItems`: each slot and the index of its
+/// producer in `producers`, at most `MAX_RESEARCHABLE`. `training` is the
+/// training buttons shown (`getNumberOfRightPanelButtons`).
+fn research_items<'a>(
+    scene: &'a Scene,
+    producers: &[Producer<'a>],
+    training: usize,
+) -> Vec<(Slot<'a>, usize)> {
+    if let [producer] = producers {
+        let mut items: Vec<(Slot, usize)> = research_slots(scene, producer.researchable)
+            .into_iter()
+            .map(|slot| (slot, 0))
+            .collect();
+        items.truncate(MAX_RESEARCHABLE);
+        return items;
+    }
+    // Not upgrading first, then the shortest queue; a stable sort, as
+    // Array.prototype.sort.
+    let mut order: Vec<usize> = (0..producers.len()).collect();
+    order.sort_by_key(|&index| (producers[index].upgrading, producers[index].queued));
+    let mut items: Vec<(Slot, usize)> = Vec::new();
+    for index in order {
+        let filtered: Vec<Slot> = research_slots(scene, producers[index].researchable)
+            .into_iter()
+            .filter(|slot| !matches!(slot, Slot::Empty))
+            .filter(|slot| !items.iter().any(|(item, _)| same_slot(item, slot)))
+            .collect();
+        let pairs = filtered
+            .iter()
+            .any(|slot| matches!(slot, Slot::Pair { .. }));
+        if filtered.len() + items.len() <= MAX_RESEARCHABLE
+            && training <= MAX_RESEARCHABLE * if pairs { 1 } else { 2 }
+        {
+            items.extend(filtered.into_iter().map(|slot| (slot, index)));
+        }
+    }
+    items
+}
+
+/// `GetNeededResources` of `item`'s costs, each as `amount` gives it from
+/// the cost in 1/100, against `player`'s stockpile, as
+/// `resourcesToAlphaMask`'s tint.
+fn needed(scene: &Scene, player: i32, item: &ListItem, amount: impl Fn(u32) -> f64) -> Modifier {
+    let Some(economy) = usize::try_from(player)
+        .ok()
+        .and_then(|player| scene.economy.get(player))
+    else {
+        return Modifier::None;
+    };
+    let mut total = 0.0;
+    let mut short = false;
+    for &(resource, cost) in &item.costs {
+        // A type the player has no count of is never needed.
+        let Some(stock) = economy
+            .resources
+            .iter()
+            .find(|stock| stock.code == resource)
+        else {
+            continue;
+        };
+        let amount = amount(cost);
+        let stock = f64::from(stock.amount);
+        if amount > stock {
+            total += amount - stock;
+            short = true;
+        }
+    }
+    if short {
+        Modifier::Needed(NEEDED_ALPHA_MAX.min((total / 10.0).round() + NEEDED_ALPHA_BASE) / 255.0)
+    } else {
+        Modifier::None
+    }
+}
+
+/// A unit template's portrait: from the details of a template seen in the
+/// match, else from the bake's table.
+fn unit_portrait(view: &View, name: &str) -> Option<String> {
+    let scene = view.scene;
+    template_index(scene, name)
+        .and_then(|template| template_details(scene, template))
+        .and_then(|template| string(scene, template.icon))
+        .and_then(|icon| (view.portrait)(icon))
+        .or_else(|| (view.template_portrait)(name))
 }
 
 fn queue_of(queues: &[(u32, detail::Queue)], producer: u32) -> Option<&detail::Queue> {

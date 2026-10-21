@@ -128,6 +128,8 @@ pub struct Store {
     portraits: HashMap<String, FileRef>,
     /// Technology name -> its icon, a key of `portraits`.
     technology_icons: HashMap<String, String>,
+    /// Entity template name -> its icon, a key of `portraits`.
+    template_icons: HashMap<String, String>,
     index_failed: bool,
     /// The index's path, `assets/index-<hash>.bin`, once loaded.
     index_name: Option<String>,
@@ -342,6 +344,12 @@ impl Store {
     /// A queued technology's portrait, as `portrait_url`.
     pub fn technology_portrait_url(&self, technology: &str) -> Option<String> {
         self.portrait_url(self.technology_icons.get(technology)?)
+    }
+
+    /// An entity template's portrait, as `portrait_url`, for a template no
+    /// entity of which has been seen.
+    pub fn template_portrait_url(&self, template: &str) -> Option<String> {
+        self.portrait_url(self.template_icons.get(template)?)
     }
 
     /// The session's ambient loop, `None` before the index or without one.
@@ -716,6 +724,7 @@ async fn load_index(store: Rc<RefCell<Store>>) {
                 store.sinking = index.sinking.into_iter().collect();
                 store.portraits = index.portraits.into_iter().collect();
                 store.technology_icons = index.technology_icons.into_iter().collect();
+                store.template_icons = index.template_icons.into_iter().collect();
                 store.index_name = Some(name.clone());
             }
             crate::stored::prune(&name).await;

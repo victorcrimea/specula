@@ -246,6 +246,8 @@ html, body { margin: 0; height: 100%; background: #0f1214; }
 /* unitGarrisonPanel at 20 6, healthGarrison at -14 1 -7 100%-49 of it. */
 #garrison-cells { position: absolute; left: 20px; top: 6px; }
 #garrison-health { left: 6px; top: 7px; width: 7px; height: 110px; }
+/* Over `.bar > *`, whose :is() counts as an id. */
+#details #garrison-health-bar { top: var(--lost, 0%); }
 /* The panels above the details on a phone, one box there. */
 #details-above { display: contents; }
 /* unitQueuePanel at 4 -56 100% 0 of unitCommands, which is 50%+110 of the
@@ -260,6 +262,7 @@ html, body { margin: 0; height: 100%; background: #0f1214; }
   background: var(--gui-production) 0 0 / 100% 100% no-repeat; }
 #queue-time { inset: 0; }
 #queue-cells { position: absolute; left: 48px; top: 6px; }
+#queue-progress { display: none; }
 /* queueProgressSlider over the undone part, from the top down. */
 #details .item > .slider { position: absolute; left: 3px; width: 32px; bottom: 3px;
   background: rgba(0, 255, 0, 0.502); }
@@ -269,10 +272,33 @@ html, body { margin: 0; height: 100%; background: #0f1214; }
 /* "color:0 0 0 127:grayscale:": grayscale under a half black image. */
 #details .item.ghost > img { filter: grayscale(1); }
 #details .item.paused > img { filter: grayscale(1) brightness(0.502); }
+/* unitCommands, 50%+110 of the bottom bar: 224 px right of the details,
+   402x166, the unitCommandsPanel sprite. For an observer it shows with any
+   selection, its buttons disabled. Training at 6 6 in rows of 10, research
+   at 6 100%-82, a pair's top over its bottom. */
+#commands { position: absolute; left: 224px; bottom: 0; width: 402px; height: 166px; }
+#commands-body { position: absolute; inset: 0; }
+/* hud_panels.png's 75 64 469 222 at its own size. */
+#commands-background { position: absolute; left: 4px; top: 4px; right: 4px; bottom: 4px;
+  background: var(--gui-hud-panels) -75px -64px / 512px 256px no-repeat; }
+#commands > .bottom-left { background-image: var(--gui-line-corner-bottom-middle); }
+#commands > .top-left { background-image: var(--gui-line-corner-middle-right); }
+#commands-training, #commands-research { position: absolute; left: 6px; top: 6px; }
+#commands-research { top: 84px; }
+#commands .column { position: absolute; width: 38px; height: 77px; }
+/* unitResearchPair, 38x76, its icon at 8 30 30 46, over both buttons. */
+#commands .pair { position: absolute; left: 0; top: 0; width: 38px; height: 76px; }
+#commands .pair::before { content: ""; position: absolute; left: 8px; top: 30px;
+  width: 22px; height: 16px; background: var(--gui-vertical-pair) 0 0 / 100% 100%; }
+/* "color:0 0 0 127:grayscale:" and resourcesToAlphaMask's red, both a
+   solid colour over the icon. */
+#details .item > .tint { position: absolute; left: 3px; top: 3px; width: 32px; height: 32px; }
+#details .item.grey > img { filter: grayscale(1); }
+#details .item.grey > .tint { background: rgba(0, 0, 0, 0.498); }
 /* Not the engine's: on a phone both panels are scaled down to leave the
    view free, the details sit right of the minimap so neither moves when
    the selection changes, and the details fold to a strip. */
-#details-toggle, #minimap-toggle, #menu-open { display: none; }
+#details-toggle, #minimap-toggle, #folds, #menu-open { display: none; }
 #settings #fps-setting { display: none; }
 #details-strip { display: none; }
 @media (max-width: 700px) {
@@ -316,6 +342,17 @@ html, body { margin: 0; height: 100%; background: #0f1214; }
     grid-template-columns: repeat(4, 38px); gap: 1px; padding: 6px 13px 7px 20px; }
   #garrison-cells > .cell { position: relative; left: 0 !important; top: 0 !important; }
   #garrison-health { height: auto; bottom: 7px; }
+  /* As wide as the details, in rows of 5; folded by default (see the
+     fold tabs below), as nothing on it can be pressed. Nothing to show
+     leaves no empty frame. */
+  #commands { position: relative; left: 0; bottom: auto; width: 228px; height: auto; }
+  #commands-body { position: relative; inset: auto; padding: 4px 0 6px; }
+  #commands-background { background: var(--gui-panel-shader) 0 0 / 100% 100%; }
+  #commands-training, #commands-research { position: relative; left: 0; top: 0; display: grid;
+    grid-template-columns: repeat(5, 38px); gap: 1px; justify-content: center; }
+  #commands-research:has(> .column:not([hidden])) { margin-top: 4px; }
+  #commands-training > .item, #commands-research > .column { position: relative;
+    left: 0 !important; top: 0 !important; }
   #details.collapsed #details-above { display: none; }
   #details-toggle, #minimap-toggle { display: block; position: absolute; left: 50%; top: -14px;
     width: 40px; height: 14px; translate: -50% 0; padding: 0; border: 1px solid #3a4248;
@@ -327,6 +364,70 @@ html, body { margin: 0; height: 100%; background: #0f1214; }
     border-right: 2px solid #e6e9eb; border-bottom: 2px solid #e6e9eb; }
   #minimap-toggle::before { top: 4px; width: 8px; height: 8px; }
   #details.collapsed #details-toggle::before { top: 6px; rotate: 225deg; }
+  /* A folded panel's tab names it, since a bare chevron does not say
+     what comes back. The panels are scaled (0.8, the minimap 0.72), so
+     the sizes here are before that. */
+  #details.collapsed #details-toggle, #minimap-panel.collapsed #minimap-toggle,
+  .fold { display: flex; align-items: center; justify-content: center; gap: 6px;
+    color: #e6e9eb; white-space: nowrap; font: 13px "0ad sans", "0ad sans fallback", sans-serif; }
+  #details.collapsed #details-toggle, #minimap-panel.collapsed #minimap-toggle {
+    width: auto; padding: 0 10px; }
+  #details.collapsed #details-toggle { top: -18px; height: 18px; }
+  #minimap-panel.collapsed #minimap-toggle { font-size: 15px; }
+  /* Back in the row, the chevron's point sitting over the text's middle. */
+  #details.collapsed #details-toggle::before, #minimap-panel.collapsed #minimap-toggle::before {
+    position: static; translate: none; flex: none; margin-top: 4px; }
+  #details.collapsed #details-toggle::after { content: "Details"; }
+  #minimap-panel.collapsed #minimap-toggle::after { content: "Minimap"; }
+  /* The queue, the garrison and the production panel fold one by one
+     (and all with the details), on named tabs in one row above them.
+     Each tab keeps its third of the width whichever are shown, so a
+     thumb finds it in the same place. */
+  #folds { display: block; position: relative; width: 228px; height: 24px; }
+  #details-above:not(:has(> .gui-frame:not([hidden]))) > #folds { display: none; }
+  .fold { position: absolute; top: 0; width: 76px; height: 24px; padding: 0;
+    border: 1px solid #3a4248; border-bottom: none; border-radius: 4px 4px 0 0;
+    background: rgba(15, 18, 20, 0.9); }
+  #commands-toggle { left: 0; }
+  #garrison-toggle { left: 76px; }
+  #queue-toggle { left: 152px; }
+  #details-above:has(> #queue[hidden]) #queue-toggle,
+  #details-above:has(> #garrison[hidden]) #garrison-toggle,
+  #details-above:has(> #commands[hidden]) #commands-toggle { display: none; }
+  .fold::before { content: ""; flex: none; width: 6px; height: 6px; margin-top: -3px;
+    rotate: 45deg; border-right: 2px solid #e6e9eb; border-bottom: 2px solid #e6e9eb; }
+  .fold.collapsed::before { margin-top: 4px; rotate: 225deg; }
+  #queue-toggle::after { content: "Queue"; }
+  #garrison-toggle::after { content: "Garrison"; }
+  #commands-toggle::after { content: "Production"; }
+  #commands.collapsed { display: none; }
+  /* Folded, the queue and the garrison keep their icons at half size in
+     a strip of 12, barely readable but enough to tell what is in there,
+     with smaller counts; the frame and the per-item sliders go. */
+  /* As wide as the details, which the open garrison (206 px, as the
+     engine's) is not, so the 12 columns fit. */
+  #queue.collapsed, #garrison.collapsed { width: 228px; height: auto;
+    background: rgba(15, 18, 20, 0.9); }
+  #queue.collapsed > :not(#queue-cells, #queue-progress), #garrison.collapsed > :not(#garrison-cells, #garrison-health) {
+    display: none; }
+  #queue.collapsed #queue-cells, #garrison.collapsed #garrison-cells {
+    grid-template-columns: repeat(12, 18px); gap: 1px; padding: 2px 0; justify-content: center; }
+  #queue.collapsed .item, #garrison.collapsed .cell { width: 18px; height: 18px; }
+  #queue.collapsed .item > img, #garrison.collapsed .cell > img { left: 1px; top: 1px;
+    width: 16px; height: 16px; }
+  #queue.collapsed .item > .paused { left: 1px; top: 1px; width: 16px; height: 16px; }
+  #queue.collapsed .item > .slider { display: none; }
+  #queue.collapsed .item > .text, #garrison.collapsed .cell > .text { justify-content: flex-end; align-items: flex-end;
+    font-size: 10px; -webkit-text-stroke-width: 1.5px; }
+  /* The first item's undone part, a line along the strip's top that
+     shrinks as the item's slider does. */
+  #queue.collapsed > #queue-progress { display: block; position: absolute; left: 0; top: 0;
+    height: 1px; background: rgb(0, 255, 0); }
+  /* The garrison's total health the same way, its bar laid flat. */
+  #garrison.collapsed > #garrison-health { left: 0; top: 0; right: 0; bottom: auto;
+    width: auto; height: 1px; }
+  #garrison.collapsed #garrison-health > :is(.border, .shine) { display: none; }
+  #garrison.collapsed #garrison-health-bar { top: 0; right: var(--lost, 0%); }
   /* A single selection without the line under the bars: the portrait
      shrinks to the bars' height and the names move up, 31 px shorter. */
   #details:has(#details-multiple[hidden]):has(#details-carrying-text[hidden]) {
@@ -552,10 +653,16 @@ body:not([data-debug="storage"]) #stats-storage { display: none; }
 <span class="edge corner top-right"></span><span class="edge corner bottom-right"></span><span class="edge corner bottom-left"></span><span class="edge corner top-left"></span>
 </div>
 <div id="details-above">
+<div id="folds">
+<button id="commands-toggle" class="fold" type="button" aria-expanded="true" aria-controls="commands" aria-label="Fold the production panel"></button>
+<button id="garrison-toggle" class="fold" type="button" aria-expanded="true" aria-controls="garrison" aria-label="Fold the garrison"></button>
+<button id="queue-toggle" class="fold" type="button" aria-expanded="true" aria-controls="queue" aria-label="Fold the queue"></button>
+</div>
 <div id="queue" class="gui-frame" hidden>
 <div id="queue-background"></div>
 <div id="queue-production"><div id="queue-time" class="text center sans-stroke-14"></div></div>
 <div id="queue-cells"></div>
+<div id="queue-progress"></div>
 <span class="edge top"></span><span class="edge right"></span><span class="edge bottom"></span><span class="edge left"></span>
 <span class="edge corner top-right"></span><span class="edge corner bottom-right"></span><span class="edge corner bottom-left"></span><span class="edge corner top-left"></span>
 </div>
@@ -563,6 +670,15 @@ body:not([data-debug="storage"]) #stats-storage { display: none; }
 <div id="garrison-background"></div>
 <div id="garrison-cells"></div>
 <div id="garrison-health" class="box bar"><div class="border"></div><div class="health-bg"></div><div id="garrison-health-bar" class="health-fg"></div><div class="shine vertical"></div></div>
+<span class="edge top"></span><span class="edge right"></span><span class="edge bottom"></span><span class="edge left"></span>
+<span class="edge corner top-right"></span><span class="edge corner bottom-right"></span><span class="edge corner bottom-left"></span><span class="edge corner top-left"></span>
+</div>
+<div id="commands" class="gui-frame" hidden>
+<div id="commands-body">
+<div id="commands-background"></div>
+<div id="commands-training"></div>
+<div id="commands-research"></div>
+</div>
 <span class="edge top"></span><span class="edge right"></span><span class="edge bottom"></span><span class="edge left"></span>
 <span class="edge corner top-right"></span><span class="edge corner bottom-right"></span><span class="edge corner bottom-left"></span><span class="edge corner top-left"></span>
 </div>
@@ -887,6 +1003,35 @@ settings.</p>
   });
   document.getElementById("details-strip").addEventListener("click", () => toggle.click());
 })();
+</script>
+<script>
+// The panels above the details fold one by one, on phones only. The
+// production panel starts folded: it is read-only, so it earns little of
+// a small screen.
+for (const [id, name, folded] of [
+  ["queue", "queue", false],
+  ["garrison", "garrison", false],
+  ["commands", "production panel", true],
+]) {
+  const panel = document.getElementById(id);
+  const toggle = document.getElementById(id + "-toggle");
+  if (!panel || !toggle) continue;
+  const key = "specula." + id + ".collapsed";
+  const show = (collapsed) => {
+    panel.classList.toggle("collapsed", collapsed);
+    toggle.classList.toggle("collapsed", collapsed);
+    toggle.setAttribute("aria-expanded", String(!collapsed));
+    toggle.setAttribute("aria-label", (collapsed ? "Unfold the " : "Fold the ") + name);
+  };
+  let stored = null;
+  try { stored = localStorage.getItem(key); } catch {}
+  show(stored === null ? folded : stored === "1");
+  toggle.addEventListener("click", () => {
+    const collapsed = !panel.classList.contains("collapsed");
+    show(collapsed);
+    try { localStorage.setItem(key, collapsed ? "1" : "0"); } catch {}
+  });
+}
 </script>
 <script>
 // The top panel folds the same way; phones start folded, since the

@@ -676,6 +676,8 @@ impl App {
         let portrait = |icon: &str| store.as_ref()?.borrow().portrait_url(icon);
         let technology_portrait =
             |technology: &str| store.as_ref()?.borrow().technology_portrait_url(technology);
+        let template_portrait =
+            |template: &str| store.as_ref()?.borrow().template_portrait_url(template);
         details.update(&panel::View {
             scene: &self.scene,
             selected,
@@ -683,6 +685,7 @@ impl App {
             perspective: self.perspective,
             portrait: &portrait,
             technology_portrait: &technology_portrait,
+            template_portrait: &template_portrait,
         });
     }
 
