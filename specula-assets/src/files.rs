@@ -1,4 +1,4 @@
-//! The split asset files, format v12. Little-endian; every file starts with
+//! The split asset files, format v14. Little-endian; every file starts with
 //! a 4-byte magic and a u8 version. Strings are u16 length and UTF-8,
 //! counts are u32. A file is served as `assets/<kind>-<16 hex>.bin`, the
 //! hex being a hash of its content, so a cached copy is never stale and
@@ -42,7 +42,9 @@
 //!   Icon names it, file ref of a portrait}. Then count x {technology
 //!   name, its path under simulation/data/technologies without `.json`,
 //!   its icon's path in the portrait list}: what a queued technology
-//!   shows.
+//!   shows. Then count x {entity template name, its Identity's Icon in
+//!   the portrait list}: what a unit shows in the training and queue
+//!   panels before any entity of it has been seen.
 //! - actor manifest "SPCA": count x object. Object 0 is the actor, the rest
 //!   every actor it can prop, transitively, so one fetch resolves an
 //!   entity. An object is {name, count x definition, count x {u8 quality,
@@ -112,7 +114,7 @@
 use crate::half::f16_bits;
 use crate::half::f16_to_f32;
 
-pub const VERSION: u8 = 13;
+pub const VERSION: u8 = 14;
 /// The largest side of each texture detail tier, which a viewer's
 /// texture quality picks from: low, medium and the whole chain as the
 /// engine uploads it at its default quality.
@@ -255,6 +257,9 @@ pub struct Index {
     pub portraits: Vec<(String, FileRef)>,
     /// Technology -> its icon, a key of `portraits`.
     pub technology_icons: Vec<(String, String)>,
+    /// Entity template -> its `Identity/Icon`, a key of `portraits`, for
+    /// the templates a viewer has not yet seen an entity of.
+    pub template_icons: Vec<(String, String)>,
 }
 
 /// A template's `Decay`, as `CCmpDecay` sinks a local entity of it.
@@ -601,6 +606,11 @@ impl Index {
             out.string(technology);
             out.string(icon);
         }
+        out.count(self.template_icons.len());
+        for (template, icon) in &self.template_icons {
+            out.string(template);
+            out.string(icon);
+        }
         out.0
     }
 
@@ -710,6 +720,9 @@ impl Index {
         let technology_icons = (0..input.count()?)
             .map(|_| Ok((input.string()?, input.string()?)))
             .collect::<Result<_, &'static str>>()?;
+        let template_icons = (0..input.count()?)
+            .map(|_| Ok((input.string()?, input.string()?)))
+            .collect::<Result<_, &'static str>>()?;
         input.finish()?;
         Ok(Index {
             actors,
@@ -726,6 +739,7 @@ impl Index {
             sinking,
             portraits,
             technology_icons,
+            template_icons,
         })
     }
 }

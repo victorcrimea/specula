@@ -206,6 +206,9 @@ pub struct Templates {
     pub civs: BTreeMap<String, CivRefs>,
     /// Every template's `Decay`.
     pub sinking: Vec<(String, Sinking)>,
+    /// Every template's `Identity/Icon`, but the abstract `template_*`
+    /// ones, which nothing trains.
+    pub icons: Vec<(String, String)>,
     /// The templates that could not be resolved.
     pub errors: Vec<String>,
 }
@@ -236,6 +239,7 @@ pub fn load(mod_dir: &Path) -> Templates {
     list_templates(&loader.root.clone(), "", &mut names);
     names.sort();
     let mut sinking = Vec::new();
+    let mut icons = Vec::new();
     for name in &names {
         let template = match loader.resolve(name) {
             Ok(template) => template,
@@ -264,6 +268,15 @@ pub fn load(mod_dir: &Path) -> Templates {
                 },
             ));
         }
+        let abstract_template = name
+            .rsplit('/')
+            .next()
+            .is_some_and(|file| file.starts_with("template_"));
+        if let Some(icon) = template.text("Identity/Icon")
+            && !abstract_template
+        {
+            icons.push((name.clone(), icon.to_string()));
+        }
         let Some(refs) = template
             .text("Identity/Civ")
             .and_then(|civ| civs.get_mut(civ))
@@ -284,6 +297,7 @@ pub fn load(mod_dir: &Path) -> Templates {
     Templates {
         civs,
         sinking,
+        icons,
         errors,
     }
 }

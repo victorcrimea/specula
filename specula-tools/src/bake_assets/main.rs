@@ -272,6 +272,7 @@ fn run() -> Result<(), String> {
         sinking: Vec::new(),
         portraits: Vec::new(),
         technology_icons: Vec::new(),
+        template_icons: Vec::new(),
     };
     let mut skipped = Vec::new();
     for name in &names {
@@ -486,6 +487,22 @@ fn write_portraits(mod_dir: &Path, index: &mut Index, output: &mut Output) -> Re
     for error in &errors {
         println!("  {error}");
     }
+    let total = index.template_icons.len();
+    let baked: HashSet<&str> = index
+        .portraits
+        .iter()
+        .map(|(icon, _)| icon.as_str())
+        .collect();
+    let template_icons = std::mem::take(&mut index.template_icons)
+        .into_iter()
+        .filter(|(_, icon)| baked.contains(icon.as_str()))
+        .collect::<Vec<_>>();
+    index.template_icons = template_icons;
+    println!(
+        "{} template icons, {} without a baked portrait",
+        index.template_icons.len(),
+        total - index.template_icons.len()
+    );
     Ok(())
 }
 
@@ -494,8 +511,11 @@ fn add_civs(mod_dir: &Path, index: &mut Index) {
     let templates::Templates {
         civs,
         sinking,
+        icons,
         errors,
     } = templates::load(mod_dir);
+    // Kept to those baked once the portraits are.
+    index.template_icons = icons;
     println!(
         "{} civs, {} templates that decay, {} templates unresolved",
         civs.len(),
