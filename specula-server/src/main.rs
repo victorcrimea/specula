@@ -285,7 +285,7 @@ fn serve(stream: UnixStream, hub: &Hub) -> io::Result<()> {
                 details: template,
             } => hub.set_template_details(index, *template)?,
             Record::Details { changed, gone } => details.apply(changed, gone),
-            Record::StringList { index, strings } => details.add_string_list(index, strings),
+            Record::ProductionList { index, items } => details.add_list(index, items),
             Record::Renames(renames) => details.set_renames(renames),
             Record::Economy(economy) => {
                 hub.set_economy(&economy);

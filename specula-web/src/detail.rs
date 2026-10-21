@@ -11,8 +11,10 @@ use crate::stream::Writer;
 
 const MESSAGE_KEYFRAME: u8 = 1;
 const MESSAGE_DELTA: u8 = 2;
-const DETAIL_VERSION: u8 = 2;
-/// Archived matches keep it; it has no garrison owners.
+const DETAIL_VERSION: u8 = 3;
+/// Archived matches keep it; its lists are of names only.
+const DETAIL_VERSION_NAME_LISTS: u8 = 2;
+/// Archived matches keep it; it also has no garrison owners.
 const DETAIL_VERSION_NO_OWNERS: u8 = 1;
 /// Slots of `Groups`, the hook's group bits.
 pub const HEALTH: usize = 0;
@@ -26,9 +28,9 @@ pub const GARRISON: usize = 7;
 pub const FOUNDATION: usize = 8;
 pub const REPAIR: usize = 9;
 const UNIT_AI: usize = 10;
-const TRAINABLE: usize = 11;
-const RESEARCHABLE: usize = 12;
-const PROGRESS: usize = 13;
+pub const TRAINABLE: usize = 11;
+pub const RESEARCHABLE: usize = 12;
+pub const PROGRESS: usize = 13;
 const HOLDER: usize = 14;
 pub const TRADER: usize = 15;
 const SLOTS: usize = 16;
@@ -90,6 +92,30 @@ pub enum Group {
         goods: u32,
         gain: u32,
     },
+}
+
+/// One item of a trainable or researchable list, read for the producer's
+/// owner.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ListItem {
+    /// 1-based string, 0 for an empty slot of the research row.
+    pub name: u32,
+    pub flags: u8,
+    /// `canBeAddedCount`; `None` for no limit.
+    pub can_be_added: Option<u32>,
+    /// 1-based resource type string, cost in 1/100.
+    pub costs: Vec<(u32, u32)>,
+}
+
+impl ListItem {
+    pub const REQUIREMENTS_MET: u8 = 1;
+    /// The panels hide it: no template data, or a technology the owner's
+    /// civ cannot research.
+    pub const HIDDEN: u8 = 2;
+    pub const PAIR_TOP: u8 = 4;
+    /// From an older hook or an archived match: only the name is known,
+    /// and a pair is one "top bottom" string.
+    pub const UNKNOWN: u8 = 8;
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -177,10 +203,9 @@ pub struct Details {
     pub known: bool,
     pub turn: u32,
     pub match_id: u64,
-    /// Whether its garrisons carry owners, which a delta does not say.
-    pub owners: bool,
-    /// Lists of 1-based strings.
-    pub lists: Vec<Vec<u32>>,
+    /// The keyframe's version, which its deltas are in too.
+    pub version: u8,
+    pub lists: Vec<Vec<ListItem>>,
     /// By template index: the groups an entity of it has when its own
     /// leave them out.
     pub defaults: BTreeMap<u32, Groups>,
@@ -205,16 +230,19 @@ impl Details {
 
     fn apply_keyframe(&mut self, cursor: &mut Cursor) -> Result<(), &'static str> {
         let turn = cursor.varint_u32()?;
-        let owners = match cursor.u8()? {
-            DETAIL_VERSION => true,
-            DETAIL_VERSION_NO_OWNERS => false,
-            _ => return Err("unknown detail version, reload the page"),
-        };
+        let version = cursor.u8()?;
+        if !matches!(
+            version,
+            DETAIL_VERSION | DETAIL_VERSION_NAME_LISTS | DETAIL_VERSION_NO_OWNERS
+        ) {
+            return Err("unknown detail version, reload the page");
+        }
+        let owners = version != DETAIL_VERSION_NO_OWNERS;
         *self = Details {
             known: true,
             turn,
             match_id: cursor.u64()?,
-            owners,
+            version,
             ..Details::default()
         };
         self.read_lists(cursor)?;
@@ -238,10 +266,11 @@ impl Details {
         }
         self.turn = cursor.varint_u32()?;
         self.read_lists(cursor)?;
+        let owners = self.owners();
         let mut id = 0u32;
         for _ in 0..cursor.varint()? {
             id = next_id(id, cursor)?;
-            let changed = read_groups(cursor, self.turn, false, self.owners)?;
+            let changed = read_groups(cursor, self.turn, false, owners)?;
             let groups = self
                 .entities
                 .entry(id)
@@ -260,11 +289,37 @@ impl Details {
         Ok(())
     }
 
+    /// Whether its garrisons carry owners, which a delta does not say.
+    fn owners(&self) -> bool {
+        self.version != DETAIL_VERSION_NO_OWNERS
+    }
+
     fn read_lists(&mut self, cursor: &mut Cursor) -> Result<(), &'static str> {
         for _ in 0..cursor.varint()? {
             let list = (0..cursor.varint()?)
-                .map(|_| cursor.varint_u32())
-                .collect::<Result<_, _>>()?;
+                .map(|_| {
+                    let name = cursor.varint_u32()?;
+                    if self.version != DETAIL_VERSION {
+                        return Ok(ListItem {
+                            name,
+                            flags: ListItem::UNKNOWN,
+                            can_be_added: None,
+                            costs: Vec::new(),
+                        });
+                    }
+                    let flags = cursor.u8()?;
+                    let can_be_added = cursor.varint_u32()?.checked_sub(1);
+                    let costs = (0..cursor.varint()?)
+                        .map(|_| Ok((cursor.varint_u32()?, cursor.varint_u32()?)))
+                        .collect::<Result<_, &'static str>>()?;
+                    Ok(ListItem {
+                        name,
+                        flags,
+                        can_be_added,
+                        costs,
+                    })
+                })
+                .collect::<Result<_, &'static str>>()?;
             self.lists.push(list);
         }
         Ok(())
@@ -277,30 +332,37 @@ impl Details {
         out.u8(MESSAGE_KEYFRAME);
         out.varint(u64::from(self.turn));
         // The deltas that follow it are still in its source's version.
-        out.u8(if self.owners {
-            DETAIL_VERSION
-        } else {
-            DETAIL_VERSION_NO_OWNERS
-        });
+        out.u8(self.version);
         out.u64(self.match_id);
         out.varint(self.lists.len() as u64);
         for list in &self.lists {
             out.varint(list.len() as u64);
-            for string in list {
-                out.varint(u64::from(*string));
+            for item in list {
+                out.varint(u64::from(item.name));
+                if self.version != DETAIL_VERSION {
+                    continue;
+                }
+                out.u8(item.flags);
+                out.varint(item.can_be_added.map_or(0, |limit| u64::from(limit) + 1));
+                out.varint(item.costs.len() as u64);
+                for (resource, cost) in &item.costs {
+                    out.varint(u64::from(*resource));
+                    out.varint(u64::from(*cost));
+                }
             }
         }
+        let owners = self.owners();
         out.varint(self.defaults.len() as u64);
         for (template, groups) in &self.defaults {
             out.varint(u64::from(*template));
-            write_groups(&mut out, groups, None, self.owners);
+            write_groups(&mut out, groups, None, owners);
         }
         out.varint(self.entities.len() as u64);
         let mut previous = 0u32;
         for (id, groups) in &self.entities {
             out.varint(u64::from(id - previous));
             previous = *id;
-            write_groups(&mut out, groups, Some(self.turn), self.owners);
+            write_groups(&mut out, groups, Some(self.turn), owners);
         }
         out.0
     }

@@ -2,9 +2,9 @@
 //! show beyond the status bars, for every entity, sent only to viewers that
 //! have something selected. Varints and zigzag as in `wire.rs`.
 //!
-//! - kind 1 keyframe: varint turn, u8 detail version (2; a viewer also
-//!   reads 1, which had no garrison owners, and ignores the stream at any
-//!   other), u64 match id (the visual stream's), list table, varint n, n x {varint template, varint mask, groups}: each
+//! - kind 1 keyframe: varint turn, u8 detail version (3; a viewer also
+//!   reads 2, whose lists are of names only, and 1, which also had no
+//!   garrison owners, and ignores the stream at any other), u64 match id (the visual stream's), list table, varint n, n x {varint template, varint mask, groups}: each
 //!   template's defaults, then varint count, count x {varint id delta,
 //!   varint mask, groups}. A keyframe leaves out a group equal to the
 //!   default of the entity's template (the template of the visual stream's
@@ -43,7 +43,9 @@
 //!   1/10;
 //! - 1024 unit AI: u8 idle, varint stance, varint formation controller id
 //!   (0: none);
-//! - 2048 trainable, 4096 researchable: varint index into the list table;
+//! - 2048 trainable, 4096 researchable: varint index into the list table
+//!   (the hook's bits 262144 and 524288, or an older hook's 2048 and
+//!   4096);
 //! - 8192 progress: u8 pack, u8 upgrade, each 255 when not running, else
 //!   0..=254 of done, varint upgrade target;
 //! - 16384 holder: varint id of the entity it is garrisoned in or a turret
@@ -53,8 +55,15 @@
 //! Strings (resource types, templates and technologies, stances, the
 //! upgrade target, goods) are 1-based indices into the visual stream's
 //! string table, 0 for none; templates in a garrison are 0-based indices
-//! into its template table. A list is varint n, n x string, so the list
-//! table is varint count, count x list; it only grows during a match.
+//! into its template table. A list is varint n, n x {varint template or
+//! technology string, u8 flags, varint can be added + 1 (0 for no limit),
+//! varint m, m x {varint resource type, varint cost in 1/100, rounded}},
+//! each item read for the producer's owner (the hook's kind 17), so the
+//! list table is varint count, count x list; it only grows during a match.
+//! Flags: 1 the requirements are met, 2 the panels hide it (no template
+//! data, or a technology the owner's civ cannot research), 4 the top of a pair whose bottom is the next item, 8 from an older
+//! hook, which sent only the name (a pair as one "top bottom" string), so
+//! the other fields say nothing.
 //!
 //! Reckoning: while the first item of a queue is not paused, its time
 //! remaining goes down by 200 ms a turn from the turn it was sent; while a
@@ -73,12 +82,13 @@ use std::collections::HashMap;
 use crate::feed::Building;
 use crate::feed::Details;
 use crate::feed::EntityDetails;
+use crate::feed::ProductionItem;
 use crate::feed::Queue;
 use crate::wire::Writer;
 
 const MESSAGE_KEYFRAME: u8 = 1;
 const MESSAGE_DELTA: u8 = 2;
-const DETAIL_VERSION: u8 = 2;
+const DETAIL_VERSION: u8 = 3;
 const HEALTH: usize = 0;
 const CAPTURE: usize = 1;
 const SUPPLY: usize = 2;
@@ -348,7 +358,7 @@ pub struct DetailEncoder {
     /// Entities whose slow groups changed since they were last sampled.
     pending_slow: BTreeSet<u32>,
     /// The list table: 1-based strings.
-    lists: Vec<Vec<u64>>,
+    lists: Vec<Vec<ProductionItem>>,
     lists_sent: usize,
 }
 
@@ -378,9 +388,8 @@ impl DetailEncoder {
     ) -> Vec<u8> {
         // The hook numbers its lists densely and sends each before its
         // first use.
-        while let Some(list) = details.string_lists.get(&(self.lists.len() as u32)) {
-            self.lists
-                .push(list.iter().map(|string| one_based(*string)).collect());
+        while let Some(list) = details.lists.get(&(self.lists.len() as u32)) {
+            self.lists.push(list.clone());
         }
         let sample = turn.is_multiple_of(SLOW_TURNS);
         let mut candidates: BTreeSet<u32> = details.changed.iter().copied().collect();
@@ -617,12 +626,19 @@ impl DetailEncoder {
     }
 }
 
-fn write_lists(out: &mut Writer, lists: &[Vec<u64>]) {
+fn write_lists(out: &mut Writer, lists: &[Vec<ProductionItem>]) {
     out.varint(lists.len() as u64);
     for list in lists {
         out.varint(list.len() as u64);
-        for string in list {
-            out.varint(*string);
+        for item in list {
+            out.varint(one_based(item.name));
+            out.u8(item.flags);
+            out.varint(item.can_be_added.map_or(0, |limit| u64::from(limit) + 1));
+            out.varint(item.costs.len() as u64);
+            for (resource, cost) in &item.costs {
+                out.varint(one_based(*resource));
+                out.varint(round(cost * 100.0));
+            }
         }
     }
 }

@@ -25,6 +25,7 @@ const RECORD_STRING_LIST: u8 = 13;
 const RECORD_RENAMES: u8 = 14;
 const RECORD_ECONOMY: u8 = 15;
 const RECORD_VARIABLE_SET: u8 = 16;
+const RECORD_PRODUCTION_LIST: u8 = 17;
 const ENTITY_SIZE: usize = 74;
 const SOUND_SIZE: usize = 27;
 const LAUNCH_SIZE: usize = 52;
@@ -54,6 +55,9 @@ const DETAIL_HOLDER: u32 = 16384;
 const DETAIL_TRADER: u32 = 32768;
 const DETAIL_RANGES: u32 = 65536;
 const DETAIL_GARRISON_OWNERS: u32 = 131072;
+const DETAIL_TRAINABLE_ITEMS: u32 = 262144;
+const DETAIL_RESEARCHABLE_ITEMS: u32 = 524288;
+const NO_LIMIT: u16 = 0xFFFF;
 const QUEUE_UNIT: u8 = 0;
 const QUEUE_TECHNOLOGY: u8 = 1;
 
@@ -217,6 +221,29 @@ pub struct TemplateDetails {
     pub components: u32,
 }
 
+/// One item of a trainable or researchable list, read for the producer's
+/// owner as the session GUI reads it.
+#[derive(Clone, PartialEq)]
+pub struct ProductionItem {
+    /// A template or technology; none for an empty slot of the research
+    /// row.
+    pub name: Option<u32>,
+    pub flags: u8,
+    /// `canBeAddedCount`; `None` for no limit.
+    pub can_be_added: Option<u16>,
+    /// Resource code string, amount.
+    pub costs: Vec<(Option<u32>, f32)>,
+}
+
+impl ProductionItem {
+    /// From an older hook, which sent only the names, and a pair as one
+    /// "top bottom" string.
+    pub const UNKNOWN: u8 = 8;
+    /// The hook's: 1 requirements met, 2 hidden, 4 the top
+    /// of a pair, as the detail stream sends them.
+    const HOOK_FLAGS: u8 = 7;
+}
+
 /// An entity's kind 12 groups; `None` is a group it does not have, or, in
 /// a record, one that did not change.
 #[derive(Default)]
@@ -236,7 +263,7 @@ pub struct EntityDetails {
     pub foundation: Option<Building>,
     pub repair: Option<Building>,
     pub unit_ai: Option<UnitAi>,
-    /// String list indices.
+    /// Production list indices.
     pub trainable: Option<u32>,
     pub researchable: Option<u32>,
     pub progress: Option<Progress>,
@@ -386,8 +413,8 @@ pub struct Resource {
 #[derive(Default)]
 pub struct Details {
     pub entities: HashMap<u32, EntityDetails>,
-    /// String list records by index, each a list of string indices.
-    pub string_lists: HashMap<u32, Vec<Option<u32>>>,
+    /// Production lists by index, from kind 17 or an older hook's kind 13.
+    pub lists: HashMap<u32, Vec<ProductionItem>>,
     /// (old id, new id) of the next turn record.
     pub renames: Vec<(u32, u32)>,
     pub economy: Vec<Economy>,
@@ -410,8 +437,8 @@ impl Details {
         }
     }
 
-    pub fn add_string_list(&mut self, index: u32, strings: Vec<Option<u32>>) {
-        self.string_lists.insert(index, strings);
+    pub fn add_list(&mut self, index: u32, items: Vec<ProductionItem>) {
+        self.lists.insert(index, items);
     }
 
     pub fn set_renames(&mut self, renames: Vec<(u32, u32)>) {
@@ -485,9 +512,9 @@ pub enum Record {
         changed: Vec<(u32, EntityDetails)>,
         gone: Vec<u32>,
     },
-    StringList {
+    ProductionList {
         index: u32,
-        strings: Vec<Option<u32>>,
+        items: Vec<ProductionItem>,
     },
     /// (old id, new id) of the next turn record.
     Renames(Vec<(u32, u32)>),
@@ -629,6 +656,7 @@ pub fn read_record(reader: &mut impl Read) -> io::Result<Option<Record>> {
             RECORD_TEMPLATE_DETAILS => return decode_template_details(&payload).map(Some),
             RECORD_DETAILS => return decode_details(&payload).map(Some),
             RECORD_STRING_LIST => return decode_string_list(&payload).map(Some),
+            RECORD_PRODUCTION_LIST => return decode_production_list(&payload).map(Some),
             RECORD_RENAMES => return decode_renames(&payload).map(Some),
             RECORD_ECONOMY => return decode_economy(&payload).map(Some),
             // Newer hooks may add kinds; the length prefix lets them be skipped.
@@ -1153,6 +1181,14 @@ fn decode_groups(cursor: &mut Cursor, mask: u32) -> io::Result<EntityDetails> {
                 .collect::<io::Result<_>>()?,
         );
     }
+    // A hook sends these or the older bits above, never both, so they share
+    // the fields and the list numbering.
+    if mask & DETAIL_TRAINABLE_ITEMS != 0 {
+        details.trainable = Some(cursor.u32()?);
+    }
+    if mask & DETAIL_RESEARCHABLE_ITEMS != 0 {
+        details.researchable = Some(cursor.u32()?);
+    }
     Ok(details)
 }
 
@@ -1172,10 +1208,42 @@ fn decode_string_list(payload: &[u8]) -> io::Result<Record> {
             "string list record length does not match its count",
         ));
     }
-    let strings = (0..count)
-        .map(|_| cursor.u32().map(optional))
+    let items = (0..count)
+        .map(|_| {
+            Ok(ProductionItem {
+                name: optional(cursor.u32()?),
+                flags: ProductionItem::UNKNOWN,
+                can_be_added: None,
+                costs: Vec::new(),
+            })
+        })
         .collect::<io::Result<_>>()?;
-    Ok(Record::StringList { index, strings })
+    Ok(Record::ProductionList { index, items })
+}
+
+fn decode_production_list(payload: &[u8]) -> io::Result<Record> {
+    let mut cursor = Cursor(payload);
+    let index = cursor.u32()?;
+    let count = cursor.u32()?;
+    let mut items = Vec::new();
+    for _ in 0..count {
+        let name = optional(cursor.u32()?);
+        let flags = cursor.u8()? & ProductionItem::HOOK_FLAGS;
+        let can_be_added = Some(cursor.u16()?).filter(|limit| *limit != NO_LIMIT);
+        let costs = (0..cursor.u8()?)
+            .map(|_| Ok((optional(cursor.u32()?), cursor.f32()?)))
+            .collect::<io::Result<_>>()?;
+        items.push(ProductionItem {
+            name,
+            flags,
+            can_be_added,
+            costs,
+        });
+    }
+    if !cursor.0.is_empty() {
+        return Err(invalid("production list record has trailing bytes"));
+    }
+    Ok(Record::ProductionList { index, items })
 }
 
 fn decode_renames(payload: &[u8]) -> io::Result<Record> {
