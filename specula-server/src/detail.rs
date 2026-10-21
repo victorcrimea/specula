@@ -2,9 +2,9 @@
 //! show beyond the status bars, for every entity, sent only to viewers that
 //! have something selected. Varints and zigzag as in `wire.rs`.
 //!
-//! - kind 1 keyframe: varint turn, u8 detail version (6; a viewer also
-//!   reads 5, which had no stats, 4, which also had no data table, 3,
-//!   which also had no rally points,
+//! - kind 1 keyframe: varint turn, u8 detail version (7; a viewer also
+//!   reads 6, which had no buildable lists, 5, which also had no stats, 4,
+//!   which also had no data table, 3, which also had no rally points,
 //!   2, whose lists are also of names only, and 1, which also had no
 //!   garrison owners, and ignores the stream at any other), u64 match id
 //!   (the visual stream's), list table, data table, varint n, n x {varint template, varint mask, groups}: each
@@ -61,7 +61,9 @@
 //!   one or the footprint's edge; positions in 1/16 m, a line's first
 //!   relative to its point and each other to the one before;
 //! - 131072 stats (the hook's 2097152): u64 hash of the JSON the attack
-//!   and resistance tooltip reads, at `/data/<hash>` (the hook's kind 20).
+//!   and resistance tooltip reads, at `/data/<hash>` (the hook's kind 20);
+//! - 262144 buildable (the hook's 4194304): varint index into the list
+//!   table, a Builder's list, its items read as trainable ones.
 //!
 //! Strings (resource types, templates and technologies, stances, the
 //! upgrade target, goods, the marker actor) are 1-based indices into the visual stream's
@@ -107,7 +109,7 @@ use crate::wire::Writer;
 
 const MESSAGE_KEYFRAME: u8 = 1;
 const MESSAGE_DELTA: u8 = 2;
-const DETAIL_VERSION: u8 = 6;
+const DETAIL_VERSION: u8 = 7;
 const HEALTH: usize = 0;
 const CAPTURE: usize = 1;
 const SUPPLY: usize = 2;
@@ -126,7 +128,8 @@ const HOLDER: usize = 14;
 const TRADER: usize = 15;
 const RALLY: usize = 16;
 const STATS: usize = 17;
-const SLOTS: usize = 18;
+const BUILDABLE: usize = 18;
+const SLOTS: usize = 19;
 /// Rally positions are sent in 1/16 m, finer than a line is wide.
 const RALLY_UNITS_PER_METRE: f32 = 16.0;
 const TURN_MS: f64 = 200.0;
@@ -264,6 +267,7 @@ fn encode_group(slot: usize, details: &EntityDetails) -> Option<Vec<u8>> {
         }
         TRAINABLE => out.varint(u64::from(details.trainable?)),
         RESEARCHABLE => out.varint(u64::from(details.researchable?)),
+        BUILDABLE => out.varint(u64::from(details.buildable?)),
         PROGRESS => {
             let progress = details.progress.as_ref()?;
             out.u8(progress_byte(progress.pack));

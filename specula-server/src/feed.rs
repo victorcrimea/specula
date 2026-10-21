@@ -63,6 +63,7 @@ const DETAIL_TRAINABLE_ITEMS: u32 = 262144;
 const DETAIL_RESEARCHABLE_ITEMS: u32 = 524288;
 const DETAIL_RALLY: u32 = 1048576;
 const DETAIL_STATS: u32 = 2097152;
+const DETAIL_BUILDABLE_ITEMS: u32 = 4194304;
 const NO_LIMIT: u16 = 0xFFFF;
 const QUEUE_UNIT: u8 = 0;
 const QUEUE_TECHNOLOGY: u8 = 1;
@@ -279,6 +280,7 @@ pub struct EntityDetails {
     /// Production list indices.
     pub trainable: Option<u32>,
     pub researchable: Option<u32>,
+    pub buildable: Option<u32>,
     pub progress: Option<Progress>,
     /// The entity it is garrisoned in or a turret on, 0 for none.
     pub holder: Option<u32>,
@@ -314,6 +316,7 @@ impl EntityDetails {
         take(&mut self.unit_ai, changed.unit_ai);
         take(&mut self.trainable, changed.trainable);
         take(&mut self.researchable, changed.researchable);
+        take(&mut self.buildable, changed.buildable);
         take(&mut self.progress, changed.progress);
         take(&mut self.holder, changed.holder);
         take(&mut self.trader, changed.trader);
@@ -1300,6 +1303,9 @@ fn decode_groups(cursor: &mut Cursor, mask: u32) -> io::Result<EntityDetails> {
     }
     if mask & DETAIL_STATS != 0 {
         details.stats = Some(u64::from(cursor.u32()?));
+    }
+    if mask & DETAIL_BUILDABLE_ITEMS != 0 {
+        details.buildable = Some(cursor.u32()?);
     }
     Ok(details)
 }

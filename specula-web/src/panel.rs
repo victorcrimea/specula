@@ -353,9 +353,11 @@ struct QueueCell {
     count: Out,
 }
 
-/// `unitCommands`' training and research buttons.
+/// `unitCommands`' training, construction and research buttons.
 struct CommandsPanel {
     root: Out,
+    /// Training's buttons, then construction's in the cells after them, as
+    /// `getNumberOfRightPanelButtons` places them.
     training: Vec<CommandCell>,
     research: Vec<ResearchColumn>,
 }
@@ -393,6 +395,7 @@ struct Producer<'a> {
     queued: usize,
     trainable: &'a [ListItem],
     researchable: &'a [ListItem],
+    buildable: &'a [ListItem],
 }
 
 /// A technology of a research slot.
@@ -1445,7 +1448,8 @@ impl ResearchColumn {
 }
 
 impl CommandsPanel {
-    /// `setupUnitPanel` of `Training`, then of `Research`, for an observer.
+    /// `setupUnitPanel` of `Training`, `Construction` and `Research`, for an
+    /// observer.
     fn show(&mut self, view: &View, entities: &[u32]) {
         let scene = view.scene;
         let mut producers = Vec::new();
@@ -1474,19 +1478,30 @@ impl CommandsPanel {
                 },
                 trainable: list(detail::TRAINABLE),
                 researchable: list(detail::RESEARCHABLE),
+                buildable: list(detail::BUILDABLE),
             });
         }
         // `data.player`: the first selected entity's owner.
         let player = producers.first().map_or(-1, |producer| producer.owner);
         let all_upgrading = producers.iter().all(|producer| producer.upgrading);
 
-        let trainable = trainable_items(scene, &producers, player);
+        let trainable = list_items(
+            scene,
+            &producers,
+            player,
+            |producer| producer.trainable,
+            MAX_TRAINABLE,
+        );
+        let buildable = list_items(
+            scene,
+            &producers,
+            player,
+            |producer| producer.buildable,
+            MAX_TRAINABLE - trainable.len(),
+        );
+        let (training_cells, construction_cells) = self.training.split_at_mut(trainable.len());
         let mut drawn = false;
-        for (i, cell) in self.training.iter_mut().enumerate() {
-            let Some(&(name, item)) = trainable.get(i) else {
-                cell.cell.hidden(true);
-                continue;
-            };
+        for (cell, &(name, item)) in training_cells.iter_mut().zip(&trainable) {
             if item.flags & ListItem::HIDDEN != 0 {
                 cell.cell.hidden(true);
                 continue;
@@ -1525,7 +1540,31 @@ impl CommandsPanel {
             drawn = true;
         }
 
-        let research = research_items(scene, &producers, trainable.len().min(MAX_TRAINABLE));
+        for (i, cell) in construction_cells.iter_mut().enumerate() {
+            let Some(&(name, item)) = buildable.get(i) else {
+                cell.cell.hidden(true);
+                continue;
+            };
+            if item.flags & ListItem::HIDDEN != 0 {
+                cell.cell.hidden(true);
+                continue;
+            }
+            // `multiplyEntityCosts(template, 1)`.
+            let short = needed_amounts(scene, player, item, |cost| (cost / 100) as f64);
+            let modifier = if item.flags & ListItem::UNKNOWN != 0 {
+                Modifier::None
+            } else if item.flags & ListItem::REQUIREMENTS_MET == 0 || item.can_be_added == Some(0) {
+                Modifier::Grey
+            } else {
+                needed(&short)
+            };
+            cell.show(unit_portrait(view, name), modifier, 0);
+            cell.cell
+                .tooltip(&construction_tooltip(view, item, player, &short));
+            drawn = true;
+        }
+
+        let research = research_items(scene, &producers, trainable.len() + buildable.len());
         for (i, column) in self.research.iter_mut().enumerate() {
             let Some(&(slot, producer)) = research.get(i) else {
                 column.column.hidden(true);
@@ -1586,17 +1625,20 @@ impl CommandsPanel {
     }
 }
 
-/// `getAllTrainableEntities`: every producer's list in selection order,
-/// duplicates dropped, each read as the first selected entity's owner
-/// reads it where a producer of that owner lists it.
-fn trainable_items<'a>(
+/// `getAllTrainableEntities` or `GetAllBuildableEntities`: every
+/// producer's `list` in selection order, duplicates dropped, at most
+/// `max`, each read as the first selected entity's owner reads it where a
+/// producer of that owner lists it.
+fn list_items<'a>(
     scene: &'a Scene,
     producers: &[Producer<'a>],
     player: i32,
+    list: impl Fn(&Producer<'a>) -> &'a [ListItem],
+    max: usize,
 ) -> Vec<(&'a str, &'a ListItem)> {
     let mut items: Vec<(&str, &ListItem, i32)> = Vec::new();
     for producer in producers {
-        for item in producer.trainable {
+        for item in list(producer) {
             let Some(name) = string(scene, item.name).filter(|name| !name.is_empty()) else {
                 continue;
             };
@@ -1610,7 +1652,7 @@ fn trainable_items<'a>(
             }
         }
     }
-    items.truncate(MAX_TRAINABLE);
+    items.truncate(max);
     items
         .into_iter()
         .map(|(name, item, _)| (name, item))
@@ -1781,6 +1823,40 @@ fn training_tooltip(
     if view.detailed {
         lines.extend(tips::detailed_lines(&data));
     }
+    if item.flags & ListItem::REQUIREMENTS_MET == 0 {
+        let technology = |name: &str| {
+            let name = string_index(view.scene, name)?;
+            view.technology_data(name, player)
+        };
+        lines.push(tips::requirements_tooltip(&data, &technology));
+    }
+    lines.push(tips::needed_resources_tooltip(short));
+    join_lines(lines)
+}
+
+/// `g_SelectionPanels.Construction.setupButton`'s tooltip for an observer:
+/// without the limits (only what can be added is sent) and the template
+/// viewer line (V9).
+fn construction_tooltip(
+    view: &View,
+    item: &ListItem,
+    player: i32,
+    short: &[(String, f64)],
+) -> String {
+    let Some(data) = view.template_data(item.name, player) else {
+        return String::new();
+    };
+    let mut lines = vec![
+        tips::entity_names_formatted(&data),
+        tips::visible_classes(&data),
+        tips::auras_tooltip(&data),
+        tips::entity_tooltip(&data),
+        tips::cost_tooltip(&data, 1.0, None),
+        tips::dropsite_tooltip(&data),
+        tips::garrison_tooltip(&data),
+        tips::turrets_tooltip(&data),
+        tips::population_bonus_tooltip(&data),
+    ];
     if item.flags & ListItem::REQUIREMENTS_MET == 0 {
         let technology = |name: &str| {
             let name = string_index(view.scene, name)?;

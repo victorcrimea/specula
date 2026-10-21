@@ -11,8 +11,10 @@ use crate::stream::Writer;
 
 const MESSAGE_KEYFRAME: u8 = 1;
 const MESSAGE_DELTA: u8 = 2;
-const DETAIL_VERSION: u8 = 6;
-/// Archived matches keep it; it has no stats.
+const DETAIL_VERSION: u8 = 7;
+/// Archived matches keep it; it has no buildable lists.
+const DETAIL_VERSION_NO_BUILDABLE: u8 = 6;
+/// Archived matches keep it; it also has no stats.
 const DETAIL_VERSION_NO_STATS: u8 = 5;
 /// Archived matches keep it; it also has no data table.
 const DETAIL_VERSION_NO_DATA: u8 = 4;
@@ -41,7 +43,8 @@ const HOLDER: usize = 14;
 pub const TRADER: usize = 15;
 pub const RALLY: usize = 16;
 pub const STATS: usize = 17;
-const SLOTS: usize = 18;
+pub const BUILDABLE: usize = 18;
+const SLOTS: usize = 19;
 /// Rally positions come in 1/16 m.
 pub const RALLY_UNITS_PER_METRE: f32 = 16.0;
 
@@ -272,6 +275,7 @@ impl Details {
         if !matches!(
             version,
             DETAIL_VERSION
+                | DETAIL_VERSION_NO_BUILDABLE
                 | DETAIL_VERSION_NO_STATS
                 | DETAIL_VERSION_NO_DATA
                 | DETAIL_VERSION_NO_RALLY
@@ -629,7 +633,7 @@ fn read_group(
             stance: cursor.varint_u32()?,
             formation_controller: cursor.varint_u32()?,
         },
-        TRAINABLE | RESEARCHABLE => Group::List(cursor.varint_u32()?),
+        TRAINABLE | RESEARCHABLE | BUILDABLE => Group::List(cursor.varint_u32()?),
         PROGRESS => Group::Progress {
             pack: cursor.u8()?,
             upgrade: cursor.u8()?,
