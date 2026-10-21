@@ -1,8 +1,9 @@
 //! The selection details panel, a port of gui/session/selection_details.js
 //! (`displaySingle`, `displayMultiple`) and of the selection panel's group
-//! buttons (`g_SelectionPanels.Selection` in selection_panels.js) and
-//! garrison buttons (`g_SelectionPanels.Garrison`), drawn into the page's
-//! `#details`. The engine's tooltips are left out.
+//! buttons (`g_SelectionPanels.Selection` in selection_panels.js), garrison
+//! buttons (`g_SelectionPanels.Garrison`) and production queue
+//! (`g_SelectionPanels.Queue`), drawn into the page's `#details`. The
+//! engine's tooltips are left out.
 //!
 //! Each element keeps what was last written to it, so an update that
 //! changes nothing touches no DOM.
@@ -31,6 +32,13 @@ const GROUP_STEP: usize = 39;
 /// `g_SelectionPanels.Garrison.getMaxNumberOfItems`, in rows of
 /// `GROUP_ROW`.
 const MAX_GARRISONED: usize = 12;
+/// `g_SelectionPanels.Queue.getMaxNumberOfItems`.
+const MAX_QUEUED: usize = 16;
+/// `rowLength || 8` in `setupUnitPanel`.
+const QUEUE_ROW: usize = 8;
+/// The slider's `3 3 35 35` in its button.
+const SLIDER_INSET: f64 = 3.0;
+const SLIDER_SIDE: f64 = 32.0;
 /// `captureBar[n]` and `captureBarMultiple[n]`, `g_MaxPlayers + 1`.
 const CAPTURE_SEGMENTS: usize = 9;
 /// `getPlayerColor(id, 128)` and `(id, 160)`, as CSS alphas.
@@ -180,14 +188,7 @@ impl GroupButton {
             let _ = button.set_attribute("type", "button");
         }
         let _ = button.set_attribute("class", class);
-        let _ = button.set_attribute(
-            "style",
-            &format!(
-                "left: {}px; top: {}px",
-                i % GROUP_ROW * GROUP_STEP,
-                i / GROUP_ROW * GROUP_STEP
-            ),
-        );
+        let _ = button.set_attribute("style", &grid_position(i, GROUP_ROW));
         let owner: HtmlElement = create(document, "div")?;
         let _ = owner.set_attribute("class", "owner");
         let icon: HtmlElement = create(document, "img")?;
@@ -262,6 +263,8 @@ pub struct DetailsPanel {
     minimap_background: Out,
     /// `None` on a page from before the garrison panel.
     garrison: Option<GarrisonPanel>,
+    /// `None` on a page from before the queue panel.
+    queue: Option<QueuePanel>,
     /// The entity the portrait follows, and the ids of each group button.
     portrait_id: Option<u32>,
     group_ids: Vec<Vec<u32>>,
@@ -274,6 +277,35 @@ struct GarrisonPanel {
     cells: Vec<GroupButton>,
     health: Out,
     health_bar: Out,
+}
+
+/// `unitQueuePanel`.
+struct QueuePanel {
+    root: Out,
+    time: Out,
+    cells: Vec<QueueCell>,
+    /// What each shown cell is, and the queues of the selection by
+    /// producer, for `tick`.
+    shown: Vec<Queued>,
+    queues: Vec<(u32, detail::Queue)>,
+}
+
+/// One `unitQueueButton`.
+struct QueueCell {
+    cell: Out,
+    icon: Out,
+    slider: Out,
+    paused: Out,
+    count: Out,
+}
+
+/// An item of `getItems`: its producer, its index in that queue, and
+/// whether it is a ghost repeating an autoqueue.
+#[derive(Clone, Copy)]
+struct Queued {
+    producer: u32,
+    index: usize,
+    ghost: bool,
 }
 
 /// What a click on the panel asks of the page.
@@ -290,6 +322,8 @@ pub struct View<'a> {
     pub perspective: Perspective,
     /// Identity's Icon -> where an `<img>` finds its portrait.
     pub portrait: &'a dyn Fn(&str) -> Option<String>,
+    /// A technology's name -> where an `<img>` finds its icon.
+    pub technology_portrait: &'a dyn Fn(&str) -> Option<String>,
 }
 
 impl DetailsPanel {
@@ -307,6 +341,18 @@ impl DetailsPanel {
                     .collect::<Result<_, _>>()?,
                 health: find("garrison-health")?,
                 health_bar: find("garrison-health-bar")?,
+            }),
+            Err(_) => None,
+        };
+        let queue = match crate::element::<HtmlElement>(document, "queue-cells") {
+            Ok(grid) => Some(QueuePanel {
+                root: find("queue")?,
+                time: find("queue-time")?,
+                cells: (0..MAX_QUEUED)
+                    .map(|i| QueueCell::new(document, &grid, i))
+                    .collect::<Result<_, _>>()?,
+                shown: Vec::new(),
+                queues: Vec::new(),
             }),
             Err(_) => None,
         };
@@ -346,6 +392,7 @@ impl DetailsPanel {
             strip_health: find("details-strip-health")?,
             minimap_background: find("minimap-background")?,
             garrison,
+            queue,
             portrait_id: None,
             group_ids: Vec::new(),
             requests: RefCell::new(Vec::new()),
@@ -421,6 +468,18 @@ impl DetailsPanel {
         }
         if let Some(garrison) = &mut self.garrison {
             garrison.show(view, &entities);
+        }
+        if let Some(queue) = &mut self.queue {
+            queue.show(view, &entities);
+            queue.tick(f64::from(view.scene.turn));
+        }
+    }
+
+    /// The queue's progress and time, between turns: `turn` is the
+    /// interpolated turn the frame shows.
+    pub fn tick(&mut self, turn: f64) {
+        if let Some(queue) = &mut self.queue {
+            queue.tick(turn);
         }
     }
 
@@ -850,6 +909,198 @@ impl GarrisonPanel {
     }
 }
 
+impl QueueCell {
+    fn new(document: &Document, grid: &HtmlElement, i: usize) -> Result<Self, String> {
+        let cell: HtmlElement = create(document, "div")?;
+        let _ = cell.set_attribute("class", "item");
+        let _ = cell.set_attribute("style", &grid_position(i, QUEUE_ROW));
+        let icon: HtmlElement = create(document, "img")?;
+        let _ = icon.set_attribute("alt", "");
+        let slider: HtmlElement = create(document, "div")?;
+        let _ = slider.set_attribute("class", "slider");
+        let paused: HtmlElement = create(document, "div")?;
+        let _ = paused.set_attribute("class", "paused");
+        // groupIconsText is z 20, over the paused icon.
+        let count: HtmlElement = create(document, "div")?;
+        let _ = count.set_attribute("class", "text center sans-bold-stroke-14");
+        for child in [&icon, &slider, &paused, &count] {
+            cell.append_child(child)
+                .map_err(|_| "cannot build a queue button")?;
+        }
+        grid.append_child(&cell)
+            .map_err(|_| "cannot add a queue button")?;
+        let mut cell = QueueCell {
+            cell: Out::new(cell),
+            icon: Out::new(icon),
+            slider: Out::new(slider),
+            paused: Out::new(paused),
+            count: Out::new(count),
+        };
+        cell.cell.hidden(true);
+        Ok(cell)
+    }
+}
+
+impl QueuePanel {
+    /// `g_SelectionPanels.Queue`'s `getItems`, `resizePanel` and
+    /// `setupButton`, but for the progress, which `tick` draws.
+    fn show(&mut self, view: &View, entities: &[u32]) {
+        let scene = view.scene;
+        let queues: Vec<(u32, detail::Queue)> = entities
+            .iter()
+            .filter_map(|&id| {
+                let dot = scene.dots.get(&id)?;
+                match &entity_groups(scene, id, dot.template)[detail::QUEUE] {
+                    Some(Group::Queue(queue)) => Some((id, queue.clone())),
+                    _ => None,
+                }
+            })
+            .collect();
+        // The first item of every producer before the second of any.
+        let mut items = Vec::new();
+        let longest = queues
+            .iter()
+            .map(|(_, queue)| queue.items.len())
+            .max()
+            .unwrap_or(0);
+        for index in 0..longest {
+            for (producer, queue) in &queues {
+                if index < queue.items.len() {
+                    items.push(Queued {
+                        producer: *producer,
+                        index,
+                        ghost: false,
+                    });
+                }
+            }
+        }
+        let repeat: Vec<Queued> = items
+            .iter()
+            .filter(|item| {
+                queue_of(&queues, item.producer)
+                    .is_some_and(|queue| queue.autoqueue && !queue.items[item.index].technology)
+            })
+            .map(|item| Queued {
+                ghost: true,
+                ..*item
+            })
+            .collect();
+        if !repeat.is_empty() {
+            let mut i = 0;
+            while items.len() < MAX_QUEUED {
+                items.push(repeat[i % repeat.len()]);
+                i += 1;
+            }
+        }
+        items.truncate(MAX_QUEUED);
+
+        self.root.hidden(items.is_empty());
+        let rows = items.len().div_ceil(QUEUE_ROW).max(1);
+        self.root.style(format!("--rows: {rows}"));
+        for (i, cell) in self.cells.iter_mut().enumerate() {
+            let Some(item) = items.get(i) else {
+                cell.cell.hidden(true);
+                continue;
+            };
+            let Some(queued) =
+                queue_of(&queues, item.producer).and_then(|queue| queue.items.get(item.index))
+            else {
+                cell.cell.hidden(true);
+                continue;
+            };
+            let name = string(scene, queued.name).unwrap_or_default();
+            let icon = if queued.technology {
+                (view.technology_portrait)(name)
+            } else {
+                template_index(scene, name)
+                    .and_then(|template| template_details(scene, template))
+                    .and_then(|template| string(scene, template.icon))
+                    .and_then(|icon| (view.portrait)(icon))
+            };
+            cell.icon.src(icon);
+            cell.count.text(&if queued.count > 1 {
+                queued.count.to_string()
+            } else {
+                String::new()
+            });
+            // The tint follows `paused` before `ghost`, the stop icon
+            // only real items.
+            let mut class = String::from("item");
+            if item.ghost {
+                class.push_str(" ghost");
+            }
+            if queued.paused {
+                class.push_str(" paused");
+            }
+            cell.cell.class(class);
+            let paused = queued.paused && !item.ghost;
+            cell.paused.hidden(!paused);
+            if item.ghost {
+                cell.slider.style(format!("top: {SLIDER_INSET}px"));
+            }
+            cell.cell.hidden(false);
+        }
+        self.shown = items;
+        self.queues = queues;
+    }
+
+    /// The sliders and `queueTimeRemaining` at `turn`.
+    fn tick(&mut self, turn: f64) {
+        let mut time = String::new();
+        for (i, (item, cell)) in self.shown.iter().zip(&mut self.cells).enumerate() {
+            if item.ghost {
+                continue;
+            }
+            let Some(queue) = queue_of(&self.queues, item.producer) else {
+                continue;
+            };
+            let Some(queued) = queue.items.get(item.index) else {
+                continue;
+            };
+            let remaining = queue.remaining_ms(item.index, turn);
+            let total = f64::from(queued.total) * 100.0;
+            let progress = if total > 0.0 {
+                (1.0 - remaining / total).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            cell.slider.style(format!(
+                "top: {}px",
+                SLIDER_INSET + (progress * SLIDER_SIDE).round()
+            ));
+            if i == 0 {
+                time = minutes_seconds(remaining / 1000.0);
+            }
+        }
+        self.time.text(&time);
+    }
+}
+
+fn queue_of(queues: &[(u32, detail::Queue)], producer: u32) -> Option<&detail::Queue> {
+    queues
+        .iter()
+        .find(|(id, _)| *id == producer)
+        .map(|(_, queue)| queue)
+}
+
+/// The template table's index of a template name.
+fn template_index(scene: &Scene, name: &str) -> Option<u32> {
+    let index = scene
+        .templates
+        .iter()
+        .position(|template| template == name)?;
+    u32::try_from(index).ok()
+}
+
+/// `setPanelObjectPosition` of the `i`-th button, 38 px and a 1 px margin.
+fn grid_position(i: usize, row: usize) -> String {
+    format!(
+        "left: {}px; top: {}px",
+        i % row * GROUP_STEP,
+        i / row * GROUP_STEP
+    )
+}
+
 fn create<T: JsCast>(document: &Document, tag: &str) -> Result<T, String> {
     document
         .create_element(tag)
@@ -927,14 +1178,18 @@ fn builders_text(building: &detail::Building, turn: u32) -> String {
     if building.builders == 0 {
         return String::new();
     }
-    // `FormatMillisecondsIntoDateStringGMT` with "m:ss" drops the fraction.
-    let seconds = building.seconds_remaining(turn).max(0.0) as u64;
     format!(
-        "({})\n{}:{:02}",
+        "({})\n{}",
         building.builders,
-        seconds / 60,
-        seconds % 60
+        minutes_seconds(building.seconds_remaining(turn))
     )
+}
+
+/// `FormatMillisecondsIntoDateStringGMT` with "m:ss", which drops the
+/// fraction.
+fn minutes_seconds(seconds: f64) -> String {
+    let seconds = seconds.max(0.0) as u64;
+    format!("{}:{:02}", seconds / 60, seconds % 60)
 }
 
 /// `Math.max(0, Math.min(1, value / max))`.

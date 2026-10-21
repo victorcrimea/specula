@@ -271,6 +271,7 @@ fn run() -> Result<(), String> {
         civs: Vec::new(),
         sinking: Vec::new(),
         portraits: Vec::new(),
+        technology_icons: Vec::new(),
     };
     let mut skipped = Vec::new();
     for name in &names {
@@ -463,6 +464,23 @@ fn write_portraits(mod_dir: &Path, index: &mut Index, output: &mut Output) -> Re
         bytes as f64 / 1e6,
         bytes as f64 / 1e3 / portraits.len().max(1) as f64,
         start.elapsed().as_secs_f32(),
+        errors.len()
+    );
+    for error in &errors {
+        println!("  {error}");
+    }
+    // Only icons that were baked, so a viewer can always fetch what the
+    // table names.
+    let (icons, errors) = portrait::technology_icons(mod_dir);
+    let total = icons.len();
+    index.technology_icons = icons
+        .into_iter()
+        .filter(|(_, icon)| index.portraits.iter().any(|(baked, _)| baked == icon))
+        .collect();
+    println!(
+        "{} technology icons, {} without a baked portrait; {} technologies could not be read",
+        index.technology_icons.len(),
+        total - index.technology_icons.len(),
         errors.len()
     );
     for error in &errors {

@@ -126,6 +126,8 @@ pub struct Store {
     /// Identity's Icon, relative to art/textures/ui/session/portraits/ ->
     /// its portrait.
     portraits: HashMap<String, FileRef>,
+    /// Technology name -> its icon, a key of `portraits`.
+    technology_icons: HashMap<String, String>,
     index_failed: bool,
     /// The index's path, `assets/index-<hash>.bin`, once loaded.
     index_name: Option<String>,
@@ -335,6 +337,11 @@ impl Store {
     pub fn portrait_url(&self, icon: &str) -> Option<String> {
         let file = self.portraits.get(icon)?;
         Some(format!("/assets/{}", Kind::Portrait.file_name(file.hash)))
+    }
+
+    /// A queued technology's portrait, as `portrait_url`.
+    pub fn technology_portrait_url(&self, technology: &str) -> Option<String> {
+        self.portrait_url(self.technology_icons.get(technology)?)
     }
 
     /// The session's ambient loop, `None` before the index or without one.
@@ -708,6 +715,7 @@ async fn load_index(store: Rc<RefCell<Store>>) {
                 store.civs = index.civs.into_iter().collect();
                 store.sinking = index.sinking.into_iter().collect();
                 store.portraits = index.portraits.into_iter().collect();
+                store.technology_icons = index.technology_icons.into_iter().collect();
                 store.index_name = Some(name.clone());
             }
             crate::stored::prune(&name).await;

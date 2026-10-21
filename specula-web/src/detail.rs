@@ -21,7 +21,7 @@ pub const SUPPLY: usize = 2;
 pub const GATHERERS: usize = 3;
 pub const CARRYING: usize = 4;
 pub const EXPERIENCE: usize = 5;
-const QUEUE: usize = 6;
+pub const QUEUE: usize = 6;
 pub const GARRISON: usize = 7;
 pub const FOUNDATION: usize = 8;
 pub const REPAIR: usize = 9;
@@ -132,9 +132,10 @@ pub struct QueueItem {
 
 impl Queue {
     /// Item `index`'s time remaining at `turn`, in ms: only the first item
-    /// runs.
-    #[expect(dead_code, reason = "the details panel (C24) reads them")]
-    pub fn remaining_ms(&self, index: usize, turn: u32) -> f64 {
+    /// runs. `turn` is fractional so the panel can tick between turns, and
+    /// may be before the turn it was sent on, as a frame shows the turn
+    /// before the last until it ends.
+    pub fn remaining_ms(&self, index: usize, turn: f64) -> f64 {
         let Some(item) = self.items.get(index) else {
             return 0.0;
         };
@@ -142,7 +143,7 @@ impl Queue {
         if index > 0 || item.paused {
             return sent;
         }
-        (sent - TURN_MS * f64::from(turn.saturating_sub(self.turn))).max(0.0)
+        (sent - TURN_MS * (turn - f64::from(self.turn))).max(0.0)
     }
 }
 

@@ -39,7 +39,10 @@
 //!   acceleration in m/s^2, u8 1 when it sinks like a ship}: every
 //!   template's `Decay`, how its corpse or rubble sinks and goes. Then
 //!   count x {path under art/textures/ui/session/portraits, as Identity's
-//!   Icon names it, file ref of a portrait}.
+//!   Icon names it, file ref of a portrait}. Then count x {technology
+//!   name, its path under simulation/data/technologies without `.json`,
+//!   its icon's path in the portrait list}: what a queued technology
+//!   shows.
 //! - actor manifest "SPCA": count x object. Object 0 is the actor, the rest
 //!   every actor it can prop, transitively, so one fetch resolves an
 //!   entity. An object is {name, count x definition, count x {u8 quality,
@@ -109,7 +112,7 @@
 use crate::half::f16_bits;
 use crate::half::f16_to_f32;
 
-pub const VERSION: u8 = 12;
+pub const VERSION: u8 = 13;
 /// The largest side of each texture detail tier, which a viewer's
 /// texture quality picks from: low, medium and the whole chain as the
 /// engine uploads it at its default quality.
@@ -250,6 +253,8 @@ pub struct Index {
     pub sinking: Vec<(String, Sinking)>,
     /// By Identity's Icon, relative to art/textures/ui/session/portraits.
     pub portraits: Vec<(String, FileRef)>,
+    /// Technology -> its icon, a key of `portraits`.
+    pub technology_icons: Vec<(String, String)>,
 }
 
 /// A template's `Decay`, as `CCmpDecay` sinks a local entity of it.
@@ -591,6 +596,11 @@ impl Index {
             out.string(icon);
             out.file(*portrait);
         }
+        out.count(self.technology_icons.len());
+        for (technology, icon) in &self.technology_icons {
+            out.string(technology);
+            out.string(icon);
+        }
         out.0
     }
 
@@ -697,6 +707,9 @@ impl Index {
         let portraits = (0..input.count()?)
             .map(|_| Ok((input.string()?, input.file()?)))
             .collect::<Result<_, &'static str>>()?;
+        let technology_icons = (0..input.count()?)
+            .map(|_| Ok((input.string()?, input.string()?)))
+            .collect::<Result<_, &'static str>>()?;
         input.finish()?;
         Ok(Index {
             actors,
@@ -712,6 +725,7 @@ impl Index {
             civs,
             sinking,
             portraits,
+            technology_icons,
         })
     }
 }

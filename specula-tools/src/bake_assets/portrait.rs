@@ -13,6 +13,7 @@ use fast_image_resize::Resizer;
 use fast_image_resize::images::Image;
 
 pub const DIR: &str = "art/textures/ui/session/portraits";
+const TECHNOLOGIES: &str = "simulation/data/technologies";
 /// Larger sources are scaled down to this, smaller ones kept: one file per
 /// portrait, sharp enough for the panel on a high density screen.
 const SIDE: u32 = 128;
@@ -70,6 +71,52 @@ fn list(dir: &Path, prefix: &str, out: &mut Vec<String>) -> Result<(), String> {
             }
         } else if name.ends_with(".png") {
             out.push(path);
+        }
+    }
+    Ok(())
+}
+
+/// Each technology under `mod_dir` with an icon, by its path under
+/// `TECHNOLOGIES` without `.json`, -> the icon relative to `DIR`, as
+/// `GetTechnologyData` names it; and the files that could not be read.
+pub fn technology_icons(mod_dir: &Path) -> (Vec<(String, String)>, Vec<String>) {
+    let root = mod_dir.join(TECHNOLOGIES);
+    let mut names = Vec::new();
+    let mut errors = Vec::new();
+    if let Err(error) = list_json(&root, "", &mut names) {
+        errors.push(error);
+    }
+    names.sort();
+    let mut icons = Vec::new();
+    for name in names {
+        let path = root.join(format!("{name}.json"));
+        let value = fs::read(&path)
+            .map_err(|error| error.to_string())
+            .and_then(|bytes| {
+                serde_json::from_slice::<serde_json::Value>(&bytes)
+                    .map_err(|error| error.to_string())
+            });
+        match value {
+            Ok(value) => {
+                if let Some(icon) = value.get("icon").and_then(serde_json::Value::as_str) {
+                    icons.push((name, format!("technologies/{icon}")));
+                }
+            }
+            Err(error) => errors.push(format!("{TECHNOLOGIES}/{name}.json: {error}")),
+        }
+    }
+    (icons, errors)
+}
+
+fn list_json(dir: &Path, prefix: &str, out: &mut Vec<String>) -> Result<(), String> {
+    let entries = fs::read_dir(dir).map_err(|error| format!("{}: {error}", dir.display()))?;
+    for entry in entries {
+        let entry = entry.map_err(|error| error.to_string())?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if entry.path().is_dir() {
+            list_json(&entry.path(), &format!("{prefix}{name}/"), out)?;
+        } else if let Some(stem) = name.strip_suffix(".json") {
+            out.push(format!("{prefix}{stem}"));
         }
     }
     Ok(())

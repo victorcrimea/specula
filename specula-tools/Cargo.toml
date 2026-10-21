@@ -43,5 +43,6 @@ opus = "0.4"
 png = "0.18"
 roxmltree = "0.21"
 rubato = "5"
+serde_json = "1.0.151"
 specula-assets = { path = "../specula-assets" }
 webp = { version = "0.3.1", default-features = false }

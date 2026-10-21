@@ -627,6 +627,12 @@ impl App {
         }
         self.play_sounds(now, progress);
         self.follow_selection();
+        // The frame moves from the turn before the scene's to the scene's.
+        if let Some(details) = &mut self.details
+            && !self.renderer.selected().is_empty()
+        {
+            details.tick(f64::from(self.scene.turn) - 1.0 + f64::from(progress));
+        }
         timing::frame(page_now() - start, drew);
     }
 
@@ -659,12 +665,15 @@ impl App {
         self.details_index = index;
         self.details_selected = selected.to_vec();
         let portrait = |icon: &str| store.as_ref()?.borrow().portrait_url(icon);
+        let technology_portrait =
+            |technology: &str| store.as_ref()?.borrow().technology_portrait_url(technology);
         details.update(&panel::View {
             scene: &self.scene,
             selected,
             palette: &self.palette,
             perspective: self.perspective,
             portrait: &portrait,
+            technology_portrait: &technology_portrait,
         });
     }
 

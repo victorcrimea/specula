@@ -1946,6 +1946,7 @@ dependencies = [
  "png",
  "roxmltree",
  "rubato",
+ "serde_json",
  "specula-assets",
  "webp",
 ]

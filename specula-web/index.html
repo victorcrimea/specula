@@ -102,6 +102,7 @@ html, body { margin: 0; height: 100%; background: #0f1214; }
 #details .center { justify-content: center; text-align: center; }
 #details .right { justify-content: flex-end; text-align: right; }
 #details .sans-stroke-12 { font-size: 12px; font-weight: 400; }
+#details .sans-stroke-14 { font-size: 14px; font-weight: 400; }
 #details .sans-bold-stroke-13 { font-size: 13px; font-weight: 700; }
 #details .sans-bold-stroke-14 { font-size: 14px; font-weight: 700; }
 #details .gold { color: var(--gui-gold); }
@@ -155,7 +156,7 @@ html, body { margin: 0; height: 100%; background: #0f1214; }
 #details-multiple { left: 6px; top: 6px; width: 216px; height: 154px; }
 /* iconButton: portrait_black.dds, 42 added to each channel under the
    mouse (snIconPortraitOver). */
-#details .group, #details .cell { position: absolute; width: 38px; height: 38px;
+#details .group, #details .cell, #details .item { position: absolute; width: 38px; height: 38px;
   padding: 0; margin: 0; border: 0;
   background: var(--gui-portrait-black) 0 0 / 100% 100%; }
 /* A button takes neither colour nor font from its parent by default. */
@@ -163,9 +164,9 @@ html, body { margin: 0; height: 100%; background: #0f1214; }
 #details .group:hover::after { content: ""; position: absolute; inset: 0;
   background: rgb(42, 42, 42); mix-blend-mode: plus-lighter; pointer-events: none; }
 #details :is(.group, .cell) > .owner { position: absolute; inset: 0; }
-#details :is(.group, .cell) > img { position: absolute; left: 3px; top: 3px;
+#details :is(.group, .cell, .item) > img { position: absolute; left: 3px; top: 3px;
   width: 32px; height: 32px; display: block; }
-#details :is(.group, .cell) > .text { inset: 0; }
+#details :is(.group, .cell, .item) > .text { inset: 0; }
 #details-count-badge { left: 181px; top: 4px; width: 32px; height: 32px;
   background: var(--gui-groups) 0 0 / 100% 100% no-repeat; }
 #details-count { inset: 0; }
@@ -186,6 +187,29 @@ html, body { margin: 0; height: 100%; background: #0f1214; }
 /* unitGarrisonPanel at 20 6, healthGarrison at -14 1 -7 100%-49 of it. */
 #garrison-cells { position: absolute; left: 20px; top: 6px; }
 #garrison-health { left: 6px; top: 7px; width: 7px; height: 110px; }
+/* The panels above the details on a phone, one box there. */
+#details-above { display: contents; }
+/* unitQueuePanel at 4 -56 100% 0 of unitCommands, which is 50%+110 of the
+   bottom bar and 166 px high: 228 px right of the details and 166 px up.
+   resizePanel makes it rows * 40 + (rows + 2) * 4 high, growing upwards.
+   The command panel under it is not drawn (V14). */
+#queue { position: absolute; left: 228px; bottom: 166px; width: 398px;
+  height: calc(var(--rows, 1) * 44px + 8px); }
+#queue-background { position: absolute; left: 4px; top: 4px; right: 4px; bottom: 4px;
+  background: var(--gui-panel-shader) 0 0 / 100% 100%; }
+#queue-production { position: absolute; left: -4px; top: -2px; width: 56px; height: 56px;
+  background: var(--gui-production) 0 0 / 100% 100% no-repeat; }
+#queue-time { inset: 0; }
+#queue-cells { position: absolute; left: 48px; top: 6px; }
+/* queueProgressSlider over the undone part, from the top down. */
+#details .item > .slider { position: absolute; left: 3px; width: 32px; bottom: 3px;
+  background: rgba(0, 255, 0, 0.502); }
+#details .item.ghost > .slider { background: rgba(0, 150, 250, 0.196); }
+#details .item > .paused { position: absolute; left: 3px; top: 3px; width: 32px; height: 32px;
+  background: var(--gui-stop) 0 0 / 100% 100%; }
+/* "color:0 0 0 127:grayscale:": grayscale under a half black image. */
+#details .item.ghost > img { filter: grayscale(1); }
+#details .item.paused > img { filter: grayscale(1) brightness(0.502); }
 /* Not the engine's: on a phone both panels are scaled down to leave the
    view free, the details sit right of the minimap so neither moves when
    the selection changes, and the details fold to a strip. */
@@ -203,7 +227,14 @@ html, body { margin: 0; height: 100%; background: #0f1214; }
   /* 8 px gutter, the minimap's 200 px at 0.72, 8 px gap. */
   #details { left: 160px; transform: scale(var(--details-scale)); transform-origin: 0 100%; }
   /* Above the details and their fold tab. */
-  #garrison { left: 0; bottom: calc(var(--details-height) + 14px); height: auto; }
+  #details-above { display: flex; flex-direction: column; gap: 2px; position: absolute;
+    left: 0; bottom: calc(var(--details-height) + 14px); }
+  #garrison { position: relative; left: 0; bottom: auto; height: auto; }
+  /* As wide as the details, its rows wrapping. */
+  #queue { position: relative; left: 0; bottom: auto; width: 228px; height: auto; }
+  #queue-cells { position: relative; left: 0; top: 0; display: grid;
+    grid-template-columns: repeat(4, 38px); gap: 1px; padding: 6px 13px 6px 48px; }
+  #queue-cells > .item { position: relative; left: 0 !important; top: 0 !important; }
   /* As tall as its rows rather than the engine's three. The rows of
      hud_panels.png it shows end at the texture's bottom, so 100% puts
      them there at any height. */
@@ -213,7 +244,7 @@ html, body { margin: 0; height: 100%; background: #0f1214; }
     grid-template-columns: repeat(4, 38px); gap: 1px; padding: 6px 13px 7px 20px; }
   #garrison-cells > .cell { position: relative; left: 0 !important; top: 0 !important; }
   #garrison-health { height: auto; bottom: 7px; }
-  #details.collapsed #garrison { display: none; }
+  #details.collapsed #details-above { display: none; }
   #details-toggle, #minimap-toggle { display: block; position: absolute; left: 50%; top: -14px;
     width: 40px; height: 14px; translate: -50% 0; padding: 0; border: 1px solid #3a4248;
     border-bottom: none; border-radius: 4px 4px 0 0; background: rgba(15, 18, 20, 0.9); }
@@ -437,12 +468,21 @@ body:not([data-debug="storage"]) #stats-storage { display: none; }
 <span class="edge top"></span><span class="edge right"></span><span class="edge bottom"></span><span class="edge left"></span>
 <span class="edge corner top-right"></span><span class="edge corner bottom-right"></span><span class="edge corner bottom-left"></span><span class="edge corner top-left"></span>
 </div>
+<div id="details-above">
+<div id="queue" class="gui-frame" hidden>
+<div id="queue-background"></div>
+<div id="queue-production"><div id="queue-time" class="text center sans-stroke-14"></div></div>
+<div id="queue-cells"></div>
+<span class="edge top"></span><span class="edge right"></span><span class="edge bottom"></span><span class="edge left"></span>
+<span class="edge corner top-right"></span><span class="edge corner bottom-right"></span><span class="edge corner bottom-left"></span><span class="edge corner top-left"></span>
+</div>
 <div id="garrison" class="gui-frame" hidden>
 <div id="garrison-background"></div>
 <div id="garrison-cells"></div>
 <div id="garrison-health" class="box bar"><div class="border"></div><div class="health-bg"></div><div id="garrison-health-bar" class="health-fg"></div><div class="shine vertical"></div></div>
 <span class="edge top"></span><span class="edge right"></span><span class="edge bottom"></span><span class="edge left"></span>
 <span class="edge corner top-right"></span><span class="edge corner bottom-right"></span><span class="edge corner bottom-left"></span><span class="edge corner top-left"></span>
+</div>
 </div>
 <div id="details-strip">
 <img id="details-strip-icon" alt="">
