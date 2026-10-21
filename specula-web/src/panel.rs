@@ -42,7 +42,7 @@ const SLIDER_SIDE: f64 = 32.0;
 /// `captureBar[n]` and `captureBarMultiple[n]`, `g_MaxPlayers + 1`.
 const CAPTURE_SEGMENTS: usize = 9;
 /// `getPlayerColor(id, 128)` and `(id, 160)`, as CSS alphas.
-const BAND_ALPHA: f64 = 128.0 / 255.0;
+pub(crate) const BAND_ALPHA: f64 = 128.0 / 255.0;
 const GROUP_ALPHA: f64 = 160.0 / 255.0;
 /// `ResourceSupply`'s `isInfinite`, the hook's template flag.
 const INFINITE_SUPPLY: u32 = 1024;
@@ -50,8 +50,8 @@ const INFINITE_SUPPLY: u32 = 1024;
 const KILL_BEFORE_GATHER_CLASS: &str = "Animal";
 
 /// An element and what was last written to it.
-struct Out {
-    element: HtmlElement,
+pub(crate) struct Out {
+    pub(crate) element: HtmlElement,
     text: Option<String>,
     style: Option<String>,
     class: Option<String>,
@@ -60,7 +60,7 @@ struct Out {
 }
 
 impl Out {
-    fn new(element: HtmlElement) -> Self {
+    pub(crate) fn new(element: HtmlElement) -> Self {
         Out {
             element,
             text: None,
@@ -71,18 +71,18 @@ impl Out {
         }
     }
 
-    fn find(document: &Document, id: &str) -> Result<Self, String> {
+    pub(crate) fn find(document: &Document, id: &str) -> Result<Self, String> {
         Ok(Out::new(crate::element(document, id)?))
     }
 
-    fn text(&mut self, text: &str) {
+    pub(crate) fn text(&mut self, text: &str) {
         if self.text.as_deref() != Some(text) {
             self.element.set_text_content(Some(text));
             self.text = Some(text.to_string());
         }
     }
 
-    fn style(&mut self, style: String) {
+    pub(crate) fn style(&mut self, style: String) {
         if self.style.as_ref() != Some(&style) {
             let _ = self.element.set_attribute("style", &style);
             self.style = Some(style);
@@ -90,14 +90,14 @@ impl Out {
     }
 
     /// The element's classes beyond those of the page.
-    fn class(&mut self, class: String) {
+    pub(crate) fn class(&mut self, class: String) {
         if self.class.as_ref() != Some(&class) {
             let _ = self.element.set_attribute("class", &class);
             self.class = Some(class);
         }
     }
 
-    fn src(&mut self, src: Option<String>) {
+    pub(crate) fn src(&mut self, src: Option<String>) {
         let src = src.unwrap_or_default();
         if self.src.as_ref() != Some(&src) {
             if src.is_empty() {
@@ -109,7 +109,7 @@ impl Out {
         }
     }
 
-    fn hidden(&mut self, hidden: bool) {
+    pub(crate) fn hidden(&mut self, hidden: bool) {
         if self.hidden != Some(hidden) {
             self.element.set_hidden(hidden);
             self.hidden = Some(hidden);
@@ -118,14 +118,19 @@ impl Out {
 }
 
 /// A bar's foreground and the capture bar's segments, by player.
-struct CaptureBar {
+pub(crate) struct CaptureBar {
     bar: Out,
     segments: Vec<Out>,
 }
 
 impl CaptureBar {
     fn find(document: &Document, bar: &str) -> Result<Self, String> {
-        let bar = Out::find(document, bar)?;
+        CaptureBar::new(document, crate::element(document, bar)?)
+    }
+
+    /// Over `bar`, which holds a `.segments`.
+    pub(crate) fn new(document: &Document, bar: HtmlElement) -> Result<Self, String> {
+        let bar = Out::new(bar);
         let parent = bar
             .element
             .query_selector(".segments")
@@ -145,7 +150,13 @@ impl CaptureBar {
 
     /// `setCaptureBarPart` for each (player, points) in drawing order, as
     /// fractions of `max` laid end to end, across or from the top.
-    fn show(&mut self, parts: &[(usize, f64)], max: f64, palette: &[u32], vertical: bool) {
+    pub(crate) fn show(
+        &mut self,
+        parts: &[(usize, f64)],
+        max: f64,
+        palette: &[u32],
+        vertical: bool,
+    ) {
         for (player, segment) in self.segments.iter_mut().enumerate() {
             segment.hidden(!parts.iter().any(|(id, _)| *id == player));
         }
@@ -311,7 +322,17 @@ struct Queued {
 /// What a click on the panel asks of the page.
 pub enum Request {
     Follow(u32),
-    Group { ids: Vec<u32>, remove: bool },
+    Group {
+        ids: Vec<u32>,
+        remove: bool,
+    },
+    /// A hero button: `selection.reset` unless `add`, then `addList`.
+    Select {
+        id: u32,
+        add: bool,
+    },
+    /// `selectAndMoveTo`.
+    SelectAndFollow(u32),
 }
 
 /// What one update reads.
@@ -1101,7 +1122,7 @@ fn grid_position(i: usize, row: usize) -> String {
     )
 }
 
-fn create<T: JsCast>(document: &Document, tag: &str) -> Result<T, String> {
+pub(crate) fn create<T: JsCast>(document: &Document, tag: &str) -> Result<T, String> {
     document
         .create_element(tag)
         .ok()
@@ -1109,7 +1130,7 @@ fn create<T: JsCast>(document: &Document, tag: &str) -> Result<T, String> {
         .ok_or_else(|| format!("cannot create a <{tag}>"))
 }
 
-fn string(scene: &Scene, index: u32) -> Option<&str> {
+pub(crate) fn string(scene: &Scene, index: u32) -> Option<&str> {
     let index = (index as usize).checked_sub(1)?;
     scene.strings.get(index).map(String::as_str)
 }
@@ -1130,7 +1151,7 @@ fn player_color(palette: &[u32], owner: i32) -> u32 {
         .unwrap_or(0)
 }
 
-fn template_details(scene: &Scene, template: u32) -> Option<&TemplateDetails> {
+pub(crate) fn template_details(scene: &Scene, template: u32) -> Option<&TemplateDetails> {
     scene.template_details.get(template as usize)?.as_ref()
 }
 
@@ -1202,7 +1223,7 @@ fn fraction(value: f64, max: f64) -> f64 {
 }
 
 /// 0xFFRRGGBB at `alpha`.
-fn css_color(color: u32, alpha: f64) -> String {
+pub(crate) fn css_color(color: u32, alpha: f64) -> String {
     format!(
         "rgba({}, {}, {}, {alpha:.3})",
         color >> 16 & 0xFF,

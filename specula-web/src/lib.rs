@@ -28,6 +28,7 @@ mod stream;
 mod terrain;
 mod territory;
 mod timing;
+mod top;
 mod unit;
 mod variation;
 mod warmup;
@@ -82,6 +83,7 @@ use crate::stream::Scene;
 use crate::stream::Sound;
 use crate::stream::SoundTarget;
 use crate::terrain::TerrainImage;
+use crate::top::TopPanel;
 use crate::warmup::Warmup;
 use crate::worker::COMMAND_CURRENT_MATCH;
 use crate::worker::COMMAND_DETAIL;
@@ -275,6 +277,8 @@ trait View {
     /// Selects only `ids`, or with `remove` leaves them out of the
     /// selection: a selection panel group button.
     fn select_group(&mut self, _ids: &[u32], _remove: bool) {}
+    /// Selects only `id`, or with `add` adds it: a hero button.
+    fn select_entity(&mut self, _id: u32, _add: bool) {}
     /// The asset bake it draws from, which also holds the sounds.
     fn asset_store(&self) -> Option<Rc<RefCell<Store>>> {
         None
@@ -459,6 +463,12 @@ struct App {
     details_dirty: bool,
     details_selected: Vec<u32>,
     details_index: bool,
+    /// Only the 3D page has the top panel.
+    top: Option<TopPanel>,
+    /// A turn, the palette or the perspective changed since it was filled;
+    /// the portrait index is compared.
+    top_dirty: bool,
+    top_index: bool,
 }
 
 /// The sound toggle and volumes, and what they play.
@@ -591,6 +601,7 @@ impl App {
             self.renames.clear();
             self.renderer.set_scene(&self.scene, &self.palette);
             self.details_dirty = true;
+            self.top_dirty = true;
             if let Some(minimap) = &mut self.minimap {
                 minimap.set_scene(&self.scene, &self.palette);
             }
@@ -627,6 +638,7 @@ impl App {
         }
         self.play_sounds(now, progress);
         self.follow_selection();
+        self.update_top(now);
         // The frame moves from the turn before the scene's to the scene's.
         if let Some(details) = &mut self.details
             && !self.renderer.selected().is_empty()
@@ -648,10 +660,7 @@ impl App {
             return;
         };
         for request in details.take_requests() {
-            match request {
-                Request::Follow(id) => self.renderer.follow(id),
-                Request::Group { ids, remove } => self.renderer.select_group(&ids, remove),
-            }
+            apply_request(&mut *self.renderer, request, &self.scene);
         }
         let store = self.renderer.asset_store();
         let index = store
@@ -675,6 +684,35 @@ impl App {
             portrait: &portrait,
             technology_portrait: &technology_portrait,
         });
+    }
+
+    /// Fills the top panel when its sources changed, and runs its fades.
+    fn update_top(&mut self, now: f64) {
+        let Some(top) = &mut self.top else {
+            return;
+        };
+        for request in top.take_requests() {
+            apply_request(&mut *self.renderer, request, &self.scene);
+        }
+        let store = self.renderer.asset_store();
+        let index = store
+            .as_ref()
+            .is_some_and(|store| store.borrow().index_name().is_some());
+        if self.top_dirty || index != self.top_index {
+            self.top_dirty = false;
+            self.top_index = index;
+            let portrait = |icon: &str| store.as_ref()?.borrow().portrait_url(icon);
+            top.update(
+                &top::View {
+                    scene: &self.scene,
+                    palette: &self.palette,
+                    perspective: self.perspective,
+                    portrait: &portrait,
+                },
+                now,
+            );
+        }
+        top.tick(now);
     }
 
     /// Covers the civs, the terrains and the entities on the map now.
@@ -977,6 +1015,13 @@ async fn run(
             .inspect_err(|error| web_sys::console::error_1(&format!("details: {error}").into()))
             .ok(),
     };
+    let top = match page {
+        Page::Map => None,
+        // An older page has no top panel; the match still shows.
+        Page::Observer => TopPanel::new(&document)
+            .inspect_err(|error| web_sys::console::error_1(&format!("top panel: {error}").into()))
+            .ok(),
+    };
     let warmup = match page {
         Page::Map => None,
         Page::Observer => Some(Warmup::new(element(&document, "warmup")?)),
@@ -1044,9 +1089,13 @@ async fn run(
         details_dirty: true,
         details_selected: Vec::new(),
         details_index: false,
+        top,
+        top_dirty: true,
+        top_index: false,
     }));
     wire_controls(&app);
     wire_details(&app);
+    wire_top(&app);
     if page == Page::Observer {
         let shadows: HtmlSelectElement = element(&document, "shadows")?;
         wire_shadows(&app, shadows.clone());
@@ -1254,6 +1303,53 @@ fn wire_details(app: &Rc<RefCell<App>>) {
         });
         button.set_oncontextmenu(Some(on_menu.as_ref().unchecked_ref()));
         on_menu.forget();
+    }
+}
+
+/// What a panel's button asked for.
+fn apply_request(renderer: &mut dyn View, request: Request, scene: &Scene) {
+    match request {
+        Request::Follow(id) => renderer.follow(id),
+        Request::Group { ids, remove } => renderer.select_group(&ids, remove),
+        Request::Select { id, add } => renderer.select_entity(id, add),
+        // `selectAndMoveTo` does nothing without a position.
+        Request::SelectAndFollow(id) => {
+            if scene.dots.contains_key(&id) {
+                renderer.select_entity(id, false);
+                renderer.follow(id);
+            }
+        }
+    }
+}
+
+/// A hero button selects its entity, with Shift (selection.add) adds it,
+/// and on a double click also follows it with the camera.
+fn wire_top(app: &Rc<RefCell<App>>) {
+    let buttons = {
+        let app = app.borrow();
+        let Some(top) = &app.top else {
+            return;
+        };
+        top.hero_buttons().cloned().collect::<Vec<_>>()
+    };
+    for (index, button) in buttons.into_iter().enumerate() {
+        let target = Rc::clone(app);
+        let on_click = Closure::<dyn FnMut(MouseEvent)>::new(move |event: MouseEvent| {
+            if let Some(top) = &target.borrow().top {
+                top.hero_clicked(index, event.shift_key());
+            }
+        });
+        button.set_onclick(Some(on_click.as_ref().unchecked_ref()));
+        // The panel lives as long as the page, so its handlers do too.
+        on_click.forget();
+        let target = Rc::clone(app);
+        let on_double = Closure::<dyn FnMut()>::new(move || {
+            if let Some(top) = &target.borrow().top {
+                top.hero_double_clicked(index);
+            }
+        });
+        button.set_ondblclick(Some(on_double.as_ref().unchecked_ref()));
+        on_double.forget();
     }
 }
 

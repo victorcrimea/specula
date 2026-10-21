@@ -8,7 +8,7 @@
 <style>
 html, body { margin: 0; height: 100%; background: #0f1214; }
 #view { display: block; width: 100vw; height: 100vh; }
-#controls { position: fixed; top: 8px; left: 8px; right: 96px; display: flex;
+#controls { position: fixed; top: calc(var(--top-height) + 8px); left: 8px; right: 128px; display: flex;
   flex-wrap: wrap; align-items: center; gap: 6px; font: 13px system-ui, sans-serif; }
 #volumes { display: flex; flex-wrap: wrap; align-items: center; gap: 6px;
   padding: 2px 8px; color: #e6e9eb; background: rgba(15, 18, 20, 0.85);
@@ -26,7 +26,7 @@ html, body { margin: 0; height: 100%; background: #0f1214; }
 #controls button[aria-pressed="true"], #playback button[aria-pressed="true"] {
   border-color: #8fa3b0; }
 #controls select:disabled, #playback :disabled { opacity: 0.5; }
-#loading { position: fixed; left: 50%; top: 44px; width: min(240px, calc(100vw - 200px));
+#loading { position: fixed; left: 50%; top: calc(var(--top-height) + 44px); width: min(240px, calc(100vw - 200px));
   transform: translateX(-50%); padding: 3px 6px; border: 1px solid #3a4248;
   border-radius: 4px; background: rgba(15, 18, 20, 0.85);
   font: 11px system-ui, sans-serif; color: #e6e9eb; white-space: nowrap;
@@ -39,6 +39,64 @@ html, body { margin: 0; height: 100%; background: #0f1214; }
 #bandbox { position: fixed; box-sizing: border-box; border: 1px solid black;
   box-shadow: inset 0 0 0 1px white; pointer-events: none; }
 #bandbox[hidden] { display: none; }
+/* topPanel (gui/session/TopPanel.xml): 36 px across the screen, with
+   the counters of top_panel/Counters.xml. Observers get one row of
+   counters per player, which the engine hides from them; the panel folds
+   away, its tab hanging under it. --top-rows comes from the wasm. */
+:root { --top-scale: 1; --top-height: calc(36px * var(--top-scale)); }
+:root:has(#top-players:not([hidden])) { --top-height: calc(var(--top-rows, 1) * 36px * var(--top-scale)); }
+:root:has(#top-panel.collapsed), :root:not(:has(#top-panel)) { --top-height: 0px; }
+#top-panel { position: fixed; left: 0; top: 0; right: 0; height: 0;
+  font-family: "0ad sans", "0ad sans fallback", sans-serif; color: white;
+  user-select: none; -webkit-user-select: none; }
+#top-panel [hidden] { display: none; }
+#top-bar { position: absolute; left: -3px; right: -3px; top: 0; height: var(--top-height);
+  background: var(--gui-ribbon-bg) 0 0 / 100% 100%; }
+#top-panel.collapsed #top-bar { display: none; }
+/* The lines are the bar's sprite, under the counters, whose gatherer
+   text reaches past the bar's bottom as in the engine. */
+#top-bar > .edge { position: absolute; left: 4px; right: 4px; height: 4px; pointer-events: none;
+  background: var(--gui-line-horiz) 0 0 / 64px 4px repeat-x; }
+#top-bar > .top { top: 0; }
+#top-bar > .bottom { bottom: 0; }
+#top-content { position: absolute; left: 3px; top: 0; transform: scale(var(--top-scale));
+  transform-origin: 0 0; }
+#top-panel .counter { position: absolute; top: 0; width: 73px; height: 36px; }
+#top-panel .counter > .icon { position: absolute; left: 2px; top: 0; width: 36px; height: 36px;
+  background: none 0 0 / 100% 100% no-repeat; }
+#top-panel .counter > .count { left: 33px; top: 4px; width: 147px; height: 18px; }
+/* gathererCounts is bottom-aligned in 20..38, which puts the digits on
+   the bar's bottom line; here they sit just above it. */
+#top-panel .counter > .gatherers { left: 33px; top: 17px; width: 167px; height: 15px; }
+#top-panel .row { position: absolute; left: 0; top: calc(var(--row) * 36px); height: 36px; }
+#top-panel .row.defeated { opacity: 0.5; }
+/* The details panel's civ band, phase emblem over the player's colour. */
+#top-panel .band { position: absolute; left: 4px; top: 6px; width: 192px; height: 24px; }
+#top-panel .band > .fill { position: absolute; inset: 0; }
+#top-panel .band > .phase { background: none 0 0 / 100% 100% no-repeat; }
+#top-panel .band > .name { inset: 0; }
+#top-panel .row > .counters { position: absolute; left: 200px; top: 0; }
+/* Left of the clock, clear of the controls on any width. */
+#top-toggle { position: absolute; right: 80px; top: var(--top-height); width: 40px; height: 14px;
+  padding: 0; border: 1px solid #3a4248; border-top: none;
+  border-radius: 0 0 4px 4px; background: rgba(15, 18, 20, 0.9); cursor: pointer; }
+#top-toggle::before { content: ""; position: absolute; left: 50%; top: 5px; width: 6px; height: 6px;
+  translate: -50% 0; rotate: 225deg; border-right: 2px solid #e6e9eb; border-bottom: 2px solid #e6e9eb; }
+#top-panel.collapsed #top-toggle::before { top: 1px; rotate: 45deg; }
+/* PanelEntities.xml: up to 19 iconButtons in a row, 50 px and a 1 px
+   margin, under the controls rather than right under the bar. */
+#heroes { position: absolute; left: 2px; top: calc(var(--top-height) + 42px);
+  width: calc((100vw - 4px) / var(--top-scale)); display: flex; flex-wrap: wrap; gap: 6px 1px;
+  transform: scale(var(--top-scale)); transform-origin: 0 0; pointer-events: none; }
+#heroes .hero { position: relative; width: 50px; height: 50px; padding: 0; margin: 0; border: 0;
+  background: var(--gui-portrait-black) 0 0 / 100% 100%; cursor: pointer; pointer-events: auto; }
+#heroes .hero:hover::after { content: ""; position: absolute; inset: 0;
+  background: rgb(42, 42, 42); mix-blend-mode: plus-lighter; pointer-events: none; }
+#heroes .hero > img { position: absolute; left: 5px; top: 5px; width: 40px; height: 40px; display: block; }
+#heroes .hero > .hit { position: absolute; left: 5px; top: 5px; width: 40px; height: 40px; }
+#heroes .hero > .bar { position: absolute; left: 3px; top: 45px; width: 44px; height: 5px; }
+#heroes .hero > .bar.capture { top: 50px; }
+#heroes .hero > .bar.capture.top { top: 45px; }
 /* The session GUI's bottom panels, laid out in the engine's pixels at
    gui.scale 1 (gui/session/session.xml, selection_panels_middle/), their
    sprites from gui/session/sprites.xml with the textures of gui/session.css.
@@ -95,32 +153,33 @@ html, body { margin: 0; height: 100%; background: #0f1214; }
 #details .bottom-edged { background:
   var(--gui-panel-shader) 0 0 / 100% 100% no-repeat,
   var(--gui-panel-shader-top-edge) 0 0 / 100% 1px no-repeat; }
-/* The engine's `-stroke` fonts: a 1 px black outline. */
-#details .text { position: absolute; display: flex; align-items: center;
+/* The engine's `-stroke` fonts: a 1 px black outline. The top panel
+   shares the text and bar styles. */
+:is(#details, #top-panel) .text { position: absolute; display: flex; align-items: center;
   white-space: pre; overflow: hidden; line-height: 1.1;
   -webkit-text-stroke: 2px black; paint-order: stroke fill; }
-#details .center { justify-content: center; text-align: center; }
-#details .right { justify-content: flex-end; text-align: right; }
-#details .sans-stroke-12 { font-size: 12px; font-weight: 400; }
-#details .sans-stroke-14 { font-size: 14px; font-weight: 400; }
-#details .sans-bold-stroke-13 { font-size: 13px; font-weight: 700; }
-#details .sans-bold-stroke-14 { font-size: 14px; font-weight: 700; }
-#details .gold { color: var(--gui-gold); }
+:is(#details, #top-panel) .center { justify-content: center; text-align: center; }
+:is(#details, #top-panel) .right { justify-content: flex-end; text-align: right; }
+:is(#details, #top-panel) .sans-stroke-12 { font-size: 12px; font-weight: 400; }
+:is(#details, #top-panel) .sans-stroke-14 { font-size: 14px; font-weight: 400; }
+:is(#details, #top-panel) .sans-bold-stroke-13 { font-size: 13px; font-weight: 700; }
+:is(#details, #top-panel) .sans-bold-stroke-14 { font-size: 14px; font-weight: 700; }
+:is(#details, #top-panel) .gold { color: var(--gui-gold); }
 /* A bar: barBorder around it, the background, the foreground and
    statsBarShaderHorizontal or ...Vertical over them. */
-#details .bar > * { position: absolute; left: 0; top: 0; right: 0; bottom: 0; }
-#details .bar > .border { left: -1px; top: -1px; right: -1px; bottom: -1px;
+:is(#details, #top-panel) .bar > * { position: absolute; left: 0; top: 0; right: 0; bottom: 0; }
+:is(#details, #top-panel) .bar > .border { left: -1px; top: -1px; right: -1px; bottom: -1px;
   background: rgba(0, 0, 0, 0.502); }
-#details .bar > .shine.horizontal { background: var(--gui-bar-lighting-horizontal)
+:is(#details, #top-panel) .bar > .shine.horizontal { background: var(--gui-bar-lighting-horizontal)
   0 0 / 170.667% 114.286% no-repeat; }
-#details .bar > .shine.vertical { background: var(--gui-bar-lighting-vertical)
+:is(#details, #top-panel) .bar > .shine.vertical { background: var(--gui-bar-lighting-vertical)
   0 0 / 114.286% 170.667% no-repeat; }
-#details .health-bg { background: rgb(255, 0, 0); }
-#details .health-fg { background: rgb(0, 200, 0); }
+:is(#details, #top-panel) .health-bg { background: rgb(255, 0, 0); }
+:is(#details, #top-panel) .health-fg { background: rgb(0, 200, 0); }
 #details .resource-bg, #details .experience-bg { background: rgb(43, 42, 40); }
 #details .resource-fg { background: rgb(255, 165, 0); }
 #details .experience-fg { background: white; }
-#details .segments > div { position: absolute; }
+:is(#details, #top-panel) .segments > div { position: absolute; }
 /* detailsAreaSingle at 4 4 100%-4 100%-44. */
 #details-single { left: 4px; top: 4px; width: 220px; height: 156px; }
 #details-stats { left: 0; top: 96px; width: 220px; height: 60px; }
@@ -217,7 +276,20 @@ html, body { margin: 0; height: 100%; background: #0f1214; }
 #settings #fps-setting { display: none; }
 #details-strip { display: none; }
 @media (max-width: 700px) {
-  :root { --details-scale: 0.8; }
+  :root { --details-scale: 0.8; --top-scale: 0.72; }
+  /* The rows keep the colour band but not the name. */
+  #top-panel .band { width: 40px; }
+  #top-panel .band > .name { display: none; }
+  #top-panel .row > .counters { left: 48px; }
+  /* The tab becomes a button in the controls row, big enough for a
+     finger and away from the screen's edge; the controls keep clear of
+     it, the perspective list shrinking rather than covering it. */
+  #top-toggle { right: 64px; top: calc(var(--top-height) + 8px); width: 34px; height: 28px;
+    border-top: 1px solid #3a4248; border-radius: 4px; }
+  #top-toggle::before { top: 11px; }
+  #top-panel.collapsed #top-toggle::before { top: 7px; }
+  #controls:not(.open) { flex-wrap: nowrap; }
+  #perspective { min-width: 0; }
   #minimap-panel { left: 8px; transform: scale(0.72); }
   /* Folded, only its tab shows, at the bottom where the map was. */
   #minimap-panel.collapsed { visibility: hidden; }
@@ -268,7 +340,7 @@ html, body { margin: 0; height: 100%; background: #0f1214; }
   #details-single:has(#details-carrying-text[hidden]) .section > .bar { width: 153px; }
   /* The other controls fold into a menu, the perspective stays out. */
   #menu-open { display: block; }
-  #controls { right: auto; max-width: calc(100vw - 96px); }
+  #controls { right: auto; max-width: calc(100vw - 120px); }
   #controls:not(.open) > :not(#menu-open, #perspective) { display: none; }
   #controls.open { flex-direction: column; align-items: stretch; padding: 6px;
     background: rgba(15, 18, 20, 0.95); border: 1px solid #3a4248; border-radius: 4px;
@@ -312,7 +384,7 @@ html, body { margin: 0; height: 100%; background: #0f1214; }
   background: rgba(15, 18, 20, 0.9); border: 1px solid #6b3a34;
   border-radius: 4px; user-select: text; -webkit-user-select: text; }
 #errors:empty { display: none; }
-#hud { position: fixed; top: 44px; right: 8px; display: flex;
+#hud { position: fixed; top: calc(var(--top-height) + 44px); right: 8px; display: flex;
   flex-direction: column; align-items: flex-end; gap: 6px;
   max-width: calc(100vw - 32px); }
 /* Monospace and padded columns, so the numbers do not jump as they change. */
@@ -325,7 +397,7 @@ body:not(.debug) #errors { display: none; }
 body:not([data-debug="network"]) #stats-network,
 body:not([data-debug="profiling"]) #stats-profiling,
 body:not([data-debug="storage"]) #stats-storage { display: none; }
-#clock { position: fixed; top: 8px; right: 8px; padding: 4px 8px;
+#clock { position: fixed; top: calc(var(--top-height) + 8px); right: 8px; padding: 4px 8px;
   font: 600 15px system-ui, sans-serif; font-variant-numeric: tabular-nums;
   color: #e6e9eb; background: rgba(15, 18, 20, 0.85);
   border: 1px solid #3a4248; border-radius: 4px; }
@@ -396,6 +468,17 @@ body:not([data-debug="storage"]) #stats-storage { display: none; }
 <body>
 <canvas id="view"></canvas>
 <div id="bandbox" hidden></div>
+<div id="top-panel">
+<div id="top-bar">
+<span class="edge top"></span><span class="edge bottom"></span>
+<div id="top-content">
+<div id="top-counters"></div>
+<div id="top-players" hidden></div>
+</div>
+</div>
+<button id="top-toggle" type="button" aria-expanded="true" aria-controls="top-bar" aria-label="Fold the top panel"></button>
+<div id="heroes"></div>
+</div>
 <div id="controls">
 <button id="menu-open" type="button" aria-expanded="false" aria-controls="controls">Menu</button>
 <button id="settings-open" type="button" aria-expanded="false" aria-controls="settings">Graphics</button>
@@ -803,6 +886,28 @@ settings.</p>
     try { localStorage.setItem(key, collapsed ? "1" : "0"); } catch {}
   });
   document.getElementById("details-strip").addEventListener("click", () => toggle.click());
+})();
+</script>
+<script>
+// The top panel folds the same way; phones start folded, since the
+// player rows take much of their screen.
+(() => {
+  const panel = document.getElementById("top-panel");
+  const toggle = document.getElementById("top-toggle");
+  const key = "specula.top.collapsed";
+  const show = (collapsed) => {
+    panel.classList.toggle("collapsed", collapsed);
+    toggle.setAttribute("aria-expanded", String(!collapsed));
+    toggle.setAttribute("aria-label", collapsed ? "Unfold the top panel" : "Fold the top panel");
+  };
+  let stored = null;
+  try { stored = localStorage.getItem(key); } catch {}
+  show(stored === null ? matchMedia("(max-width: 700px)").matches : stored === "1");
+  toggle.addEventListener("click", () => {
+    const collapsed = !panel.classList.contains("collapsed");
+    show(collapsed);
+    try { localStorage.setItem(key, collapsed ? "1" : "0"); } catch {}
+  });
 })();
 </script>
 <script>

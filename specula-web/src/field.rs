@@ -401,9 +401,11 @@ enum PickInput {
     },
     Clear,
     /// A selection panel group button: `makePrimarySelection`, or with
-    /// `remove` `removeGroupFromSelection`.
+    /// `remove` `removeGroupFromSelection`; a hero button, with `add`
+    /// for Shift.
     Group {
         ids: Vec<u32>,
+        add: bool,
         remove: bool,
     },
 }
@@ -1753,7 +1755,7 @@ impl Field {
                     remove,
                 } => (self.in_band(view_proj, from, to), add, remove),
                 PickInput::Clear => (Vec::new(), false, false),
-                PickInput::Group { ids, remove } => (ids, false, remove),
+                PickInput::Group { ids, add, remove } => (ids, add, remove),
             };
             let first = if add {
                 self.selection.add_list(&ids, look)
@@ -3865,7 +3867,16 @@ impl View for Field {
     fn select_group(&mut self, ids: &[u32], remove: bool) {
         self.camera.borrow_mut().picks.push(PickInput::Group {
             ids: ids.to_vec(),
+            add: false,
             remove,
+        });
+    }
+
+    fn select_entity(&mut self, id: u32, add: bool) {
+        self.camera.borrow_mut().picks.push(PickInput::Group {
+            ids: vec![id],
+            add,
+            remove: false,
         });
     }
 

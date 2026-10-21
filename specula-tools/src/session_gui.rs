@@ -43,7 +43,7 @@ const BROTLI_QUALITY: u32 = 11;
 const BROTLI_WINDOW_BITS: u32 = 22;
 
 /// (custom property key, path under `UI`), copied as they are.
-const TEXTURES: [(&str, &str); 32] = [
+const TEXTURES: [(&str, &str); 34] = [
     ("hud-panels", "session/hud_panels.png"),
     ("line-horiz", "global/border/line_horiz.png"),
     ("line-vert", "global/border/line_vert.png"),
@@ -91,6 +91,11 @@ const TEXTURES: [(&str, &str); 32] = [
     ("resource-wood", "session/icons/resources/wood.png"),
     ("resource-stone", "session/icons/resources/stone.png"),
     ("resource-metal", "session/icons/resources/metal.png"),
+    (
+        "resource-population",
+        "session/icons/resources/population.png",
+    ),
+    ("ribbon-bg", "session/ribbon_bg.png"),
     ("repair", "session/icons/repair.png"),
     ("production", "session/icons/production.png"),
     ("stop", "session/icons/stop.png"),
