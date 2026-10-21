@@ -59,6 +59,20 @@ pub struct Mark<'a> {
     pub color: u32,
 }
 
+/// One rally point's line this frame (`CCmpRallyPointRenderer`).
+pub struct RallyLine<'a> {
+    /// As the template names it.
+    pub texture: &'a str,
+    pub thickness: f32,
+    /// `territory::CAP_*`, at the first point and the last.
+    pub start_cap: u8,
+    pub end_cap: u8,
+    /// 0xAARRGGBB.
+    pub color: u32,
+    /// x and z in metres.
+    pub points: Vec<[f32; 2]>,
+}
+
 /// One `CCmpOverlayRenderer` sprite this frame.
 pub struct Sprite<'a> {
     /// Relative to art/textures/ui/session/icons/.
@@ -339,12 +353,13 @@ impl Overlays {
         Ok(())
     }
 
-    /// Lays this frame's `marks` on `image`.
+    /// Lays this frame's `marks` and `rally_lines` on `image`.
     pub fn prepare(
         &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         marks: &[Mark],
+        rally_lines: &[RallyLine],
         image: Option<&TerrainImage>,
     ) {
         self.quad_count = 0;
@@ -404,6 +419,27 @@ impl Overlays {
             match self.line_draws.last_mut() {
                 Some((texture, range)) if texture == mark.texture => range.end = end,
                 _ => self.line_draws.push((mark.texture.to_string(), start..end)),
+            }
+        }
+        for line in rally_lines {
+            if !textures.lines.contains_key(line.texture) {
+                continue;
+            }
+            let start = indices.len() as u32;
+            territory::open_ribbon(
+                &line.points,
+                line.color,
+                line.thickness,
+                line.start_cap,
+                line.end_cap,
+                image,
+                &mut vertices,
+                &mut indices,
+            );
+            let end = indices.len() as u32;
+            match self.line_draws.last_mut() {
+                Some((texture, range)) if texture == line.texture => range.end = end,
+                _ => self.line_draws.push((line.texture.to_string(), start..end)),
             }
         }
         let index_bytes: Vec<u8> = indices

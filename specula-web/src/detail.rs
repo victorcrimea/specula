@@ -11,8 +11,14 @@ use crate::stream::Writer;
 
 const MESSAGE_KEYFRAME: u8 = 1;
 const MESSAGE_DELTA: u8 = 2;
-const DETAIL_VERSION: u8 = 3;
-/// Archived matches keep it; its lists are of names only.
+const DETAIL_VERSION: u8 = 6;
+/// Archived matches keep it; it has no stats.
+const DETAIL_VERSION_NO_STATS: u8 = 5;
+/// Archived matches keep it; it also has no data table.
+const DETAIL_VERSION_NO_DATA: u8 = 4;
+/// Archived matches keep it; it also has no rally points.
+const DETAIL_VERSION_NO_RALLY: u8 = 3;
+/// Archived matches keep it; its lists are also of names only.
 const DETAIL_VERSION_NAME_LISTS: u8 = 2;
 /// Archived matches keep it; it also has no garrison owners.
 const DETAIL_VERSION_NO_OWNERS: u8 = 1;
@@ -33,7 +39,11 @@ pub const RESEARCHABLE: usize = 12;
 pub const PROGRESS: usize = 13;
 const HOLDER: usize = 14;
 pub const TRADER: usize = 15;
-const SLOTS: usize = 16;
+pub const RALLY: usize = 16;
+pub const STATS: usize = 17;
+const SLOTS: usize = 18;
+/// Rally positions come in 1/16 m.
+pub const RALLY_UNITS_PER_METRE: f32 = 16.0;
 
 /// By group bit; `None` is a group not sent.
 pub type Groups = [Option<Group>; SLOTS];
@@ -92,6 +102,32 @@ pub enum Group {
         goods: u32,
         gain: u32,
     },
+    Rally {
+        /// The flag's actor.
+        marker: u32,
+        points: Vec<RallyPoint>,
+    },
+    /// The hash of the entity's stats JSON, at `/data/<hash>`.
+    Stats(u64),
+}
+
+/// A rally point and the line to it, in `RALLY_UNITS_PER_METRE`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RallyPoint {
+    pub x: i32,
+    pub z: i32,
+    /// From the point back to the previous one or the footprint's edge.
+    pub path: Vec<[i32; 2]>,
+}
+
+/// What a JSON of the data table is about; names and civs are 1-based
+/// strings.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum DataKey {
+    /// `GetTemplateData` for a player.
+    Template { name: u32, player: i32 },
+    /// The session GUI's `GetTechnologyData` for a civ.
+    Technology { name: u32, civ: u32 },
 }
 
 /// One item of a trainable or researchable list, read for the producer's
@@ -206,6 +242,8 @@ pub struct Details {
     /// The keyframe's version, which its deltas are in too.
     pub version: u8,
     pub lists: Vec<Vec<ListItem>>,
+    /// The hash of each JSON the tooltips read, at `/data/<hash>`.
+    pub data: BTreeMap<DataKey, u64>,
     /// By template index: the groups an entity of it has when its own
     /// leave them out.
     pub defaults: BTreeMap<u32, Groups>,
@@ -233,7 +271,12 @@ impl Details {
         let version = cursor.u8()?;
         if !matches!(
             version,
-            DETAIL_VERSION | DETAIL_VERSION_NAME_LISTS | DETAIL_VERSION_NO_OWNERS
+            DETAIL_VERSION
+                | DETAIL_VERSION_NO_STATS
+                | DETAIL_VERSION_NO_DATA
+                | DETAIL_VERSION_NO_RALLY
+                | DETAIL_VERSION_NAME_LISTS
+                | DETAIL_VERSION_NO_OWNERS
         ) {
             return Err("unknown detail version, reload the page");
         }
@@ -246,6 +289,7 @@ impl Details {
             ..Details::default()
         };
         self.read_lists(cursor)?;
+        self.read_data(cursor)?;
         for _ in 0..cursor.varint()? {
             let template = cursor.varint_u32()?;
             let groups = read_groups(cursor, turn, false, owners)?;
@@ -266,6 +310,7 @@ impl Details {
         }
         self.turn = cursor.varint_u32()?;
         self.read_lists(cursor)?;
+        self.read_data(cursor)?;
         let owners = self.owners();
         let mut id = 0u32;
         for _ in 0..cursor.varint()? {
@@ -294,12 +339,40 @@ impl Details {
         self.version != DETAIL_VERSION_NO_OWNERS
     }
 
+    fn read_data(&mut self, cursor: &mut Cursor) -> Result<(), &'static str> {
+        if self.version < DETAIL_VERSION_NO_STATS {
+            return Ok(());
+        }
+        for _ in 0..cursor.varint()? {
+            let kind = cursor.u8()?;
+            let name = cursor.varint_u32()?;
+            let key = match kind {
+                0 => DataKey::Template {
+                    name,
+                    player: cursor.zigzag()?,
+                },
+                1 => DataKey::Technology {
+                    name,
+                    civ: cursor.varint_u32()?,
+                },
+                _ => return Err("unknown data kind"),
+            };
+            self.data.insert(key, cursor.u64()?);
+        }
+        Ok(())
+    }
+
+    /// Whether its list items carry more than their names.
+    fn full_lists(&self) -> bool {
+        self.version >= DETAIL_VERSION_NO_RALLY
+    }
+
     fn read_lists(&mut self, cursor: &mut Cursor) -> Result<(), &'static str> {
         for _ in 0..cursor.varint()? {
             let list = (0..cursor.varint()?)
                 .map(|_| {
                     let name = cursor.varint_u32()?;
-                    if self.version != DETAIL_VERSION {
+                    if !self.full_lists() {
                         return Ok(ListItem {
                             name,
                             flags: ListItem::UNKNOWN,
@@ -339,7 +412,7 @@ impl Details {
             out.varint(list.len() as u64);
             for item in list {
                 out.varint(u64::from(item.name));
-                if self.version != DETAIL_VERSION {
+                if !self.full_lists() {
                     continue;
                 }
                 out.u8(item.flags);
@@ -349,6 +422,24 @@ impl Details {
                     out.varint(u64::from(*resource));
                     out.varint(u64::from(*cost));
                 }
+            }
+        }
+        if self.version >= DETAIL_VERSION_NO_STATS {
+            out.varint(self.data.len() as u64);
+            for (key, hash) in &self.data {
+                match key {
+                    DataKey::Template { name, player } => {
+                        out.u8(0);
+                        out.varint(u64::from(*name));
+                        out.zigzag(*player);
+                    }
+                    DataKey::Technology { name, civ } => {
+                        out.u8(1);
+                        out.varint(u64::from(*name));
+                        out.varint(u64::from(*civ));
+                    }
+                }
+                out.u64(*hash);
             }
         }
         let owners = self.owners();
@@ -365,6 +456,15 @@ impl Details {
             write_groups(&mut out, groups, Some(self.turn), owners);
         }
         out.0
+    }
+
+    /// Entity `id`'s group in `slot`, as `resolved` finds it, without
+    /// copying the rest.
+    pub fn group(&self, id: u32, template: Option<u32>, slot: usize) -> Option<&Group> {
+        self.entities
+            .get(&id)
+            .and_then(|groups| groups[slot].as_ref())
+            .or_else(|| self.defaults.get(&template?)?[slot].as_ref())
     }
 
     /// Entity `id`'s groups, those it was not sent taken from its
@@ -540,6 +640,28 @@ fn read_group(
             goods: cursor.varint_u32()?,
             gain: cursor.varint_u32()?,
         },
+        STATS => Group::Stats(cursor.u64()?),
+        RALLY => {
+            let marker = cursor.varint_u32()?;
+            let points = (0..cursor.varint()?)
+                .map(|_| {
+                    let x = cursor.zigzag()?;
+                    let z = cursor.zigzag()?;
+                    let mut previous = [x, z];
+                    let path = (0..cursor.varint()?)
+                        .map(|_| {
+                            previous = [
+                                previous[0].wrapping_add(cursor.zigzag()?),
+                                previous[1].wrapping_add(cursor.zigzag()?),
+                            ];
+                            Ok(previous)
+                        })
+                        .collect::<Result<_, &'static str>>()?;
+                    Ok(RallyPoint { x, z, path })
+                })
+                .collect::<Result<_, &'static str>>()?;
+            Group::Rally { marker, points }
+        }
         _ => return Err("unknown detail group"),
     })
 }
@@ -659,6 +781,22 @@ fn write_group(out: &mut Writer, group: &Group, owners: bool) {
         Group::Trader { goods, gain } => {
             out.varint(u64::from(*goods));
             out.varint(u64::from(*gain));
+        }
+        Group::Stats(hash) => out.u64(*hash),
+        Group::Rally { marker, points } => {
+            out.varint(u64::from(*marker));
+            out.varint(points.len() as u64);
+            for point in points {
+                out.zigzag(point.x);
+                out.zigzag(point.z);
+                out.varint(point.path.len() as u64);
+                let mut previous = [point.x, point.z];
+                for at in &point.path {
+                    out.zigzag(at[0].wrapping_sub(previous[0]));
+                    out.zigzag(at[1].wrapping_sub(previous[1]));
+                    previous = *at;
+                }
+            }
         }
     }
 }

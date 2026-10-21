@@ -28,6 +28,8 @@ mod stream;
 mod terrain;
 mod territory;
 mod timing;
+mod tips;
+mod tooltip;
 mod top;
 mod unit;
 mod variation;
@@ -147,6 +149,16 @@ const WATER_SETTINGS_KEY: &str = "specula.water";
 const SKY_SETTINGS_KEY: &str = "specula.sky";
 const PARTICLES_SETTINGS_KEY: &str = "specula.particles";
 const PROJECTILES_SETTINGS_KEY: &str = "specula.projectiles";
+/// localStorage key of the detailed tooltips setting, the engine's
+/// showdetailedtooltips: 0 off, 1 on.
+const DETAILED_TOOLTIPS_SETTINGS_KEY: &str = "specula.detailedtooltips";
+/// localStorage keys of the attack, aura and heal range overlays, in that
+/// order: 0 off, 1 on.
+const RANGES_SETTINGS_KEYS: [&str; 3] = [
+    "specula.rangesattack",
+    "specula.rangesaura",
+    "specula.rangesheal",
+];
 const REFRACTION_SETTINGS_KEY: &str = "specula.waterrefraction";
 const REAL_DEPTH_SETTINGS_KEY: &str = "specula.waterrealdepth";
 const REFLECTION_SETTINGS_KEY: &str = "specula.waterreflection";
@@ -208,6 +220,12 @@ trait View {
     }
     /// Whether to draw projectiles, where it draws any.
     fn set_projectiles(&mut self, _on: bool) {}
+    /// Whether the attack, aura and heal range overlays are drawn, where it
+    /// draws any. Its own keys toggle them too, hence the getter.
+    fn set_ranges(&mut self, _ranges: [bool; 3]) {}
+    fn ranges(&self) -> [bool; 3] {
+        [false; 3]
+    }
     /// The shadow map's size, 0 for none, where it draws shadows.
     fn set_shadows(&mut self, _size: u32) {}
     /// How far ahead shadows reach, in metres, likewise.
@@ -469,6 +487,37 @@ struct App {
     /// the portrait index is compared.
     top_dirty: bool,
     top_index: bool,
+    /// Only the 3D page draws range overlays.
+    ranges: Option<RangeControls>,
+    /// Only the 3D page has panels with tooltips.
+    tooltips: Option<tooltip::Tooltips>,
+    /// The JSON the tooltips read, fetched as they ask for it.
+    data_files: tips::DataFiles,
+    detailed_tooltips: bool,
+}
+
+/// The range overlay lists, and the values they and the storage last got,
+/// which the view's keys may have changed since.
+struct RangeControls {
+    selects: [HtmlSelectElement; 3],
+    shown: [bool; 3],
+}
+
+impl RangeControls {
+    fn show(&mut self, ranges: [bool; 3]) {
+        if ranges == self.shown {
+            return;
+        }
+        self.shown = ranges;
+        let storage = web_sys::window().and_then(|window| window.local_storage().ok().flatten());
+        for ((select, key), on) in self.selects.iter().zip(RANGES_SETTINGS_KEYS).zip(ranges) {
+            select.set_value(if on { "1" } else { "0" });
+            // Best effort: without storage the choice lasts only this visit.
+            if let Some(storage) = &storage {
+                let _ = storage.set_item(key, if on { "1" } else { "0" });
+            }
+        }
+    }
 }
 
 /// The sound toggle and volumes, and what they play.
@@ -637,6 +686,9 @@ impl App {
             }
         }
         self.play_sounds(now, progress);
+        if let Some(ranges) = &mut self.ranges {
+            ranges.show(self.renderer.ranges());
+        }
         self.follow_selection();
         self.update_top(now);
         // The frame moves from the turn before the scene's to the scene's.
@@ -644,6 +696,9 @@ impl App {
             && !self.renderer.selected().is_empty()
         {
             details.tick(f64::from(self.scene.turn) - 1.0 + f64::from(progress));
+        }
+        if let Some(tooltips) = &self.tooltips {
+            tooltips.frame(now);
         }
         timing::frame(page_now() - start, drew);
     }
@@ -666,6 +721,10 @@ impl App {
         let index = store
             .as_ref()
             .is_some_and(|store| store.borrow().index_name().is_some());
+        // A tooltip's data that arrived is shown at once.
+        if self.data_files.take_loaded() {
+            self.details_dirty = true;
+        }
         let selected = self.renderer.selected();
         if !self.details_dirty && index == self.details_index && selected == self.details_selected {
             return;
@@ -686,6 +745,8 @@ impl App {
             portrait: &portrait,
             technology_portrait: &technology_portrait,
             template_portrait: &template_portrait,
+            data: &self.data_files,
+            detailed: self.detailed_tooltips,
         });
     }
 
@@ -1025,6 +1086,11 @@ async fn run(
             .inspect_err(|error| web_sys::console::error_1(&format!("top panel: {error}").into()))
             .ok(),
     };
+    let tooltips = match page {
+        Page::Map => None,
+        // An older page has no tooltip box; the panels still show.
+        Page::Observer => tooltip::Tooltips::new(&document).ok(),
+    };
     let warmup = match page {
         Page::Map => None,
         Page::Observer => Some(Warmup::new(element(&document, "warmup")?)),
@@ -1095,6 +1161,10 @@ async fn run(
         top,
         top_dirty: true,
         top_index: false,
+        ranges: None,
+        tooltips,
+        data_files: tips::DataFiles::default(),
+        detailed_tooltips: false,
     }));
     wire_controls(&app);
     wire_details(&app);
@@ -1234,6 +1304,15 @@ async fn run(
             Vec::new(),
         );
         wire_projectiles(&app, element(&document, "projectiles")?);
+        wire_detailed_tooltips(&app, element(&document, "detailed-tooltips")?);
+        wire_ranges(
+            &app,
+            [
+                element(&document, "ranges-attack")?,
+                element(&document, "ranges-aura")?,
+                element(&document, "ranges-heal")?,
+            ],
+        );
     }
     wire_sound(&app, &window);
     wire_warmup(&app);
@@ -1416,6 +1495,82 @@ fn wire_projectiles(app: &Rc<RefCell<App>>, select: HtmlSelectElement) {
     select.set_onchange(Some(on_change.as_ref().unchecked_ref()));
     // The controls live as long as the page, so their handlers do too.
     on_change.forget();
+}
+
+/// The detailed tooltips list, kept across visits; off unless turned on,
+/// as the engine's default.cfg.
+fn wire_detailed_tooltips(app: &Rc<RefCell<App>>, select: HtmlSelectElement) {
+    let saved = web_sys::window()
+        .and_then(|window| window.local_storage().ok().flatten())
+        .and_then(|storage| {
+            storage
+                .get_item(DETAILED_TOOLTIPS_SETTINGS_KEY)
+                .ok()
+                .flatten()
+        })
+        .is_some_and(|text| text == "1");
+    select.set_value(if saved { "1" } else { "0" });
+    app.borrow_mut().detailed_tooltips = saved;
+
+    let target = Rc::clone(app);
+    let list = select.clone();
+    let on_change = Closure::<dyn FnMut()>::new(move || {
+        let on = list.value() == "1";
+        // Best effort: without storage the choice lasts only this visit.
+        if let Some(storage) =
+            web_sys::window().and_then(|window| window.local_storage().ok().flatten())
+        {
+            let _ = storage.set_item(DETAILED_TOOLTIPS_SETTINGS_KEY, if on { "1" } else { "0" });
+        }
+        let app = &mut *target.borrow_mut();
+        app.detailed_tooltips = on;
+        app.details_dirty = true;
+    });
+    select.set_onchange(Some(on_change.as_ref().unchecked_ref()));
+    // The controls live as long as the page, so their handlers do too.
+    on_change.forget();
+}
+
+/// The range overlay lists, kept across visits; on unless turned off, as the
+/// game's defaults. Alt+C, Alt+V and Alt+B change them too, which
+/// `RangeControls::show` brings back to the lists each frame.
+fn wire_ranges(app: &Rc<RefCell<App>>, selects: [HtmlSelectElement; 3]) {
+    let storage = web_sys::window().and_then(|window| window.local_storage().ok().flatten());
+    let saved = RANGES_SETTINGS_KEYS.map(|key| {
+        storage
+            .as_ref()
+            .and_then(|storage| storage.get_item(key).ok().flatten())
+            .is_none_or(|text| text != "0")
+    });
+    for (select, on) in selects.iter().zip(saved) {
+        select.set_value(if on { "1" } else { "0" });
+    }
+    {
+        let app = &mut *app.borrow_mut();
+        app.renderer.set_ranges(saved);
+        app.ranges = Some(RangeControls {
+            selects: selects.clone(),
+            shown: saved,
+        });
+    }
+
+    for (kind, select) in selects.into_iter().enumerate() {
+        let target = Rc::clone(app);
+        let list = select.clone();
+        let on_change = Closure::<dyn FnMut()>::new(move || {
+            let app = &mut *target.borrow_mut();
+            let mut ranges = app.renderer.ranges();
+            ranges[kind] = list.value() == "1";
+            app.renderer.set_ranges(ranges);
+            if let Some(controls) = &mut app.ranges {
+                controls.show(ranges);
+            }
+            app.dirty = true;
+        });
+        select.set_onchange(Some(on_change.as_ref().unchecked_ref()));
+        // The controls live as long as the page, so their handlers do too.
+        on_change.forget();
+    }
 }
 
 /// The texture quality list, kept across visits. A device that is not

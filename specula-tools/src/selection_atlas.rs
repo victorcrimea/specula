@@ -10,7 +10,8 @@
 //! with its `X_mask.png`. Those in a subdirectory are the quads drawn under
 //! units and go into one atlas; those at the top level are line textures
 //! (outlines, range overlays) and are kept whole, since a line repeats its
-//! texture along its length.
+//! texture along its length. The rally point line (`RallyPointRenderer`'s
+//! texture, outside that directory) is a line texture too.
 //!
 //! The status bar sprites are the bar textures under
 //! art/textures/ui/session/icons/ and every rank icon in its ranks/. They
@@ -31,7 +32,8 @@
 //! sprite atlas as width * height RGBA8 pixels, all row-major. Only the
 //! mask's red channel is kept, as the engine's `overlayline.fs` reads only
 //! that. Quad and line names are relative to art/textures/selection/, as
-//! the observer hook sends them; sprite names to
+//! the observer hook sends them, except the rally line's, which is the
+//! full path the template names; sprite names to
 //! art/textures/ui/session/icons/, as `StatusBars.js` builds its paths.
 
 use std::fs;
@@ -64,6 +66,9 @@ const RANK_DIRECTORY: &str = "ranks";
 /// together, and nothing draws auras yet.
 const SKIPPED_DIRECTORY: &str = "auras";
 const MASK_SUFFIX: &str = "_mask.png";
+/// Relative to the mod, as `template_structure.xml`'s RallyPointRenderer
+/// names it.
+const RALLY_LINE: &str = "art/textures/misc/rallypoint_line.png";
 const ATLAS_WIDTH: u32 = 1024;
 /// The tallest quad, so the atlas height stays a multiple of every quad
 /// height and the mip chain divides evenly.
@@ -139,6 +144,14 @@ fn main() -> ExitCode {
                     return ExitCode::FAILURE;
                 }
             }
+        }
+    }
+    match load(&mod_dir, RALLY_LINE) {
+        Ok(Some(texture)) => lines.push(texture),
+        Ok(None) => eprintln!("skipped {RALLY_LINE}: no {MASK_SUFFIX}"),
+        Err(error) => {
+            eprintln!("{RALLY_LINE}: {error}");
+            return ExitCode::FAILURE;
         }
     }
 

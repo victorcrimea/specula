@@ -1,6 +1,7 @@
 //! Decoder for the observer hook's feed, format v14. The writer is
 //! `source/network/SpeculaFeed.cpp` in the `specula` branch of 0ad-specula.
 
+use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::io;
@@ -26,6 +27,9 @@ const RECORD_RENAMES: u8 = 14;
 const RECORD_ECONOMY: u8 = 15;
 const RECORD_VARIABLE_SET: u8 = 16;
 const RECORD_PRODUCTION_LIST: u8 = 17;
+const RECORD_TEMPLATE_DATA: u8 = 18;
+const RECORD_TECHNOLOGY_DATA: u8 = 19;
+const RECORD_STATS: u8 = 20;
 const ENTITY_SIZE: usize = 74;
 const SOUND_SIZE: usize = 27;
 const LAUNCH_SIZE: usize = 52;
@@ -57,6 +61,8 @@ const DETAIL_RANGES: u32 = 65536;
 const DETAIL_GARRISON_OWNERS: u32 = 131072;
 const DETAIL_TRAINABLE_ITEMS: u32 = 262144;
 const DETAIL_RESEARCHABLE_ITEMS: u32 = 524288;
+const DETAIL_RALLY: u32 = 1048576;
+const DETAIL_STATS: u32 = 2097152;
 const NO_LIMIT: u16 = 0xFFFF;
 const QUEUE_UNIT: u8 = 0;
 const QUEUE_TECHNOLOGY: u8 = 1;
@@ -217,8 +223,15 @@ pub struct TemplateDetails {
     /// Bit i for the i-th of Health, Capturable, ResourceSupply,
     /// ProductionQueue, GarrisonHolder, Promotion, ResourceGatherer,
     /// Foundation, Repairable, UnitAI, Trainer, Researcher, Pack, Upgrade,
-    /// Trader, Garrisonable, Turretable, Attack, Auras, Heal.
+    /// Trader, Garrisonable, Turretable, Attack, Auras, Heal, RallyPoint.
     pub components: u32,
+    /// RallyPointRenderer's line, full VFS paths.
+    pub rally_texture: Option<u32>,
+    pub rally_mask: Option<u32>,
+    pub rally_thickness: f32,
+    /// 0 flat, 1 round, 2 sharp, 3 square.
+    pub rally_start_cap: u8,
+    pub rally_end_cap: u8,
 }
 
 /// One item of a trainable or researchable list, read for the producer's
@@ -274,6 +287,10 @@ pub struct EntityDetails {
     /// The owner of each entity of `garrison`, in its order, -1 for none.
     /// Older hooks do not send it.
     pub garrison_owners: Option<Vec<i8>>,
+    pub rally: Option<Rally>,
+    /// The kind 20 stats index as decoded, then, once applied, the hash
+    /// `Details::set_stats` gave that index.
+    pub stats: Option<u64>,
 }
 
 impl EntityDetails {
@@ -302,6 +319,8 @@ impl EntityDetails {
         take(&mut self.trader, changed.trader);
         take(&mut self.ranges, changed.ranges);
         take(&mut self.garrison_owners, changed.garrison_owners);
+        take(&mut self.rally, changed.rally);
+        take(&mut self.stats, changed.stats);
     }
 }
 
@@ -388,6 +407,22 @@ pub struct RangeOverlay {
     pub thickness: f32,
 }
 
+/// An entity's rally points, none when unset.
+pub struct Rally {
+    /// String record index of the flag's actor.
+    pub marker: Option<u32>,
+    pub points: Vec<RallyPoint>,
+}
+
+pub struct RallyPoint {
+    /// In metres.
+    pub x: f32,
+    pub z: f32,
+    /// The line to the point, from it back to the previous one or the
+    /// footprint's edge, x and z in metres.
+    pub path: Vec<[f32; 2]>,
+}
+
 /// A player's top panel numbers; index 0 is gaia.
 pub struct Economy {
     pub population: i32,
@@ -422,11 +457,28 @@ pub struct Details {
     /// turn record.
     pub changed: HashSet<u32>,
     pub gone: Vec<u32>,
+    /// The hash of the latest JSON of each kind 18 and 19 key.
+    pub data: BTreeMap<DataKey, u64>,
+    /// The hash of each kind 20 stats JSON, by index.
+    pub stats: HashMap<u32, u64>,
+}
+
+/// What a kind 18 or 19 record is about.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum DataKey {
+    /// A template name string and the player its values are for.
+    Template { name: u32, player: i32 },
+    /// A technology name string and a civ string.
+    Technology { name: u32, civ: u32 },
 }
 
 impl Details {
     pub fn apply(&mut self, changed: Vec<(u32, EntityDetails)>, gone: Vec<u32>) {
-        for (id, groups) in changed {
+        for (id, mut groups) in changed {
+            // The hook sends a stats record before the details that use it.
+            groups.stats = groups
+                .stats
+                .and_then(|index| self.stats.get(&(index as u32)).copied());
             self.entities.entry(id).or_default().merge(groups);
             self.changed.insert(id);
         }
@@ -447,6 +499,14 @@ impl Details {
 
     pub fn set_economy(&mut self, economy: Vec<Economy>) {
         self.economy = economy;
+    }
+
+    pub fn set_data(&mut self, key: DataKey, hash: u64) {
+        self.data.insert(key, hash);
+    }
+
+    pub fn set_stats(&mut self, index: u32, hash: u64) {
+        self.stats.insert(index, hash);
     }
 
     /// The renames and changes belong to the turn just read.
@@ -519,6 +579,16 @@ pub enum Record {
     /// (old id, new id) of the next turn record.
     Renames(Vec<(u32, u32)>),
     Economy(Vec<Economy>),
+    /// Kind 18 or 19: UTF-8 JSON.
+    Data {
+        key: DataKey,
+        json: Vec<u8>,
+    },
+    /// Kind 20: UTF-8 JSON.
+    Stats {
+        index: u32,
+        json: Vec<u8>,
+    },
 }
 
 /// `ICmpTerritoryManager`'s grid, whenever it changes: row-major, x
@@ -657,6 +727,17 @@ pub fn read_record(reader: &mut impl Read) -> io::Result<Option<Record>> {
             RECORD_DETAILS => return decode_details(&payload).map(Some),
             RECORD_STRING_LIST => return decode_string_list(&payload).map(Some),
             RECORD_PRODUCTION_LIST => return decode_production_list(&payload).map(Some),
+            RECORD_STATS => {
+                let mut cursor = Cursor(&payload);
+                let index = cursor.u32()?;
+                return Ok(Some(Record::Stats {
+                    index,
+                    json: cursor.0.to_vec(),
+                }));
+            }
+            RECORD_TEMPLATE_DATA | RECORD_TECHNOLOGY_DATA => {
+                return decode_data(head[0], &payload).map(Some);
+            }
             RECORD_RENAMES => return decode_renames(&payload).map(Some),
             RECORD_ECONOMY => return decode_economy(&payload).map(Some),
             // Newer hooks may add kinds; the length prefix lets them be skipped.
@@ -1008,12 +1089,25 @@ fn decode_template_details(payload: &[u8]) -> io::Result<Record> {
         lang: None,
         phenotypes: None,
         components: cursor.u32()?,
+        rally_texture: None,
+        rally_mask: None,
+        rally_thickness: 0.0,
+        rally_start_cap: 0,
+        rally_end_cap: 0,
     };
     // A hook from before lang and phenotypes ends here; the feed version
     // stayed, so both lengths are read.
     if !cursor.0.is_empty() {
         details.lang = optional(cursor.u32()?);
         details.phenotypes = optional(cursor.u32()?);
+    }
+    // Likewise for a hook from before rally points.
+    if !cursor.0.is_empty() {
+        details.rally_texture = optional(cursor.u32()?);
+        details.rally_mask = optional(cursor.u32()?);
+        details.rally_thickness = cursor.f32()?;
+        details.rally_start_cap = cursor.u8()?;
+        details.rally_end_cap = cursor.u8()?;
     }
     if !cursor.0.is_empty() {
         return Err(invalid("template details record longer than its contents"));
@@ -1189,6 +1283,24 @@ fn decode_groups(cursor: &mut Cursor, mask: u32) -> io::Result<EntityDetails> {
     if mask & DETAIL_RESEARCHABLE_ITEMS != 0 {
         details.researchable = Some(cursor.u32()?);
     }
+    if mask & DETAIL_RALLY != 0 {
+        let count = cursor.u8()?;
+        let marker = optional(cursor.u32()?);
+        let mut points = Vec::with_capacity(usize::from(count));
+        for _ in 0..count {
+            let x = cursor.f32()?;
+            let z = cursor.f32()?;
+            let length = cursor.u16()?;
+            let path = (0..length)
+                .map(|_| Ok([cursor.f32()?, cursor.f32()?]))
+                .collect::<io::Result<_>>()?;
+            points.push(RallyPoint { x, z, path });
+        }
+        details.rally = Some(Rally { marker, points });
+    }
+    if mask & DETAIL_STATS != 0 {
+        details.stats = Some(u64::from(cursor.u32()?));
+    }
     Ok(details)
 }
 
@@ -1219,6 +1331,26 @@ fn decode_string_list(payload: &[u8]) -> io::Result<Record> {
         })
         .collect::<io::Result<_>>()?;
     Ok(Record::ProductionList { index, items })
+}
+
+fn decode_data(kind: u8, payload: &[u8]) -> io::Result<Record> {
+    let mut cursor = Cursor(payload);
+    let name = cursor.u32()?;
+    let key = if kind == RECORD_TEMPLATE_DATA {
+        DataKey::Template {
+            name,
+            player: cursor.u32()? as i32,
+        }
+    } else {
+        DataKey::Technology {
+            name,
+            civ: cursor.u32()?,
+        }
+    };
+    Ok(Record::Data {
+        key,
+        json: cursor.0.to_vec(),
+    })
 }
 
 fn decode_production_list(payload: &[u8]) -> io::Result<Record> {

@@ -64,6 +64,10 @@ use crate::bench::BenchInfo;
 use crate::bench::CameraPose;
 use crate::blend;
 use crate::blend::Splat;
+use crate::detail;
+use crate::detail::Group;
+use crate::detail::RALLY_UNITS_PER_METRE;
+use crate::detail::RallyPoint;
 use crate::far;
 use crate::far::Capture;
 use crate::far::CaptureDraw;
@@ -75,6 +79,7 @@ use crate::impostor;
 use crate::overlay::Mark;
 use crate::overlay::OverlayShape;
 use crate::overlay::Overlays;
+use crate::overlay::RallyLine;
 use crate::overlay::Sprite;
 use crate::particles;
 use crate::particles::Owner;
@@ -94,6 +99,7 @@ use crate::selection::Selection;
 use crate::shadow;
 use crate::shadow::Shadow;
 use crate::sky::Sky;
+use crate::stream::COMPONENT_RALLY_POINT;
 use crate::stream::COMPONENT_RESOURCE_SUPPLY;
 use crate::stream::Dot;
 use crate::stream::RangeSet;
@@ -509,6 +515,14 @@ struct Entities {
     range_sets: Vec<RangeSet>,
     /// `Scene::captures`.
     captures: BTreeMap<u32, Vec<u8>>,
+    /// The rally points the detail stream holds, by entity, none unset.
+    rallies: BTreeMap<u32, Rally>,
+}
+
+struct Rally {
+    /// 1-based string of the flag's actor, 0 for none.
+    marker: u32,
+    points: Vec<RallyPoint>,
 }
 
 pub struct Field {
@@ -1513,6 +1527,7 @@ impl Field {
         if self.projectiles {
             self.place_shots(progress, view_proj, &planes, pixel_scale, &mut groups);
         }
+        self.place_rally_flags(progress, view_proj, &planes, pixel_scale, &mut groups);
         if self.particles_visible {
             let dots = &self.entities.dots;
             let shots = &self.shots;
@@ -3043,6 +3058,67 @@ impl Field {
         }
     }
 
+    /// The flag `CCmpRallyPointRenderer` puts at each rally point of the
+    /// selection: its marker's actor, on the ground, unturned, in the
+    /// owner's colour.
+    fn place_rally_flags(
+        &mut self,
+        progress: f32,
+        view_proj: &[[f32; 4]; 4],
+        planes: &[[f32; 4]; 6],
+        pixel_scale: f32,
+        groups: &mut HashMap<GroupKey, Vec<u8>>,
+    ) {
+        let Some(ground) = &self.ground else {
+            return;
+        };
+        let mut flags = Vec::new();
+        for id in self.selection.selected() {
+            let (Some(rally), Some(dot)) = (
+                self.entities.rallies.get(id),
+                entity_dot(&self.entities, *id),
+            ) else {
+                continue;
+            };
+            if rally.marker == 0 {
+                continue;
+            }
+            for point in &rally.points {
+                let x = point.x as f32 / RALLY_UNITS_PER_METRE;
+                let z = point.z as f32 / RALLY_UNITS_PER_METRE;
+                flags.push((
+                    *id,
+                    rally.marker,
+                    dot.owner,
+                    Vec3::new(x, ground.image.ground(x, z), z),
+                ));
+            }
+        }
+        let time = self.sim_time(progress) as f32 * 1000.0;
+        for (id, marker, owner, at) in flags {
+            let Some(model) = self.impact_model(marker) else {
+                continue;
+            };
+            let mut transform = Mat4::identity();
+            transform.translate(at);
+            let place = ShotPlace {
+                owner,
+                emitter: Owner::Entity(id),
+                time,
+                progress,
+            };
+            self.place_shot_model(
+                &model,
+                &transform,
+                &place,
+                view_proj,
+                planes,
+                pixel_scale,
+                groups,
+            );
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn place_shot_model(
         &mut self,
@@ -3600,6 +3676,14 @@ impl View for Field {
         self.projectiles = on;
     }
 
+    fn set_ranges(&mut self, ranges: [bool; 3]) {
+        self.camera.borrow_mut().ranges = ranges;
+    }
+
+    fn ranges(&self) -> [bool; 3] {
+        self.camera.borrow().ranges
+    }
+
     fn set_shadows(&mut self, size: u32) {
         self.shadow.set_size(&self.device, size);
     }
@@ -3778,6 +3862,29 @@ impl View for Field {
             .dots
             .extend(scene.dots.iter().map(|(id, dot)| (*id, *dot)));
         entities.captures.clone_from(&scene.captures);
+        entities.rallies.clear();
+        if scene.details.known && scene.details.match_id == scene.match_id {
+            for (id, dot) in &scene.dots {
+                let rally_point = entities
+                    .template_details
+                    .get(dot.template as usize)
+                    .and_then(Option::as_ref)
+                    .is_some_and(|details| details.components & COMPONENT_RALLY_POINT != 0);
+                if rally_point
+                    && let Some(Group::Rally { marker, points }) =
+                        scene.details.group(*id, Some(dot.template), detail::RALLY)
+                    && !points.is_empty()
+                {
+                    entities.rallies.insert(
+                        *id,
+                        Rally {
+                            marker: *marker,
+                            points: points.clone(),
+                        },
+                    );
+                }
+            }
+        }
         self.shots.retain(|id, _| scene.shots.contains_key(id));
         for (id, shot) in &scene.shots {
             if self.shots.contains_key(id) {
@@ -4040,10 +4147,12 @@ impl View for Field {
             &self.palette,
             ranges,
         );
+        let rally_lines = rally_lines(&self.entities, self.selection.selected(), &self.palette);
         self.overlays.prepare(
             &self.device,
             &self.queue,
             &marks,
+            &rally_lines,
             self.ground.as_ref().map(|ground| &ground.image),
         );
         let sprites = status_bar_sprites(
@@ -5731,6 +5840,57 @@ fn overlay_marks<'a>(
         });
     }
     marks
+}
+
+/// The lines to the rally points of the `selected` entities, as
+/// `DisplayRallyPoint` shows them for the selection, here whoever owns
+/// them, in the owner's colour and solid all along.
+fn rally_lines<'a>(
+    entities: &'a Entities,
+    selected: &[u32],
+    palette: &[u32],
+) -> Vec<RallyLine<'a>> {
+    let mut lines = Vec::new();
+    for id in selected {
+        let (Some(rally), Some(dot)) = (entities.rallies.get(id), entity_dot(entities, *id)) else {
+            continue;
+        };
+        let Some(details) = entities
+            .template_details
+            .get(dot.template as usize)
+            .and_then(Option::as_ref)
+        else {
+            continue;
+        };
+        let Some(texture) = string(&entities.strings, details.rally_texture) else {
+            continue;
+        };
+        for point in &rally.points {
+            if point.path.len() < 2 {
+                continue;
+            }
+            lines.push(RallyLine {
+                texture,
+                thickness: details.rally_thickness,
+                // The path runs from the flag back to the building, so the
+                // engine swaps the template's caps.
+                start_cap: details.rally_end_cap,
+                end_cap: details.rally_start_cap,
+                color: packed(owner_rgb(palette, dot.owner), 1.0),
+                points: point
+                    .path
+                    .iter()
+                    .map(|[x, z]| {
+                        [
+                            *x as f32 / RALLY_UNITS_PER_METRE,
+                            *z as f32 / RALLY_UNITS_PER_METRE,
+                        ]
+                    })
+                    .collect(),
+            });
+        }
+    }
+    lines
 }
 
 /// Player `owner`'s displayed colour, white without an owner.

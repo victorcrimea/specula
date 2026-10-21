@@ -438,6 +438,18 @@ pub fn terrain(
     })
 }
 
+/// A kind 18 or 19 JSON the detail stream names by its hash.
+#[rocket::get("/data/<id>")]
+pub fn data(id: &str, hub: &State<Arc<Hub>>) -> Option<Encoded<Vec<u8>>> {
+    let file = hub.data(u64::from_str_radix(id, 16).ok()?)?;
+    Some(Encoded {
+        brotli: false,
+        body: file.to_vec(),
+        content_type: ContentType::JSON,
+        cache: IMMUTABLE,
+    })
+}
+
 #[rocket::get("/assets/<name>")]
 pub async fn asset(name: &str, accepts: AcceptsBrotli) -> Option<Encoded<NamedFile>> {
     if !plain_name(name) {

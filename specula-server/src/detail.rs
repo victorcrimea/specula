@@ -2,16 +2,20 @@
 //! show beyond the status bars, for every entity, sent only to viewers that
 //! have something selected. Varints and zigzag as in `wire.rs`.
 //!
-//! - kind 1 keyframe: varint turn, u8 detail version (3; a viewer also
-//!   reads 2, whose lists are of names only, and 1, which also had no
-//!   garrison owners, and ignores the stream at any other), u64 match id (the visual stream's), list table, varint n, n x {varint template, varint mask, groups}: each
+//! - kind 1 keyframe: varint turn, u8 detail version (6; a viewer also
+//!   reads 5, which had no stats, 4, which also had no data table, 3,
+//!   which also had no rally points,
+//!   2, whose lists are also of names only, and 1, which also had no
+//!   garrison owners, and ignores the stream at any other), u64 match id
+//!   (the visual stream's), list table, data table, varint n, n x {varint template, varint mask, groups}: each
 //!   template's defaults, then varint count, count x {varint id delta,
 //!   varint mask, groups}. A keyframe leaves out a group equal to the
 //!   default of the entity's template (the template of the visual stream's
 //!   entity of that id) and an entity with nothing left. The groups of
 //!   production queues, foundations and repairs are never defaults, and in
 //!   a keyframe each is followed by varint turns since it was sent.
-//! - kind 2 delta: varint turn, the lists added to the table, varint
+//! - kind 2 delta: varint turn, the lists added to the table, the data
+//!   table's entries that are new or changed, varint
 //!   count, count x {varint id delta, varint mask, groups} of the groups
 //!   that changed, varint count, count x id delta of the entities gone.
 //!   Every turn of the visual stream has one, empty or not, so the two
@@ -50,10 +54,17 @@
 //!   0..=254 of done, varint upgrade target;
 //! - 16384 holder: varint id of the entity it is garrisoned in or a turret
 //!   on, 0 for none;
-//! - 32768 trader: varint goods type, varint total gain rounded.
+//! - 32768 trader: varint goods type, varint total gain rounded;
+//! - 65536 rally points (the hook's 1048576): varint marker actor, varint
+//!   n, n x {zigzag x, zigzag z, varint m, m x {zigzag x, zigzag z}}, each
+//!   point followed by the line to it, from the point back to the previous
+//!   one or the footprint's edge; positions in 1/16 m, a line's first
+//!   relative to its point and each other to the one before;
+//! - 131072 stats (the hook's 2097152): u64 hash of the JSON the attack
+//!   and resistance tooltip reads, at `/data/<hash>` (the hook's kind 20).
 //!
 //! Strings (resource types, templates and technologies, stances, the
-//! upgrade target, goods) are 1-based indices into the visual stream's
+//! upgrade target, goods, the marker actor) are 1-based indices into the visual stream's
 //! string table, 0 for none; templates in a garrison are 0-based indices
 //! into its template table. A list is varint n, n x {varint template or
 //! technology string, u8 flags, varint can be added + 1 (0 for no limit),
@@ -64,6 +75,13 @@
 //! data, or a technology the owner's civ cannot research), 4 the top of a pair whose bottom is the next item, 8 from an older
 //! hook, which sent only the name (a pair as one "top bottom" string), so
 //! the other fields say nothing.
+//!
+//! The data table names the JSON the tooltips read, served at
+//! `/data/<hash as 16 hex digits>`: varint n, n x {u8 kind, varint name,
+//! key, u64 hash}. Kind 0 is a template's `GetTemplateData` for a player
+//! (the hook's kind 18), whose key is the zigzag player; kind 1 a
+//! technology's data for a civ (kind 19), whose key is the civ string.
+//! Names and civs are strings as above.
 //!
 //! Reckoning: while the first item of a queue is not paused, its time
 //! remaining goes down by 200 ms a turn from the turn it was sent; while a
@@ -80,6 +98,7 @@ use std::collections::BTreeSet;
 use std::collections::HashMap;
 
 use crate::feed::Building;
+use crate::feed::DataKey;
 use crate::feed::Details;
 use crate::feed::EntityDetails;
 use crate::feed::ProductionItem;
@@ -88,7 +107,7 @@ use crate::wire::Writer;
 
 const MESSAGE_KEYFRAME: u8 = 1;
 const MESSAGE_DELTA: u8 = 2;
-const DETAIL_VERSION: u8 = 3;
+const DETAIL_VERSION: u8 = 6;
 const HEALTH: usize = 0;
 const CAPTURE: usize = 1;
 const SUPPLY: usize = 2;
@@ -105,7 +124,11 @@ const RESEARCHABLE: usize = 12;
 const PROGRESS: usize = 13;
 const HOLDER: usize = 14;
 const TRADER: usize = 15;
-const SLOTS: usize = 16;
+const RALLY: usize = 16;
+const STATS: usize = 17;
+const SLOTS: usize = 18;
+/// Rally positions are sent in 1/16 m, finer than a line is wide.
+const RALLY_UNITS_PER_METRE: f32 = 16.0;
 const TURN_MS: f64 = 200.0;
 /// Production and construction advance in 1 s timer steps, so a reckoning
 /// that runs smoothly is up to 1 s off between steps; this is a step plus
@@ -253,6 +276,25 @@ fn encode_group(slot: usize, details: &EntityDetails) -> Option<Vec<u8>> {
             out.varint(one_based(trader.goods));
             out.varint(round(trader.gain));
         }
+        STATS => out.u64(details.stats?),
+        RALLY => {
+            let rally = details.rally.as_ref()?;
+            let units = |metres: f32| i64::from((metres * RALLY_UNITS_PER_METRE).round() as i32);
+            out.varint(one_based(rally.marker));
+            out.varint(rally.points.len() as u64);
+            for point in &rally.points {
+                let mut previous = [units(point.x), units(point.z)];
+                out.zigzag(previous[0]);
+                out.zigzag(previous[1]);
+                out.varint(point.path.len() as u64);
+                for [x, z] in &point.path {
+                    let at = [units(*x), units(*z)];
+                    out.zigzag(at[0] - previous[0]);
+                    out.zigzag(at[1] - previous[1]);
+                    previous = at;
+                }
+            }
+        }
         _ => unreachable!(),
     }
     Some(out.0)
@@ -360,6 +402,8 @@ pub struct DetailEncoder {
     /// The list table: 1-based strings.
     lists: Vec<Vec<ProductionItem>>,
     lists_sent: usize,
+    /// The data table as viewers hold it.
+    data: BTreeMap<DataKey, u64>,
 }
 
 impl DetailEncoder {
@@ -369,6 +413,7 @@ impl DetailEncoder {
             pending_slow: BTreeSet::new(),
             lists: Vec::new(),
             lists_sent: 0,
+            data: BTreeMap::new(),
         }
     }
 
@@ -417,6 +462,14 @@ impl DetailEncoder {
         out.varint(u64::from(turn));
         write_lists(&mut out, &self.lists[self.lists_sent..]);
         self.lists_sent = self.lists.len();
+        let changed: Vec<(DataKey, u64)> = details
+            .data
+            .iter()
+            .filter(|(key, hash)| self.data.get(key) != Some(hash))
+            .map(|(key, hash)| (*key, *hash))
+            .collect();
+        write_data(&mut out, &changed);
+        self.data.extend(changed);
         let mut body = Writer::default();
         let mut count = 0u64;
         let mut previous = 0u32;
@@ -553,6 +606,8 @@ impl DetailEncoder {
         out.u8(DETAIL_VERSION);
         out.u64(match_id);
         write_lists(&mut out, &self.lists);
+        let data: Vec<(DataKey, u64)> = self.data.iter().map(|(key, hash)| (*key, *hash)).collect();
+        write_data(&mut out, &data);
         out.varint(defaults.len() as u64);
         for (template, groups) in &defaults {
             out.varint(u64::from(*template));
@@ -640,6 +695,25 @@ fn write_lists(out: &mut Writer, lists: &[Vec<ProductionItem>]) {
                 out.varint(round(cost * 100.0));
             }
         }
+    }
+}
+
+fn write_data(out: &mut Writer, entries: &[(DataKey, u64)]) {
+    out.varint(entries.len() as u64);
+    for (key, hash) in entries {
+        match key {
+            DataKey::Template { name, player } => {
+                out.u8(0);
+                out.varint(u64::from(*name) + 1);
+                out.zigzag(i64::from(*player));
+            }
+            DataKey::Technology { name, civ } => {
+                out.u8(1);
+                out.varint(u64::from(*name) + 1);
+                out.varint(u64::from(*civ) + 1);
+            }
+        }
+        out.u64(*hash);
     }
 }
 

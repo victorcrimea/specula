@@ -4,7 +4,7 @@
 //! buttons (`g_SelectionPanels.Garrison`), production queue
 //! (`g_SelectionPanels.Queue`) and training and research buttons
 //! (`g_SelectionPanels.Training` and `Research`), drawn into the page's
-//! `#details`. The engine's tooltips are left out.
+//! `#details`, with the engine's tooltips where their data is sent.
 //!
 //! Each element keeps what was last written to it, so an update that
 //! changes nothing touches no DOM.
@@ -12,10 +12,12 @@
 use std::cell::RefCell;
 
 use wasm_bindgen::JsCast;
+use wasm_bindgen::JsValue;
 use web_sys::Document;
 use web_sys::HtmlElement;
 
 use crate::detail;
+use crate::detail::DataKey;
 use crate::detail::Group;
 use crate::detail::Groups;
 use crate::detail::ListItem;
@@ -24,6 +26,9 @@ use crate::pick;
 use crate::stream::Scene;
 use crate::stream::Stance;
 use crate::stream::TemplateDetails;
+use crate::tips;
+use crate::tips::DataFiles;
+use crate::tooltip;
 
 /// `g_SelectionPanels.Selection.getMaxNumberOfItems`.
 const MAX_GROUPS: usize = 16;
@@ -73,6 +78,7 @@ pub(crate) struct Out {
     class: Option<String>,
     src: Option<String>,
     hidden: Option<bool>,
+    tooltip: Option<String>,
 }
 
 impl Out {
@@ -84,6 +90,7 @@ impl Out {
             class: None,
             src: None,
             hidden: None,
+            tooltip: None,
         }
     }
 
@@ -122,6 +129,18 @@ impl Out {
                 let _ = self.element.set_attribute("src", &src);
             }
             self.src = Some(src);
+        }
+    }
+
+    /// The engine markup `tooltip.rs` shows over it, none when empty.
+    pub(crate) fn tooltip(&mut self, text: &str) {
+        if self.tooltip.as_deref() != Some(text) {
+            if text.is_empty() {
+                let _ = self.element.remove_attribute(tooltip::ATTRIBUTE);
+            } else {
+                let _ = self.element.set_attribute(tooltip::ATTRIBUTE, text);
+            }
+            self.tooltip = Some(text.to_string());
         }
     }
 
@@ -202,12 +221,14 @@ struct GroupButton {
 }
 
 impl GroupButton {
-    /// The `i`-th of a grid, a `tag` of `class` at `setPanelObjectPosition`.
+    /// The `i`-th of a grid, a `tag` of `class` at `setPanelObjectPosition`,
+    /// with tooltips of `tooltip_style`.
     fn new(
         document: &Document,
         grid: &HtmlElement,
         tag: &str,
         class: &str,
+        tooltip_style: &str,
         i: usize,
     ) -> Result<Self, String> {
         let button: HtmlElement = create(document, tag)?;
@@ -215,6 +236,7 @@ impl GroupButton {
             let _ = button.set_attribute("type", "button");
         }
         let _ = button.set_attribute("class", class);
+        let _ = button.set_attribute(tooltip::STYLE_ATTRIBUTE, tooltip_style);
         let _ = button.set_attribute("style", &grid_position(i, GROUP_ROW));
         let owner: HtmlElement = create(document, "div")?;
         let _ = owner.set_attribute("class", "owner");
@@ -274,6 +296,7 @@ pub struct DetailsPanel {
     resource_bar: Out,
     carrying_text: Out,
     carrying_icon: Out,
+    attack: Out,
     portrait: Out,
     icon: Out,
     experience: Out,
@@ -425,6 +448,38 @@ pub struct View<'a> {
     /// An entity template's name -> where an `<img>` finds its icon, for
     /// a template no entity of which has been seen.
     pub template_portrait: &'a dyn Fn(&str) -> Option<String>,
+    /// The JSON the data table names.
+    pub data: &'a DataFiles,
+    /// The "Detailed tooltips" setting, the engine's showdetailedtooltips.
+    pub detailed: bool,
+}
+
+impl View<'_> {
+    /// A template's `GetTemplateData` for `player`; `name` is the 1-based
+    /// string of its name.
+    fn template_data(&self, name: u32, player: i32) -> Option<JsValue> {
+        let hash = self
+            .scene
+            .details
+            .data
+            .get(&DataKey::Template { name, player })?;
+        self.data.get(*hash)
+    }
+
+    /// A technology's data for `player`'s civ; `name` is its 1-based
+    /// string.
+    fn technology_data(&self, name: u32, player: i32) -> Option<JsValue> {
+        let civ = usize::try_from(player)
+            .ok()
+            .and_then(|player| self.scene.players.get(player))?;
+        let civ = string_index(self.scene, &civ.civ)?;
+        let hash = self
+            .scene
+            .details
+            .data
+            .get(&DataKey::Technology { name, civ })?;
+        self.data.get(*hash)
+    }
 }
 
 impl DetailsPanel {
@@ -432,13 +487,22 @@ impl DetailsPanel {
         let find = |id: &str| Out::find(document, id);
         let grid: HtmlElement = crate::element(document, "details-groups")?;
         let groups = (0..MAX_GROUPS)
-            .map(|i| GroupButton::new(document, &grid, "button", "group", i))
+            .map(|i| GroupButton::new(document, &grid, "button", "group", "sessionToolTipBold", i))
             .collect::<Result<_, _>>()?;
         let garrison = match crate::element::<HtmlElement>(document, "garrison-cells") {
             Ok(grid) => Some(GarrisonPanel {
                 root: find("garrison")?,
                 cells: (0..MAX_GARRISONED)
-                    .map(|i| GroupButton::new(document, &grid, "div", "cell", i))
+                    .map(|i| {
+                        GroupButton::new(
+                            document,
+                            &grid,
+                            "div",
+                            "cell",
+                            "sessionToolTipBottomBold",
+                            i,
+                        )
+                    })
                     .collect::<Result<_, _>>()?,
                 health: find("garrison-health")?,
                 health_bar: find("garrison-health-bar")?,
@@ -494,6 +558,7 @@ impl DetailsPanel {
             resource_bar: find("details-resource-bar")?,
             carrying_text: find("details-carrying-text")?,
             carrying_icon: find("details-carrying-icon")?,
+            attack: find("details-attack")?,
             portrait: find("details-portrait")?,
             icon: find("details-icon")?,
             experience: find("details-experience")?,
@@ -682,6 +747,7 @@ impl DetailsPanel {
                     "background-image: var(--gui-rank-{})",
                     rank.to_ascii_lowercase()
                 ));
+                self.rank.tooltip(&format!("{rank} Rank"));
                 self.rank.hidden(false);
             }
             None => self.rank.hidden(true),
@@ -695,6 +761,8 @@ impl DetailsPanel {
         }
         self.icon.src(icon.clone());
         self.strip_icon.src(icon);
+        self.portrait
+            .tooltip(&portrait_tooltip(view, dot.template, dot.owner, primary));
 
         // Before the detail stream has the entity, stream 1's fraction
         // still fills the bar, without its numbers.
@@ -740,6 +808,7 @@ impl DetailsPanel {
             .class(format!("box section section-{resource_slot}"));
 
         self.health_section.hidden(health.is_none());
+        self.health_section.tooltip("Health");
         if let Some((hitpoints, max, text)) = &health {
             let width = 100.0 * fraction(*hitpoints, *max);
             self.health_bar.style(format!("width: {width}%"));
@@ -771,12 +840,17 @@ impl DetailsPanel {
                 .copied()
                 .unwrap_or(0.0);
             let known = matches!(groups[detail::CAPTURE], Some(Group::Capture { .. }));
-            self.capture_stats
-                .text(&if (health.is_some() && supply.is_some()) || !known {
-                    String::new()
-                } else {
-                    format!("{} / {}", owned.ceil(), max.ceil())
-                });
+            let small = health.is_some() && supply.is_some();
+            self.capture_stats.text(&if small || !known {
+                String::new()
+            } else {
+                format!("{} / {}", owned.ceil(), max.ceil())
+            });
+            self.capture_section.tooltip(&if small && known {
+                tooltip::current_capture(owned, *max, None)
+            } else {
+                "Capture Points".to_string()
+            });
         }
 
         match &groups[detail::EXPERIENCE] {
@@ -787,6 +861,12 @@ impl DetailsPanel {
                 let done = fraction(f64::from(*experience), f64::from((*required).max(1)));
                 self.experience_bar
                     .style(format!("top: {}%", 100.0 - 100.0 * done));
+                let label = tooltip::header_font("Experience:");
+                self.experience.tooltip(&if experience < required {
+                    format!("{label} {experience} / {required}")
+                } else {
+                    format!("{label} {experience}")
+                });
                 self.experience.hidden(false);
             }
             _ => self.experience.hidden(true),
@@ -798,11 +878,50 @@ impl DetailsPanel {
             self.resource_stats.text(text);
         }
 
+        // `attackAndResistanceStats`, from the stats the detail stream
+        // names once they have arrived.
+        let stats = match &groups[detail::STATS] {
+            Some(Group::Stats(hash)) => view.data.get(*hash),
+            _ => None,
+        };
+        let stats_tooltip = stats.map_or_else(String::new, |stats| {
+            // `calculateCarriedResources`: everything carried, and a
+            // trader's gain.
+            let mut carried: Vec<(String, f64)> = Vec::new();
+            if let Some(Group::Carrying(list)) = &groups[detail::CARRYING] {
+                for item in list {
+                    let code = string(scene, item.kind).unwrap_or_default().to_string();
+                    carried.push((code, f64::from(item.amount)));
+                }
+            }
+            if let Some(Group::Trader { goods, gain }) = &groups[detail::TRADER] {
+                let code = string(scene, *goods).unwrap_or_default().to_string();
+                carried.push((code, f64::from(*gain)));
+            }
+            join_lines(vec![
+                tips::attack_tooltip(&stats),
+                tips::healer_tooltip(&stats),
+                tips::resistance_tooltip(&stats),
+                tips::gather_tooltip(&stats),
+                tips::speed_tooltip(&stats),
+                tips::garrison_tooltip(&stats),
+                tips::turrets_tooltip(&stats),
+                tips::population_bonus_tooltip(&stats),
+                tips::projectiles_tooltip(&stats),
+                tips::rates_tooltip(&stats, "resourceTrickle", "Resource Trickle:"),
+                tips::rates_tooltip(&stats, "upkeep", "Upkeep:"),
+                tips::loot_tooltip(&stats, &carried),
+            ])
+        });
+        self.attack.hidden(stats_tooltip.is_empty());
+        self.attack.tooltip(&stats_tooltip);
+
         let carrying = self.carrying(view, &groups, template, health.is_some());
         match carrying {
-            Some((icon, text)) => {
+            Some((icon, text, tip)) => {
                 self.carrying_icon
                     .style(format!("background-image: var(--gui-{icon})"));
+                self.carrying_icon.tooltip(&tip);
                 self.carrying_text.text(&text);
                 self.carrying_icon.hidden(false);
                 self.carrying_text.hidden(false);
@@ -814,8 +933,8 @@ impl DetailsPanel {
         }
     }
 
-    /// The icon key and text of the line under the bars, first that
-    /// applies: carried resources, trader gain, foundation builders,
+    /// The icon key, text and tooltip of the line under the bars, first
+    /// that applies: carried resources, trader gain, foundation builders,
     /// gatherers, repair builders.
     fn carrying(
         &self,
@@ -823,7 +942,7 @@ impl DetailsPanel {
         groups: &Groups,
         template: Option<&TemplateDetails>,
         has_health: bool,
-    ) -> Option<(String, String)> {
+    ) -> Option<(String, String, String)> {
         let scene = view.scene;
         if let Some(Group::Carrying(carried)) = &groups[detail::CARRYING]
             && let Some(first) = carried.first()
@@ -832,16 +951,27 @@ impl DetailsPanel {
             return Some((
                 format!("resource-{kind}"),
                 format!("{} / {}", first.amount, first.capacity),
+                String::new(),
             ));
         }
         if let Some(Group::Trader { goods, gain }) = &groups[detail::TRADER]
             && *gain > 0
         {
             let kind = string(scene, *goods).unwrap_or_default();
-            return Some((format!("resource-{kind}"), gain.to_string()));
+            // `getTradingTooltip` parts the gain by player, which the hook
+            // sums.
+            return Some((
+                format!("resource-{kind}"),
+                gain.to_string(),
+                format!("Gain: {gain}"),
+            ));
         }
         if let Some(Group::Building(building)) = &groups[detail::FOUNDATION] {
-            return Some(("repair".to_string(), builders_text(building, scene.turn)));
+            return Some((
+                "repair".to_string(),
+                builders_text(building, scene.turn),
+                build_time_tooltip(building, scene.turn, "builders", "build"),
+            ));
         }
         let kill_before_gather = template.is_some_and(|template| {
             pick::has_class(template, &scene.strings, KILL_BEFORE_GATHER_CLASS)
@@ -850,14 +980,22 @@ impl DetailsPanel {
             && (!kill_before_gather || !has_health)
             && let Some(Group::Gatherers { count, max }) = &groups[detail::GATHERERS]
         {
-            return Some(("repair".to_string(), format!("{count} / {max}")));
+            return Some((
+                "repair".to_string(),
+                format!("{count} / {max}"),
+                "Current/max gatherers".to_string(),
+            ));
         }
         // `needsRepair`: below its max hitpoints.
         if let (Some(Group::Building(building)), Some(Group::Health { hitpoints, max })) =
             (&groups[detail::REPAIR], &groups[detail::HEALTH])
             && hitpoints < max
         {
-            return Some(("repair".to_string(), builders_text(building, scene.turn)));
+            return Some((
+                "repair".to_string(),
+                builders_text(building, scene.turn),
+                build_time_tooltip(building, scene.turn, "repairers", "repair"),
+            ));
         }
         None
     }
@@ -900,6 +1038,8 @@ impl DetailsPanel {
         }
 
         self.health_multiple.hidden(health <= 0.0);
+        self.health_multiple
+            .tooltip(&tooltip::current_health(health, max_health, None));
         let filled = 100.0 * fraction(health, max_health);
         self.health_multiple_bar
             .style(format!("top: {}%", 100.0 - filled));
@@ -919,10 +1059,20 @@ impl DetailsPanel {
             }
             self.capture_multiple
                 .show(&parts, max_capture, view.palette, true);
+            let owned = owner
+                .and_then(|owner| capture.get(owner))
+                .copied()
+                .unwrap_or(0.0);
+            self.capture_multiple.bar.tooltip(&tooltip::current_health(
+                owned,
+                max_capture,
+                Some("Capture Points:"),
+            ));
         }
 
         let count = entities.len().to_string();
         self.count.text(&count);
+        self.count.tooltip(&units_tooltip(scene, entities));
         self.strip_name.text(&count);
 
         let grouped = crate::selection::groups(entities, |id| {
@@ -949,6 +1099,9 @@ impl DetailsPanel {
             // The owner's colour shows to observers only, which a viewer
             // always is.
             button.show(icon, player_color(view.palette, dot.owner), ids.len());
+            button
+                .button
+                .tooltip(&group_tooltip(scene, dot.template, dot.owner, ids));
             self.group_ids.push(ids.clone());
         }
         self.strip_icon.src(first_icon);
@@ -1008,6 +1161,12 @@ impl GarrisonPanel {
                 player_color(view.palette, owner),
                 grouped[index].1.len(),
             );
+            // An observer cannot unload, so only the names and the owner.
+            cell.button.tooltip(&format!(
+                "{}\nPlayer: {}",
+                template_names(scene, template),
+                player_name(scene, owner)
+            ));
         }
 
         let mut health = 0.0;
@@ -1023,6 +1182,8 @@ impl GarrisonPanel {
             }
         }
         self.health.hidden(health <= 0.0);
+        self.health
+            .tooltip(&tooltip::current_health(health, max_health, None));
         // A variable, since the folded phone strip lays the bar flat.
         self.health_bar.style(format!(
             "--lost: {}%",
@@ -1036,6 +1197,7 @@ impl QueueCell {
         let cell: HtmlElement = create(document, "div")?;
         let _ = cell.set_attribute("class", "item");
         let _ = cell.set_attribute("style", &grid_position(i, QUEUE_ROW));
+        let _ = cell.set_attribute(tooltip::STYLE_ATTRIBUTE, "sessionToolTipBottom");
         let icon: HtmlElement = create(document, "img")?;
         let _ = icon.set_attribute("alt", "");
         let slider: HtmlElement = create(document, "div")?;
@@ -1154,6 +1316,9 @@ impl QueuePanel {
             cell.cell.class(class);
             let paused = queued.paused && !item.ghost;
             cell.paused.hidden(!paused);
+            let owner = scene.dots.get(&item.producer).map_or(-1, |dot| dot.owner);
+            cell.cell
+                .tooltip(&queue_tooltip(view, queued, item.ghost, owner));
             if item.ghost {
                 cell.slider.style(format!("top: {SLIDER_INSET}px"));
             }
@@ -1205,6 +1370,7 @@ impl CommandCell {
         let cell: HtmlElement = create(document, "div")?;
         let _ = cell.set_attribute("class", "item");
         let _ = cell.set_attribute("style", position);
+        let _ = cell.set_attribute(tooltip::STYLE_ATTRIBUTE, "sessionToolTipBottom");
         let icon: HtmlElement = create(document, "img")?;
         let _ = icon.set_attribute("alt", "");
         let tint: HtmlElement = create(document, "div")?;
@@ -1340,6 +1506,10 @@ impl CommandsPanel {
             let count = item
                 .can_be_added
                 .map_or(producing, |limit| producing.min(limit));
+            // `multiplyEntityCosts`: floored after the multiplication.
+            let short = needed_amounts(scene, player, item, |cost| {
+                (u64::from(cost) * u64::from(count) / 100) as f64
+            });
             let modifier = if all_upgrading {
                 Modifier::Grey
             } else if item.flags & ListItem::UNKNOWN != 0 {
@@ -1347,12 +1517,11 @@ impl CommandsPanel {
             } else if item.flags & ListItem::REQUIREMENTS_MET == 0 || item.can_be_added == Some(0) {
                 Modifier::Grey
             } else {
-                // `multiplyEntityCosts`: floored after the multiplication.
-                needed(scene, player, item, |cost| {
-                    (u64::from(cost) * u64::from(count) / 100) as f64
-                })
+                needed(&short)
             };
             cell.show(unit_portrait(view, name), modifier, count);
+            cell.cell
+                .tooltip(&training_tooltip(view, item, player, count, &short));
             drawn = true;
         }
 
@@ -1390,6 +1559,8 @@ impl CommandsPanel {
                     cell.cell.hidden(true);
                     continue;
                 };
+                let short =
+                    needed_amounts(scene, player, tech.item, |cost| f64::from(cost) / 100.0);
                 let modifier = if upgrading {
                     Modifier::Grey
                 } else if tech.item.flags & ListItem::UNKNOWN != 0 {
@@ -1397,9 +1568,14 @@ impl CommandsPanel {
                 } else if tech.item.flags & ListItem::REQUIREMENTS_MET == 0 {
                     Modifier::Grey
                 } else {
-                    needed(scene, player, tech.item, |cost| f64::from(cost) / 100.0)
+                    needed(&short)
                 };
                 cell.show((view.technology_portrait)(tech.name), modifier, 0);
+                let owner = producers
+                    .get(producer)
+                    .map_or(player, |producer| producer.owner);
+                cell.cell
+                    .tooltip(&research_tooltip(view, tech.item, owner, &short));
             }
         }
 
@@ -1537,17 +1713,21 @@ fn research_items<'a>(
 }
 
 /// `GetNeededResources` of `item`'s costs, each as `amount` gives it from
-/// the cost in 1/100, against `player`'s stockpile, as
-/// `resourcesToAlphaMask`'s tint.
-fn needed(scene: &Scene, player: i32, item: &ListItem, amount: impl Fn(u32) -> f64) -> Modifier {
+/// the cost in 1/100, against `player`'s stockpile: what each resource
+/// lacks, none when it can be paid.
+fn needed_amounts(
+    scene: &Scene,
+    player: i32,
+    item: &ListItem,
+    amount: impl Fn(u32) -> f64,
+) -> Vec<(String, f64)> {
     let Some(economy) = usize::try_from(player)
         .ok()
         .and_then(|player| scene.economy.get(player))
     else {
-        return Modifier::None;
+        return Vec::new();
     };
-    let mut total = 0.0;
-    let mut short = false;
+    let mut short = Vec::new();
     for &(resource, cost) in &item.costs {
         // A type the player has no count of is never needed.
         let Some(stock) = economy
@@ -1560,15 +1740,140 @@ fn needed(scene: &Scene, player: i32, item: &ListItem, amount: impl Fn(u32) -> f
         let amount = amount(cost);
         let stock = f64::from(stock.amount);
         if amount > stock {
-            total += amount - stock;
-            short = true;
+            short.push((
+                string(scene, resource).unwrap_or_default().to_string(),
+                amount - stock,
+            ));
         }
     }
-    if short {
-        Modifier::Needed(NEEDED_ALPHA_MAX.min((total / 10.0).round() + NEEDED_ALPHA_BASE) / 255.0)
-    } else {
-        Modifier::None
+    short
+}
+
+/// `resourcesToAlphaMask`'s tint of what `needed_amounts` found.
+fn needed(short: &[(String, f64)]) -> Modifier {
+    if short.is_empty() {
+        return Modifier::None;
     }
+    let total: f64 = short.iter().map(|(_, amount)| amount).sum();
+    Modifier::Needed(NEEDED_ALPHA_MAX.min((total / 10.0).round() + NEEDED_ALPHA_BASE) / 255.0)
+}
+
+/// `g_SelectionPanels.Training.setupButton`'s tooltip for an observer:
+/// without the hotkey, the limits (only what can be added is sent), the
+/// template viewer line (V9) and the batch line.
+fn training_tooltip(
+    view: &View,
+    item: &ListItem,
+    player: i32,
+    count: u32,
+    short: &[(String, f64)],
+) -> String {
+    let Some(data) = view.template_data(item.name, player) else {
+        return String::new();
+    };
+    let mut lines = vec![
+        tips::entity_names_formatted(&data),
+        tips::visible_classes(&data),
+        tips::auras_tooltip(&data),
+        tips::entity_tooltip(&data),
+        tips::cost_tooltip(&data, f64::from(count), None),
+    ];
+    if view.detailed {
+        lines.extend(tips::detailed_lines(&data));
+    }
+    if item.flags & ListItem::REQUIREMENTS_MET == 0 {
+        let technology = |name: &str| {
+            let name = string_index(view.scene, name)?;
+            view.technology_data(name, player)
+        };
+        lines.push(tips::requirements_tooltip(&data, &technology));
+    }
+    lines.push(tips::needed_resources_tooltip(short));
+    join_lines(lines)
+}
+
+/// `g_SelectionPanels.Research.setupButton`'s tooltip, its costs those of
+/// the list (the producer's multiplier applied), and without the entity
+/// counts a requirement still lacks (`classCounts` is not sent) or the
+/// template viewer line (V9).
+fn research_tooltip(view: &View, item: &ListItem, owner: i32, short: &[(String, f64)]) -> String {
+    let Some(data) = view.technology_data(item.name, owner) else {
+        return String::new();
+    };
+    let costs: Vec<(String, f64)> = item
+        .costs
+        .iter()
+        .map(|(resource, cost)| {
+            (
+                string(view.scene, *resource)
+                    .unwrap_or_default()
+                    .to_string(),
+                f64::from(*cost) / 100.0,
+            )
+        })
+        .collect();
+    let mut lines = vec![
+        tips::entity_names_formatted(&data),
+        tips::entity_tooltip(&data),
+        tips::cost_tooltip(&data, 1.0, Some(&costs)),
+    ];
+    if item.flags & ListItem::REQUIREMENTS_MET == 0 {
+        let requirements = tips::requirements_text(&data);
+        if !requirements.is_empty() {
+            lines.push(tooltip::objection_font(&requirements));
+        }
+    }
+    lines.push(tips::needed_resources_tooltip(short));
+    join_lines(lines)
+}
+
+/// `displaySingle`'s `iconBorder` tooltip, from the owner's template data
+/// where the engine reads the viewer's, and without the template viewer
+/// line (V9).
+fn portrait_tooltip(view: &View, template: u32, owner: i32, primary: &str) -> String {
+    let scene = view.scene;
+    let data = scene
+        .templates
+        .get(template as usize)
+        .and_then(|name| string_index(scene, name))
+        .and_then(|name| view.template_data(name, owner));
+    let mut lines = vec![tooltip::tags(primary, &[("font", "sans-bold-16")])];
+    if let Some(data) = &data {
+        lines.extend([
+            tips::visible_classes(data),
+            tips::auras_tooltip(data),
+            tips::entity_tooltip(data),
+            tips::treasure_tooltip(data),
+        ]);
+    }
+    let unit = template_details(scene, template)
+        .is_some_and(|details| pick::has_class(details, &scene.strings, "Unit"));
+    lines.push(
+        if unit {
+            "Left-click to follow."
+        } else {
+            "Left-click to focus."
+        }
+        .to_string(),
+    );
+    join_lines(lines)
+}
+
+fn join_lines(lines: Vec<String>) -> String {
+    lines
+        .into_iter()
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// The 1-based string index of `text`, if the stream has it.
+fn string_index(scene: &Scene, text: &str) -> Option<u32> {
+    scene
+        .strings
+        .iter()
+        .position(|other| other == text)
+        .map(|index| index as u32 + 1)
 }
 
 /// A unit template's portrait: from the details of a template seen in the
@@ -1587,6 +1892,151 @@ fn queue_of(queues: &[(u32, detail::Queue)], producer: u32) -> Option<&detail::Q
         .iter()
         .find(|(id, _)| *id == producer)
         .map(|(_, queue)| queue)
+}
+
+/// `getEntityNames` of a template the template table has details for.
+fn template_names(scene: &Scene, template: u32) -> String {
+    let details = template_details(scene, template);
+    let name = |index: Option<u32>| {
+        index
+            .and_then(|index| string(scene, index))
+            .unwrap_or_default()
+    };
+    tooltip::entity_names(
+        name(details.map(|details| details.generic_name)),
+        name(details.map(|details| details.specific_name)),
+    )
+}
+
+fn player_name(scene: &Scene, owner: i32) -> &str {
+    usize::try_from(owner)
+        .ok()
+        .and_then(|owner| scene.players.get(owner))
+        .map_or("", |player| player.name.as_str())
+}
+
+/// The resources of `carrying` and of a trader's goods, by type in the
+/// order first met, as `setupButton` and `calculateCarriedResources` sum
+/// them.
+fn add_carried(scene: &Scene, groups: &Groups, carried: &mut Vec<(String, u32)>) {
+    let mut add = |kind: u32, amount: u32| {
+        let kind = string(scene, kind).unwrap_or_default().to_string();
+        match carried.iter_mut().find(|(code, _)| *code == kind) {
+            Some((_, sum)) => *sum += amount,
+            None => carried.push((kind, amount)),
+        }
+    };
+    if let Some(Group::Carrying(list)) = &groups[detail::CARRYING]
+        && let Some(first) = list.first()
+    {
+        add(first.kind, first.amount);
+    }
+    if let Some(Group::Trader { goods, gain }) = &groups[detail::TRADER]
+        && *gain > 0
+    {
+        add(*goods, *gain);
+    }
+}
+
+/// `g_SelectionPanels.Selection.setupButton`'s tooltip, for an observer.
+fn group_tooltip(scene: &Scene, template: u32, owner: i32, ids: &[u32]) -> String {
+    let mut tooltip = template_names(scene, template);
+    let mut carried = Vec::new();
+    for &id in ids {
+        if let Some(dot) = scene.dots.get(&id) {
+            add_carried(scene, &entity_groups(scene, id, dot.template), &mut carried);
+        }
+    }
+    if !carried.is_empty() {
+        tooltip.push('\n');
+        tooltip.push_str(
+            &carried
+                .iter()
+                .map(|(code, amount)| format!("{}{amount}", tooltip::resource_icon(code)))
+                .collect::<Vec<_>>()
+                .join(" "),
+        );
+    }
+    tooltip.push_str(&format!("\nPlayer: {}", player_name(scene, owner)));
+    tooltip
+}
+
+/// `displayMultiple`'s `numberOfUnits` tooltip. Garrisonable sizes and
+/// loot are not sent, so only holders count to the garrison size and the
+/// loot line has the carried resources alone.
+fn units_tooltip(scene: &Scene, entities: &[u32]) -> String {
+    let mut garrison_size = 0;
+    let mut carried = Vec::new();
+    for &id in entities {
+        let Some(dot) = scene.dots.get(&id) else {
+            continue;
+        };
+        let groups = entity_groups(scene, id, dot.template);
+        add_carried(scene, &groups, &mut carried);
+        if let Some(Group::Garrison { occupied, .. }) = &groups[detail::GARRISON] {
+            garrison_size += occupied;
+        }
+    }
+    let list = |carried: &[(String, u32)]| {
+        carried
+            .iter()
+            .filter(|(_, amount)| *amount != 0)
+            .map(|(code, amount)| format!("{} {amount}", tooltip::resource_icon(code)))
+            .collect::<Vec<_>>()
+            .join("  ")
+    };
+    let mut tooltip = String::new();
+    if garrison_size > 0 {
+        tooltip = format!(
+            "{}: {}\n",
+            tooltip::header_font("Garrison Size"),
+            tooltip::body_font(&garrison_size.to_string())
+        );
+    }
+    if !carried.is_empty() {
+        tooltip = format!(
+            "{} {}\n",
+            tooltip::header_font("Carrying:"),
+            tooltip::body_font(&list(&carried))
+        );
+        tooltip.push_str(&format!(
+            "{} {}",
+            tooltip::header_font("Loot:"),
+            tooltip::body_font(&list(&carried))
+        ));
+    }
+    tooltip
+}
+
+/// `g_SelectionPanels.Queue.setupButton`'s tooltip, without the template
+/// viewer line (V9): none until the item's data has arrived.
+fn queue_tooltip(view: &View, queued: &detail::QueueItem, ghost: bool, owner: i32) -> String {
+    let scene = view.scene;
+    let name = string(scene, queued.name).unwrap_or_default();
+    let names = if queued.technology {
+        view.technology_data(queued.name, owner)
+            .map(|data| tips::entity_names(&data))
+    } else {
+        view.template_data(queued.name, owner)
+            .map(|data| tips::entity_names(&data))
+            .or_else(|| template_index(scene, name).map(|template| template_names(scene, template)))
+    };
+    let Some(names) = names else {
+        return String::new();
+    };
+    let mut lines = vec![names];
+    if ghost {
+        lines.push("The auto-queue will try to train this item later.".to_string());
+    }
+    if queued.missing_population > 0 {
+        lines.push(tooltip::objection_font("Insufficient population capacity:"));
+        lines.push(format!(
+            "{} {}",
+            tooltip::resource_icon("population"),
+            queued.missing_population
+        ));
+    }
+    lines.join("\n")
 }
 
 /// The template table's index of a template name.
@@ -1689,6 +2139,26 @@ fn builders_text(building: &detail::Building, turn: u32) -> String {
         building.builders,
         minutes_seconds(building.seconds_remaining(turn))
     )
+}
+
+/// `getBuildTimeTooltip` (`noun` "builders", `kind` "build") and
+/// `getRepairTimeTooltip` ("repairers", "repair"), without the line of
+/// what another worker would save, as the hook does not send
+/// `timeRemainingNew`.
+fn build_time_tooltip(building: &detail::Building, turn: u32, noun: &str, kind: &str) -> String {
+    let mut lines = vec![format!(
+        "{} {}",
+        tooltip::header_font(&format!("Number of {noun}:")),
+        building.builders
+    )];
+    if building.builders > 0 {
+        lines.push(format!(
+            "{} {}",
+            tooltip::header_font(&format!("Remaining {kind} time:")),
+            tooltip::seconds_string(building.seconds_remaining(turn).floor() as i64)
+        ));
+    }
+    lines.join("\n")
 }
 
 /// `FormatMillisecondsIntoDateStringGMT` with "m:ss", which drops the

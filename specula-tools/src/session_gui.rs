@@ -43,7 +43,7 @@ const BROTLI_QUALITY: u32 = 11;
 const BROTLI_WINDOW_BITS: u32 = 22;
 
 /// (custom property key, path under `UI`), copied as they are.
-const TEXTURES: [(&str, &str); 35] = [
+const TEXTURES: [(&str, &str); 51] = [
     ("hud-panels", "session/hud_panels.png"),
     ("line-horiz", "global/border/line_horiz.png"),
     ("line-vert", "global/border/line_vert.png"),
@@ -108,6 +108,27 @@ const TEXTURES: [(&str, &str); 35] = [
     ("phase-city", "session/panel_phase_emblems_city.png"),
     ("phase-hidden", "session/panel_phase_emblems_hidden.png"),
     ("minimap-circle", "session/minimap_circle_modern.png"),
+    ("stance-defensive", "session/icons/stances/defensive.png"),
+    // The `<icon>`s of gui/common/resources/, which tooltips name as
+    // `[icon="icon_<code>"]`.
+    ("icon-food", "session/icons/resources/food_small.png"),
+    ("icon-wood", "session/icons/resources/wood_small.png"),
+    ("icon-stone", "session/icons/resources/stone_small.png"),
+    ("icon-metal", "session/icons/resources/metal_small.png"),
+    (
+        "icon-population",
+        "session/icons/resources/population_small.png",
+    ),
+    ("icon-time", "session/icons/resources/time_small.png"),
+    ("icon-xp", "session/icons/promote.png"),
+    ("icon-food_fish", "session/icons/resources/fish_small.png"),
+    ("icon-food_fruit", "session/icons/resources/fruit_small.png"),
+    ("icon-food_grain", "session/icons/resources/grain_small.png"),
+    ("icon-food_meat", "session/icons/resources/meat_small.png"),
+    ("icon-food_rice", "session/icons/resources/rice_small.png"),
+    ("icon-metal_ore", "session/icons/resources/metal_small.png"),
+    ("icon-stone_rock", "session/icons/resources/stone_small.png"),
+    ("icon-wood_tree", "session/icons/resources/wood_small.png"),
     ("portrait-black", "session/icons/bkg/portrait_black.dds"),
 ];
 /// The engine's `sans` (config/default.cfg, [fonts.sans]): (family, CSS

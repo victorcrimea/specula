@@ -1,7 +1,7 @@
 //! The top panel, a port of gui/session/top_panel/ (`CounterManager`,
 //! `CounterResource`, `CounterPopulation`) and of the hero buttons
 //! (`PanelEntityManager`, `PanelEntity`), drawn into the page's
-//! `#top-panel`. The engine's tooltips are left out.
+//! `#top-panel`, with the engine's tooltips where their data is sent.
 //!
 //! The engine hides the counters from observers and lists every player's
 //! values in their tooltip; here the Observer perspective shows one row of
@@ -12,6 +12,8 @@ use std::cell::RefCell;
 use web_sys::Document;
 use web_sys::HtmlElement;
 
+use crate::detail;
+use crate::detail::Group;
 use crate::diplomacy::Perspective;
 use crate::panel::BAND_ALPHA;
 use crate::panel::CaptureBar;
@@ -25,6 +27,7 @@ use crate::pick;
 use crate::stream::Economy;
 use crate::stream::PlayerState;
 use crate::stream::Scene;
+use crate::tooltip;
 
 /// `g_ResourceData.GetCodes()` for the public mod, in its order.
 const RESOURCES: [&str; 4] = ["food", "wood", "stone", "metal"];
@@ -51,6 +54,7 @@ const FADE_OPACITY_RATE: i32 = 3;
 
 /// One `resource[n]` counter: its count and gatherers.
 struct Counter {
+    panel: Out,
     count: Out,
     stats: Out,
 }
@@ -85,6 +89,7 @@ impl Counter {
             .append_child(&counter)
             .map_err(|_| "cannot add a counter")?;
         Ok(Counter {
+            panel: Out::new(counter),
             count: Out::new(count),
             stats: Out::new(stats),
         })
@@ -127,8 +132,11 @@ impl Counters {
         Ok(Counters(counters))
     }
 
-    /// `CounterResource.rebuild` and `CounterPopulation.rebuild`.
-    fn show(&mut self, scene: &Scene, economy: &Economy) {
+    /// `CounterResource.rebuild` and `CounterPopulation.rebuild` for player
+    /// `viewed`, whose tooltips list the others, as an observer's do.
+    fn show(&mut self, scene: &Scene, viewed: usize, palette: &[u32]) {
+        let none = Economy::default();
+        let economy = scene.economy.get(viewed).unwrap_or(&none);
         let resource = |code: &str| {
             economy
                 .resources
@@ -153,6 +161,65 @@ impl Counters {
                 ),
                 gatherers,
             );
+        }
+
+        // `CounterManager.rebuild`'s `allyPlayerStates`: everyone else
+        // still playing, for an observer. The order line is left out, as
+        // a click does not sort here (V27).
+        let others: Vec<(usize, &Economy)> = scene
+            .players
+            .iter()
+            .enumerate()
+            .skip(1)
+            .filter(|(id, player)| *id != viewed && player.state != PlayerState::Defeated)
+            .filter_map(|(id, _)| Some((id, scene.economy.get(id)?)))
+            .collect();
+        let ally_stats = |stat: &dyn Fn(&Economy) -> String| {
+            others.iter().fold(String::new(), |result, (id, economy)| {
+                let rgb = palette.get(*id).copied().unwrap_or(0).to_be_bytes();
+                let name = scene
+                    .players
+                    .get(*id)
+                    .map_or("", |player| player.name.as_str());
+                let player = format!(
+                    "{} {name}",
+                    tooltip::colored("\u{25a0}", &format!("{} {} {}", rgb[1], rgb[2], rgb[3]))
+                );
+                tooltip::tags(
+                    &format!("{result}\n{player}: {}", stat(economy)),
+                    &[("font", "sans-bold-stroke-14")],
+                )
+            })
+        };
+        let title = |text: &str| tooltip::tags(text, &[("font", "sans-bold-16")]);
+        for (counter, code) in self.0.iter_mut().zip(RESOURCES) {
+            let (name, description) = tooltip::resource_data(code).unwrap_or_default();
+            let amount = |economy: &Economy| {
+                economy
+                    .resources
+                    .iter()
+                    .find(|resource| string(scene, resource.code) == Some(code))
+                    .map_or(0, |resource| resource.amount)
+                    .to_string()
+            };
+            counter.panel.tooltip(&format!(
+                "{}\n{description}{}",
+                title(name),
+                ally_stats(&amount)
+            ));
+        }
+        if let Some(population) = self.0.last_mut() {
+            let stat = |economy: &Economy| {
+                format!(
+                    "{}/{} ({})",
+                    economy.population, economy.population_limit, economy.population_max
+                )
+            };
+            population.panel.tooltip(&format!(
+                "{}{}",
+                title("Population: current/limit (max)"),
+                ally_stats(&stat)
+            ));
         }
     }
 }
@@ -441,11 +508,9 @@ impl TopPanel {
     /// the frame clock, for the attack fades.
     pub fn update(&mut self, view: &View, now: f64) {
         let scene = view.scene;
-        let none = Economy::default();
         let rows = match view.perspective {
             Perspective::Player(id) => {
-                self.counters
-                    .show(scene, scene.economy.get(id).unwrap_or(&none));
+                self.counters.show(scene, id, view.palette);
                 0
             }
             Perspective::Observer => {
@@ -518,7 +583,7 @@ impl TopPanel {
                 format!("background-image: var(--gui-phase-{phase})")
             });
             row.name.text(&player.name);
-            row.counters.show(scene, economy);
+            row.counters.show(scene, id, view.palette);
         }
         Ok(())
     }
@@ -665,7 +730,65 @@ fn show_hero(view: &View, hero: &Hero, button: &mut HeroButton) {
     if hero.fade.is_none() {
         button.hit.hidden(true);
     }
+    button.button.tooltip(&hero_tooltip(view, hero));
     button.button.hidden(false);
+}
+
+/// `PanelEntity.update`'s tooltip: the name, then health and capture
+/// points while the detail stream has them; the other lines need data
+/// that is not sent.
+fn hero_tooltip(view: &View, hero: &Hero) -> String {
+    let scene = view.scene;
+    let Some(dot) = scene.dots.get(&hero.id) else {
+        return String::new();
+    };
+    let template = template_details(scene, dot.template);
+    let name = |index: Option<u32>| {
+        index
+            .and_then(|index| string(scene, index))
+            .unwrap_or_default()
+    };
+    let specific = name(template.map(|template| template.specific_name));
+    let generic = name(template.map(|template| template.generic_name));
+    let mut lines = Vec::new();
+    if scene.details.known {
+        let groups = scene.details.resolved(hero.id, Some(dot.template));
+        if let Some(Group::Health { hitpoints, max }) = &groups[detail::HEALTH] {
+            lines.push(tooltip::current_health(
+                f64::from(*hitpoints),
+                f64::from(*max),
+                None,
+            ));
+        }
+        if let Some(Group::Capture { points, max }) = &groups[detail::CAPTURE] {
+            let owned = usize::try_from(dot.owner)
+                .ok()
+                .and_then(|owner| points.get(owner))
+                .copied()
+                .unwrap_or(0);
+            lines.push(tooltip::current_capture(
+                f64::from(owned),
+                f64::from(*max),
+                None,
+            ));
+        }
+    }
+    format!(
+        "{}\n{}",
+        tooltip::tags(
+            if specific.is_empty() {
+                generic
+            } else {
+                specific
+            },
+            &[("font", "sans-bold-16")]
+        ),
+        lines
+            .into_iter()
+            .filter(|line| !line.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n")
+    )
 }
 
 /// `abbreviateLargeNumbers`.

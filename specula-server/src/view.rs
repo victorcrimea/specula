@@ -1,4 +1,4 @@
-//! The viewer stream, wire format v15: messages for each keyframe, turn or
+//! The viewer stream, wire format v16: messages for each keyframe, turn or
 //! match end, varints and zigzag as in `wire.rs`, positions and heights in
 //! 1/16 m, carried brotli-compressed as below.
 //!
@@ -182,7 +182,9 @@
 //! bar height, f32 status bar height offset, varint generic name, varint
 //! specific name, varint icon, varint selection group name, varint rank,
 //! varint classes, varint visible classes, varint select sound group,
-//! varint lang, varint phenotypes, varint components}. The flags and
+//! varint lang, varint phenotypes, varint components, varint rally line
+//! texture, varint rally line mask, f32 rally line thickness, u8 rally line
+//! start cap, u8 rally line end cap}. The flags and
 //! component bits are those of the hook's template details (`SpeculaFeed.h`, kind 11), and so are the
 //! meanings of the strings, which are 1-based indices into the string
 //! table, 0 for none. A template the hook had no details for has none; the
@@ -251,6 +253,9 @@
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::hash::DefaultHasher;
+use std::hash::Hash;
+use std::hash::Hasher;
 use std::io;
 use std::io::ErrorKind;
 use std::io::Write;
@@ -284,7 +289,7 @@ const MESSAGE_KEYFRAME: u8 = 1;
 const MESSAGE_DELTA: u8 = 2;
 const MESSAGE_ENDED: u8 = 3;
 /// In every keyframe; deltas follow one, so they need none.
-const WIRE_VERSION: u8 = 15;
+const WIRE_VERSION: u8 = 16;
 const CHANGED_POSITION: u64 = 1;
 const CHANGED_COLOR: u64 = 2;
 const CHANGED_ICON: u64 = 4;
@@ -664,6 +669,7 @@ struct Archive {
     segments: Vec<Message>,
     detail_segments: Vec<Message>,
     terrain: Option<(u64, TerrainFile)>,
+    data_files: HashMap<u64, Arc<[u8]>>,
 }
 
 struct Ended {
@@ -791,6 +797,9 @@ struct State {
     detail: Track,
     detail_encoder: DetailEncoder,
     terrain: Option<(u64, TerrainFile)>,
+    /// The kind 18 and 19 JSON of the match, by the hash the detail
+    /// stream names it by.
+    data_files: HashMap<u64, Arc<[u8]>>,
     ground: Option<Ground>,
     /// What viewers hold after the last turn, which the next delta builds
     /// on; near the simulation's state, not equal to it.
@@ -873,6 +882,7 @@ impl Hub {
                 detail: Track::new(),
                 detail_encoder: DetailEncoder::new(),
                 terrain: None,
+                data_files: HashMap::new(),
                 ground: None,
                 dots: BTreeMap::new(),
                 captures: BTreeMap::new(),
@@ -1056,6 +1066,30 @@ impl Hub {
         state.ground = Some(ground);
     }
 
+    /// Keeps a kind 18 or 19 JSON for `/data/<hash>`, and returns that hash.
+    pub fn add_data(&self, json: Vec<u8>) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        json.hash(&mut hasher);
+        let hash = hasher.finish();
+        self.state
+            .lock()
+            .unwrap()
+            .data_files
+            .entry(hash)
+            .or_insert_with(|| json.into());
+        hash
+    }
+
+    /// Only the current and the previous match's files are kept.
+    pub fn data(&self, hash: u64) -> Option<Arc<[u8]>> {
+        let state = self.state.lock().unwrap();
+        let archived = state
+            .previous
+            .as_ref()
+            .and_then(|archive| archive.data_files.get(&hash));
+        state.data_files.get(&hash).or(archived).cloned()
+    }
+
     /// Only the current and the previous match's terrain are kept; an
     /// older id is gone.
     pub fn terrain(&self, id: u64) -> Option<TerrainFile> {
@@ -1103,6 +1137,7 @@ impl Hub {
             segments: std::mem::take(&mut state.visual.segments),
             detail_segments: std::mem::take(&mut state.detail.segments),
             terrain: state.terrain.clone(),
+            data_files: std::mem::take(&mut state.data_files),
         });
         state.ended = Some(Ended {
             at: Instant::now(),
@@ -2093,6 +2128,11 @@ fn write_templates(out: &mut Writer, templates: &[Template]) {
             out.varint(one_based(string));
         }
         out.varint(u64::from(details.components));
+        out.varint(one_based(details.rally_texture));
+        out.varint(one_based(details.rally_mask));
+        out.f32(details.rally_thickness);
+        out.u8(details.rally_start_cap);
+        out.u8(details.rally_end_cap);
     }
 }
 

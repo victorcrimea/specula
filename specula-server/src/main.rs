@@ -85,6 +85,7 @@ async fn main() {
                 viewer,
                 detail_viewer,
                 web::terrain,
+                web::data,
                 segment_file,
                 detail_segment_file,
                 web::index,
@@ -287,6 +288,8 @@ fn serve(stream: UnixStream, hub: &Hub) -> io::Result<()> {
             Record::Details { changed, gone } => details.apply(changed, gone),
             Record::ProductionList { index, items } => details.add_list(index, items),
             Record::Renames(renames) => details.set_renames(renames),
+            Record::Data { key, json } => details.set_data(key, hub.add_data(json)),
+            Record::Stats { index, json } => details.set_stats(index, hub.add_data(json)),
             Record::Economy(economy) => {
                 hub.set_economy(&economy);
                 details.set_economy(economy);

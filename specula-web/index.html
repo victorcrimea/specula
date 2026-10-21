@@ -199,6 +199,9 @@ html, body { margin: 0; height: 100%; background: #0f1214; }
 #details .section > .text { left: 0; top: 0; width: 124px; height: 14px; }
 #details .section > .bar { left: 1px; top: 14px; width: 123px; height: 7px; }
 #details-lower { left: 0; top: 63px; width: 220px; height: 35px; }
+/* attackAndResistanceStats, the defensive stance icon. */
+#details-attack { left: 97px; top: 0; width: 32px; height: 32px;
+  background: var(--gui-stance-defensive) 0 0 / 100% 100% no-repeat; }
 #details-carrying-text { left: 124px; top: 0; width: 63px; height: 32px; }
 #details-carrying-icon { left: 188px; top: 0; width: 32px; height: 32px;
   background: none 0 0 / 100% 100% no-repeat; }
@@ -428,17 +431,18 @@ html, body { margin: 0; height: 100%; background: #0f1214; }
     width: auto; height: 1px; }
   #garrison.collapsed #garrison-health > :is(.border, .shine) { display: none; }
   #garrison.collapsed #garrison-health-bar { top: 0; right: var(--lost, 0%); }
-  /* A single selection without the line under the bars: the portrait
-     shrinks to the bars' height and the names move up, 31 px shorter. */
-  #details:has(#details-multiple[hidden]):has(#details-carrying-text[hidden]) {
+  /* A single selection without the line under the bars (nothing carried
+     and no stats icon): the portrait shrinks to the bars' height and the
+     names move up, 31 px shorter. */
+  #details:has(#details-multiple[hidden]):has(#details-carrying-text[hidden]):has(#details-attack[hidden]) {
     --details-height: 133px; }
-  #details-single:has(#details-carrying-text[hidden]) #details-stats { top: 65px; }
-  #details-single:has(#details-carrying-text[hidden]) #details-portrait { width: 64px; height: 64px; }
-  #details-single:has(#details-carrying-text[hidden]) #details-icon { width: 62px; height: 62px; }
-  #details-single:has(#details-carrying-text[hidden]) #details-experience { height: 60px; }
-  #details-single:has(#details-carrying-text[hidden]) .section { left: 66px; width: 154px; }
-  #details-single:has(#details-carrying-text[hidden]) .section > .text { width: 154px; }
-  #details-single:has(#details-carrying-text[hidden]) .section > .bar { width: 153px; }
+  #details-single:has(#details-carrying-text[hidden]):has(#details-attack[hidden]) #details-stats { top: 65px; }
+  #details-single:has(#details-carrying-text[hidden]):has(#details-attack[hidden]) #details-portrait { width: 64px; height: 64px; }
+  #details-single:has(#details-carrying-text[hidden]):has(#details-attack[hidden]) #details-icon { width: 62px; height: 62px; }
+  #details-single:has(#details-carrying-text[hidden]):has(#details-attack[hidden]) #details-experience { height: 60px; }
+  #details-single:has(#details-carrying-text[hidden]):has(#details-attack[hidden]) .section { left: 66px; width: 154px; }
+  #details-single:has(#details-carrying-text[hidden]):has(#details-attack[hidden]) .section > .text { width: 154px; }
+  #details-single:has(#details-carrying-text[hidden]):has(#details-attack[hidden]) .section > .bar { width: 153px; }
   /* The other controls fold into a menu, the perspective stays out. */
   #menu-open { display: block; }
   #controls { right: auto; max-width: calc(100vw - 120px); }
@@ -564,11 +568,24 @@ body:not([data-debug="storage"]) #stats-storage { display: none; }
 #bench-status { margin: 0; font-size: 12px; color: #8fa3b0; }
 #bench-status:empty { display: none; }
 @media (prefers-reduced-motion: reduce) { #settings, #settings.open { transition: none; } }
+/* The engine's session tooltips (gui/common/setup.xml): the
+   BackgroundSessionTooltip sprite, darkbrown with a 1 px gold edge,
+   buffer_zone 4, maxwidth 400, white text; the wasm sets the font and
+   the place. Above everything, and never under the pointer's way. */
+#tooltip { position: fixed; left: 0; top: 0; z-index: 1000; max-width: 400px;
+  box-sizing: border-box; padding: 4px; pointer-events: none;
+  background: rgb(30, 20, 10); border: 1px solid rgb(237, 227, 167);
+  font-family: "0ad sans", "0ad sans fallback", sans-serif; color: white;
+  line-height: 1.2; white-space: pre-wrap; overflow-wrap: break-word; }
+#tooltip[hidden] { display: none; }
+#tooltip .icon { display: inline-block; width: 16px; height: 16px;
+  vertical-align: -3px; background: center / 100% 100% no-repeat; }
 </style>
 </head>
 <body>
 <canvas id="view"></canvas>
 <div id="bandbox" hidden></div>
+<div id="tooltip" hidden></div>
 <div id="top-panel">
 <div id="top-bar">
 <span class="edge top"></span><span class="edge bottom"></span>
@@ -634,6 +651,7 @@ body:not([data-debug="storage"]) #stats-storage { display: none; }
 </div>
 </div>
 <div id="details-lower" class="box edged">
+<div id="details-attack" class="box" data-tooltip-style="sessionToolTipInstantly" hidden></div>
 <div id="details-carrying-text" class="text right sans-bold-stroke-13"></div>
 <div id="details-carrying-icon" class="box"></div>
 </div>
@@ -799,6 +817,24 @@ body:not([data-debug="storage"]) #stats-storage { display: none; }
 <option value="0">Off</option>
 <option value="1" selected>On</option>
 </select></label>
+<h3>Tooltips</h3>
+<label>Detailed tooltips <select id="detailed-tooltips">
+<option value="0" selected>Off</option>
+<option value="1">On</option>
+</select></label>
+<h3>Range overlays</h3>
+<label>Attack ranges (Alt+C) <select id="ranges-attack">
+<option value="0">Off</option>
+<option value="1" selected>On</option>
+</select></label>
+<label>Aura ranges (Alt+V) <select id="ranges-aura">
+<option value="0">Off</option>
+<option value="1" selected>On</option>
+</select></label>
+<label>Heal ranges (Alt+B) <select id="ranges-heal">
+<option value="0">Off</option>
+<option value="1" selected>On</option>
+</select></label>
 <h3>Post-processing</h3>
 <label>Post-processing <select id="postproc" data-balanced="1">
 <option value="0">Off</option>
@@ -935,8 +971,9 @@ settings.</p>
   }
   // Each control's own change handler applies and saves it, so a preset
   // only sets values. Document order puts a parent before its dependents,
-  // so Max enables them before it reaches them. Projectiles show what
-  // happens rather than how well it is drawn, so no preset touches them.
+  // so Max enables them before it reaches them. Projectiles, range
+  // overlays and tooltips show what happens rather than how well it is
+  // drawn, so no preset touches them.
   // Fog hides the far side of the map, which a maximalist wants to see.
   // Balanced takes each control's data-balanced, chosen from benchmark
   // runs for the look per frame time; the benchmark reads them too.
@@ -944,7 +981,8 @@ settings.</p>
     const max = preset === "max";
     const pane = document.getElementById("pane-quality");
     for (const control of pane.querySelectorAll("select, input[type=range]")) {
-      if (control.id === "projectiles") continue;
+      if (control.id === "projectiles" || control.id.startsWith("ranges-") ||
+          control.id === "detailed-tooltips") continue;
       if (preset === "balanced") {
         const value = control.dataset.balanced;
         if (value === undefined) continue;

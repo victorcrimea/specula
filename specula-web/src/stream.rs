@@ -19,7 +19,7 @@ pub const ENVELOPE_ENDED: u8 = 4;
 const MESSAGE_KEYFRAME: u8 = 1;
 const MESSAGE_DELTA: u8 = 2;
 const MESSAGE_ENDED: u8 = 3;
-const WIRE_VERSION: u8 = 15;
+const WIRE_VERSION: u8 = 16;
 const CHANGED_POSITION: u64 = 1;
 const CHANGED_COLOR: u64 = 2;
 const CHANGED_ICON: u64 = 4;
@@ -46,6 +46,8 @@ const MOTION_CAPTURE: u8 = 4;
 const COMPONENT_HEALTH: u32 = 1;
 /// And for ResourceSupply.
 pub const COMPONENT_RESOURCE_SUPPLY: u32 = 4;
+/// And for RallyPoint.
+pub const COMPONENT_RALLY_POINT: u32 = 1 << 20;
 const SOUND_ENTITY: u8 = 0;
 const SOUND_POSITION: u8 = 1;
 const SOUND_PLAYER: u8 = 2;
@@ -360,6 +362,13 @@ pub struct TemplateDetails {
     pub phenotypes: u32,
     /// Bit i for the i-th of the hook's detail components, Health first.
     pub components: u32,
+    /// RallyPointRenderer's line, 1-based strings of full VFS paths.
+    pub rally_texture: u32,
+    pub rally_mask: u32,
+    pub rally_thickness: f32,
+    /// 0 flat, 1 round, 2 sharp, 3 square.
+    pub rally_start_cap: u8,
+    pub rally_end_cap: u8,
 }
 
 /// A player's top panel numbers.
@@ -927,6 +936,11 @@ impl Scene {
                 out.varint(u64::from(string));
             }
             out.varint(u64::from(details.components));
+            out.varint(u64::from(details.rally_texture));
+            out.varint(u64::from(details.rally_mask));
+            out.u32(details.rally_thickness.to_bits());
+            out.u8(details.rally_start_cap);
+            out.u8(details.rally_end_cap);
         }
         out.varint(self.strings.len() as u64);
         for text in &self.strings {
@@ -1475,6 +1489,11 @@ impl<'a> Cursor<'a> {
             lang: self.varint_u32()?,
             phenotypes: self.varint_u32()?,
             components: self.varint_u32()?,
+            rally_texture: self.varint_u32()?,
+            rally_mask: self.varint_u32()?,
+            rally_thickness: self.f32()?,
+            rally_start_cap: self.u8()?,
+            rally_end_cap: self.u8()?,
         })
     }
 

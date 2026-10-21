@@ -421,6 +421,225 @@ pub fn ribbon(
     }
 }
 
+/// `SOverlayTexturedLine::LineCapType`, as the hook sends it.
+pub const CAP_ROUND: u8 = 1;
+pub const CAP_SHARP: u8 = 2;
+pub const CAP_SQUARE: u8 = 3;
+
+/// The open-line part of `CTexturedLineRData::Update` with its caps
+/// (`CreateLineCap`), appended as `ribbon` appends. The caps are laid out
+/// here for `thickness`, which goes to the shader as its float too, and
+/// their vertices have no miter.
+#[allow(clippy::too_many_arguments)]
+pub fn open_ribbon(
+    points: &[[f32; 2]],
+    color: u32,
+    thickness: f32,
+    start_cap: u8,
+    end_cap: u8,
+    image: &TerrainImage,
+    vertices: &mut Vec<u8>,
+    indices: &mut Vec<u32>,
+) {
+    let n = points.len();
+    if n < 2 {
+        return;
+    }
+    let ground = |[x, z]: [f32; 2]| {
+        let y = image.ground(x, z);
+        if y < image.water_level {
+            ([x, image.water_level, z], true)
+        } else {
+            ([x, y, z], false)
+        }
+    };
+    // The engine extends the first and the last segment by an artificial
+    // point beyond each end, so the ends are cut square.
+    let beyond = |end: [f32; 2], next: [f32; 2]| [2.0 * end[0] - next[0], 2.0 * end[1] - next[1]];
+    let first = (vertices.len() / VERTEX_SIZE) as u32;
+    let rgba = color.to_be_bytes();
+    let color = [rgba[1], rgba[2], rgba[3], rgba[0]];
+    let mut push = |position: [f32; 3], miter: [f32; 3], uv: [f32; 2]| {
+        for value in position.iter().chain(&miter).chain(&uv) {
+            vertices.extend_from_slice(&value.to_le_bytes());
+        }
+        vertices.extend_from_slice(&color);
+        vertices.extend_from_slice(&thickness.to_le_bytes());
+    };
+    // Each pair's corners, at u 0 and u 1, for the caps.
+    let mut corners: Vec<([f32; 3], [f32; 3])> = Vec::with_capacity(n);
+    let mut v = 0.0;
+    for i in 0..n {
+        let (p1, floating) = ground(points[i]);
+        let (p0, _) = ground(if i == 0 {
+            beyond(points[0], points[1])
+        } else {
+            points[i - 1]
+        });
+        let (p2, _) = ground(if i == n - 1 {
+            beyond(points[i], points[i - 1])
+        } else {
+            points[i + 1]
+        });
+        let normal = if floating {
+            [0.0, 1.0, 0.0]
+        } else {
+            image.normal(p1[0], p1[2])
+        };
+        let behind = normalized3(sub3(p1, p0));
+        let ahead = normalized3(sub3(p2, p1));
+        let mut miter = cross(
+            [
+                behind[0] + ahead[0],
+                behind[1] + ahead[1],
+                behind[2] + ahead[2],
+            ],
+            normal,
+        );
+        let length = dot3(miter, cross(ahead, normal));
+        if length.abs() > 0.000001 {
+            miter = miter.map(|value| value / length);
+        }
+        let lifted = [
+            p1[0] + normal[0] * OVERLAY_VOFFSET,
+            p1[1] + normal[1] * OVERLAY_VOFFSET,
+            p1[2] + normal[2] * OVERLAY_VOFFSET,
+        ];
+        push(lifted, miter, [0.0, v]);
+        push(lifted, miter, [1.0, v]);
+        let across = miter.map(|value| value * thickness);
+        corners.push((add3(lifted, across), sub3(lifted, across)));
+        v = 1.0 - v;
+    }
+    for pair in 1..n as u32 {
+        let (a, b) = (first + 2 * (pair - 1), first + 2 * (pair - 1) + 1);
+        let (c, d) = (first + 2 * pair, first + 2 * pair + 1);
+        indices.extend_from_slice(&[a, b, c, c, b, d]);
+    }
+
+    let centroid = |(a, b): ([f32; 3], [f32; 3])| {
+        [
+            0.5 * (a[0] + b[0]),
+            0.5 * (a[1] + b[1]),
+            0.5 * (a[2] + b[2]),
+        ]
+    };
+    let (last, before_last) = (corners[n - 1], corners[n - 2]);
+    // The order of the corners decides which side the cap is on.
+    line_cap(
+        end_cap,
+        last.0,
+        last.1,
+        normalized3(sub3(centroid(last), centroid(before_last))),
+        thickness,
+        &mut push,
+        vertices_len(first, n),
+        indices,
+    );
+    let start_offset = vertices_len(first, n) + cap_vertex_count(end_cap);
+    line_cap(
+        start_cap,
+        corners[0].1,
+        corners[0].0,
+        normalized3(sub3(centroid(corners[0]), centroid(corners[1]))),
+        thickness,
+        &mut push,
+        start_offset,
+        indices,
+    );
+}
+
+fn vertices_len(first: u32, pairs: usize) -> u32 {
+    first + 2 * pairs as u32
+}
+
+fn cap_vertex_count(cap: u8) -> u32 {
+    match cap {
+        CAP_ROUND => ROUND_CAP_POINTS + 1,
+        CAP_SHARP => SHARP_CAP_POINTS + 1,
+        CAP_SQUARE => 5,
+        _ => 0,
+    }
+}
+
+/// `CreateLineCap`'s samples along a round cap, corners included, and a
+/// sharp cap's single point ahead.
+const ROUND_CAP_POINTS: u32 = 8;
+const SHARP_CAP_POINTS: u32 = 3;
+
+/// `CTexturedLineRData::CreateLineCap`; its vertices start at `offset`.
+#[allow(clippy::too_many_arguments)]
+fn line_cap(
+    cap: u8,
+    corner1: [f32; 3],
+    corner2: [f32; 3],
+    direction: [f32; 3],
+    thickness: f32,
+    push: &mut impl FnMut([f32; 3], [f32; 3], [f32; 2]),
+    offset: u32,
+    indices: &mut Vec<u32>,
+) {
+    let center = [
+        0.5 * (corner1[0] + corner2[0]),
+        0.5 * (corner1[1] + corner2[1]),
+        0.5 * (corner1[2] + corner2[2]),
+    ];
+    let none = [0.0; 3];
+    match cap {
+        CAP_ROUND | CAP_SHARP => {
+            let (points, radius, center_u) = if cap == CAP_SHARP {
+                // A point ahead, pushed further out to look sharper, and a
+                // nudge so the texture meets the corners.
+                (SHARP_CAP_POINTS, thickness * 1.5, 0.480)
+            } else {
+                (ROUND_CAP_POINTS, thickness, 0.5)
+            };
+            let step = -std::f32::consts::PI / (points - 1) as f32;
+            let base = normalized3(sub3(corner2, center)).map(|value| value * radius);
+            let axis = normalized3(cross(direction, base));
+            push(center, none, [center_u, 0.5]);
+            push(corner2, none, [0.0, 0.0]);
+            for i in 1..points - 1 {
+                let rotated = rotate(base, axis, i as f32 * step);
+                let v = (i as f32 / (points - 1) as f32).clamp(0.0, 1.0);
+                push(add3(center, rotated), none, [0.0, v]);
+            }
+            push(corner1, none, [0.0, 1.0]);
+            for i in 1..points {
+                indices.extend_from_slice(&[offset, offset + i, offset + i + 1]);
+            }
+        }
+        CAP_SQUARE => {
+            let ahead = direction.map(|value| value * thickness);
+            push(center, none, [0.5, 0.5]);
+            push(corner2, none, [0.0, 0.0]);
+            push(add3(corner2, ahead), none, [0.0, 0.33333]);
+            push(add3(corner1, ahead), none, [0.0, 0.66666]);
+            push(corner1, none, [0.0, 1.0]);
+            for i in 1..4 {
+                indices.extend_from_slice(&[offset, offset + i, offset + i + 1]);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn add3(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+    [a[0] + b[0], a[1] + b[1], a[2] + b[2]]
+}
+
+/// `CQuaternion::FromAxisAngle` then `Rotate`, as Rodrigues' formula.
+fn rotate(vector: [f32; 3], axis: [f32; 3], angle: f32) -> [f32; 3] {
+    let (sin, cos) = angle.sin_cos();
+    let across = cross(axis, vector);
+    let along = dot3(axis, vector) * (1.0 - cos);
+    [
+        vector[0] * cos + across[0] * sin + axis[0] * along,
+        vector[1] * cos + across[1] * sin + axis[1] * along,
+        vector[2] * cos + across[2] * sin + axis[2] * along,
+    ]
+}
+
 /// A border line to draw, before it is laid on the ground.
 struct Line {
     color: u32,
