@@ -2110,6 +2110,13 @@ fn wire_storage_notice(app: &Rc<RefCell<App>>, document: &Document) -> Result<()
         let _ = storage.set_item(STORAGE_NOTICE_KEY, &now.to_string());
     }
     notice.set_hidden(false);
+    // Minimal graphics on a first visit, so the page loads on any device;
+    // the preset button's handler applies and saves each setting.
+    if shown_at.is_none()
+        && let Ok(min) = element::<HtmlButtonElement>(document, "preset-min")
+    {
+        min.click();
+    }
 
     let popup = notice.clone();
     on_click(&ok, move || popup.set_hidden(true));
