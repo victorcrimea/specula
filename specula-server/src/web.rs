@@ -65,6 +65,8 @@ const ICONS: &str = "icons.bin";
 const SELECTION: &str = "selection.bin";
 /// specula-tools' session-gui output, and the stylesheet naming the rest.
 const GUI: &str = "gui";
+const LANG: &str = "lang";
+const LANGS: &str = "langs.txt";
 const SESSION_CSS: &str = "gui/session.css";
 /// Each versioned atlas under its page placeholder.
 const ATLAS_PLACEHOLDERS: [(&str, &str); 3] = [
@@ -518,6 +520,27 @@ pub async fn gui_file(
         &Path::new(WEB_ROOT).join(GUI).join(name),
         accepts,
         IMMUTABLE,
+        content_type,
+    )
+    .await
+}
+
+/// The translation tables, named by their content, and `langs.txt`, the
+/// list that names them, which keeps its name across bakes.
+#[rocket::get("/lang/<name>")]
+pub async fn lang_file(name: &str, accepts: AcceptsBrotli) -> Option<Encoded<NamedFile>> {
+    if !plain_name(name) {
+        return None;
+    }
+    let (cache, content_type) = if name == LANGS {
+        (REVALIDATE, ContentType::Plain)
+    } else {
+        (IMMUTABLE, ContentType::JSON)
+    };
+    with_brotli(
+        &Path::new(WEB_ROOT).join(LANG).join(name),
+        accepts,
+        cache,
         content_type,
     )
     .await

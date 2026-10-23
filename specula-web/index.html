@@ -732,11 +732,12 @@ body:not([data-debug="storage"]) #stats-storage { display: none; }
 </div>
 <div id="settings" role="dialog" aria-labelledby="settings-title" inert>
 <div id="settings-head">
-<h2 id="settings-title">Graphics</h2>
+<h2 id="settings-title">Settings</h2>
 <button id="settings-close" type="button" aria-label="Close">x</button>
 </div>
 <div class="tabs" role="tablist">
 <button type="button" role="tab" id="tab-quality" aria-controls="pane-quality" aria-selected="true">Quality</button>
+<button type="button" role="tab" id="tab-language" aria-controls="pane-language" aria-selected="false">Language</button>
 </div>
 <div class="pane" role="tabpanel" id="pane-quality" aria-labelledby="tab-quality">
 <div class="presets">
@@ -872,6 +873,11 @@ body:not([data-debug="storage"]) #stats-storage { display: none; }
 <option value="fsr">FidelityFX Super Resolution 1.0</option>
 <option value="bilinear">Bilinear</option>
 <option value="pixelated">Pixelated</option>
+</select></label>
+</div>
+<div class="pane" role="tabpanel" id="pane-language" aria-labelledby="tab-language" hidden>
+<label>Language <select id="language">
+<option value="">Default (browser)</option>
 </select></label>
 </div>
 </div>

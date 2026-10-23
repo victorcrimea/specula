@@ -25,6 +25,10 @@ name = "session-gui"
 path = "src/session_gui.rs"
 
 [[bin]]
+name = "bake-translations"
+path = "src/bake_translations.rs"
+
+[[bin]]
 name = "bake-unit"
 path = "src/bake_unit/main.rs"
 
@@ -41,6 +45,7 @@ mikktspace = { version = "0.3", default-features = false, features = ["glam"] }
 ogg = "0.9"
 opus = "0.4"
 png = "0.18"
+polib = "0.3.0"
 roxmltree = "0.21"
 rubato = "5"
 serde_json = "1.0.151"

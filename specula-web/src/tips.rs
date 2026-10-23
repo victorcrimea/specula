@@ -14,6 +14,9 @@ use wasm_bindgen::JsCast;
 use wasm_bindgen::JsValue;
 use wasm_bindgen_futures::JsFuture;
 
+use crate::lang::translate;
+use crate::lang::translate_context;
+use crate::lang::translate_plural;
 use crate::tooltip::body_font;
 use crate::tooltip::header_font;
 use crate::tooltip::objection_font;
@@ -125,6 +128,12 @@ fn text(value: &JsValue) -> String {
     value.as_string().unwrap_or_default()
 }
 
+/// A string the engine runs through `translate` when it loads the data
+/// (`translateObjectKeys`), or when it shows it.
+fn translated(value: &JsValue) -> String {
+    translate(&text(value))
+}
+
 fn keys(value: &JsValue) -> Vec<String> {
     if !value.is_object() {
         return Vec::new();
@@ -171,24 +180,21 @@ fn comma_font(text: &str) -> String {
     tags(text, &[("font", "sans-12")])
 }
 
-fn plural<'a>(count: f64, one: &'a str, many: &'a str) -> &'a str {
-    if count == 1.0 { one } else { many }
-}
-
 /// `getSecondsString`.
 fn seconds_string(seconds: f64) -> String {
     format!(
         "{} {}",
         js_number(seconds),
-        unit_font(plural(seconds, "second", "seconds"))
+        unit_font(&translate_plural("second", "seconds", seconds))
     )
 }
 
-fn damage_name(code: &str) -> &str {
-    DAMAGE_TYPES
+fn damage_name(code: &str) -> String {
+    let name = DAMAGE_TYPES
         .iter()
         .find(|(known, _, _)| *known == code)
-        .map_or(code, |(_, name, _)| name)
+        .map_or(code, |(_, name, _)| name);
+    translate_context("damage type", name)
 }
 
 /// `g_DamageTypesMetadata.sort`.
@@ -203,27 +209,28 @@ fn sort_damage_types(mut codes: Vec<String>) -> Vec<String> {
     codes
 }
 
-fn status_name(code: &str) -> &str {
-    STATUS_EFFECTS
+fn status_name(code: &str) -> String {
+    let name = STATUS_EFFECTS
         .iter()
         .find(|(known, _, _)| *known == code)
-        .map_or(code, |(_, name, _)| name)
+        .map_or(code, |(_, name, _)| name);
+    translate_context("status effect", name)
 }
 
 /// `getEntityNames` at the default gui.session.howtoshownames 0.
 pub fn entity_names(template: &JsValue) -> String {
     let name = field(template, "name");
     crate::tooltip::entity_names(
-        &text(&field(&name, "generic")),
-        &text(&field(&name, "specific")),
+        &translated(&field(&name, "generic")),
+        &translated(&field(&name, "specific")),
     )
 }
 
 /// `getEntityNamesFormatted`.
 pub fn entity_names_formatted(template: &JsValue) -> String {
     let name = field(template, "name");
-    let generic = text(&field(&name, "generic"));
-    let specific = text(&field(&name, "specific"));
+    let generic = translated(&field(&name, "generic"));
+    let specific = translated(&field(&name, "specific"));
     if specific.is_empty() {
         return tags(&generic, &[("font", "sans-bold-16")]);
     }
@@ -242,7 +249,7 @@ pub fn entity_names_formatted(template: &JsValue) -> String {
 
 /// `getEntityTooltip`.
 pub fn entity_tooltip(template: &JsValue) -> String {
-    let tooltip = text(&field(template, "tooltip"));
+    let tooltip = translated(&field(template, "tooltip"));
     if tooltip.is_empty() {
         String::new()
     } else {
@@ -254,15 +261,15 @@ pub fn entity_tooltip(template: &JsValue) -> String {
 pub fn visible_classes(template: &JsValue) -> String {
     let classes: Vec<String> = items(&field(template, "visibleIdentityClasses"))
         .iter()
-        .map(text)
+        .map(translated)
         .collect();
     if classes.is_empty() {
         return String::new();
     }
     format!(
         "{} {}",
-        header_font("Classes:"),
-        body_font(&classes.join(", "))
+        header_font(&translate("Classes:")),
+        body_font(&classes.join(&translate(", ")))
     )
 }
 
@@ -277,14 +284,14 @@ pub fn auras_tooltip(template: &JsValue) -> String {
             let mut tooltip = format!(
                 "{} {}",
                 header_font(&format!("{}:", entity_names(&aura))),
-                body_font(&text(&field(&aura, "description")))
+                body_font(&translated(&field(&aura, "description")))
             );
             let radius = plus(&field(&aura, "radius"));
             if radius != 0.0 {
                 tooltip.push_str(&format!(
                     " Range: {} {}",
                     js_number(radius),
-                    unit_font(plural(radius, "meter", "meters"))
+                    unit_font(&translate_plural("meter", "meters", radius))
                 ));
             }
             tooltip
@@ -308,7 +315,11 @@ pub fn treasure_tooltip(template: &JsValue) -> String {
     if rewards.is_empty() {
         return String::new();
     }
-    format!("{} {}", header_font("Reward:"), rewards.join("  "))
+    format!(
+        "{} {}",
+        header_font(&translate("Reward:")),
+        rewards.join("  ")
+    )
 }
 
 /// `getHealthTooltip`.
@@ -317,7 +328,11 @@ pub fn health_tooltip(template: &JsValue) -> String {
     if !health.is_truthy() {
         return String::new();
     }
-    format!("{} {}", header_font("Health:"), js_number(plus(&health)))
+    format!(
+        "{} {}",
+        header_font(&translate("Health:")),
+        js_number(plus(&health))
+    )
 }
 
 /// `resistanceLevelToPercentageString`.
@@ -348,10 +363,10 @@ pub fn resistance_tooltip(template: &JsValue) -> String {
     if damage.is_truthy() {
         details.push(format!(
             "{} {}",
-            header_font("Damage:"),
+            header_font(&translate("Damage:")),
             sort_damage_types(keys(&damage))
                 .iter()
-                .map(|code| resistance_part(plus(&field(&damage, code)), damage_name(code)))
+                .map(|code| resistance_part(plus(&field(&damage, code)), &damage_name(code)))
                 .collect::<Vec<_>>()
                 .join(&comma_font(", "))
         ));
@@ -360,7 +375,7 @@ pub fn resistance_tooltip(template: &JsValue) -> String {
     if capture.is_truthy() {
         details.push(format!(
             "{} {}",
-            header_font("Capture:"),
+            header_font(&translate("Capture:")),
             resistance_part(plus(&capture), "Capture")
         ));
     }
@@ -368,14 +383,14 @@ pub fn resistance_tooltip(template: &JsValue) -> String {
     if status.is_truthy() {
         details.push(format!(
             "{} {}",
-            header_font("Status Effects:"),
+            header_font(&translate("Status Effects:")),
             keys(&status)
                 .iter()
                 .map(|code| {
                     let effect = field(&status, code);
                     let block = plus(&field(&effect, "blockChance"));
                     let duration = plus(&field(&effect, "duration"));
-                    let name = unit_font(status_name(code));
+                    let name = unit_font(&status_name(code));
                     let reduction = js_number(100.0 - duration * 100.0);
                     if block == 1.0 {
                         format!("Blocks {name}")
@@ -399,7 +414,7 @@ pub fn resistance_tooltip(template: &JsValue) -> String {
     }
     format!(
         "{}\n{INDENT}{}",
-        header_font("Resistance:"),
+        header_font(&translate("Resistance:")),
         details.join(&format!("\n{INDENT}"))
     )
 }
@@ -413,13 +428,13 @@ fn attack_rate_details(interval: f64, projectiles: Option<f64>) -> String {
         return "Garrison to fire arrows".to_string();
     }
     let mut rate = seconds_string(interval / 1000.0);
-    let mut header = header_font("Interval:");
+    let mut header = header_font(&translate("Interval:"));
     if let Some(count) = projectiles.filter(|count| *count > 1.0) {
-        header = header_font("Rate:");
+        header = header_font(&translate("Rate:"));
         rate = format!(
             "{} {} / {rate}",
             js_number(count),
-            unit_font(plural(count, "arrow", "arrows"))
+            unit_font(&translate_plural("arrow", "arrows", count))
         );
     }
     format!("{header} {rate}")
@@ -438,11 +453,11 @@ fn range_details(attack: &JsValue) -> String {
     } else {
         0.0
     };
-    let label = header_font("Range:");
-    let unit = unit_font(if min != 0.0 || relative != 0.0 {
-        "meters"
+    let label = header_font(&translate("Range:"));
+    let unit = unit_font(&if min != 0.0 || relative != 0.0 {
+        translate_plural("meter", "meters", 2.0)
     } else {
-        plural(max, "meter", "meters")
+        translate_plural("meter", "meters", max)
     });
     let relative_text = if relative > 0.0 {
         format!("+{}", js_number(relative))
@@ -476,7 +491,7 @@ fn damage_details(damage: &JsValue) -> String {
             format!(
                 "{} {}",
                 to_fixed(plus(&field(damage, code)), 1),
-                unit_font(damage_name(code))
+                unit_font(&damage_name(code))
             )
         })
         .collect::<Vec<_>>()
@@ -500,7 +515,7 @@ fn apply_status_details(status: &JsValue) -> String {
         "gives {}",
         keys(status)
             .iter()
-            .map(|code| unit_font(status_name(code)))
+            .map(|code| unit_font(&status_name(code)))
             .collect::<Vec<_>>()
             .join(&comma_font(", "))
     )
@@ -553,7 +568,7 @@ fn status_effects_tooltip(code: &str, effect: &JsValue) -> String {
         };
         attributes.push(format!(
             "{}: {}",
-            header_font("Duration"),
+            header_font(&translate("Duration")),
             seconds_string(left / 1000.0)
         ));
     }
@@ -568,7 +583,7 @@ fn status_effects_tooltip(code: &str, effect: &JsValue) -> String {
     };
     format!(
         "{}: {} {stackability}",
-        header_font(status_name(code)),
+        header_font(&status_name(code)),
         attributes.join(&comma_font(", "))
     )
 }
@@ -621,7 +636,7 @@ pub fn attack_tooltip(template: &JsValue) -> String {
     }
     format!(
         "{}\n{INDENT}{}",
-        header_font("Attack:"),
+        header_font(&translate("Attack:")),
         tooltips.join(&format!("\n{INDENT}"))
     )
 }
@@ -644,21 +659,21 @@ pub fn healer_tooltip(template: &JsValue) -> String {
     [
         format!(
             "{} {} {}",
-            header_font("Heal:"),
+            header_font(&translate("Heal:")),
             js_number(health),
             unit_font("Health")
         ),
         format!(
             "{} {} {}",
-            header_font("Range:"),
+            header_font(&translate("Range:")),
             js_number(range),
-            unit_font(plural(range, "meter", "meters"))
+            unit_font(&translate_plural("meter", "meters", range))
         ),
         format!(
             "{} {} {}",
-            header_font("Interval:"),
+            header_font(&translate("Interval:")),
             js_number(interval),
-            unit_font(plural(interval, "second", "seconds"))
+            unit_font(&translate_plural("second", "seconds", interval))
         ),
     ]
     .join(", ")
@@ -671,14 +686,14 @@ pub fn garrison_tooltip(template: &JsValue) -> String {
     if holder.is_truthy() {
         tooltips.push(format!(
             "{}: {}",
-            header_font("Garrison Limit"),
+            header_font(&translate("Garrison Limit")),
             js_number(plus(&field(&holder, "capacity")))
         ));
         let heal = field(&holder, "buffHeal");
         if heal.is_truthy() {
             tooltips.push(format!(
                 "{} {} {} / {}",
-                header_font("Heal:"),
+                header_font(&translate("Heal:")),
                 js_number(js_round(plus(&heal))),
                 unit_font("Health"),
                 unit_font("second")
@@ -696,7 +711,7 @@ pub fn garrison_tooltip(template: &JsValue) -> String {
         if size > 1.0 || extra != 0.0 {
             tooltips.push(format!(
                 "{}: {} {}",
-                header_font("Garrison Size"),
+                header_font(&translate("Garrison Size")),
                 js_number(size),
                 if extra != 0.0 {
                     format!("+ {}", js_number(extra))
@@ -717,7 +732,7 @@ pub fn turrets_tooltip(template: &JsValue) -> String {
     }
     format!(
         "{}: {}",
-        header_font("Turret Positions"),
+        header_font(&translate("Turret Positions")),
         keys(&field(&holder, "turretPoints")).len()
     )
 }
@@ -738,8 +753,16 @@ pub fn projectiles_tooltip(template: &JsValue) -> String {
         return String::new();
     }
     [
-        format!("{}: {}", header_font("Projectile Limit"), js_number(limit)),
-        format!("{}: {}", header_font("Default"), js_number(default)),
+        format!(
+            "{}: {}",
+            header_font(&translate("Projectile Limit")),
+            js_number(limit)
+        ),
+        format!(
+            "{}: {}",
+            header_font(&translate("Default")),
+            js_number(default)
+        ),
         format!("{}: {}", header_font("Per Unit"), rounded(multiplier, 2)),
     ]
     .join(&comma_font(", "))
@@ -759,13 +782,13 @@ pub fn speed_tooltip(template: &JsValue) -> String {
     let comma = comma_font(", ");
     format!(
         "{} {} {}{comma}{} {}{comma}{} {}",
-        header_font("Speed:"),
+        header_font(&translate("Speed:")),
         to_fixed(walk, 1),
-        unit_font("Walk"),
+        unit_font(&translate("Walk")),
         to_fixed(run, 1),
-        unit_font("Run"),
+        unit_font(&translate("Run")),
         to_fixed(plus(&field(&speed, "acceleration")), 1),
-        unit_font("Acceleration")
+        unit_font(&translate("Acceleration"))
     )
 }
 
@@ -777,7 +800,7 @@ pub fn dropsite_tooltip(template: &JsValue) -> String {
     }
     format!(
         "{} {}",
-        header_font("Dropsite for:"),
+        header_font(&translate("Dropsite for:")),
         types
             .iter()
             .map(|code| resource_icon(&text(code)))
@@ -808,7 +831,11 @@ pub fn gather_tooltip(template: &JsValue) -> String {
     if shown.is_empty() {
         return String::new();
     }
-    format!("{} {}", header_font("Gather Rates:"), shown.join("  "))
+    format!(
+        "{} {}",
+        header_font(&translate("Gather Rates:")),
+        shown.join("  ")
+    )
 }
 
 /// `getLootTooltip`, with `carried` from the entity's own state.
@@ -833,7 +860,7 @@ pub fn loot_tooltip(template: &JsValue, carried: &[(String, f64)]) -> String {
     if labels.is_empty() {
         return String::new();
     }
-    format!("{} {}", header_font("Loot:"), labels.join("  "))
+    format!("{} {}", header_font(&translate("Loot:")), labels.join("  "))
 }
 
 /// `getResourceTrickleTooltip` (`key` "resourceTrickle", `label` "Resource
@@ -871,7 +898,7 @@ pub fn population_bonus_tooltip(template: &JsValue) -> String {
     }
     format!(
         "{} {}",
-        header_font("Population Bonus:"),
+        header_font(&translate("Population Bonus:")),
         js_number(plus(&bonus))
     )
 }
@@ -906,7 +933,7 @@ pub fn cost_tooltip(template: &JsValue, count: f64, costs: Option<&[(String, f64
     if parts.is_empty() {
         return String::new();
     }
-    format!("{} {}", header_font("Cost:"), parts.join("  "))
+    format!("{} {}", header_font(&translate("Cost:")), parts.join("  "))
 }
 
 /// `getNeededResourcesTooltip`.
@@ -916,7 +943,7 @@ pub fn needed_resources_tooltip(needed: &[(String, f64)]) -> String {
     }
     format!(
         "{} {}",
-        objection_font("Insufficient resources:"),
+        objection_font(&translate("Insufficient resources:")),
         needed
             .iter()
             .map(|(code, amount)| format!(
@@ -970,5 +997,5 @@ pub fn detailed_lines(template: &JsValue) -> Vec<String> {
 
 /// The JSON's `requirementsTooltip`, a technology's.
 pub fn requirements_text(technology: &JsValue) -> String {
-    text(&field(technology, "requirementsTooltip"))
+    translated(&field(technology, "requirementsTooltip"))
 }

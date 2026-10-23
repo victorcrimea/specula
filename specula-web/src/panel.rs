@@ -22,6 +22,7 @@ use crate::detail::Group;
 use crate::detail::Groups;
 use crate::detail::ListItem;
 use crate::diplomacy::Perspective;
+use crate::lang;
 use crate::pick;
 use crate::stream::Scene;
 use crate::stream::Stance;
@@ -685,12 +686,15 @@ impl DetailsPanel {
         // g_SpecificNamesPrimary and g_ShowSecondaryNames, at the default
         // gui.session.howtoshownames 0. `name.specific` falls back to the
         // generic name.
-        let generic = template.and_then(|template| string(scene, template.generic_name));
+        let generic = template
+            .and_then(|template| string(scene, template.generic_name))
+            .map(lang::translate);
         let specific = template
             .and_then(|template| string(scene, template.specific_name))
-            .or(generic);
-        let primary = specific.unwrap_or_default();
-        let secondary = generic.unwrap_or_default();
+            .map(lang::translate)
+            .or_else(|| generic.clone());
+        let primary = specific.as_deref().unwrap_or_default();
+        let secondary = generic.as_deref().unwrap_or_default();
         let hide_secondary = secondary.is_empty() || primary == secondary;
         self.primary.text(primary);
         self.primary.class(format!(
@@ -750,7 +754,10 @@ impl DetailsPanel {
                     "background-image: var(--gui-rank-{})",
                     rank.to_ascii_lowercase()
                 ));
-                self.rank.tooltip(&format!("{rank} Rank"));
+                self.rank.tooltip(&lang::format(
+                    &lang::translate("%(rank)s Rank"),
+                    &[("rank", &lang::translate_context("Rank", rank))],
+                ));
                 self.rank.hidden(false);
             }
             None => self.rank.hidden(true),
@@ -811,7 +818,7 @@ impl DetailsPanel {
             .class(format!("box section section-{resource_slot}"));
 
         self.health_section.hidden(health.is_none());
-        self.health_section.tooltip("Health");
+        self.health_section.tooltip(&lang::translate("Health"));
         if let Some((hitpoints, max, text)) = &health {
             let width = 100.0 * fraction(*hitpoints, *max);
             self.health_bar.style(format!("width: {width}%"));
@@ -852,7 +859,7 @@ impl DetailsPanel {
             self.capture_section.tooltip(&if small && known {
                 tooltip::current_capture(owned, *max, None)
             } else {
-                "Capture Points".to_string()
+                lang::translate("Capture Points")
             });
         }
 
@@ -864,7 +871,7 @@ impl DetailsPanel {
                 let done = fraction(f64::from(*experience), f64::from((*required).max(1)));
                 self.experience_bar
                     .style(format!("top: {}%", 100.0 - 100.0 * done));
-                let label = tooltip::header_font("Experience:");
+                let label = tooltip::header_font(&lang::translate("Experience:"));
                 self.experience.tooltip(&if experience < required {
                     format!("{label} {experience} / {required}")
                 } else {
@@ -911,8 +918,12 @@ impl DetailsPanel {
                 tips::turrets_tooltip(&stats),
                 tips::population_bonus_tooltip(&stats),
                 tips::projectiles_tooltip(&stats),
-                tips::rates_tooltip(&stats, "resourceTrickle", "Resource Trickle:"),
-                tips::rates_tooltip(&stats, "upkeep", "Upkeep:"),
+                tips::rates_tooltip(
+                    &stats,
+                    "resourceTrickle",
+                    &lang::translate("Resource Trickle:"),
+                ),
+                tips::rates_tooltip(&stats, "upkeep", &lang::translate("Upkeep:")),
                 tips::loot_tooltip(&stats, &carried),
             ])
         });
@@ -986,7 +997,7 @@ impl DetailsPanel {
             return Some((
                 "repair".to_string(),
                 format!("{count} / {max}"),
-                "Current/max gatherers".to_string(),
+                lang::translate("Current/max gatherers"),
             ));
         }
         // `needsRepair`: below its max hitpoints.
@@ -1069,7 +1080,7 @@ impl DetailsPanel {
             self.capture_multiple.bar.tooltip(&tooltip::current_health(
                 owned,
                 max_capture,
-                Some("Capture Points:"),
+                Some(&lang::translate("Capture Points:")),
             ));
         }
 
@@ -1924,14 +1935,11 @@ fn portrait_tooltip(view: &View, template: u32, owner: i32, primary: &str) -> St
     }
     let unit = template_details(scene, template)
         .is_some_and(|details| pick::has_class(details, &scene.strings, "Unit"));
-    lines.push(
-        if unit {
-            "Left-click to follow."
-        } else {
-            "Left-click to focus."
-        }
-        .to_string(),
-    );
+    lines.push(if unit {
+        lang::translate("Left-click to follow.")
+    } else {
+        lang::translate("Left-click to focus.")
+    });
     join_lines(lines)
 }
 
@@ -1976,11 +1984,12 @@ fn template_names(scene: &Scene, template: u32) -> String {
     let name = |index: Option<u32>| {
         index
             .and_then(|index| string(scene, index))
+            .map(lang::translate)
             .unwrap_or_default()
     };
     tooltip::entity_names(
-        name(details.map(|details| details.generic_name)),
-        name(details.map(|details| details.specific_name)),
+        &name(details.map(|details| details.generic_name)),
+        &name(details.map(|details| details.specific_name)),
     )
 }
 
@@ -2065,19 +2074,19 @@ fn units_tooltip(scene: &Scene, entities: &[u32]) -> String {
     if garrison_size > 0 {
         tooltip = format!(
             "{}: {}\n",
-            tooltip::header_font("Garrison Size"),
+            tooltip::header_font(&lang::translate("Garrison Size")),
             tooltip::body_font(&garrison_size.to_string())
         );
     }
     if !carried.is_empty() {
         tooltip = format!(
             "{} {}\n",
-            tooltip::header_font("Carrying:"),
+            tooltip::header_font(&lang::translate("Carrying:")),
             tooltip::body_font(&list(&carried))
         );
         tooltip.push_str(&format!(
             "{} {}",
-            tooltip::header_font("Loot:"),
+            tooltip::header_font(&lang::translate("Loot:")),
             tooltip::body_font(&list(&carried))
         ));
     }
@@ -2102,10 +2111,14 @@ fn queue_tooltip(view: &View, queued: &detail::QueueItem, ghost: bool, owner: i3
     };
     let mut lines = vec![names];
     if ghost {
-        lines.push("The auto-queue will try to train this item later.".to_string());
+        lines.push(lang::translate(
+            "The auto-queue will try to train this item later.",
+        ));
     }
     if queued.missing_population > 0 {
-        lines.push(tooltip::objection_font("Insufficient population capacity:"));
+        lines.push(tooltip::objection_font(&lang::translate(
+            "Insufficient population capacity:",
+        )));
         lines.push(format!(
             "{} {}",
             tooltip::resource_icon("population"),

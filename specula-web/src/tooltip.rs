@@ -17,6 +17,8 @@ use web_sys::Element;
 use web_sys::HtmlElement;
 use web_sys::MouseEvent;
 
+use crate::lang::translate;
+
 /// The engine's markup, set by the panels.
 pub const ATTRIBUTE: &str = "data-tooltip";
 /// A setup.xml tooltip name, `sessionToolTip` when absent.
@@ -488,7 +490,7 @@ pub fn current_health(hitpoints: f64, max: f64, label: Option<&str>) -> String {
     }
     format!(
         "{} {} / {}",
-        header_font(label.unwrap_or("Health:")),
+        header_font(&label.map_or_else(|| translate("Health:"), str::to_string)),
         hitpoints.round(),
         max.round()
     )
@@ -501,7 +503,7 @@ pub fn current_capture(points: f64, max: f64, label: Option<&str>) -> String {
     }
     format!(
         "{} {} / {}",
-        header_font(label.unwrap_or("Capture points:")),
+        header_font(&label.map_or_else(|| translate("Capture points:"), str::to_string)),
         points.round(),
         max.round()
     )

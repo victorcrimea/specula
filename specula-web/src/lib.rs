@@ -9,6 +9,7 @@ mod field;
 mod gpu;
 mod icons;
 mod impostor;
+mod lang;
 mod march;
 mod minimap;
 mod opfs;
@@ -124,6 +125,7 @@ const SHADOW_SETTINGS_KEY: &str = "specula.shadows";
 const SHADOW_CUTOFF_SETTINGS_KEY: &str = "specula.shadowscutoff";
 /// localStorage key of the texture quality: 1 low, 2 medium, 3 high.
 const TEXTURE_SETTINGS_KEY: &str = "specula.textures";
+const LANGUAGE_SETTINGS_KEY: &str = lang::SETTING_KEY;
 /// localStorage key of the material maps setting: 0 off, 1 on.
 const MAP_SETTINGS_KEY: &str = "specula.maps";
 /// localStorage key of the triplanar setting: 0 off, 1 on.
@@ -1178,6 +1180,7 @@ async fn run(
             element(&document, "shadowscutoff-value")?,
             &shadows,
         );
+        wire_language(&app, element(&document, "language")?);
         wire_textures(&app, element(&document, "textures")?);
         wire_maps(&app, element(&document, "maps")?);
         wire_triplanar(&app, element(&document, "triplanar")?);
@@ -1579,6 +1582,78 @@ fn wire_ranges(app: &Rc<RefCell<App>>, selects: [HtmlSelectElement; 3]) {
             app.dirty = true;
         });
     }
+}
+
+/// The language list: the browser's own order by default, or the one the
+/// menu names, kept across visits. The names the engine's text is looked
+/// up in change with it, so the panels are made again.
+fn wire_language(app: &Rc<RefCell<App>>, select: HtmlSelectElement) {
+    let storage = web_sys::window().and_then(|window| window.local_storage().ok().flatten());
+    let saved = storage
+        .as_ref()
+        .and_then(|storage| storage.get_item(LANGUAGE_SETTINGS_KEY).ok().flatten())
+        .unwrap_or_default();
+    let app = Rc::clone(app);
+    wasm_bindgen_futures::spawn_local(async move {
+        let languages = Rc::new(lang::languages().await);
+        let Some(document) = web_sys::window().and_then(|window| window.document()) else {
+            return;
+        };
+        for language in languages.iter() {
+            let Some(option) = document
+                .create_element("option")
+                .ok()
+                .and_then(|option| option.dyn_into::<HtmlOptionElement>().ok())
+            else {
+                continue;
+            };
+            option.set_value(&language.code);
+            option.set_text(&language.name);
+            let _ = select.append_child(&option);
+        }
+        let default = lang::choose(&languages, "");
+        if let Some(first) = select
+            .item(0)
+            .and_then(|option| option.dyn_into::<HtmlOptionElement>().ok())
+        {
+            first.set_text(&match default {
+                Some(language) => format!("Default (browser: {})", language.name),
+                None => "Default (browser: English)".to_string(),
+            });
+        }
+        let apply = {
+            let app = Rc::clone(&app);
+            let languages = Rc::clone(&languages);
+            move |setting: String| {
+                let app = Rc::clone(&app);
+                let languages = Rc::clone(&languages);
+                wasm_bindgen_futures::spawn_local(async move {
+                    let chosen = lang::choose(&languages, &setting);
+                    if lang::load(chosen).await
+                        && let Ok(mut app) = app.try_borrow_mut()
+                    {
+                        app.details_dirty = true;
+                        app.top_dirty = true;
+                        app.dirty = true;
+                    }
+                });
+            }
+        };
+        // A saved code the list no longer has is the default.
+        let known = languages.iter().any(|language| language.code == saved);
+        select.set_value(if known { &saved } else { "" });
+        apply(select.value());
+        let list = select.clone();
+        on_change(&select, move || {
+            let setting = list.value();
+            if let Some(storage) =
+                web_sys::window().and_then(|window| window.local_storage().ok().flatten())
+            {
+                let _ = storage.set_item(LANGUAGE_SETTINGS_KEY, &setting);
+            }
+            apply(setting);
+        });
+    });
 }
 
 /// The texture quality list, kept across visits. A device that is not

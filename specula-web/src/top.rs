@@ -15,6 +15,7 @@ use web_sys::HtmlElement;
 use crate::detail;
 use crate::detail::Group;
 use crate::diplomacy::Perspective;
+use crate::lang;
 use crate::panel::BAND_ALPHA;
 use crate::panel::CaptureBar;
 use crate::panel::Out;
@@ -203,8 +204,9 @@ impl Counters {
                     .to_string()
             };
             counter.panel.tooltip(&format!(
-                "{}\n{description}{}",
-                title(name),
+                "{}\n{}{}",
+                title(&lang::translate_context("firstWord", name)),
+                lang::translate(description),
                 ally_stats(&amount)
             ));
         }
@@ -217,7 +219,7 @@ impl Counters {
             };
             population.panel.tooltip(&format!(
                 "{}{}",
-                title("Population: current/limit (max)"),
+                title(&lang::translate("Population: current/limit (max)")),
                 ally_stats(&stat)
             ));
         }
@@ -746,6 +748,7 @@ fn hero_tooltip(view: &View, hero: &Hero) -> String {
     let name = |index: Option<u32>| {
         index
             .and_then(|index| string(scene, index))
+            .map(lang::translate)
             .unwrap_or_default()
     };
     let specific = name(template.map(|template| template.specific_name));
@@ -777,9 +780,9 @@ fn hero_tooltip(view: &View, hero: &Hero) -> String {
         "{}\n{}",
         tooltip::tags(
             if specific.is_empty() {
-                generic
+                &generic
             } else {
-                specific
+                &specific
             },
             &[("font", "sans-bold-16")]
         ),
