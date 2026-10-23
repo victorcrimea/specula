@@ -396,12 +396,14 @@ impl LoadingBar {
     fn show(&mut self, progress: Progress) {
         let (label, width, busy) = match progress {
             Progress::Idle => (String::new(), 0.0, false),
-            Progress::Starting => ("Loading the model index".to_string(), 0.0, true),
+            Progress::Starting => (lang::translate("Loading the model index"), 0.0, true),
             Progress::Bytes { done, total } => (
-                format!(
-                    "Loading models {:.1} / {:.1} MB",
-                    done as f64 / 1e6,
-                    total as f64 / 1e6
+                lang::format(
+                    &lang::translate("Loading models %(done)s / %(total)s MB"),
+                    &[
+                        ("done", &format!("{:.1}", done as f64 / 1e6)),
+                        ("total", &format!("{:.1}", total as f64 / 1e6)),
+                    ],
                 ),
                 done as f64 / total.max(1) as f64 * 100.0,
                 true,
@@ -538,8 +540,10 @@ impl SoundControls {
         let _ = self
             .button
             .set_attribute("aria-pressed", if settings.on { "true" } else { "false" });
-        self.button
-            .set_text_content(Some(if settings.on { "Sound on" } else { "Sound off" }));
+        lang::set_text(
+            &self.button,
+            if settings.on { "Sound on" } else { "Sound off" },
+        );
         self.volumes.set_hidden(!settings.on);
         self.master.set_value(&settings.master.to_string());
         self.effects.set_value(&settings.effects.to_string());
@@ -609,13 +613,12 @@ impl MatchOver {
         let left = self.switch_at - now;
         let text = if left > 0.0 {
             let seconds = (left / 1000.0).ceil() as u64;
-            format!(
-                "Match over. Next match in {}:{:02}",
-                seconds / 60,
-                seconds % 60
+            lang::format(
+                &lang::translate("Match over. Next match in %(time)s"),
+                &[("time", &format!("{}:{:02}", seconds / 60, seconds % 60))],
             )
         } else {
-            "Match over. Waiting for the next match".to_string()
+            lang::translate("Match over. Waiting for the next match")
         };
         if text != self.shown {
             self.text.set_text_content(Some(&text));
@@ -917,8 +920,10 @@ impl App {
         self.live = flags & STATUS_LIVE != 0;
         self.paused = flags & STATUS_PAUSED != 0;
         self.play_button.set_disabled(false);
-        self.play_button
-            .set_text_content(Some(if self.paused { "Play" } else { "Pause" }));
+        lang::set_text(
+            &self.play_button,
+            if self.paused { "Play" } else { "Pause" },
+        );
         // For the phone layout's icon, which CSS cannot take from the text.
         let paused = if self.paused { "true" } else { "false" };
         let _ = self.play_button.set_attribute("data-paused", paused);
@@ -973,6 +978,7 @@ fn set_panic_hook() {
 #[wasm_bindgen]
 pub fn page_main(glue_url: String, wasm_url: String, icons_url: Option<String>) {
     set_panic_hook();
+    lang::start_page();
     let icons_url = icons_url.unwrap_or_else(|| "/icons.bin".to_string());
     wasm_bindgen_futures::spawn_local(async move {
         if let Err(error) = run(Page::Map, glue_url, wasm_url, icons_url, None).await {
@@ -1611,27 +1617,33 @@ fn wire_language(app: &Rc<RefCell<App>>, select: HtmlSelectElement) {
             option.set_text(&language.name);
             let _ = select.append_child(&option);
         }
-        let default = lang::choose(&languages, "");
-        if let Some(first) = select
-            .item(0)
-            .and_then(|option| option.dyn_into::<HtmlOptionElement>().ok())
-        {
-            first.set_text(&match default {
-                Some(language) => format!("Default (browser: {})", language.name),
-                None => "Default (browser: English)".to_string(),
-            });
-        }
+        let default_name = lang::choose(&languages, "")
+            .map_or("English".to_string(), |language| language.name.clone());
         let apply = {
             let app = Rc::clone(&app);
             let languages = Rc::clone(&languages);
+            let select = select.clone();
             move |setting: String| {
                 let app = Rc::clone(&app);
                 let languages = Rc::clone(&languages);
+                let select = select.clone();
+                let default_name = default_name.clone();
                 wasm_bindgen_futures::spawn_local(async move {
                     let chosen = lang::choose(&languages, &setting);
-                    if lang::load(chosen).await
-                        && let Ok(mut app) = app.try_borrow_mut()
-                    {
+                    if lang::load(chosen).await {
+                        // The list's first entry names the browser's pick in
+                        // the language just loaded.
+                        if let Some(first) = select
+                            .item(0)
+                            .and_then(|option| option.dyn_into::<HtmlOptionElement>().ok())
+                        {
+                            first.set_text(&lang::format(
+                                &lang::translate("Default (browser: %(name)s)"),
+                                &[("name", &default_name)],
+                            ));
+                        }
+                    }
+                    if let Ok(mut app) = app.try_borrow_mut() {
                         app.details_dirty = true;
                         app.top_dirty = true;
                         app.dirty = true;

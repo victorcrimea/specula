@@ -3,6 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./i18n.js"></script>
 <title>Specula</title>
 <link rel="stylesheet" href="./gui/session.css?v=SESSION">
 <style>
@@ -380,8 +381,8 @@ html, body { margin: 0; height: 100%; background: #0f1214; }
   /* Back in the row, the chevron's point sitting over the text's middle. */
   #details.collapsed #details-toggle::before, #minimap-panel.collapsed #minimap-toggle::before {
     position: static; translate: none; flex: none; margin-top: 4px; }
-  #details.collapsed #details-toggle::after { content: "Details"; }
-  #minimap-panel.collapsed #minimap-toggle::after { content: "Minimap"; }
+  #details.collapsed #details-toggle::after { content: attr(data-label); }
+  #minimap-panel.collapsed #minimap-toggle::after { content: attr(data-label); }
   /* The queue, the garrison and the production panel fold one by one
      (and all with the details), on named tabs in one row above them.
      Each tab keeps its third of the width whichever are shown, so a
@@ -598,25 +599,25 @@ body:not([data-debug="storage"]) #stats-storage { display: none; }
 <div id="heroes"></div>
 </div>
 <div id="controls">
-<button id="menu-open" type="button" aria-expanded="false" aria-controls="controls">Menu</button>
-<button id="settings-open" type="button" aria-expanded="false" aria-controls="settings">Graphics</button>
-<button id="diplomacy" type="button" aria-pressed="false">Diplomacy colours</button>
-<select id="perspective" aria-label="Perspective">
-<option value="0">Observer</option>
+<button id="menu-open" type="button" aria-expanded="false" aria-controls="controls" data-i18n>Menu</button>
+<button id="settings-open" type="button" aria-expanded="false" aria-controls="settings" data-i18n>Graphics</button>
+<button id="diplomacy" type="button" aria-pressed="false" data-i18n>Diplomacy colours</button>
+<select id="perspective" aria-label="Perspective" data-i18n-attrs="aria-label">
+<option value="0" data-i18n>Observer</option>
 </select>
-<button id="sound" type="button" aria-pressed="false">Sound off</button>
+<button id="sound" type="button" aria-pressed="false" data-i18n>Sound off</button>
 <button id="warmup" type="button" disabled>Warm up</button>
 <div id="volumes" hidden>
-<label>Master <input id="volume-master" type="range" min="0" max="1" step="0.05" value="0.5"></label>
-<label>Effects <input id="volume-effects" type="range" min="0" max="1" step="0.05" value="0.5"></label>
-<label>Music <input id="volume-music" type="range" min="0" max="1" step="0.05" value="0.5"></label>
+<label data-i18n>Master <input id="volume-master" type="range" min="0" max="1" step="0.05" value="0.5"></label>
+<label data-i18n>Effects <input id="volume-effects" type="range" min="0" max="1" step="0.05" value="0.5"></label>
+<label data-i18n>Music <input id="volume-music" type="range" min="0" max="1" step="0.05" value="0.5"></label>
 </div>
 </div>
-<div id="clock" aria-label="Match time">0:00</div>
+<div id="clock" aria-label="Match time" data-i18n-attrs="aria-label">0:00</div>
 <div id="minimap-panel" class="gui-frame">
 <div id="minimap-background"></div>
 <div id="minimap-circle"></div>
-<canvas id="minimap" aria-label="Minimap"></canvas>
+<canvas id="minimap" aria-label="Minimap" data-i18n-attrs="aria-label"></canvas>
 <button id="minimap-toggle" type="button" aria-expanded="true" aria-label="Fold the minimap"></button>
 <span class="edge top"></span><span class="edge right"></span><span class="edge bottom"></span><span class="edge left"></span>
 <span class="edge corner top-right"></span><span class="edge corner bottom-right"></span><span class="edge corner bottom-left"></span><span class="edge corner top-left"></span>
@@ -655,7 +656,7 @@ body:not([data-debug="storage"]) #stats-storage { display: none; }
 <div id="details-carrying-text" class="text right sans-bold-stroke-13"></div>
 <div id="details-carrying-icon" class="box"></div>
 </div>
-<button id="details-portrait" class="box" type="button" aria-label="Follow with the camera">
+<button id="details-portrait" class="box" type="button" aria-label="Follow with the camera" data-i18n-attrs="aria-label">
 <img id="details-icon" alt="">
 <div id="details-experience" class="box bar"><div class="border"></div><div class="experience-bg"></div><div id="details-experience-bar" class="experience-fg"></div><div class="shine vertical"></div></div>
 <div id="details-rank" class="box"></div>
@@ -708,10 +709,10 @@ body:not([data-debug="storage"]) #stats-storage { display: none; }
 </div>
 </div>
 <div id="hud">
-<div id="fps" aria-label="Frames per second">- FPS</div>
-<pre id="stats-network" class="stats" aria-label="Network statistics"></pre>
-<pre id="stats-profiling" class="stats" aria-label="Profiling statistics"></pre>
-<pre id="stats-storage" class="stats" aria-label="Memory and storage statistics"></pre>
+<div id="fps" aria-label="Frames per second" data-i18n-attrs="aria-label">- FPS</div>
+<pre id="stats-network" class="stats" aria-label="Network statistics" data-i18n-attrs="aria-label"></pre>
+<pre id="stats-profiling" class="stats" aria-label="Profiling statistics" data-i18n-attrs="aria-label"></pre>
+<pre id="stats-storage" class="stats" aria-label="Memory and storage statistics" data-i18n-attrs="aria-label"></pre>
 <pre id="errors" aria-live="polite"></pre>
 </div>
 <div id="loading" role="status">
@@ -719,147 +720,147 @@ body:not([data-debug="storage"]) #stats-storage { display: none; }
 <div id="loading-track"><div id="loading-fill"></div></div>
 </div>
 <div id="playback">
-<button id="play" type="button" disabled>Pause</button>
-<select id="speed" aria-label="Playback speed" disabled></select>
-<input id="timeline" type="range" min="0" max="0" value="0" step="1" aria-label="Timeline" disabled>
-<button id="live" type="button" aria-pressed="true" disabled>Live</button>
-<button id="current" type="button" hidden disabled>Current match</button>
+<button id="play" type="button" disabled data-i18n>Pause</button>
+<select id="speed" aria-label="Playback speed" disabled data-i18n-attrs="aria-label"></select>
+<input id="timeline" type="range" min="0" max="0" value="0" step="1" aria-label="Timeline" disabled data-i18n-attrs="aria-label">
+<button id="live" type="button" aria-pressed="true" disabled data-i18n>Live</button>
+<button id="current" type="button" hidden disabled data-i18n>Current match</button>
 </div>
 <div id="match-over" role="status" hidden>
 <span id="match-over-text">Match over</span>
-<button id="match-over-current" type="button" disabled>Current match</button>
-<button id="match-over-close" type="button" aria-label="Close">x</button>
+<button id="match-over-current" type="button" disabled data-i18n>Current match</button>
+<button id="match-over-close" type="button" aria-label="Close" data-i18n-attrs="aria-label">x</button>
 </div>
 <div id="settings" role="dialog" aria-labelledby="settings-title" inert>
 <div id="settings-head">
-<h2 id="settings-title">Settings</h2>
-<button id="settings-close" type="button" aria-label="Close">x</button>
+<h2 id="settings-title" data-i18n>Settings</h2>
+<button id="settings-close" type="button" aria-label="Close" data-i18n-attrs="aria-label">x</button>
 </div>
 <div class="tabs" role="tablist">
-<button type="button" role="tab" id="tab-quality" aria-controls="pane-quality" aria-selected="true">Quality</button>
-<button type="button" role="tab" id="tab-language" aria-controls="pane-language" aria-selected="false">Language</button>
+<button type="button" role="tab" id="tab-quality" aria-controls="pane-quality" aria-selected="true" data-i18n>Quality</button>
+<button type="button" role="tab" id="tab-language" aria-controls="pane-language" aria-selected="false" data-i18n>Language</button>
 </div>
 <div class="pane" role="tabpanel" id="pane-quality" aria-labelledby="tab-quality">
 <div class="presets">
-<button id="preset-min" type="button">Min</button>
-<button id="preset-balanced" type="button">Balanced</button>
-<button id="preset-max" type="button">Max</button>
+<button id="preset-min" type="button" data-i18n>Min</button>
+<button id="preset-balanced" type="button" data-i18n>Balanced</button>
+<button id="preset-max" type="button" data-i18n>Max</button>
 </div>
 <div class="presets">
-<button id="bench" type="button">Benchmark</button>
-<a id="bench-download" class="button" hidden>Download report</a>
+<button id="bench" type="button" data-i18n>Benchmark</button>
+<a id="bench-download" class="button" hidden data-i18n>Download report</a>
 </div>
 <p id="bench-status" role="status"></p>
-<label id="fps-setting">Frame stats <input id="show-fps" type="checkbox"></label>
-<h3>Textures</h3>
-<label>Textures <select id="textures" data-balanced="3">
-<option value="1">Low</option>
-<option value="2">Medium</option>
-<option value="3">High</option>
+<label id="fps-setting" data-i18n>Frame stats <input id="show-fps" type="checkbox"></label>
+<h3 data-i18n>Textures</h3>
+<label data-i18n>Textures <select id="textures" data-balanced="3">
+<option value="1" data-i18n>Low</option>
+<option value="2" data-i18n>Medium</option>
+<option value="3" data-i18n>High</option>
 </select></label>
-<label>Material maps <select id="maps" data-balanced="1">
-<option value="0">Off</option>
-<option value="1">On</option>
+<label data-i18n>Material maps <select id="maps" data-balanced="1">
+<option value="0" data-i18n>Off</option>
+<option value="1" data-i18n>On</option>
 </select></label>
-<label>Triplanar cliffs <select id="triplanar" data-balanced="1">
-<option value="0">Off</option>
-<option value="1">On</option>
+<label data-i18n>Triplanar cliffs <select id="triplanar" data-balanced="1">
+<option value="0" data-i18n>Off</option>
+<option value="1" data-i18n>On</option>
 </select></label>
-<label>Wind <select id="wind" data-balanced="1">
-<option value="0">Off</option>
-<option value="1">On</option>
+<label data-i18n>Wind <select id="wind" data-balanced="1">
+<option value="0" data-i18n>Off</option>
+<option value="1" data-i18n>On</option>
 </select></label>
-<h3>Shadows</h3>
-<label>Shadows <select id="shadows" data-balanced="4096">
-<option value="0">Off</option>
-<option value="1024">Low</option>
-<option value="2048">Medium</option>
-<option value="4096">High</option>
-<option value="8192">Very High</option>
+<h3 data-i18n>Shadows</h3>
+<label data-i18n>Shadows <select id="shadows" data-balanced="4096">
+<option value="0" data-i18n>Off</option>
+<option value="1024" data-i18n>Low</option>
+<option value="2048" data-i18n>Medium</option>
+<option value="4096" data-i18n>High</option>
+<option value="8192" data-i18n>Very High</option>
 </select></label>
-<label>Cutoff distance <span><input id="shadowscutoff" data-balanced="300" type="range" min="100" max="1500" step="10" value="300">
+<label data-i18n>Cutoff distance <span><input id="shadowscutoff" data-balanced="300" type="range" min="100" max="1500" step="10" value="300">
 <span id="shadowscutoff-value">300 m</span></span></label>
-<h3>Water</h3>
-<label>Water effects <select id="water" data-balanced="1">
-<option value="0">Off</option>
-<option value="1">On</option>
+<h3 data-i18n>Water</h3>
+<label data-i18n>Water effects <select id="water" data-balanced="1">
+<option value="0" data-i18n>Off</option>
+<option value="1" data-i18n>On</option>
 </select></label>
-<label>High-quality water effects <select id="waterfancyeffects" data-balanced="1">
-<option value="0">Off</option>
-<option value="1">On</option>
+<label data-i18n>High-quality water effects <select id="waterfancyeffects" data-balanced="1">
+<option value="0" data-i18n>Off</option>
+<option value="1" data-i18n>On</option>
 </select></label>
-<label>Water reflections <select id="waterreflection" data-balanced="1">
-<option value="0">Off</option>
-<option value="1">On</option>
+<label data-i18n>Water reflections <select id="waterreflection" data-balanced="1">
+<option value="0" data-i18n>Off</option>
+<option value="1" data-i18n>On</option>
 </select></label>
-<label>Water refraction <select id="waterrefraction" data-balanced="0">
-<option value="0">Off</option>
-<option value="1">On</option>
+<label data-i18n>Water refraction <select id="waterrefraction" data-balanced="0">
+<option value="0" data-i18n>Off</option>
+<option value="1" data-i18n>On</option>
 </select></label>
-<label>Real water depth <select id="waterrealdepth" data-balanced="1">
-<option value="0">Off</option>
-<option value="1">On</option>
+<label data-i18n>Real water depth <select id="waterrealdepth" data-balanced="1">
+<option value="0" data-i18n>Off</option>
+<option value="1" data-i18n>On</option>
 </select></label>
-<h3>Scene</h3>
-<label>Sky <select id="sky" data-balanced="1">
-<option value="0">Off</option>
-<option value="1">On</option>
+<h3 data-i18n>Scene</h3>
+<label data-i18n>Sky <select id="sky" data-balanced="1">
+<option value="0" data-i18n>Off</option>
+<option value="1" data-i18n>On</option>
 </select></label>
-<label>Fog <select id="fog" data-balanced="0">
-<option value="0">Off</option>
-<option value="1">On</option>
+<label data-i18n>Fog <select id="fog" data-balanced="0">
+<option value="0" data-i18n>Off</option>
+<option value="1" data-i18n>On</option>
 </select></label>
-<h3>Effects</h3>
-<label>Particles <select id="particles" data-balanced="1">
-<option value="0">Off</option>
-<option value="1">On</option>
+<h3 data-i18n>Effects</h3>
+<label data-i18n>Particles <select id="particles" data-balanced="1">
+<option value="0" data-i18n>Off</option>
+<option value="1" data-i18n>On</option>
 </select></label>
-<label>Projectiles <select id="projectiles">
-<option value="0">Off</option>
-<option value="1" selected>On</option>
+<label data-i18n>Projectiles <select id="projectiles">
+<option value="0" data-i18n>Off</option>
+<option value="1" selected data-i18n>On</option>
 </select></label>
-<h3>Tooltips</h3>
-<label>Detailed tooltips <select id="detailed-tooltips">
-<option value="0" selected>Off</option>
-<option value="1">On</option>
+<h3 data-i18n>Tooltips</h3>
+<label data-i18n>Detailed tooltips <select id="detailed-tooltips">
+<option value="0" selected data-i18n>Off</option>
+<option value="1" data-i18n>On</option>
 </select></label>
-<h3>Range overlays</h3>
-<label>Attack ranges (Alt+C) <select id="ranges-attack">
-<option value="0">Off</option>
-<option value="1" selected>On</option>
+<h3 data-i18n>Range overlays</h3>
+<label data-i18n>Attack ranges (Alt+C) <select id="ranges-attack">
+<option value="0" data-i18n>Off</option>
+<option value="1" selected data-i18n>On</option>
 </select></label>
-<label>Aura ranges (Alt+V) <select id="ranges-aura">
-<option value="0">Off</option>
-<option value="1" selected>On</option>
+<label data-i18n>Aura ranges (Alt+V) <select id="ranges-aura">
+<option value="0" data-i18n>Off</option>
+<option value="1" selected data-i18n>On</option>
 </select></label>
-<label>Heal ranges (Alt+B) <select id="ranges-heal">
-<option value="0">Off</option>
-<option value="1" selected>On</option>
+<label data-i18n>Heal ranges (Alt+B) <select id="ranges-heal">
+<option value="0" data-i18n>Off</option>
+<option value="1" selected data-i18n>On</option>
 </select></label>
-<h3>Post-processing</h3>
-<label>Post-processing <select id="postproc" data-balanced="1">
-<option value="0">Off</option>
-<option value="1">On</option>
+<h3 data-i18n>Post-processing</h3>
+<label data-i18n>Post-processing <select id="postproc" data-balanced="1">
+<option value="0" data-i18n>Off</option>
+<option value="1" data-i18n>On</option>
 </select></label>
-<label>Bloom <select id="bloom" data-balanced="1">
-<option value="0">Off</option>
-<option value="1">On</option>
+<label data-i18n>Bloom <select id="bloom" data-balanced="1">
+<option value="0" data-i18n>Off</option>
+<option value="1" data-i18n>On</option>
 </select></label>
-<label>Depth of field <select id="dof" data-balanced="0">
-<option value="0">Off</option>
-<option value="1">On</option>
+<label data-i18n>Depth of field <select id="dof" data-balanced="0">
+<option value="0" data-i18n>Off</option>
+<option value="1" data-i18n>On</option>
 </select></label>
-<label>Antialiasing <select id="antialiasing" data-balanced="1">
-<option value="0">Disabled</option>
-<option value="1">FXAA</option>
+<label data-i18n>Antialiasing <select id="antialiasing" data-balanced="1">
+<option value="0" data-i18n>Disabled</option>
+<option value="1" data-i18n>FXAA</option>
 </select></label>
-<label>Sharpening <select id="sharpening" data-balanced="1">
-<option value="0">Disabled</option>
-<option value="1">FidelityFX CAS</option>
+<label data-i18n>Sharpening <select id="sharpening" data-balanced="1">
+<option value="0" data-i18n>Disabled</option>
+<option value="1" data-i18n>FidelityFX CAS</option>
 </select></label>
-<label>Sharpness factor <span><input id="sharpness" data-balanced="0.3" type="range" min="0" max="1" step="0.05" value="0.3">
+<label data-i18n>Sharpness factor <span><input id="sharpness" data-balanced="0.3" type="range" min="0" max="1" step="0.05" value="0.3">
 <span id="sharpness-value">0.30</span></span></label>
-<label>Resolution scale <select id="renderscale" data-min="0.5" data-balanced="1" data-max="1">
+<label data-i18n>Resolution scale <select id="renderscale" data-min="0.5" data-balanced="1" data-max="1">
 <option value="0.5">50%</option>
 <option value="0.75">75%</option>
 <option value="0.875">87.5%</option>
@@ -869,43 +870,43 @@ body:not([data-debug="storage"]) #stats-storage { display: none; }
 <option value="1.75">175%</option>
 <option value="2">200%</option>
 </select></label>
-<label>Upscale technique <select id="upscale" data-min="bilinear" data-balanced="fsr" data-max="fsr">
-<option value="fsr">FidelityFX Super Resolution 1.0</option>
-<option value="bilinear">Bilinear</option>
-<option value="pixelated">Pixelated</option>
+<label data-i18n>Upscale technique <select id="upscale" data-min="bilinear" data-balanced="fsr" data-max="fsr">
+<option value="fsr" data-i18n>FidelityFX Super Resolution 1.0</option>
+<option value="bilinear" data-i18n>Bilinear</option>
+<option value="pixelated" data-i18n>Pixelated</option>
 </select></label>
 </div>
 <div class="pane" role="tabpanel" id="pane-language" aria-labelledby="tab-language" hidden>
-<label>Language <select id="language">
+<label data-i18n>Language <select id="language">
 <option value="">Default (browser)</option>
 </select></label>
 </div>
 </div>
 <div id="storage-notice" role="dialog" aria-modal="true" aria-labelledby="storage-notice-title" hidden>
 <div id="storage-notice-box">
-<h2 id="storage-notice-title">Assets for the 3D view</h2>
-<p>To show the match in 3D, this observer uses the game's own models,
+<h2 id="storage-notice-title" data-i18n>Assets for the 3D view</h2>
+<p data-i18n-html>To show the match in 3D, this observer uses the game's own models,
 textures, animations and sounds. It downloads them from this server as the
 match needs them and keeps them in your browser's storage. Your next match
 or visit then reuses them instead of downloading them again.</p>
-<p>Over time this observer may store up to <b>ASSETS_SIZE</b> of data on your
+<p data-i18n-html data-size="ASSETS_SIZE">Over time this observer may store up to <b>{size}</b> of data on your
 machine.</p>
-<p>You don't need to wait for any of it. The match starts right away, and
+<p data-i18n-html>You don't need to wait for any of it. The match starts right away, and
 each model is fetched the first time it comes on screen. It shows first as
 a small rough version of a few KB, and full detail follows. A lower texture
 quality in the settings stores less.</p>
-<p><b>Warm up</b> downloads, in the background, everything this match can
+<p data-i18n-html><b>Warm up</b> downloads, in the background, everything this match can
 need: the buildings and units of every civilisation in it, the map's
 terrain, and the trees, animals and rocks on it. Then nothing has to load
 when it first appears. This helps on a slow connection, or before the
 armies meet. It also asks your browser to keep these files rather than
 clear them when space runs low, and some browsers will ask your permission
 first.</p>
-<p>You can delete the stored files at any time in your browser's site data
+<p data-i18n-html>You can delete the stored files at any time in your browser's site data
 settings.</p>
 <div id="storage-notice-buttons">
-<button id="storage-notice-warmup" type="button">Warm up now</button>
-<button id="storage-notice-ok" type="button">Got it</button>
+<button id="storage-notice-warmup" type="button" data-i18n>Warm up now</button>
+<button id="storage-notice-ok" type="button" data-i18n>Got it</button>
 </div>
 </div>
 </div>
@@ -1037,9 +1038,11 @@ settings.</p>
   const show = (collapsed) => {
     panel.classList.toggle("collapsed", collapsed);
     toggle.setAttribute("aria-expanded", String(!collapsed));
-    toggle.setAttribute("aria-label", collapsed ? "Unfold the details" : "Fold the details");
+    toggle.setAttribute("aria-label", speculaT(collapsed ? "Unfold the details" : "Fold the details"));
+    toggle.dataset.label = speculaT("Details");
   };
   try { show(localStorage.getItem(key) === "1"); } catch { show(false); }
+  speculaOnLanguage(() => show(panel.classList.contains("collapsed")));
   toggle.addEventListener("click", () => {
     const collapsed = !panel.classList.contains("collapsed");
     show(collapsed);
@@ -1052,10 +1055,10 @@ settings.</p>
 // The panels above the details fold one by one, on phones only. The
 // production panel starts folded: it is read-only, so it earns little of
 // a small screen.
-for (const [id, name, folded] of [
-  ["queue", "queue", false],
-  ["garrison", "garrison", false],
-  ["commands", "production panel", true],
+for (const [id, foldLabel, unfoldLabel, folded] of [
+  ["queue", "Fold the queue", "Unfold the queue", false],
+  ["garrison", "Fold the garrison", "Unfold the garrison", false],
+  ["commands", "Fold the production panel", "Unfold the production panel", true],
 ]) {
   const panel = document.getElementById(id);
   const toggle = document.getElementById(id + "-toggle");
@@ -1065,11 +1068,12 @@ for (const [id, name, folded] of [
     panel.classList.toggle("collapsed", collapsed);
     toggle.classList.toggle("collapsed", collapsed);
     toggle.setAttribute("aria-expanded", String(!collapsed));
-    toggle.setAttribute("aria-label", (collapsed ? "Unfold the " : "Fold the ") + name);
+    toggle.setAttribute("aria-label", speculaT(collapsed ? unfoldLabel : foldLabel));
   };
   let stored = null;
   try { stored = localStorage.getItem(key); } catch {}
   show(stored === null ? folded : stored === "1");
+  speculaOnLanguage(() => show(panel.classList.contains("collapsed")));
   toggle.addEventListener("click", () => {
     const collapsed = !panel.classList.contains("collapsed");
     show(collapsed);
@@ -1087,11 +1091,12 @@ for (const [id, name, folded] of [
   const show = (collapsed) => {
     panel.classList.toggle("collapsed", collapsed);
     toggle.setAttribute("aria-expanded", String(!collapsed));
-    toggle.setAttribute("aria-label", collapsed ? "Unfold the top panel" : "Fold the top panel");
+    toggle.setAttribute("aria-label", speculaT(collapsed ? "Unfold the top panel" : "Fold the top panel"));
   };
   let stored = null;
   try { stored = localStorage.getItem(key); } catch {}
   show(stored === null ? matchMedia("(max-width: 700px)").matches : stored === "1");
+  speculaOnLanguage(() => show(panel.classList.contains("collapsed")));
   toggle.addEventListener("click", () => {
     const collapsed = !panel.classList.contains("collapsed");
     show(collapsed);
@@ -1126,9 +1131,11 @@ for (const [id, name, folded] of [
   const showMinimap = (collapsed) => {
     minimap.classList.toggle("collapsed", collapsed);
     minimapToggle.setAttribute("aria-expanded", String(!collapsed));
-    minimapToggle.setAttribute("aria-label", collapsed ? "Unfold the minimap" : "Fold the minimap");
+    minimapToggle.setAttribute("aria-label", speculaT(collapsed ? "Unfold the minimap" : "Fold the minimap"));
+    minimapToggle.dataset.label = speculaT("Minimap");
   };
   showMinimap(get(minimapKey) === "1");
+  speculaOnLanguage(() => showMinimap(minimap.classList.contains("collapsed")));
   minimapToggle.addEventListener("click", () => {
     const collapsed = !minimap.classList.contains("collapsed");
     showMinimap(collapsed);

@@ -19,6 +19,7 @@ use specula_assets::files::Texture;
 use web_sys::HtmlButtonElement;
 
 use crate::assets::Store;
+use crate::lang;
 
 /// Fewer than the store's own requests, which are for what is on screen
 /// now, and the stream's segments.
@@ -147,10 +148,12 @@ impl Warmup {
             Some(run) if !run.borrow().finished() => {
                 let run = run.borrow();
                 (
-                    format!(
-                        "Warming up {:.1} / {:.1} MB",
-                        run.done_bytes as f64 / 1e6,
-                        run.total_bytes as f64 / 1e6
+                    lang::format(
+                        &lang::translate("Warming up %(done)s / %(total)s MB"),
+                        &[
+                            ("done", &format!("{:.1}", run.done_bytes as f64 / 1e6)),
+                            ("total", &format!("{:.1}", run.total_bytes as f64 / 1e6)),
+                        ],
                     ),
                     false,
                 )
@@ -158,12 +161,21 @@ impl Warmup {
             Some(run) if ran_for_target => {
                 let failed = run.borrow().failed;
                 if failed == 0 {
-                    ("Warmed up".to_string(), false)
+                    (lang::translate("Warmed up"), false)
                 } else {
-                    (format!("Warm up ({failed} failed)"), true)
+                    (
+                        lang::format(
+                            &lang::translate("Warm up (%(failed)s failed)"),
+                            &[("failed", &failed.to_string())],
+                        ),
+                        true,
+                    )
                 }
             }
-            _ => ("Warm up".to_string(), index_loaded && !self.civs.is_empty()),
+            _ => (
+                lang::translate("Warm up"),
+                index_loaded && !self.civs.is_empty(),
+            ),
         };
         let key = format!("{label}|{enabled}");
         if key == self.shown {

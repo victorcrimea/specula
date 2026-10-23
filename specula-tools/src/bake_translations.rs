@@ -17,6 +17,12 @@
 //! the language menu shows them. Untranslated and fuzzy messages are left
 //! out, so a lookup that misses falls back to the English msgid.
 //!
+//! Specula's own strings are in `specula-web/i18n/<code>.json` (English
+//! text -> translation, with `en.json` naming each one's context). They are
+//! merged over the engine's messages, so a string the engine has too takes
+//! the engine's wording unless Specula's file names it. A translation that
+//! lacks or adds a placeholder or tag of its English is an error.
+//!
 //! Old files are left in the output directory, so a page that still names
 //! them keeps working until the next deploy clears it.
 
@@ -36,6 +42,7 @@ use serde_json::Value;
 
 const DEFAULT_RELEASE: &str = "target/translations";
 const DEFAULT_OUTPUT: &str = "specula-web/lang";
+const OWN_STRINGS: &str = "specula-web/i18n";
 const TARBALL: &str = "https://releases.wildfiregames.com/0ad-0.28.0-unix-data.tar.gz";
 const PREFIX: &str = "0ad-0.28.0/";
 const ZIPS: [&str; 2] = [
@@ -123,6 +130,7 @@ fn run(release: &Path, output: &Path) -> Result<(), String> {
                 read_catalog(&entry, &text, &mut plural, &mut messages)?;
             }
         }
+        read_own(code, &mut messages)?;
         if messages.is_empty() {
             return Err(format!("no translations for {code}"));
         }
@@ -230,6 +238,53 @@ fn read_catalog(
         messages.insert(key, value);
     }
     Ok(())
+}
+
+/// Merges Specula's strings for `code` over `messages`, if it has any.
+fn read_own(code: &str, messages: &mut BTreeMap<String, Value>) -> Result<(), String> {
+    let path = Path::new(OWN_STRINGS).join(format!("{code}.json"));
+    let Ok(text) = fs::read_to_string(&path) else {
+        return Ok(());
+    };
+    let own: BTreeMap<String, String> =
+        serde_json::from_str(&text).map_err(|error| format!("{}: {error}", path.display()))?;
+    for (english, translation) in own {
+        if translation.trim().is_empty() || markers(&english) != markers(&translation) {
+            return Err(format!(
+                "{}: bad translation of {english:?}",
+                path.display()
+            ));
+        }
+        messages.insert(english, Value::String(translation));
+    }
+    Ok(())
+}
+
+/// The `%(name)s` placeholders, `{size}` and `<b>` tags of `text`, sorted,
+/// which a translation must keep.
+fn markers(text: &str) -> Vec<String> {
+    let mut found = Vec::new();
+    let mut rest = text;
+    while let Some(start) = rest.find(['%', '{', '<']) {
+        rest = &rest[start..];
+        let close = match rest.as_bytes()[0] {
+            b'%' => rest
+                .find(")s")
+                .map(|at| at + 2)
+                .filter(|_| rest[1..].starts_with('(')),
+            b'{' => rest.find('}').map(|at| at + 1),
+            _ => rest.find('>').map(|at| at + 1),
+        };
+        match close {
+            Some(end) => {
+                found.push(rest[..end].to_string());
+                rest = &rest[end..];
+            }
+            None => rest = &rest[1..],
+        }
+    }
+    found.sort();
+    found
 }
 
 fn write(path: &Path, bytes: &[u8]) -> Result<(), String> {

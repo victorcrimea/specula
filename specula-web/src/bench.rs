@@ -30,6 +30,7 @@ use web_sys::HtmlSelectElement;
 use crate::App;
 use crate::assets::Progress;
 use crate::element;
+use crate::lang;
 use crate::timing;
 use crate::timing::Samples;
 use crate::worker::COMMAND_LIVE;
@@ -342,7 +343,7 @@ impl Bench {
             app.borrow().command(COMMAND_PAUSE, 0.0);
         }
         self.download.set_hidden(true);
-        self.button.set_text_content(Some("Stop benchmark"));
+        lang::set_text(&self.button, "Stop benchmark");
         self.running = Some(Running {
             runs,
             index: 0,
@@ -622,14 +623,17 @@ impl Bench {
         };
         let run = &running.runs[running.index];
         let phase = match running.phase {
-            Phase::Apply | Phase::Settle { .. } => "warming up",
-            Phase::Measure { .. } => "measuring",
+            Phase::Apply | Phase::Settle { .. } => lang::translate("warming up"),
+            Phase::Measure { .. } => lang::translate("measuring"),
         };
-        self.status.set_text_content(Some(&format!(
-            "Run {}/{}, {phase}: {}",
-            running.index + 1,
-            running.runs.len(),
-            run.name
+        self.status.set_text_content(Some(&lang::format(
+            &lang::translate("Run %(index)s/%(total)s, %(phase)s: %(name)s"),
+            &[
+                ("index", &(running.index + 1).to_string()),
+                ("total", &running.runs.len().to_string()),
+                ("phase", &phase),
+                ("name", &run.name),
+            ],
         )));
         let app = &mut *app.borrow_mut();
         // Drawn every frame, as a paused scene otherwise is not.
@@ -660,13 +664,19 @@ impl Bench {
             }
             app.dirty = true;
         }
-        self.button.set_text_content(Some("Benchmark"));
+        lang::set_text(&self.button, "Benchmark");
         let complete = running.results.len() == running.runs.len();
-        self.status.set_text_content(Some(&format!(
-            "{} of {} runs measured{}",
-            running.results.len(),
-            running.runs.len(),
-            if complete { "" } else { ", stopped" }
+        let template = if complete {
+            "%(done)s of %(total)s runs measured"
+        } else {
+            "%(done)s of %(total)s runs measured, stopped"
+        };
+        self.status.set_text_content(Some(&lang::format(
+            &lang::translate(template),
+            &[
+                ("done", &running.results.len().to_string()),
+                ("total", &running.runs.len().to_string()),
+            ],
         )));
         if running.results.is_empty() {
             return;

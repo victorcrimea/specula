@@ -9,6 +9,7 @@ use std::collections::HashMap;
 
 use wasm_bindgen::JsCast;
 use wasm_bindgen::JsValue;
+use wasm_bindgen::closure::Closure;
 use wasm_bindgen_futures::JsFuture;
 
 /// `localStorage` key of the chosen language code; absent or empty is the
@@ -107,6 +108,53 @@ fn first(message: Message, fallback: &str) -> String {
     }
 }
 
+/// Sets `element`'s text to `english` translated, and keeps the English where
+/// i18n.js reads it, so the next language change translates it again.
+pub fn set_text(element: &web_sys::HtmlElement, english: &str) {
+    let _ = element.set_attribute("data-i18n", "");
+    let _ = element.set_attribute("data-i18n-en", english);
+    element.set_text_content(Some(&translate(english)));
+}
+
+/// Makes `window.speculaTranslate`, for the inline scripts, once.
+fn expose() {
+    let Some(window) = web_sys::window() else {
+        return;
+    };
+    let name = JsValue::from_str("speculaTranslate");
+    if js_sys::Reflect::has(&window, &name).unwrap_or(true) {
+        return;
+    }
+    let closure = Closure::<dyn Fn(String) -> String>::new(|msgid: String| translate(&msgid));
+    let _ = js_sys::Reflect::set(&window, &name, closure.as_ref());
+    closure.forget();
+}
+
+/// Translates the page's marked text again, which i18n.js does.
+fn apply_dom() {
+    let Some(window) = web_sys::window() else {
+        return;
+    };
+    if let Ok(apply) = js_sys::Reflect::get(&window, &"speculaApplyLanguage".into())
+        && let Ok(apply) = apply.dyn_into::<js_sys::Function>()
+    {
+        let _ = apply.call0(&JsValue::NULL);
+    }
+}
+
+/// For a page with no language list: the saved language, else the
+/// browser's.
+pub fn start_page() {
+    wasm_bindgen_futures::spawn_local(async {
+        let saved = web_sys::window()
+            .and_then(|window| window.local_storage().ok().flatten())
+            .and_then(|storage| storage.get_item(SETTING_KEY).ok().flatten())
+            .unwrap_or_default();
+        let languages = languages().await;
+        load(choose(&languages, &saved)).await;
+    });
+}
+
 /// The engine's `sprintf` with named placeholders: each `%(name)s` in
 /// `template` becomes the value named `name`.
 pub fn format(template: &str, values: &[(&str, &str)]) -> String {
@@ -192,6 +240,7 @@ pub async fn load(language: Option<&Language>) -> bool {
         return false;
     };
     TABLE.with(|current| *current.borrow_mut() = table);
+    expose();
     if let Some(root) = web_sys::window()
         .and_then(|window| window.document())
         .and_then(|document| document.document_element())
@@ -199,6 +248,7 @@ pub async fn load(language: Option<&Language>) -> bool {
         let tag = language.map_or("en".to_string(), |language| language.code.replace('_', "-"));
         let _ = root.set_attribute("lang", &tag);
     }
+    apply_dom();
     true
 }
 

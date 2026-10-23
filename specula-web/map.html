@@ -3,6 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./i18n.js"></script>
 <title>Specula map</title>
 <style>
 html, body { margin: 0; height: 100%; background: #0f1214; }
@@ -37,23 +38,23 @@ html, body { margin: 0; height: 100%; background: #0f1214; }
 <body>
 <canvas id="view"></canvas>
 <div id="controls">
-<button id="diplomacy" type="button" aria-pressed="false">Diplomacy colours</button>
-<select id="perspective" aria-label="Perspective" disabled>
-<option value="0">Observer</option>
+<button id="diplomacy" type="button" aria-pressed="false" data-i18n>Diplomacy colours</button>
+<select id="perspective" aria-label="Perspective" disabled data-i18n-attrs="aria-label">
+<option value="0" data-i18n>Observer</option>
 </select>
 </div>
-<div id="clock" aria-label="Match time">0:00</div>
+<div id="clock" aria-label="Match time" data-i18n-attrs="aria-label">0:00</div>
 <div id="playback">
-<button id="play" type="button" disabled>Pause</button>
-<select id="speed" aria-label="Playback speed" disabled></select>
-<input id="timeline" type="range" min="0" max="0" value="0" step="1" aria-label="Timeline" disabled>
-<button id="live" type="button" aria-pressed="true" disabled>Live</button>
-<button id="current" type="button" hidden disabled>Current match</button>
+<button id="play" type="button" disabled data-i18n>Pause</button>
+<select id="speed" aria-label="Playback speed" disabled data-i18n-attrs="aria-label"></select>
+<input id="timeline" type="range" min="0" max="0" value="0" step="1" aria-label="Timeline" disabled data-i18n-attrs="aria-label">
+<button id="live" type="button" aria-pressed="true" disabled data-i18n>Live</button>
+<button id="current" type="button" hidden disabled data-i18n>Current match</button>
 </div>
 <div id="match-over" role="status" hidden>
 <span id="match-over-text">Match over</span>
-<button id="match-over-current" type="button" disabled>Current match</button>
-<button id="match-over-close" type="button" aria-label="Close">x</button>
+<button id="match-over-current" type="button" disabled data-i18n>Current match</button>
+<button id="match-over-close" type="button" aria-label="Close" data-i18n-attrs="aria-label">x</button>
 </div>
 <script type="module">
 const glue = "./pkg/specula_web.js?v=GLUE";
