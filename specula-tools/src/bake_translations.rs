@@ -2,7 +2,9 @@
 //! client to look an engine string up in.
 //!
 //! Usage: bake-translations [release data dir] [output dir]
-//! Defaults: target/translations and specula-web/lang.
+//! Defaults: ~/.cache/specula/translations and specula-web/lang. The
+//! release data lives outside the checkout so a `cargo clean` does not
+//! cost the 2 GB download again.
 //!
 //! The engine's repository holds no .po files (they live on Transifex), but
 //! its release tarball ships them inside `public.zip` and `mod.zip`. The
@@ -40,7 +42,8 @@ use std::process::Stdio;
 use polib::po_file;
 use serde_json::Value;
 
-const DEFAULT_RELEASE: &str = "target/translations";
+/// Under `$HOME`.
+const DEFAULT_RELEASE: &str = ".cache/specula/translations";
 const DEFAULT_OUTPUT: &str = "specula-web/lang";
 const OWN_STRINGS: &str = "specula-web/i18n";
 const TARBALL: &str = "https://releases.wildfiregames.com/0ad-0.28.0-unix-data.tar.gz";
@@ -103,7 +106,16 @@ const LANGUAGES: [(&str, &str); 27] = [
 
 fn main() -> ExitCode {
     let mut args = std::env::args().skip(1);
-    let release = PathBuf::from(args.next().unwrap_or_else(|| DEFAULT_RELEASE.into()));
+    let release = match args.next() {
+        Some(release) => PathBuf::from(release),
+        None => match std::env::var_os("HOME") {
+            Some(home) => PathBuf::from(home).join(DEFAULT_RELEASE),
+            None => {
+                eprintln!("HOME is not set; name the release data dir");
+                return ExitCode::FAILURE;
+            }
+        },
+    };
     let output = PathBuf::from(args.next().unwrap_or_else(|| DEFAULT_OUTPUT.into()));
     match run(&release, &output) {
         Ok(()) => ExitCode::SUCCESS,
