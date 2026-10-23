@@ -600,7 +600,7 @@ body:not([data-debug="storage"]) #stats-storage { display: none; }
 </div>
 <div id="controls">
 <button id="menu-open" type="button" aria-expanded="false" aria-controls="controls" data-i18n>Menu</button>
-<button id="settings-open" type="button" aria-expanded="false" aria-controls="settings" data-i18n>Graphics</button>
+<button id="settings-open" type="button" aria-expanded="false" aria-controls="settings" data-i18n>Settings</button>
 <button id="diplomacy" type="button" aria-pressed="false" data-i18n>Diplomacy colours</button>
 <select id="perspective" aria-label="Perspective" data-i18n-attrs="aria-label">
 <option value="0" data-i18n>Observer</option>
@@ -1118,7 +1118,7 @@ for (const [id, foldLabel, unfoldLabel, folded] of [
     menu.setAttribute("aria-expanded", String(open));
   };
   menu.addEventListener("click", () => showMenu(!controls.classList.contains("open")));
-  // Graphics opens its own panel over the menu, so the menu gets out of
+  // Settings opens its own panel over the menu, so the menu gets out of
   // the way; a tap anywhere else closes it as well.
   document.getElementById("settings-open").addEventListener("click", () => showMenu(false));
   document.addEventListener("pointerdown", (event) => {
