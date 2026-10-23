@@ -30,6 +30,8 @@ const RECORD_PRODUCTION_LIST: u8 = 17;
 const RECORD_TEMPLATE_DATA: u8 = 18;
 const RECORD_TECHNOLOGY_DATA: u8 = 19;
 const RECORD_STATS: u8 = 20;
+const RECORD_PLAYER_GUI: u8 = 21;
+const RECORD_FORMATION_DATA: u8 = 22;
 const ENTITY_SIZE: usize = 74;
 const SOUND_SIZE: usize = 27;
 const LAUNCH_SIZE: usize = 52;
@@ -64,6 +66,10 @@ const DETAIL_RESEARCHABLE_ITEMS: u32 = 524288;
 const DETAIL_RALLY: u32 = 1048576;
 const DETAIL_STATS: u32 = 2097152;
 const DETAIL_BUILDABLE_ITEMS: u32 = 4194304;
+const DETAIL_STANCES: u32 = 8388608;
+const DETAIL_FORMATIONS: u32 = 16777216;
+const DETAIL_COMMANDS: u32 = 33554432;
+const DETAIL_UPGRADES: u32 = 67108864;
 const NO_LIMIT: u16 = 0xFFFF;
 const QUEUE_UNIT: u8 = 0;
 const QUEUE_TECHNOLOGY: u8 = 1;
@@ -224,7 +230,8 @@ pub struct TemplateDetails {
     /// Bit i for the i-th of Health, Capturable, ResourceSupply,
     /// ProductionQueue, GarrisonHolder, Promotion, ResourceGatherer,
     /// Foundation, Repairable, UnitAI, Trainer, Researcher, Pack, Upgrade,
-    /// Trader, Garrisonable, Turretable, Attack, Auras, Heal, RallyPoint.
+    /// Trader, Garrisonable, Turretable, Attack, Auras, Heal, RallyPoint,
+    /// Builder, Gate, AlertRaiser, ResourceDropsite, TurretHolder, Market.
     pub components: u32,
     /// RallyPointRenderer's line, full VFS paths.
     pub rally_texture: Option<u32>,
@@ -281,6 +288,12 @@ pub struct EntityDetails {
     pub trainable: Option<u32>,
     pub researchable: Option<u32>,
     pub buildable: Option<u32>,
+    /// A production list of the upgrades, as for a trainable list.
+    pub upgrades: Option<u32>,
+    /// String record indices of `UnitAI.GetSelectableStances`.
+    pub stances: Option<Vec<Option<u32>>>,
+    pub formations: Option<Formations>,
+    pub commands: Option<Commands>,
     pub progress: Option<Progress>,
     /// The entity it is garrisoned in or a turret on, 0 for none.
     pub holder: Option<u32>,
@@ -317,6 +330,10 @@ impl EntityDetails {
         take(&mut self.trainable, changed.trainable);
         take(&mut self.researchable, changed.researchable);
         take(&mut self.buildable, changed.buildable);
+        take(&mut self.upgrades, changed.upgrades);
+        take(&mut self.stances, changed.stances);
+        take(&mut self.formations, changed.formations);
+        take(&mut self.commands, changed.commands);
         take(&mut self.progress, changed.progress);
         take(&mut self.holder, changed.holder);
         take(&mut self.trader, changed.trader);
@@ -384,6 +401,26 @@ pub struct UnitAi {
     pub formation_controller: u32,
 }
 
+/// The formation an entity is in, and those its UnitAI can use.
+#[derive(Clone, PartialEq, Eq)]
+pub struct Formations {
+    /// String record index of the template; the null formation's when in
+    /// none.
+    pub current: Option<u32>,
+    pub list: Vec<Option<u32>>,
+}
+
+/// What the command row and the pack, gate and alert panels read.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct Commands {
+    /// The hook's `COMMAND_*` bits, `SpeculaFeed.h` kind 12 group 33554432.
+    pub flags: u16,
+    /// String record index of AlertRaiser's target classes.
+    pub alert_classes: Option<u32>,
+    /// The ejectable occupants of a TurretHolder's points.
+    pub turrets: u16,
+}
+
 pub struct Progress {
     /// -1 when not packing or upgrading.
     pub pack: f32,
@@ -426,6 +463,16 @@ pub struct RallyPoint {
     pub path: Vec<[f32; 2]>,
 }
 
+/// What a player's panels read that is not an entity's: the formations the
+/// civ may use and the barter prices; index 0 is gaia.
+#[derive(Clone, PartialEq)]
+pub struct PlayerGui {
+    /// String record indices of formation templates.
+    pub formations: Vec<Option<u32>>,
+    /// Resource code string index, buy price, sell price.
+    pub prices: Vec<(Option<u32>, f32, f32)>,
+}
+
 /// A player's top panel numbers; index 0 is gaia.
 pub struct Economy {
     pub population: i32,
@@ -456,6 +503,8 @@ pub struct Details {
     /// (old id, new id) of the next turn record.
     pub renames: Vec<(u32, u32)>,
     pub economy: Vec<Economy>,
+    /// Kind 21, by player index.
+    pub player_gui: Vec<PlayerGui>,
     /// The entities whose groups changed, and those gone, before the next
     /// turn record.
     pub changed: HashSet<u32>,
@@ -473,6 +522,8 @@ pub enum DataKey {
     Template { name: u32, player: i32 },
     /// A technology name string and a civ string.
     Technology { name: u32, civ: u32 },
+    /// A formation template name string.
+    Formation { name: u32 },
 }
 
 impl Details {
@@ -502,6 +553,10 @@ impl Details {
 
     pub fn set_economy(&mut self, economy: Vec<Economy>) {
         self.economy = economy;
+    }
+
+    pub fn set_player_gui(&mut self, player_gui: Vec<PlayerGui>) {
+        self.player_gui = player_gui;
     }
 
     pub fn set_data(&mut self, key: DataKey, hash: u64) {
@@ -582,7 +637,9 @@ pub enum Record {
     /// (old id, new id) of the next turn record.
     Renames(Vec<(u32, u32)>),
     Economy(Vec<Economy>),
-    /// Kind 18 or 19: UTF-8 JSON.
+    /// Kind 21.
+    PlayerGui(Vec<PlayerGui>),
+    /// Kind 18, 19 or 22: UTF-8 JSON.
     Data {
         key: DataKey,
         json: Vec<u8>,
@@ -738,7 +795,8 @@ pub fn read_record(reader: &mut impl Read) -> io::Result<Option<Record>> {
                     json: cursor.0.to_vec(),
                 }));
             }
-            RECORD_TEMPLATE_DATA | RECORD_TECHNOLOGY_DATA => {
+            RECORD_PLAYER_GUI => return decode_player_gui(&payload).map(Some),
+            RECORD_TEMPLATE_DATA | RECORD_TECHNOLOGY_DATA | RECORD_FORMATION_DATA => {
                 return decode_data(head[0], &payload).map(Some);
             }
             RECORD_RENAMES => return decode_renames(&payload).map(Some),
@@ -1307,6 +1365,32 @@ fn decode_groups(cursor: &mut Cursor, mask: u32) -> io::Result<EntityDetails> {
     if mask & DETAIL_BUILDABLE_ITEMS != 0 {
         details.buildable = Some(cursor.u32()?);
     }
+    if mask & DETAIL_STANCES != 0 {
+        let count = cursor.u8()?;
+        details.stances = Some(
+            (0..count)
+                .map(|_| Ok(optional(cursor.u32()?)))
+                .collect::<io::Result<_>>()?,
+        );
+    }
+    if mask & DETAIL_FORMATIONS != 0 {
+        let current = optional(cursor.u32()?);
+        let count = cursor.u16()?;
+        let list = (0..count)
+            .map(|_| Ok(optional(cursor.u32()?)))
+            .collect::<io::Result<_>>()?;
+        details.formations = Some(Formations { current, list });
+    }
+    if mask & DETAIL_COMMANDS != 0 {
+        details.commands = Some(Commands {
+            flags: cursor.u16()?,
+            alert_classes: optional(cursor.u32()?),
+            turrets: cursor.u16()?,
+        });
+    }
+    if mask & DETAIL_UPGRADES != 0 {
+        details.upgrades = Some(cursor.u32()?);
+    }
     Ok(details)
 }
 
@@ -1342,7 +1426,9 @@ fn decode_string_list(payload: &[u8]) -> io::Result<Record> {
 fn decode_data(kind: u8, payload: &[u8]) -> io::Result<Record> {
     let mut cursor = Cursor(payload);
     let name = cursor.u32()?;
-    let key = if kind == RECORD_TEMPLATE_DATA {
+    let key = if kind == RECORD_FORMATION_DATA {
+        DataKey::Formation { name }
+    } else if kind == RECORD_TEMPLATE_DATA {
         DataKey::Template {
             name,
             player: cursor.u32()? as i32,
@@ -1382,6 +1468,25 @@ fn decode_production_list(payload: &[u8]) -> io::Result<Record> {
         return Err(invalid("production list record has trailing bytes"));
     }
     Ok(Record::ProductionList { index, items })
+}
+
+fn decode_player_gui(payload: &[u8]) -> io::Result<Record> {
+    let mut cursor = Cursor(payload);
+    let count = cursor.u32()?;
+    let mut players = Vec::new();
+    for _ in 0..count {
+        let formations = (0..cursor.u16()?)
+            .map(|_| Ok(optional(cursor.u32()?)))
+            .collect::<io::Result<_>>()?;
+        let prices = (0..cursor.u8()?)
+            .map(|_| Ok((optional(cursor.u32()?), cursor.f32()?, cursor.f32()?)))
+            .collect::<io::Result<_>>()?;
+        players.push(PlayerGui { formations, prices });
+    }
+    if !cursor.0.is_empty() {
+        return Err(invalid("player GUI record has trailing bytes"));
+    }
+    Ok(Record::PlayerGui(players))
 }
 
 fn decode_renames(payload: &[u8]) -> io::Result<Record> {

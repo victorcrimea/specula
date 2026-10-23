@@ -3,8 +3,10 @@
 //! buttons (`g_SelectionPanels.Selection` in selection_panels.js), garrison
 //! buttons (`g_SelectionPanels.Garrison`), production queue
 //! (`g_SelectionPanels.Queue`) and training and research buttons
-//! (`g_SelectionPanels.Training` and `Research`), drawn into the page's
-//! `#details`, with the engine's tooltips where their data is sent.
+//! (`g_SelectionPanels.Training` and `Research`), construction, gate, pack
+//! and upgrade buttons, drawn into the page's `#details`, with the engine's
+//! tooltips where their data is sent. The stance, alert, formation and
+//! barter panels are in `left.rs` and the command row in `command_row.rs`.
 //!
 //! Each element keeps what was last written to it, so an update that
 //! changes nothing touches no DOM.
@@ -16,14 +18,20 @@ use wasm_bindgen::JsValue;
 use web_sys::Document;
 use web_sys::HtmlElement;
 
+use crate::command_row::CommandRow;
 use crate::detail;
+use crate::detail::Commands;
 use crate::detail::DataKey;
 use crate::detail::Group;
 use crate::detail::Groups;
 use crate::detail::ListItem;
 use crate::diplomacy::Perspective;
 use crate::lang;
+use crate::left::LeftPanel;
 use crate::pick;
+use crate::stream::COMPONENT_GATE;
+use crate::stream::COMPONENT_PACK;
+use crate::stream::COMPONENT_UPGRADE;
 use crate::stream::Scene;
 use crate::stream::Stance;
 use crate::stream::TemplateDetails;
@@ -318,18 +326,26 @@ pub struct DetailsPanel {
     queue: Option<QueuePanel>,
     /// `None` on a page from before the production panel.
     commands: Option<CommandsPanel>,
+    /// `None` on a page from before the command row.
+    command_row: Option<CommandRow>,
     /// The entity the portrait follows, and the ids of each group button.
     portrait_id: Option<u32>,
     group_ids: Vec<Vec<u32>>,
     requests: RefCell<Vec<Request>>,
 }
 
-/// `unitGarrisonPanel` and `healthGarrison` in the supplemental panel.
+/// The supplemental panel: `unitGarrisonPanel` and `healthGarrison`, and
+/// the stance, alert, formation and barter panels beside them.
 struct GarrisonPanel {
     root: Out,
+    /// The garrison buttons' grid, hidden when another panel takes the
+    /// place.
+    grid: Out,
     cells: Vec<GroupButton>,
     health: Out,
     health_bar: Out,
+    /// `None` on a page from before those panels.
+    left: Option<LeftPanel>,
 }
 
 /// `unitQueuePanel`.
@@ -363,11 +379,20 @@ struct CommandsPanel {
     research: Vec<ResearchColumn>,
 }
 
-/// One `unitTrainingButton` or `unitResearchButton`.
+/// One `unitTrainingButton`, `unitResearchButton`, `unitGateButton`,
+/// `unitPackButton` or `unitUpgradeButton`.
 struct CommandCell {
     cell: Out,
     icon: Out,
+    /// A texture of `session.css` instead of an `<img>`, for the buttons
+    /// the page draws from the engine's own files.
+    glyph: Out,
     tint: Out,
+    /// `upgrade.png`, which the upgrade buttons draw over their icon.
+    marker: Out,
+    slider: Out,
+    /// `corners.png`.
+    selection: Out,
     count: Out,
 }
 
@@ -377,6 +402,31 @@ struct ResearchColumn {
     top: CommandCell,
     bottom: CommandCell,
     pair: Out,
+}
+
+/// A selected entity, as the right panels read it.
+struct RightState {
+    owner: i32,
+    template: u32,
+    groups: Groups,
+}
+
+/// A gate or pack button: an engine texture and its tooltip's msgid.
+struct GlyphItem {
+    key: &'static str,
+    tooltip: &'static str,
+    /// `corners.png` over it.
+    selected: bool,
+}
+
+/// An upgrade button.
+struct UpgradeItem {
+    name: String,
+    modifier: Modifier,
+    count: u32,
+    /// The part done, while it upgrades.
+    progress: Option<f64>,
+    tooltip: String,
 }
 
 /// `setupButton`'s sprite modifier.
@@ -496,6 +546,11 @@ impl DetailsPanel {
         let garrison = match crate::element::<HtmlElement>(document, "garrison-cells") {
             Ok(grid) => Some(GarrisonPanel {
                 root: find("garrison")?,
+                grid: Out::new(grid.clone()),
+                left: match LeftPanel::find(document) {
+                    Some(left) => Some(left?),
+                    None => None,
+                },
                 cells: (0..MAX_GARRISONED)
                     .map(|i| {
                         GroupButton::new(
@@ -580,6 +635,10 @@ impl DetailsPanel {
             garrison,
             queue,
             commands,
+            command_row: match CommandRow::find(document) {
+                Some(row) => Some(row?),
+                None => None,
+            },
             portrait_id: None,
             group_ids: Vec::new(),
             requests: RefCell::new(Vec::new()),
@@ -611,6 +670,35 @@ impl DetailsPanel {
                 remove,
             });
         }
+    }
+
+    /// The barter sell buttons, for the page to wire.
+    pub fn barter_buttons(&self) -> Vec<HtmlElement> {
+        self.garrison
+            .as_ref()
+            .and_then(|garrison| garrison.left.as_ref())
+            .map(|left| left.sell_buttons().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    /// A barter sell button was pressed: it chooses what the buy buttons
+    /// price.
+    pub fn barter_clicked(&self, index: usize) {
+        if let Some(left) = self
+            .garrison
+            .as_ref()
+            .and_then(|garrison| garrison.left.as_ref())
+        {
+            left.sell_clicked(index);
+        }
+    }
+
+    /// Whether a press changed what the panel shows.
+    pub fn take_redraw(&self) -> bool {
+        self.garrison
+            .as_ref()
+            .and_then(|garrison| garrison.left.as_ref())
+            .is_some_and(LeftPanel::take_redraw)
     }
 
     pub fn take_requests(&self) -> Vec<Request> {
@@ -662,6 +750,9 @@ impl DetailsPanel {
         }
         if let Some(commands) = &mut self.commands {
             commands.show(view, &entities);
+        }
+        if let Some(row) = &mut self.command_row {
+            row.show(view, &entities);
         }
     }
 
@@ -1056,7 +1147,7 @@ impl DetailsPanel {
             .tooltip(&tooltip::current_health(health, max_health, None));
         let filled = 100.0 * fraction(health, max_health);
         self.health_multiple_bar
-            .style(format!("top: {}%", 100.0 - filled));
+            .style(format!("--filled: {filled}%"));
         self.strip_health.style(format!("width: {filled}%"));
 
         self.capture_multiple.bar.hidden(max_capture <= 0.0);
@@ -1123,8 +1214,33 @@ impl DetailsPanel {
 }
 
 impl GarrisonPanel {
-    /// `g_SelectionPanels.Garrison` and `updateGarrisonHealthBar`.
+    /// `g_SelectionPanels.Barter`, `Garrison`, `Alert`, `Formation` and
+    /// `Stance` in `g_PanelsOrder`, with `updateGarrisonHealthBar`.
     fn show(&mut self, view: &View, entities: &[u32]) {
+        // Barter and Garrison conflict, and Barter comes first.
+        let barter = self
+            .left
+            .as_mut()
+            .is_some_and(|left| left.show_barter(view, entities));
+        let garrison = !barter && self.show_garrison(view, entities);
+        let others = self
+            .left
+            .as_mut()
+            .is_some_and(|left| left.show_others(view, entities, garrison));
+        // Vanilla keeps the frame for an observer with any selection; on a
+        // phone it would only take space, so the page hides it there.
+        self.root.hidden(entities.is_empty());
+        self.root
+            .class(String::from(if barter || garrison || others {
+                "gui-frame"
+            } else {
+                "gui-frame empty"
+            }));
+    }
+
+    /// `g_SelectionPanels.Garrison` and `updateGarrisonHealthBar`; true
+    /// when it has buttons.
+    fn show_garrison(&mut self, view: &View, entities: &[u32]) -> bool {
         let scene = view.scene;
         // (id, template, owner) of every entity the selection holds.
         let mut held: Vec<(u32, u32, i32)> = Vec::new();
@@ -1157,7 +1273,7 @@ impl GarrisonPanel {
             let (_, template, owner) = find(id)?;
             Some((owner, group_name(scene, template)?.to_string()))
         });
-        self.root.hidden(grouped.is_empty());
+        self.grid.hidden(grouped.is_empty());
         for (index, cell) in self.cells.iter_mut().enumerate() {
             let Some((_, template, owner)) = grouped
                 .get(index)
@@ -1185,7 +1301,7 @@ impl GarrisonPanel {
 
         let mut health = 0.0;
         let mut max_health = 0.0;
-        if first_holds {
+        if first_holds && !grouped.is_empty() {
             for &(id, template, _) in &held {
                 if let Some(Group::Health { hitpoints, max }) =
                     &entity_groups(scene, id, template)[detail::HEALTH]
@@ -1203,6 +1319,7 @@ impl GarrisonPanel {
             "--lost: {}%",
             100.0 - 100.0 * fraction(health, max_health)
         ));
+        !grouped.is_empty()
     }
 }
 
@@ -1387,11 +1504,18 @@ impl CommandCell {
         let _ = cell.set_attribute(tooltip::STYLE_ATTRIBUTE, "sessionToolTipBottom");
         let icon: HtmlElement = create(document, "img")?;
         let _ = icon.set_attribute("alt", "");
-        let tint: HtmlElement = create(document, "div")?;
-        let _ = tint.set_attribute("class", "tint");
-        let count: HtmlElement = create(document, "div")?;
-        let _ = count.set_attribute("class", "text center sans-bold-stroke-14");
-        for child in [&icon, &tint, &count] {
+        let div = |class: &str| -> Result<HtmlElement, String> {
+            let div: HtmlElement = create(document, "div")?;
+            let _ = div.set_attribute("class", class);
+            Ok(div)
+        };
+        let glyph = div("icon")?;
+        let tint = div("tint")?;
+        let marker = div("marker")?;
+        let slider = div("slider")?;
+        let selection = div("selection")?;
+        let count = div("text center sans-bold-stroke-14")?;
+        for child in [&icon, &glyph, &tint, &marker, &slider, &selection, &count] {
             cell.append_child(child)
                 .map_err(|_| "cannot build a production button")?;
         }
@@ -1401,14 +1525,44 @@ impl CommandCell {
         let mut cell = CommandCell {
             cell: Out::new(cell),
             icon: Out::new(icon),
+            glyph: Out::new(glyph),
             tint: Out::new(tint),
+            marker: Out::new(marker),
+            slider: Out::new(slider),
+            selection: Out::new(selection),
             count: Out::new(count),
         };
         cell.cell.hidden(true);
+        cell.glyph.hidden(true);
+        cell.marker.hidden(true);
+        cell.slider.hidden(true);
+        cell.selection.hidden(true);
         Ok(cell)
     }
 
+    /// A button of the engine's own texture `key`, with `corners.png` over
+    /// it when `selected`.
+    fn show_glyph(&mut self, key: &str, selected: bool) {
+        self.icon.src(None);
+        self.icon.hidden(true);
+        self.glyph
+            .style(format!("background-image: var(--gui-{key})"));
+        self.glyph.hidden(false);
+        self.cell.class(String::from("item"));
+        self.tint.style(String::new());
+        self.marker.hidden(true);
+        self.slider.hidden(true);
+        self.selection.hidden(!selected);
+        self.count.text("");
+        self.cell.hidden(false);
+    }
+
     fn show(&mut self, icon: Option<String>, modifier: Modifier, count: u32) {
+        self.glyph.hidden(true);
+        self.icon.hidden(false);
+        self.marker.hidden(true);
+        self.slider.hidden(true);
+        self.selection.hidden(true);
         self.icon.src(icon);
         self.cell.class(String::from(match modifier {
             Modifier::Grey => "item grey",
@@ -1464,6 +1618,7 @@ impl CommandsPanel {
     fn show(&mut self, view: &View, entities: &[u32]) {
         let scene = view.scene;
         let mut producers = Vec::new();
+        let mut states: Vec<RightState> = Vec::new();
         for &id in entities {
             let Some(dot) = scene.dots.get(&id) else {
                 continue;
@@ -1491,27 +1646,65 @@ impl CommandsPanel {
                 researchable: list(detail::RESEARCHABLE),
                 buildable: list(detail::BUILDABLE),
             });
+            states.push(RightState {
+                owner: dot.owner,
+                template: dot.template,
+                groups,
+            });
         }
         // `data.player`: the first selected entity's owner.
         let player = producers.first().map_or(-1, |producer| producer.owner);
         let all_upgrading = producers.iter().all(|producer| producer.upgrading);
 
+        // `g_PanelsOrder`: Gate, Pack and Upgrade come before Training, and
+        // `getNumberOfRightPanelButtons` puts the rest after them.
+        let gate = gate_items(scene, &states);
+        let pack = pack_items(scene, &states);
+        let upgrades = upgrade_items(view, &states, player);
+        let upgrades = &upgrades[..upgrades.len().min(MAX_TRAINABLE - gate.len() - pack.len())];
+        let before = gate.len() + pack.len() + upgrades.len();
         let trainable = list_items(
             scene,
             &producers,
             player,
             |producer| producer.trainable,
-            MAX_TRAINABLE,
+            MAX_TRAINABLE - before,
         );
         let buildable = list_items(
             scene,
             &producers,
             player,
             |producer| producer.buildable,
-            MAX_TRAINABLE - trainable.len(),
+            MAX_TRAINABLE - before - trainable.len(),
         );
-        let (training_cells, construction_cells) = self.training.split_at_mut(trainable.len());
-        let mut drawn = false;
+        let (right_cells, other_cells) = self.training.split_at_mut(before);
+        let (gate_cells, other) = right_cells.split_at_mut(gate.len());
+        let (pack_cells, upgrade_cells) = other.split_at_mut(pack.len());
+        let mut drawn = before > 0;
+        for (cell, item) in gate_cells.iter_mut().zip(&gate) {
+            cell.show_glyph(item.key, item.selected);
+            cell.cell.tooltip(&lang::translate(item.tooltip));
+        }
+        for (cell, item) in pack_cells.iter_mut().zip(&pack) {
+            cell.show_glyph(item.key, false);
+            cell.cell.tooltip(&lang::translate(item.tooltip));
+        }
+        for (cell, item) in upgrade_cells.iter_mut().zip(upgrades) {
+            cell.show(unit_portrait(view, &item.name), item.modifier, item.count);
+            cell.marker.hidden(false);
+            match item.progress {
+                Some(progress) => {
+                    cell.slider.style(format!(
+                        "top: {}px",
+                        SLIDER_INSET + (progress * SLIDER_SIDE).round()
+                    ));
+                    cell.slider.hidden(false);
+                }
+                None => cell.slider.hidden(true),
+            }
+            cell.cell.tooltip(&item.tooltip);
+        }
+        let (training_cells, construction_cells) = other_cells.split_at_mut(trainable.len());
         for (cell, &(name, item)) in training_cells.iter_mut().zip(&trainable) {
             if item.flags & ListItem::HIDDEN != 0 {
                 cell.cell.hidden(true);
@@ -1575,7 +1768,11 @@ impl CommandsPanel {
             drawn = true;
         }
 
-        let research = research_items(scene, &producers, trainable.len() + buildable.len());
+        let research = research_items(
+            scene,
+            &producers,
+            before + trainable.len() + buildable.len(),
+        );
         for (i, column) in self.research.iter_mut().enumerate() {
             let Some(&(slot, producer)) = research.get(i) else {
                 column.column.hidden(true);
@@ -1634,6 +1831,251 @@ impl CommandsPanel {
         // of only hidden items or empty slots draw nothing either.
         self.root.hidden(!drawn);
     }
+}
+
+fn has_component(scene: &Scene, template: u32, bit: u32) -> bool {
+    template_details(scene, template).is_some_and(|details| details.components & bit != 0)
+}
+
+fn command_flags(state: &RightState) -> u32 {
+    match &state.groups[detail::COMMANDS] {
+        Some(Group::Commands(commands)) => commands.flags,
+        _ => 0,
+    }
+}
+
+/// Whether the state's `Progress` group has an upgrade running, and the
+/// template it leads to.
+fn upgrading_to(scene: &Scene, state: &RightState) -> Option<(f64, Option<String>)> {
+    match &state.groups[detail::PROGRESS] {
+        Some(Group::Progress {
+            upgrade,
+            upgrade_target,
+            ..
+        }) if *upgrade != PROGRESS_NONE => Some((
+            f64::from(*upgrade) / 254.0,
+            string(scene, *upgrade_target).map(str::to_string),
+        )),
+        _ => None,
+    }
+}
+
+/// `g_SelectionPanels.Gate.getItems`: both buttons, the lock of the state
+/// some selected gate is in marked.
+fn gate_items(scene: &Scene, states: &[RightState]) -> Vec<GlyphItem> {
+    // Some(locked) of a gate.
+    let locked = |state: &RightState| {
+        has_component(scene, state.template, COMPONENT_GATE)
+            .then(|| command_flags(state) & Commands::GATE_LOCKED != 0)
+    };
+    let hide_locked = states.iter().all(|state| locked(state) != Some(true));
+    let hide_unlocked = states.iter().all(|state| locked(state) != Some(false));
+    if hide_locked && hide_unlocked {
+        return Vec::new();
+    }
+    vec![
+        GlyphItem {
+            key: "lock-locked",
+            tooltip: "Lock Gate",
+            selected: !hide_locked,
+        },
+        GlyphItem {
+            key: "lock-unlocked",
+            tooltip: "Unlock Gate",
+            selected: !hide_unlocked,
+        },
+    ]
+}
+
+/// `g_SelectionPanels.Pack.getItems`.
+fn pack_items(scene: &Scene, states: &[RightState]) -> Vec<GlyphItem> {
+    let (mut pack, mut unpack, mut pack_cancel, mut unpack_cancel) = (false, false, false, false);
+    for state in states {
+        if !has_component(scene, state.template, COMPONENT_PACK) {
+            continue;
+        }
+        let packed = command_flags(state) & Commands::PACKED != 0;
+        let moving = matches!(
+            &state.groups[detail::PROGRESS],
+            Some(Group::Progress { pack, .. }) if *pack != PROGRESS_NONE
+        );
+        match (moving, packed) {
+            (false, true) => unpack = true,
+            (false, false) => pack = true,
+            (true, true) => unpack_cancel = true,
+            (true, false) => pack_cancel = true,
+        }
+    }
+    let mut items = Vec::new();
+    let mut add = |used: bool, key: &'static str, tooltip: &'static str| {
+        if used {
+            items.push(GlyphItem {
+                key,
+                tooltip,
+                selected: false,
+            });
+        }
+    };
+    add(pack, "pack", "Pack");
+    add(unpack, "unpack", "Unpack");
+    add(pack_cancel, "cancel", "Cancel Packing");
+    add(unpack_cancel, "cancel", "Cancel Unpacking");
+    items
+}
+
+/// `hasSameRestrictionCategory` of the upgrade's template and another.
+fn same_restriction_category(a: &JsValue, b: &JsValue) -> bool {
+    for key in ["trainingRestrictions", "buildRestrictions"] {
+        if let (Some(a), Some(b)) = (
+            tips::restriction_category(a, key),
+            tips::restriction_category(b, key),
+        ) {
+            return a == b;
+        }
+    }
+    false
+}
+
+/// `g_SelectionPanels.Upgrade`, for an observer: the first selected
+/// entity's upgrades, when every selected entity is of one template.
+fn upgrade_items(view: &View, states: &[RightState], player: i32) -> Vec<UpgradeItem> {
+    let scene = view.scene;
+    let Some(first) = states.first() else {
+        return Vec::new();
+    };
+    if states.iter().any(|state| state.template != first.template)
+        || !has_component(scene, first.template, COMPONENT_UPGRADE)
+    {
+        return Vec::new();
+    }
+    let Some(Group::List(index)) = &first.groups[detail::UPGRADES] else {
+        return Vec::new();
+    };
+    let Some(list) = scene.details.lists.get(*index as usize) else {
+        return Vec::new();
+    };
+    let mut items = Vec::new();
+    for item in list {
+        let Some(name) = string(scene, item.name) else {
+            continue;
+        };
+        // `GetTemplateData` of what it upgrades to; the button stays
+        // hidden until it has arrived.
+        let Some(data) = view.template_data(item.name, player) else {
+            continue;
+        };
+        let requirements_met = item.flags & ListItem::REQUIREMENTS_MET != 0;
+        let upgrading: Vec<f64> = states
+            .iter()
+            .filter_map(|state| upgrading_to(scene, state))
+            .filter(|(_, target)| target.as_deref() == Some(name))
+            .map(|(progress, _)| progress)
+            .collect();
+        // Not upgrading, and not training or researching.
+        let upgradable = states
+            .iter()
+            .filter(|state| {
+                upgrading_to(scene, state).is_none()
+                    && !matches!(
+                        &state.groups[detail::QUEUE],
+                        Some(Group::Queue(queue)) if !queue.items.is_empty()
+                    )
+            })
+            .count() as u32;
+        let (generic, specific) = tips::name_parts(&data);
+        let primary = if specific.is_empty() {
+            &generic
+        } else {
+            &specific
+        };
+        let secondary = if specific.is_empty() {
+            &specific
+        } else {
+            &generic
+        };
+        let line = if secondary.is_empty() || primary == secondary {
+            lang::format(
+                &lang::translate("Upgrade to a %(primaryName)s."),
+                &[("primaryName", primary)],
+            )
+        } else {
+            lang::format(
+                &lang::translate("Upgrade to a %(primaryName)s (%(secondaryName)s)."),
+                &[("primaryName", primary), ("secondaryName", secondary)],
+            )
+        };
+        let (modifier, count, progress, tooltip);
+        if upgrading.is_empty() && upgradable > 0 {
+            // `multiplyEntityCosts(item, upgradableEntStates.length)`.
+            let short = needed_amounts(scene, player, item, |cost| {
+                (u64::from(cost) * u64::from(upgradable) / 100) as f64
+            });
+            let same_category = states.iter().any(|state| {
+                scene
+                    .templates
+                    .get(state.template as usize)
+                    .and_then(|name| string_index(scene, name))
+                    .and_then(|name| view.template_data(name, state.owner))
+                    .is_some_and(|other| same_restriction_category(&data, &other))
+            });
+            modifier = if !requirements_met || (item.can_be_added == Some(0) && !same_category) {
+                Modifier::Grey
+            } else {
+                needed(&short)
+            };
+            count = if upgradable > 1 { upgradable } else { 0 };
+            progress = None;
+            // `getEntityCostTooltip` of the upgrade's own costs for the
+            // whole selection.
+            let costs: Vec<(String, f64)> = item
+                .costs
+                .iter()
+                .map(|(resource, cost)| {
+                    (
+                        string(scene, *resource).unwrap_or_default().to_string(),
+                        f64::from(*cost) / 100.0 * states.len() as f64,
+                    )
+                })
+                .collect();
+            tooltip = join_lines(vec![
+                line,
+                tips::cost_tooltip(&tips::empty_cost(), 1.0, Some(&costs)),
+                tips::needed_resources_tooltip(&short),
+            ]);
+        } else if !upgrading.is_empty() {
+            modifier = Modifier::None;
+            count = if upgrading.len() > 1 {
+                upgrading.len() as u32
+            } else {
+                0
+            };
+            // `state.upgrade.progress || 1`.
+            progress = Some(
+                upgrading
+                    .iter()
+                    .map(|progress| if *progress == 0.0 { 1.0 } else { *progress })
+                    .fold(0.0, f64::max),
+            );
+            tooltip = lang::translate("Cancel Upgrading");
+        } else {
+            modifier = Modifier::Grey;
+            count = 0;
+            progress = None;
+            tooltip = tooltip::objection_font(&lang::translate_plural(
+                "Cannot upgrade when the entity is training, researching or already upgrading.",
+                "Cannot upgrade when all entities are training, researching or already upgrading.",
+                states.len() as f64,
+            ));
+        }
+        items.push(UpgradeItem {
+            name: name.to_string(),
+            modifier,
+            count,
+            progress,
+            tooltip,
+        });
+    }
+    items
 }
 
 /// `getAllTrainableEntities` or `GetAllBuildableEntities`: every
@@ -1943,7 +2385,7 @@ fn portrait_tooltip(view: &View, template: u32, owner: i32, primary: &str) -> St
     join_lines(lines)
 }
 
-fn join_lines(lines: Vec<String>) -> String {
+pub(crate) fn join_lines(lines: Vec<String>) -> String {
     lines
         .into_iter()
         .filter(|line| !line.is_empty())
@@ -1952,7 +2394,7 @@ fn join_lines(lines: Vec<String>) -> String {
 }
 
 /// The 1-based string index of `text`, if the stream has it.
-fn string_index(scene: &Scene, text: &str) -> Option<u32> {
+pub(crate) fn string_index(scene: &Scene, text: &str) -> Option<u32> {
     scene
         .strings
         .iter()
@@ -2138,7 +2580,7 @@ fn template_index(scene: &Scene, name: &str) -> Option<u32> {
 }
 
 /// `setPanelObjectPosition` of the `i`-th button, 38 px and a 1 px margin.
-fn grid_position(i: usize, row: usize) -> String {
+pub(crate) fn grid_position(i: usize, row: usize) -> String {
     format!(
         "left: {}px; top: {}px",
         i % row * GROUP_STEP,
@@ -2167,7 +2609,7 @@ fn group_name(scene: &Scene, template: u32) -> Option<&str> {
         .or_else(|| scene.templates.get(template as usize).map(String::as_str))
 }
 
-fn player_color(palette: &[u32], owner: i32) -> u32 {
+pub(crate) fn player_color(palette: &[u32], owner: i32) -> u32 {
     usize::try_from(owner)
         .ok()
         .and_then(|owner| palette.get(owner))
@@ -2180,7 +2622,7 @@ pub(crate) fn template_details(scene: &Scene, template: u32) -> Option<&Template
 }
 
 /// The entity's detail groups, none before the detail stream has a state.
-fn entity_groups(scene: &Scene, id: u32, template: u32) -> Groups {
+pub(crate) fn entity_groups(scene: &Scene, id: u32, template: u32) -> Groups {
     if scene.details.known {
         scene.details.resolved(id, Some(template))
     } else {
@@ -2207,7 +2649,7 @@ fn capture_points(scene: &Scene, id: u32, groups: &Groups) -> Option<(Vec<f64>, 
     ))
 }
 
-fn mutual_allies(scene: &Scene, a: usize, b: usize) -> bool {
+pub(crate) fn mutual_allies(scene: &Scene, a: usize, b: usize) -> bool {
     let ally = |from: usize, to: usize| {
         scene
             .players
@@ -2258,7 +2700,7 @@ fn minutes_seconds(seconds: f64) -> String {
 }
 
 /// `Math.max(0, Math.min(1, value / max))`.
-fn fraction(value: f64, max: f64) -> f64 {
+pub(crate) fn fraction(value: f64, max: f64) -> f64 {
     if max > 0.0 {
         (value / max).clamp(0.0, 1.0)
     } else {

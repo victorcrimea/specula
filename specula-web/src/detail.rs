@@ -13,7 +13,10 @@ use crate::stream::Writer;
 
 const MESSAGE_KEYFRAME: u8 = 1;
 const MESSAGE_DELTA: u8 = 2;
-/// Archived matches keep it; it has no buildable lists.
+/// Archived matches keep it; it has no stances, formations, commands,
+/// upgrades or player table.
+const DETAIL_VERSION_NO_COMMANDS: u8 = 7;
+/// Archived matches keep it; it also has no buildable lists.
 const DETAIL_VERSION_NO_BUILDABLE: u8 = 6;
 /// Archived matches keep it; it also has no stats.
 const DETAIL_VERSION_NO_STATS: u8 = 5;
@@ -36,16 +39,20 @@ pub const QUEUE: usize = 6;
 pub const GARRISON: usize = 7;
 pub const FOUNDATION: usize = 8;
 pub const REPAIR: usize = 9;
-const UNIT_AI: usize = 10;
+pub const UNIT_AI: usize = 10;
 pub const TRAINABLE: usize = 11;
 pub const RESEARCHABLE: usize = 12;
 pub const PROGRESS: usize = 13;
-const HOLDER: usize = 14;
+pub const HOLDER: usize = 14;
 pub const TRADER: usize = 15;
 pub const RALLY: usize = 16;
 pub const STATS: usize = 17;
 pub const BUILDABLE: usize = 18;
-const SLOTS: usize = 19;
+pub const STANCES: usize = 19;
+pub const FORMATIONS: usize = 20;
+pub const COMMANDS: usize = 21;
+pub const UPGRADES: usize = 22;
+const SLOTS: usize = 23;
 /// Rally positions come in 1/16 m.
 pub const RALLY_UNITS_PER_METRE: f32 = 16.0;
 
@@ -113,6 +120,47 @@ pub enum Group {
     },
     /// The hash of the entity's stats JSON, at `/data/<hash>`.
     Stats(u64),
+    /// `UnitAI.GetSelectableStances`, 1-based strings.
+    Stances(Vec<u32>),
+    Formations {
+        /// The formation template it is in, 1-based; the null formation's
+        /// when in none.
+        current: u32,
+        /// The templates its UnitAI can use, 1-based.
+        list: Vec<u32>,
+    },
+    Commands(Commands),
+}
+
+/// What the command row and the pack, gate and alert panels read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Commands {
+    pub flags: u32,
+    /// AlertRaiser's target classes, 1-based, 0 without one.
+    pub alert_classes: u32,
+    /// The ejectable occupants of a TurretHolder's points.
+    pub turrets: u32,
+}
+
+impl Commands {
+    pub const WORK_ORDERS: u32 = 1;
+    pub const CAN_GUARD: u32 = 2;
+    pub const GUARDING: u32 = 4;
+    pub const CAN_PATROL: u32 = 8;
+    pub const GATE_LOCKED: u32 = 16;
+    pub const PACKED: u32 = 32;
+    pub const SHARABLE: u32 = 64;
+    pub const SHARED: u32 = 128;
+    pub const EJECTABLE: u32 = 256;
+}
+
+/// What a player's panels read that is not an entity's.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct PlayerGui {
+    /// 1-based formation template strings the civ may use.
+    pub formations: Vec<u32>,
+    /// 1-based resource code, buy price, sell price.
+    pub prices: Vec<(u32, f32, f32)>,
 }
 
 /// A rally point and the line to it, in `RALLY_UNITS_PER_METRE`.
@@ -132,6 +180,8 @@ pub enum DataKey {
     Template { name: u32, player: i32 },
     /// The session GUI's `GetTechnologyData` for a civ.
     Technology { name: u32, civ: u32 },
+    /// A formation template's info JSON.
+    Formation { name: u32 },
 }
 
 /// One item of a trainable or researchable list, read for the producer's
@@ -248,6 +298,8 @@ pub struct Details {
     pub lists: Vec<Vec<ListItem>>,
     /// The hash of each JSON the tooltips read, at `/data/<hash>`.
     pub data: BTreeMap<DataKey, u64>,
+    /// By player index; empty for a stream before detail version 8.
+    pub players: Vec<PlayerGui>,
     /// By template index: the groups an entity of it has when its own
     /// leave them out.
     pub defaults: BTreeMap<u32, Groups>,
@@ -276,6 +328,7 @@ impl Details {
         if !matches!(
             version,
             DETAIL_VERSION
+                | DETAIL_VERSION_NO_COMMANDS
                 | DETAIL_VERSION_NO_BUILDABLE
                 | DETAIL_VERSION_NO_STATS
                 | DETAIL_VERSION_NO_DATA
@@ -295,6 +348,7 @@ impl Details {
         };
         self.read_lists(cursor)?;
         self.read_data(cursor)?;
+        self.read_players(cursor)?;
         for _ in 0..cursor.varint()? {
             let template = cursor.varint_u32()?;
             let groups = read_groups(cursor, turn, false, owners)?;
@@ -316,6 +370,9 @@ impl Details {
         self.turn = cursor.varint_u32()?;
         self.read_lists(cursor)?;
         self.read_data(cursor)?;
+        if self.version > DETAIL_VERSION_NO_COMMANDS && cursor.u8()? != 0 {
+            self.read_players(cursor)?;
+        }
         let owners = self.owners();
         let mut id = 0u32;
         for _ in 0..cursor.varint()? {
@@ -360,10 +417,30 @@ impl Details {
                     name,
                     civ: cursor.varint_u32()?,
                 },
+                2 => DataKey::Formation { name },
                 _ => return Err("unknown data kind"),
             };
             self.data.insert(key, cursor.u64()?);
         }
+        Ok(())
+    }
+
+    /// The player table, which versions before 8 do not have.
+    fn read_players(&mut self, cursor: &mut ByteReader) -> Result<(), &'static str> {
+        if self.version <= DETAIL_VERSION_NO_COMMANDS {
+            return Ok(());
+        }
+        self.players = (0..cursor.varint()?)
+            .map(|_| {
+                let formations = (0..cursor.varint()?)
+                    .map(|_| cursor.varint_u32())
+                    .collect::<Result<_, _>>()?;
+                let prices = (0..cursor.varint()?)
+                    .map(|_| Ok((cursor.varint_u32()?, cursor.f32()?, cursor.f32()?)))
+                    .collect::<Result<_, &'static str>>()?;
+                Ok(PlayerGui { formations, prices })
+            })
+            .collect::<Result<_, &'static str>>()?;
         Ok(())
     }
 
@@ -443,8 +520,27 @@ impl Details {
                         out.varint(u64::from(*name));
                         out.varint(u64::from(*civ));
                     }
+                    DataKey::Formation { name } => {
+                        out.u8(2);
+                        out.varint(u64::from(*name));
+                    }
                 }
                 out.u64(*hash);
+            }
+        }
+        if self.version > DETAIL_VERSION_NO_COMMANDS {
+            out.varint(self.players.len() as u64);
+            for player in &self.players {
+                out.varint(player.formations.len() as u64);
+                for formation in &player.formations {
+                    out.varint(u64::from(*formation));
+                }
+                out.varint(player.prices.len() as u64);
+                for (resource, buy, sell) in &player.prices {
+                    out.varint(u64::from(*resource));
+                    out.f32(*buy);
+                    out.f32(*sell);
+                }
             }
         }
         let owners = self.owners();
@@ -634,7 +730,24 @@ fn read_group(
             stance: cursor.varint_u32()?,
             formation_controller: cursor.varint_u32()?,
         },
-        TRAINABLE | RESEARCHABLE | BUILDABLE => Group::List(cursor.varint_u32()?),
+        TRAINABLE | RESEARCHABLE | BUILDABLE | UPGRADES => Group::List(cursor.varint_u32()?),
+        STANCES => Group::Stances(
+            (0..cursor.varint()?)
+                .map(|_| cursor.varint_u32())
+                .collect::<Result<_, _>>()?,
+        ),
+        FORMATIONS => {
+            let current = cursor.varint_u32()?;
+            let list = (0..cursor.varint()?)
+                .map(|_| cursor.varint_u32())
+                .collect::<Result<_, _>>()?;
+            Group::Formations { current, list }
+        }
+        COMMANDS => Group::Commands(Commands {
+            flags: cursor.varint_u32()?,
+            alert_classes: cursor.varint_u32()?,
+            turrets: cursor.varint_u32()?,
+        }),
         PROGRESS => Group::Progress {
             pack: cursor.u8()?,
             upgrade: cursor.u8()?,
@@ -788,6 +901,24 @@ fn write_group(out: &mut Writer, group: &Group, owners: bool) {
             out.varint(u64::from(*gain));
         }
         Group::Stats(hash) => out.u64(*hash),
+        Group::Stances(stances) => {
+            out.varint(stances.len() as u64);
+            for stance in stances {
+                out.varint(u64::from(*stance));
+            }
+        }
+        Group::Formations { current, list } => {
+            out.varint(u64::from(*current));
+            out.varint(list.len() as u64);
+            for formation in list {
+                out.varint(u64::from(*formation));
+            }
+        }
+        Group::Commands(commands) => {
+            out.varint(u64::from(commands.flags));
+            out.varint(u64::from(commands.alert_classes));
+            out.varint(u64::from(commands.turrets));
+        }
         Group::Rally { marker, points } => {
             out.varint(u64::from(*marker));
             out.varint(points.len() as u64);

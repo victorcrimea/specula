@@ -291,6 +291,7 @@ fn serve(stream: UnixStream, hub: &Hub) -> io::Result<()> {
             Record::Renames(renames) => details.set_renames(renames),
             Record::Data { key, json } => details.set_data(key, hub.add_data(json)),
             Record::Stats { index, json } => details.set_stats(index, hub.add_data(json)),
+            Record::PlayerGui(player_gui) => details.set_player_gui(player_gui),
             Record::Economy(economy) => {
                 hub.set_economy(&economy);
                 details.set_economy(economy);

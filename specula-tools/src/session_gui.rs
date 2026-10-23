@@ -43,7 +43,7 @@ const BROTLI_QUALITY: u32 = 11;
 const BROTLI_WINDOW_BITS: u32 = 22;
 
 /// (custom property key, path under `UI`), copied as they are.
-const TEXTURES: [(&str, &str); 51] = [
+const TEXTURES: [(&str, &str); 95] = [
     ("hud-panels", "session/hud_panels.png"),
     ("line-horiz", "global/border/line_horiz.png"),
     ("line-vert", "global/border/line_vert.png"),
@@ -130,6 +130,77 @@ const TEXTURES: [(&str, &str); 51] = [
     ("icon-stone_rock", "session/icons/resources/stone_small.png"),
     ("icon-wood_tree", "session/icons/resources/wood_small.png"),
     ("portrait-black", "session/icons/bkg/portrait_black.dds"),
+    ("stance-violent", "session/icons/stances/violent.png"),
+    ("stance-aggressive", "session/icons/stances/aggressive.png"),
+    ("stance-passive", "session/icons/stances/passive.png"),
+    (
+        "stance-standground",
+        "session/icons/stances/standground.png",
+    ),
+    (
+        "formation-battle_line",
+        "session/icons/formations/battle_line.png",
+    ),
+    ("formation-box", "session/icons/formations/box.png"),
+    (
+        "formation-column_closed",
+        "session/icons/formations/column_closed.png",
+    ),
+    (
+        "formation-column_open",
+        "session/icons/formations/column_open.png",
+    ),
+    ("formation-flank", "session/icons/formations/flank.png"),
+    (
+        "formation-line_closed",
+        "session/icons/formations/line_closed.png",
+    ),
+    (
+        "formation-line_open",
+        "session/icons/formations/line_open.png",
+    ),
+    ("formation-null", "session/icons/formations/null.png"),
+    ("formation-phalanx", "session/icons/formations/phalanx.png"),
+    ("formation-scatter", "session/icons/formations/scatter.png"),
+    (
+        "formation-skirmish",
+        "session/icons/formations/skirmish.png",
+    ),
+    (
+        "formation-syntagma",
+        "session/icons/formations/syntagma.png",
+    ),
+    ("formation-testudo", "session/icons/formations/testudo.png"),
+    ("formation-wedge", "session/icons/formations/wedge.png"),
+    ("corners", "session/icons/corners.png"),
+    ("upgrade", "session/icons/upgrade.png"),
+    ("bell-raise", "session/icons/bell_level1.png"),
+    ("bell-end", "session/icons/bell_level0.png"),
+    ("lock-locked", "session/icons/lock_locked.png"),
+    ("lock-unlocked", "session/icons/lock_unlocked.png"),
+    ("pack", "session/icons/pack.png"),
+    ("unpack", "session/icons/unpack.png"),
+    ("cancel", "session/icons/cancel.png"),
+    ("command-garrison-out", "session/icons/garrison-out.png"),
+    ("command-delete", "session/icons/kill_small.png"),
+    (
+        "command-delete-disabled",
+        "session/icons/kill_small_disabled.png",
+    ),
+    ("command-call-to-arms", "session/icons/call-to-arms.png"),
+    ("command-garrison", "session/icons/garrison.png"),
+    ("command-occupy-turret", "session/icons/occupy-turret.png"),
+    ("command-leave-turret", "session/icons/leave-turret.png"),
+    ("command-focus-rally", "session/icons/focus-rally.png"),
+    ("command-back-to-work", "session/icons/back-to-work.png"),
+    ("command-add-guard", "session/icons/add-guard.png"),
+    ("command-remove-guard", "session/icons/remove-guard.png"),
+    ("command-economics", "session/icons/economics.png"),
+    ("command-patrol", "session/icons/patrol.png"),
+    ("command-locked", "session/icons/locked_small.png"),
+    ("command-unlocked", "session/icons/unlocked_small.png"),
+    ("command-autoqueue-on", "session/icons/autoqueue-on.png"),
+    ("command-autoqueue-off", "session/icons/autoqueue-off.png"),
 ];
 /// The engine's `sans` (config/default.cfg, [fonts.sans]): (family, CSS
 /// weight, file under fonts/). FreeSans is the engine's fallback for what

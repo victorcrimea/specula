@@ -50,6 +50,22 @@ const COMPONENT_HEALTH: u32 = 1;
 pub const COMPONENT_RESOURCE_SUPPLY: u32 = 4;
 /// And for RallyPoint.
 pub const COMPONENT_RALLY_POINT: u32 = 1 << 20;
+/// The rest of the hook's component bits, `DETAIL_INTERFACES` in order.
+pub const COMPONENT_GARRISON_HOLDER: u32 = 1 << 4;
+pub const COMPONENT_FOUNDATION: u32 = 1 << 7;
+pub const COMPONENT_UNIT_AI: u32 = 1 << 9;
+pub const COMPONENT_TRAINER: u32 = 1 << 10;
+pub const COMPONENT_PACK: u32 = 1 << 12;
+pub const COMPONENT_UPGRADE: u32 = 1 << 13;
+pub const COMPONENT_GARRISONABLE: u32 = 1 << 15;
+pub const COMPONENT_TURRETABLE: u32 = 1 << 16;
+pub const COMPONENT_BUILDER: u32 = 1 << 21;
+pub const COMPONENT_GATE: u32 = 1 << 22;
+pub const COMPONENT_ALERT_RAISER: u32 = 1 << 23;
+pub const COMPONENT_TURRET_HOLDER: u32 = 1 << 25;
+pub const COMPONENT_MARKET: u32 = 1 << 26;
+/// `TemplateDetails::flags`: Identity's Undeletable.
+pub const TEMPLATE_UNDELETABLE: u32 = 2048;
 const SOUND_ENTITY: u8 = 0;
 const SOUND_POSITION: u8 = 1;
 const SOUND_PLAYER: u8 = 2;
@@ -1375,6 +1391,10 @@ impl Writer {
     }
 
     pub(crate) fn u64(&mut self, value: u64) {
+        self.0.extend_from_slice(&value.to_le_bytes());
+    }
+
+    pub(crate) fn f32(&mut self, value: f32) {
         self.0.extend_from_slice(&value.to_le_bytes());
     }
 

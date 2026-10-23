@@ -2,12 +2,13 @@
 //! show beyond the status bars, for every entity, sent only to viewers that
 //! have something selected. Varints and zigzag as in `wire.rs`.
 //!
-//! - kind 1 keyframe: varint turn, u8 detail version (7; a viewer also
-//!   reads 6, which had no buildable lists, 5, which also had no stats, 4,
+//! - kind 1 keyframe: varint turn, u8 detail version (8; a viewer also
+//!   reads 7, which had no stances, formations, commands or upgrades and
+//!   no player table, 6, which had no buildable lists, 5, which also had no stats, 4,
 //!   which also had no data table, 3, which also had no rally points,
 //!   2, whose lists are also of names only, and 1, which also had no
 //!   garrison owners, and ignores the stream at any other), u64 match id
-//!   (the visual stream's), list table, data table, varint n, n x {varint template, varint mask, groups}: each
+//!   (the visual stream's), list table, data table, player table, varint n, n x {varint template, varint mask, groups}: each
 //!   template's defaults, then varint count, count x {varint id delta,
 //!   varint mask, groups}. A keyframe leaves out a group equal to the
 //!   default of the entity's template (the template of the visual stream's
@@ -15,7 +16,8 @@
 //!   production queues, foundations and repairs are never defaults, and in
 //!   a keyframe each is followed by varint turns since it was sent.
 //! - kind 2 delta: varint turn, the lists added to the table, the data
-//!   table's entries that are new or changed, varint
+//!   table's entries that are new or changed, u8 1 and the player table
+//!   when it changed (else 0), varint
 //!   count, count x {varint id delta, varint mask, groups} of the groups
 //!   that changed, varint count, count x id delta of the entities gone.
 //!   Every turn of the visual stream has one, empty or not, so the two
@@ -63,7 +65,17 @@
 //! - 131072 stats (the hook's 2097152): u64 hash of the JSON the attack
 //!   and resistance tooltip reads, at `/data/<hash>` (the hook's kind 20);
 //! - 262144 buildable (the hook's 4194304): varint index into the list
-//!   table, a Builder's list, its items read as trainable ones.
+//!   table, a Builder's list, its items read as trainable ones;
+//! - 524288 stances (the hook's 8388608): varint n, n x varint stance;
+//! - 1048576 formations (16777216): varint the entity's formation template,
+//!   varint n, n x varint formation template its UnitAI can use;
+//! - 2097152 commands (33554432): varint flags (1 has work orders, 2 can
+//!   guard, 4 guards, 8 can patrol, 16 gate locked, 32 packed, 64 sharable
+//!   dropsite, 128 shared, 256 ejectable), varint AlertRaiser's target
+//!   classes, varint ejectable turret occupants;
+//! - 4194304 upgrades (67108864): varint index into the list table, the
+//!   upgrades of an Upgrade, each with the costs, requirements and limits
+//!   of the upgrade as the Upgrade panel reads them (time left out).
 //!
 //! Strings (resource types, templates and technologies, stances, the
 //! upgrade target, goods, the marker actor) are 1-based indices into the visual stream's
@@ -83,7 +95,12 @@
 //! key, u64 hash}. Kind 0 is a template's `GetTemplateData` for a player
 //! (the hook's kind 18), whose key is the zigzag player; kind 1 a
 //! technology's data for a civ (kind 19), whose key is the civ string.
-//! Names and civs are strings as above.
+//! Names and civs are strings as above. Kind 2 is a formation template's
+//! info (the hook's kind 22), whose key is empty.
+//!
+//! The player table (the hook's kind 21): varint n, n x {varint f, f x
+//! varint formation template the civ may use, varint m, m x {varint
+//! resource code, f32 buy price, f32 sell price}}; index 0 is gaia.
 //!
 //! Reckoning: while the first item of a queue is not paused, its time
 //! remaining goes down by 200 ms a turn from the turn it was sent; while a
@@ -105,6 +122,7 @@ use crate::feed::Building;
 use crate::feed::DataKey;
 use crate::feed::Details;
 use crate::feed::EntityDetails;
+use crate::feed::PlayerGui;
 use crate::feed::ProductionItem;
 use crate::feed::Queue;
 use crate::wire::Writer;
@@ -130,7 +148,11 @@ const TRADER: usize = 15;
 const RALLY: usize = 16;
 const STATS: usize = 17;
 const BUILDABLE: usize = 18;
-const SLOTS: usize = 19;
+const STANCES: usize = 19;
+const FORMATIONS: usize = 20;
+const COMMANDS: usize = 21;
+const UPGRADES: usize = 22;
+const SLOTS: usize = 23;
 /// Rally positions are sent in 1/16 m, finer than a line is wide.
 const RALLY_UNITS_PER_METRE: f32 = 16.0;
 const TURN_MS: f64 = 200.0;
@@ -269,6 +291,28 @@ fn encode_group(slot: usize, details: &EntityDetails) -> Option<Vec<u8>> {
         TRAINABLE => out.varint(u64::from(details.trainable?)),
         RESEARCHABLE => out.varint(u64::from(details.researchable?)),
         BUILDABLE => out.varint(u64::from(details.buildable?)),
+        UPGRADES => out.varint(u64::from(details.upgrades?)),
+        STANCES => {
+            let stances = details.stances.as_ref()?;
+            out.varint(stances.len() as u64);
+            for stance in stances {
+                out.varint(one_based(*stance));
+            }
+        }
+        FORMATIONS => {
+            let formations = details.formations.as_ref()?;
+            out.varint(one_based(formations.current));
+            out.varint(formations.list.len() as u64);
+            for formation in &formations.list {
+                out.varint(one_based(*formation));
+            }
+        }
+        COMMANDS => {
+            let commands = details.commands.as_ref()?;
+            out.varint(u64::from(commands.flags));
+            out.varint(one_based(commands.alert_classes));
+            out.varint(u64::from(commands.turrets));
+        }
         PROGRESS => {
             let progress = details.progress.as_ref()?;
             out.u8(progress_byte(progress.pack));
@@ -409,6 +453,8 @@ pub struct DetailEncoder {
     lists_sent: usize,
     /// The data table as viewers hold it.
     data: BTreeMap<DataKey, u64>,
+    /// The player table as viewers hold it.
+    players: Vec<PlayerGui>,
 }
 
 impl DetailEncoder {
@@ -419,6 +465,7 @@ impl DetailEncoder {
             lists: Vec::new(),
             lists_sent: 0,
             data: BTreeMap::new(),
+            players: Vec::new(),
         }
     }
 
@@ -475,6 +522,13 @@ impl DetailEncoder {
             .collect();
         write_data(&mut out, &changed);
         self.data.extend(changed);
+        if self.players == details.player_gui {
+            out.u8(0);
+        } else {
+            out.u8(1);
+            write_players(&mut out, &details.player_gui);
+            self.players = details.player_gui.clone();
+        }
         let mut body = Writer::default();
         let mut count = 0u64;
         let mut previous = 0u32;
@@ -613,6 +667,7 @@ impl DetailEncoder {
         write_lists(&mut out, &self.lists);
         let data: Vec<(DataKey, u64)> = self.data.iter().map(|(key, hash)| (*key, *hash)).collect();
         write_data(&mut out, &data);
+        write_players(&mut out, &self.players);
         out.varint(defaults.len() as u64);
         for (template, groups) in &defaults {
             out.varint(u64::from(*template));
@@ -717,8 +772,28 @@ fn write_data(out: &mut Writer, entries: &[(DataKey, u64)]) {
                 out.varint(u64::from(*name) + 1);
                 out.varint(u64::from(*civ) + 1);
             }
+            DataKey::Formation { name } => {
+                out.u8(2);
+                out.varint(u64::from(*name) + 1);
+            }
         }
         out.u64(*hash);
+    }
+}
+
+fn write_players(out: &mut Writer, players: &[PlayerGui]) {
+    out.varint(players.len() as u64);
+    for player in players {
+        out.varint(player.formations.len() as u64);
+        for formation in &player.formations {
+            out.varint(one_based(*formation));
+        }
+        out.varint(player.prices.len() as u64);
+        for (resource, buy, sell) in &player.prices {
+            out.varint(one_based(*resource));
+            out.f32(*buy);
+            out.f32(*sell);
+        }
     }
 }
 

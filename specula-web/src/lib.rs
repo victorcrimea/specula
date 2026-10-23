@@ -2,6 +2,7 @@ mod assets;
 mod audio;
 mod bench;
 mod blend;
+mod command_row;
 mod detail;
 mod diplomacy;
 mod far;
@@ -10,6 +11,7 @@ mod gpu;
 mod icons;
 mod impostor;
 mod lang;
+mod left;
 mod march;
 mod minimap;
 mod opfs;
@@ -722,6 +724,9 @@ impl App {
         for request in details.take_requests() {
             apply_request(&mut *self.renderer, request, &self.scene);
         }
+        if details.take_redraw() {
+            self.details_dirty = true;
+        }
         let store = self.renderer.asset_store();
         let index = store
             .as_ref()
@@ -1357,7 +1362,7 @@ fn element<T: JsCast>(document: &Document, id: &str) -> Result<T, String> {
 /// selects its group, or with Ctrl (session.deselectgroup) or the right
 /// button removes it.
 fn wire_details(app: &Rc<RefCell<App>>) {
-    let (portrait, buttons) = {
+    let (portrait, buttons, sells) = {
         let app = app.borrow();
         let Some(details) = &app.details else {
             return;
@@ -1365,6 +1370,7 @@ fn wire_details(app: &Rc<RefCell<App>>) {
         (
             details.portrait_button().clone(),
             details.group_buttons().cloned().collect::<Vec<_>>(),
+            details.barter_buttons(),
         )
     };
     let target = Rc::clone(app);
@@ -1376,6 +1382,16 @@ fn wire_details(app: &Rc<RefCell<App>>) {
     portrait.set_onclick(Some(on_click.as_ref().unchecked_ref()));
     // The panel lives as long as the page, so its handlers do too.
     on_click.forget();
+    for (index, button) in sells.into_iter().enumerate() {
+        let target = Rc::clone(app);
+        let on_click = Closure::<dyn FnMut()>::new(move || {
+            if let Some(details) = &target.borrow().details {
+                details.barter_clicked(index);
+            }
+        });
+        button.set_onclick(Some(on_click.as_ref().unchecked_ref()));
+        on_click.forget();
+    }
     for (index, button) in buttons.into_iter().enumerate() {
         let target = Rc::clone(app);
         let on_click = Closure::<dyn FnMut(MouseEvent)>::new(move |event: MouseEvent| {

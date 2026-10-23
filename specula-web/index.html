@@ -129,16 +129,16 @@ html, body { margin: 0; height: 100%; background: #0f1214; }
   background: var(--gui-minimap-circle) 0 0 / 100% 100%; pointer-events: none; }
 #minimap { position: absolute; left: 8px; top: 10px; width: 184px; height: 184px;
   cursor: pointer; touch-action: none; }
-/* selectionDetails, 50%-114 of the bottom bar, without the command row
-   (unit_commands.xml) under the details: 164 px rather than 204. */
+/* selectionDetails, 50%-114 of the bottom bar, with the command row
+   (unit_commands.xml) in its bottom 40 px. */
 #details { position: fixed; left: calc(50% - 114px); bottom: var(--panel-bottom);
-  --details-height: 164px;
+  --details-height: 204px;
   width: 228px; height: var(--details-height); font-family: "0ad sans", "0ad sans fallback", sans-serif;
   color: white; user-select: none; -webkit-user-select: none; }
 #details[hidden], #details [hidden] { display: none; }
 #details-panel { left: 0; top: 0; width: 228px; height: var(--details-height); position: absolute;
   /* The sub-rectangle 0 0 220 192 of hud_panels.png, stretched over the
-     engine's 228x204, of which the top 164 px show. */
+     engine's 228x204. */
   background: var(--gui-hud-panels) 0 0 / 530.618px 272px no-repeat; }
 #details .box { position: absolute; }
 #details .fill { position: absolute; left: 0; top: 0; right: 0; bottom: 0; }
@@ -235,6 +235,8 @@ html, body { margin: 0; height: 100%; background: #0f1214; }
 #details-count { inset: 0; }
 #details-health-multiple { left: 187px; top: 40px; width: 8px; height: 114px; }
 #details-capture-multiple { left: 199px; top: 40px; width: 8px; height: 114px; }
+/* Filled from the bottom; the variable lets a phone lay the bar flat. */
+#details #details-health-multiple-bar { top: calc(100% - var(--filled, 100%)); }
 /* supplementalSelectionDetails, 50%-316 of the bottom bar and 166 px
    high, so 202 px left of the details and 2 px taller; for an observer
    the garrison buttons are disabled with sprite_disabled = sprite, so
@@ -252,6 +254,16 @@ html, body { margin: 0; height: 100%; background: #0f1214; }
 #garrison-health { left: 6px; top: 7px; width: 7px; height: 110px; }
 /* Over `.bar > *`, whose :is() counts as an id. */
 #details #garrison-health-bar { top: var(--lost, 0%); }
+/* unitBarterPanel and unitFormationPanel at 6 6; the stance and alert
+   panels are TranslucentPanels (BackgroundTranslucent, 0 0 0 85) at 4 4 of
+   the bottom, 40 px high, the stance buttons 2 px in, the alert buttons in
+   the last 118 px. */
+#barter-cells, #formation-cells { position: absolute; left: 6px; top: 6px; }
+#details .barter { position: absolute; width: 38px; height: 80px; }
+#stance, #alert { position: absolute; left: 4px; right: 4px; bottom: 4px; height: 40px;
+  background: rgba(0, 0, 0, 0.333); }
+#stance-cells { position: absolute; left: 2px; top: 1px; }
+#alert-cells { position: absolute; left: calc(100% - 118px); top: 1px; }
 /* The panels above the details on a phone, one box there. */
 #details-above { display: contents; }
 /* unitQueuePanel at 4 -56 100% 0 of unitCommands, which is 50%+110 of the
@@ -299,6 +311,26 @@ html, body { margin: 0; height: 100%; background: #0f1214; }
 #details .item > .tint { position: absolute; left: 3px; top: 3px; width: 32px; height: 32px; }
 #details .item.grey > img { filter: grayscale(1); }
 #details .item.grey > .tint { background: rgba(0, 0, 0, 0.498); }
+/* unitCommandPanel at 0 100%-40 100% 100%-4 (z 30), its buttons iconButtons
+   of 32 px centred on the panel, with the commandIcon filling each. */
+#details-commands { left: 0; top: 164px; width: 228px; height: 36px; z-index: 30; }
+#details-command-cells { position: absolute; left: 0; top: 0; right: 0; bottom: 0; }
+#details .command { position: absolute; top: 0; width: 32px; height: 32px;
+  background: var(--gui-portrait-black) 0 0 / 100% 100%; }
+#details .command > .icon { position: absolute; left: 0; top: 0; width: 32px; height: 32px;
+  background: none 0 0 / 100% 100% no-repeat; }
+#details .command > .text { inset: 0; }
+/* The buttons of the left panels and the right panel draw their icon as a
+   texture of session.css; corners.png marks the chosen one, upgrade.png the
+   default formation, and a barter caption is resourceText over the top half. */
+#details .item > .icon, #details .item > .selection, #details .item > .marker {
+  position: absolute; left: 3px; top: 3px; width: 32px; height: 32px;
+  background: none 0 0 / 100% 100% no-repeat; }
+#details .item > .selection { background-image: var(--gui-corners); }
+#details .item > .marker { background-image: var(--gui-upgrade); }
+#details .item > .tint { background-repeat: no-repeat; }
+#details .item.grey > .icon, #details .item.selected > .icon { filter: grayscale(1); }
+#details .item > .caption { inset: 0 0 50% 0; justify-content: flex-start; }
 /* Not the engine's: on a phone both panels are scaled down to leave the
    view free, the details sit right of the minimap so neither moves when
    the selection changes, and the details fold to a strip. */
@@ -332,6 +364,12 @@ html, body { margin: 0; height: 100%; background: #0f1214; }
   #details-above { display: flex; flex-direction: column; gap: 2px; position: absolute;
     left: 0; bottom: calc(var(--details-height) + 14px); }
   #garrison { position: relative; left: 0; bottom: auto; height: auto; }
+  #garrison.empty { display: none; }
+  /* No alert buttons on a phone (Specula only): they take a whole strip,
+     and the frame goes when they were all it had. */
+  #alert { display: none !important; }
+  #garrison:not(:has(> #stance:not([hidden]), > #formation:not([hidden]),
+    > #barter:not([hidden]), > #garrison-cells:not([hidden]))) { display: none; }
   /* As wide as the details, its rows wrapping. */
   #queue { position: relative; left: 0; bottom: auto; width: 228px; height: auto; }
   #queue-cells { position: relative; left: 0; top: 0; display: grid;
@@ -346,6 +384,17 @@ html, body { margin: 0; height: 100%; background: #0f1214; }
     grid-template-columns: repeat(4, 38px); gap: 1px; padding: 6px 13px 7px 20px; }
   #garrison-cells > .cell { position: relative; left: 0 !important; top: 0 !important; }
   #garrison-health { height: auto; bottom: 7px; }
+  /* The other panels of the frame, one under the other. */
+  #barter-cells, #formation-cells { position: relative; left: 0; top: 0; display: grid;
+    grid-template-columns: repeat(5, 38px); gap: 1px; padding: 6px; }
+  #formation-cells > .item, #barter-cells > .barter { position: relative;
+    left: 0 !important; top: 0 !important; }
+  #stance, #alert { position: relative; left: 0; right: auto; bottom: auto; margin: 4px; }
+  #stance-cells, #alert-cells { position: relative; left: 0; top: 0; display: flex; gap: 1px;
+    padding: 1px 2px; }
+  #alert-cells { flex-direction: row-reverse; justify-content: flex-start; }
+  #stance-cells > .item, #alert-cells > .item { position: relative;
+    left: 0 !important; top: 0 !important; }
   /* As wide as the details, in rows of 5; folded by default (see the
      fold tabs below), as nothing on it can be pressed. Nothing to show
      leaves no empty frame. */
@@ -383,12 +432,14 @@ html, body { margin: 0; height: 100%; background: #0f1214; }
     position: static; translate: none; flex: none; margin-top: 4px; }
   #details.collapsed #details-toggle::after { content: attr(data-label); }
   #minimap-panel.collapsed #minimap-toggle::after { content: attr(data-label); }
-  /* The queue, the garrison and the production panel fold one by one
+  /* The queue, the orders panel (the garrison frame) and the build panel fold one by one
      (and all with the details), on named tabs in one row above them.
      Each tab keeps its third of the width whichever are shown, so a
      thumb finds it in the same place. */
   #folds { display: block; position: relative; width: 228px; height: 24px; }
   #details-above:not(:has(> .gui-frame:not([hidden]))) > #folds { display: none; }
+  #details-above:has(> #queue[hidden]):has(> #commands[hidden]):not(:has(> #garrison
+    > :is(#stance, #formation, #barter, #garrison-cells):not([hidden]))) > #folds { display: none; }
   .fold { position: absolute; top: 0; width: 76px; height: 24px; padding: 0;
     border: 1px solid #3a4248; border-bottom: none; border-radius: 4px 4px 0 0;
     background: rgba(15, 18, 20, 0.9); }
@@ -397,13 +448,12 @@ html, body { margin: 0; height: 100%; background: #0f1214; }
   #queue-toggle { left: 152px; }
   #details-above:has(> #queue[hidden]) #queue-toggle,
   #details-above:has(> #garrison[hidden]) #garrison-toggle,
+  #details-above:not(:has(> #garrison > :is(#stance, #formation, #barter, #garrison-cells):not([hidden]))) #garrison-toggle,
   #details-above:has(> #commands[hidden]) #commands-toggle { display: none; }
   .fold::before { content: ""; flex: none; width: 6px; height: 6px; margin-top: -3px;
     rotate: 45deg; border-right: 2px solid #e6e9eb; border-bottom: 2px solid #e6e9eb; }
   .fold.collapsed::before { margin-top: 4px; rotate: 225deg; }
-  #queue-toggle::after { content: "Queue"; }
-  #garrison-toggle::after { content: "Garrison"; }
-  #commands-toggle::after { content: "Production"; }
+  #queue-toggle::after, #garrison-toggle::after, #commands-toggle::after { content: attr(data-label); }
   #commands.collapsed { display: none; }
   /* Folded, the queue and the garrison keep their icons at half size in
      a strip of 12, barely readable but enough to tell what is in there,
@@ -432,18 +482,74 @@ html, body { margin: 0; height: 100%; background: #0f1214; }
     width: auto; height: 1px; }
   #garrison.collapsed #garrison-health > :is(.border, .shine) { display: none; }
   #garrison.collapsed #garrison-health-bar { top: 0; right: var(--lost, 0%); }
-  /* A single selection without the line under the bars (nothing carried
-     and no stats icon): the portrait shrinks to the bars' height and the
-     names move up, 31 px shorter. */
-  #details:has(#details-multiple[hidden]):has(#details-carrying-text[hidden]):has(#details-attack[hidden]) {
-    --details-height: 133px; }
-  #details-single:has(#details-carrying-text[hidden]):has(#details-attack[hidden]) #details-stats { top: 65px; }
-  #details-single:has(#details-carrying-text[hidden]):has(#details-attack[hidden]) #details-portrait { width: 64px; height: 64px; }
-  #details-single:has(#details-carrying-text[hidden]):has(#details-attack[hidden]) #details-icon { width: 62px; height: 62px; }
-  #details-single:has(#details-carrying-text[hidden]):has(#details-attack[hidden]) #details-experience { height: 60px; }
-  #details-single:has(#details-carrying-text[hidden]):has(#details-attack[hidden]) .section { left: 66px; width: 154px; }
-  #details-single:has(#details-carrying-text[hidden]):has(#details-attack[hidden]) .section > .text { width: 154px; }
-  #details-single:has(#details-carrying-text[hidden]):has(#details-attack[hidden]) .section > .bar { width: 153px; }
+  /* Compact details (Specula only): a single selection in two rows beside
+     a 56 px portrait, the name over the player's band with the commands and
+     the stats and carried icons at their right, the bars with their numbers
+     inside them under that; a multiple selection as the count and one
+     scrolling row of group buttons over the summed health. The secondary
+     name, civ emblem, phase emblem and the summed capture bar are left out. */
+  #details { --details-height: 86px; }
+  #details #details-single { left: 4px; top: 4px; width: 220px; height: 78px; }
+  #details #details-multiple { left: 4px; top: 4px; width: 220px; height: 64px; }
+  #details:has(#details-multiple:not([hidden])) { --details-height: 72px; }
+  /* No type row when the type is the name. */
+  #details:has(#details-multiple[hidden]):has(#details-secondary[hidden]) { --details-height: 72px; }
+  #details-single:has(#details-secondary[hidden]) #details-civ,
+  #details-single:has(#details-secondary[hidden]) #details-lower { top: 15px; }
+  #details-single:has(#details-secondary[hidden]) #details-bars { top: 30px; }
+  #details #details-portrait { width: 56px; height: 56px; }
+  #details #details-icon { width: 54px; height: 54px; }
+  #details #details-experience { height: 52px; }
+  #details #details-stats { left: 0; top: 0; width: 220px; height: 44px; background: none; }
+  #details #details-primary, #details #details-primary.alone { left: 60px; top: 0; width: auto;
+    right: calc(var(--commands, 0) * 27px); height: 15px;
+    justify-content: flex-start; }
+  /* The generic name (the type: Civic Centre, Spearman) on its own row
+     under the specific one, which a player may not know. */
+  #details #details-secondary { left: 60px; top: 14px; width: auto;
+    right: calc(var(--commands, 0) * 27px); height: 14px; justify-content: flex-start; }
+  #details #details-emblem, #details #details-phase { display: none; }
+  #details #details-civ { left: 60px; top: 29px; width: auto; right: var(--lower-width, 0px);
+    height: 14px; }
+  #details #details-player { left: 4px; right: 4px; top: 0; width: auto; height: 14px;
+    justify-content: flex-start; font-size: 12px; }
+  #details #details-bars { left: 60px; top: 44px; width: 160px; height: 34px; background: none; }
+  #details .section { left: 0; width: 160px; height: 14px; }
+  #details .section-top { top: 1px; height: 14px; }
+  #details .section-middle, #details .section-bottom { top: 17px; height: 14px; }
+  #details .section > .bar { left: 1px; top: 1px; width: 158px; height: 12px; }
+  #details .section > .text { left: 0; top: 0; width: 160px; height: 14px; z-index: 1;
+    justify-content: center; }
+  #details #details-lower { left: auto; right: 0; top: 29px; width: 80px;
+    height: 14px; background: none; }
+  #details #details-attack { left: auto; right: 0; top: -1px; width: 16px; height: 16px; }
+  #details #details-carrying-icon { left: auto; right: 18px; top: -1px; width: 16px; height: 16px; }
+  #details #details-carrying-text { left: auto; right: 36px; top: 0; width: 44px; height: 14px; font-size: 12px; }
+  #details:has(#details-attack:not([hidden])) { --lower-width: 20px; }
+  #details:has(#details-carrying-text:not([hidden])) { --lower-width: 82px; }
+  #details #details-commands { left: auto; right: 4px; top: 4px; width: 162px; height: 26px; }
+  #details #details-command-cells { display: flex; justify-content: flex-end; gap: 1px; }
+  #details .command { position: relative; flex: none; left: auto !important; width: 26px; height: 26px; }
+  #details .command > .icon { width: 26px; height: 26px; }
+  #details .command > .text { font-size: 11px; }
+  #details:has(#details-command-cells > .command:nth-child(1):not([hidden])) { --commands: 1; }
+  #details:has(#details-command-cells > .command:nth-child(2):not([hidden])) { --commands: 2; }
+  #details:has(#details-command-cells > .command:nth-child(3):not([hidden])) { --commands: 3; }
+  #details:has(#details-command-cells > .command:nth-child(4):not([hidden])) { --commands: 4; }
+  #details:has(#details-command-cells > .command:nth-child(5):not([hidden])) { --commands: 5; }
+  #details:has(#details-command-cells > .command:nth-child(6):not([hidden])) { --commands: 6; }
+  #details #details-count-badge { left: 0; top: 0; width: 32px; height: 32px; }
+  #details #details-groups { position: absolute; left: 36px; top: 0; right: 0; height: 34px;
+    display: flex; gap: 1px; overflow-x: auto; overflow-y: hidden; scrollbar-width: none; }
+  #details #details-groups > .group { position: relative; flex: none; left: 0 !important; top: 0 !important;
+    width: 32px; height: 32px; }
+  #details #details-groups > .group > img { left: 2px; top: 2px; width: 28px; height: 28px; }
+  #details #details-health-multiple { left: 36px; top: 42px; width: auto; height: 8px;
+    right: calc(var(--commands, 0) * 27px + 4px); }
+  #details #details-health-multiple-bar { top: 0; right: calc(100% - var(--filled, 100%)); }
+  #details #details-health-multiple > .shine.vertical { display: none; }
+  #details #details-capture-multiple { display: none; }
+  #details:has(#details-multiple:not([hidden])) #details-commands { top: auto; bottom: 4px; }
   /* The other controls fold into a menu, the perspective stays out. */
   #menu-open { display: block; }
   #controls { right: auto; max-width: calc(100vw - 120px); }
@@ -668,14 +774,15 @@ body:not([data-debug="storage"]) #stats-storage { display: none; }
 <div id="details-health-multiple" class="box bar"><div class="border"></div><div class="health-bg"></div><div id="details-health-multiple-bar" class="health-fg"></div><div class="shine vertical"></div></div>
 <div id="details-capture-multiple" class="box bar"><div class="border"></div><div class="segments"></div><div class="shine vertical"></div></div>
 </div>
+<div id="details-commands" class="box"><div id="details-command-cells"></div></div>
 <span class="edge top"></span><span class="edge right"></span><span class="edge bottom"></span><span class="edge left"></span>
 <span class="edge corner top-right"></span><span class="edge corner bottom-right"></span><span class="edge corner bottom-left"></span><span class="edge corner top-left"></span>
 </div>
 <div id="details-above">
 <div id="folds">
-<button id="commands-toggle" class="fold" type="button" aria-expanded="true" aria-controls="commands" aria-label="Fold the production panel"></button>
-<button id="garrison-toggle" class="fold" type="button" aria-expanded="true" aria-controls="garrison" aria-label="Fold the garrison"></button>
-<button id="queue-toggle" class="fold" type="button" aria-expanded="true" aria-controls="queue" aria-label="Fold the queue"></button>
+<button id="commands-toggle" class="fold" type="button" aria-expanded="true" aria-controls="commands" aria-label="Fold the build panel" data-label="Build" data-i18n-attrs="data-label"></button>
+<button id="garrison-toggle" class="fold" type="button" aria-expanded="true" aria-controls="garrison" aria-label="Fold the orders panel" data-label="Orders" data-i18n-attrs="data-label"></button>
+<button id="queue-toggle" class="fold" type="button" aria-expanded="true" aria-controls="queue" aria-label="Fold the queue" data-label="Queue" data-i18n-attrs="data-label"></button>
 </div>
 <div id="queue" class="gui-frame" hidden>
 <div id="queue-background"></div>
@@ -687,8 +794,12 @@ body:not([data-debug="storage"]) #stats-storage { display: none; }
 </div>
 <div id="garrison" class="gui-frame" hidden>
 <div id="garrison-background"></div>
+<div id="barter" hidden><div id="barter-cells"></div></div>
 <div id="garrison-cells"></div>
 <div id="garrison-health" class="box bar"><div class="border"></div><div class="health-bg"></div><div id="garrison-health-bar" class="health-fg"></div><div class="shine vertical"></div></div>
+<div id="formation" hidden><div id="formation-cells"></div></div>
+<div id="alert" class="strip" hidden><div id="alert-cells"></div></div>
+<div id="stance" class="strip" hidden><div id="stance-cells"></div></div>
 <span class="edge top"></span><span class="edge right"></span><span class="edge bottom"></span><span class="edge left"></span>
 <span class="edge corner top-right"></span><span class="edge corner bottom-right"></span><span class="edge corner bottom-left"></span><span class="edge corner top-left"></span>
 </div>
@@ -1054,12 +1165,12 @@ settings.</p>
 </script>
 <script>
 // The panels above the details fold one by one, on phones only. The
-// production panel starts folded: it is read-only, so it earns little of
+// build panel starts folded: it is read-only, so it earns little of
 // a small screen.
 for (const [id, foldLabel, unfoldLabel, folded] of [
   ["queue", "Fold the queue", "Unfold the queue", false],
-  ["garrison", "Fold the garrison", "Unfold the garrison", false],
-  ["commands", "Fold the production panel", "Unfold the production panel", true],
+  ["garrison", "Fold the orders panel", "Unfold the orders panel", false],
+  ["commands", "Fold the build panel", "Unfold the build panel", true],
 ]) {
   const panel = document.getElementById(id);
   const toggle = document.getElementById(id + "-toggle");

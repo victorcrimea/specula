@@ -116,6 +116,16 @@ fn field(value: &JsValue, key: &str) -> JsValue {
     js_sys::Reflect::get(value, &key.into()).unwrap_or(JsValue::UNDEFINED)
 }
 
+/// A text member of a JSON object, empty when it is not there.
+pub fn text_field(value: &JsValue, key: &str) -> String {
+    text(&field(value, key))
+}
+
+/// A number member of a JSON object, 0 when it is not there.
+pub fn number_field(value: &JsValue, key: &str) -> f64 {
+    plus(&field(value, key))
+}
+
 /// `+value`, 0 for what is not a number.
 fn plus(value: &JsValue) -> f64 {
     value
@@ -223,6 +233,31 @@ pub fn entity_names(template: &JsValue) -> String {
     crate::tooltip::entity_names(
         &translated(&field(&name, "generic")),
         &translated(&field(&name, "specific")),
+    )
+}
+
+/// The category of a template's `trainingRestrictions` or
+/// `buildRestrictions`, when it has them.
+pub fn restriction_category(template: &JsValue, key: &str) -> Option<String> {
+    let restrictions = field(template, key);
+    restrictions
+        .is_object()
+        .then(|| text(&field(&restrictions, "category")))
+}
+
+/// A template with an empty `cost`, for a tooltip that gives its own costs.
+pub fn empty_cost() -> JsValue {
+    let template = js_sys::Object::new();
+    let _ = js_sys::Reflect::set(&template, &"cost".into(), &js_sys::Object::new());
+    template.into()
+}
+
+/// A template's translated generic and specific names.
+pub fn name_parts(template: &JsValue) -> (String, String) {
+    let name = field(template, "name");
+    (
+        translated(&field(&name, "generic")),
+        translated(&field(&name, "specific")),
     )
 }
 
