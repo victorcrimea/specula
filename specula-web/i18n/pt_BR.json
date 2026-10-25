@@ -77,6 +77,7 @@
   "Match over": "Partida encerrada",
   "Match over. Next match in %(time)s": "Partida encerrada. Próxima partida em %(time)s",
   "Match over. Waiting for the next match": "Partida encerrada. Aguardando a próxima partida",
+  "Live stream starts in %(time)s": "A transmissão ao vivo começa em %(time)s",
   "Default (browser: %(name)s)": "Padrão (navegador: %(name)s)",
   "warming up": "aquecimento",
   "measuring": "medição",

@@ -77,6 +77,7 @@
   "Match over": "Mecz zakończony",
   "Match over. Next match in %(time)s": "Mecz zakończony. Następny mecz za %(time)s",
   "Match over. Waiting for the next match": "Mecz zakończony. Oczekiwanie na następny mecz",
+  "Live stream starts in %(time)s": "Transmisja na żywo rozpocznie się za %(time)s",
   "Default (browser: %(name)s)": "Domyślny (przeglądarka: %(name)s)",
   "warming up": "rozgrzewka",
   "measuring": "pomiar",

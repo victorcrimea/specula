@@ -77,6 +77,7 @@
   "Match over": "Matchen är slut",
   "Match over. Next match in %(time)s": "Matchen är slut. Nästa match om %(time)s",
   "Match over. Waiting for the next match": "Matchen är slut. Väntar på nästa match",
+  "Live stream starts in %(time)s": "Livesändningen börjar om %(time)s",
   "Default (browser: %(name)s)": "Standard (webbläsare: %(name)s)",
   "warming up": "uppvärmning",
   "measuring": "mätning",

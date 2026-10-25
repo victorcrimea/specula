@@ -16,6 +16,7 @@ use std::os::unix::fs::FileTypeExt;
 use std::os::unix::net::UnixListener;
 use std::os::unix::net::UnixStream;
 use std::sync::Arc;
+use std::time::Duration;
 
 use rocket::State;
 use rocket::fairing::AdHoc;
@@ -36,16 +37,23 @@ use crate::view::Hub;
 use crate::view::Message;
 
 const DEFAULT_SOCKET: &str = "/tmp/specula-feed.sock";
+/// As AoE2 DE's ranked spectating: long enough that a player cannot scout
+/// the opponent through the broadcast.
+const DEFAULT_DELAY_SECS: u64 = 120;
 /// Relative to the working directory, so the server runs from the repo root.
 pub const WEB_ROOT: &str = "specula-web";
 
 #[rocket::main]
 async fn main() {
-    let (path, observe) = match parse_args() {
+    let Args {
+        socket: path,
+        observe,
+        delay,
+    } = match parse_args() {
         Ok(args) => args,
         Err(error) => {
             eprintln!("{error}");
-            eprintln!("usage: specula-server [SOCKET] [--observe HOST:PORT]");
+            eprintln!("usage: specula-server [SOCKET] [--observe HOST:PORT] [--delay SECONDS]");
             std::process::exit(2);
         }
     };
@@ -61,8 +69,11 @@ async fn main() {
         }
     };
     println!("waiting for an observer on {path}");
+    println!("viewers see the game {} s late", delay.as_secs());
 
-    let hub = Arc::new(Hub::new());
+    let hub = Arc::new(Hub::new(delay));
+    let publisher_hub = Arc::clone(&hub);
+    std::thread::spawn(move || publisher_hub.run_publisher());
     let feed_hub = Arc::clone(&hub);
     // The feed is blocking std I/O, so it gets its own thread rather than
     // a slot in Rocket's async runtime.
@@ -212,13 +223,26 @@ fn segment_bytes((bytes, closed): (Message, bool)) -> Option<SegmentBytes> {
     Some(SegmentBytes(bytes.to_vec(), cache))
 }
 
-/// `[SOCKET] [--observe HOST:PORT]`, in any order.
-fn parse_args() -> Result<(String, Option<(String, String)>), String> {
+struct Args {
+    socket: String,
+    observe: Option<(String, String)>,
+    delay: Duration,
+}
+
+/// `[SOCKET] [--observe HOST:PORT] [--delay SECONDS]`, in any order.
+fn parse_args() -> Result<Args, String> {
     let mut socket = None;
     let mut observe = None;
+    let mut delay = Duration::from_secs(DEFAULT_DELAY_SECS);
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
-        if arg == "--observe" {
+        if arg == "--delay" {
+            let seconds = args.next().ok_or("--delay needs SECONDS")?;
+            let seconds = seconds
+                .parse::<u32>()
+                .map_err(|_| format!("--delay {seconds}: expected whole seconds"))?;
+            delay = Duration::from_secs(u64::from(seconds));
+        } else if arg == "--observe" {
             let target = args.next().ok_or("--observe needs HOST:PORT")?;
             let (host, port) = target
                 .rsplit_once(':')
@@ -231,10 +255,11 @@ fn parse_args() -> Result<(String, Option<(String, String)>), String> {
             return Err(format!("unexpected argument {arg}"));
         }
     }
-    Ok((
-        socket.unwrap_or_else(|| DEFAULT_SOCKET.to_string()),
+    Ok(Args {
+        socket: socket.unwrap_or_else(|| DEFAULT_SOCKET.to_string()),
         observe,
-    ))
+        delay,
+    })
 }
 
 // Only a socket is removed, so a mistyped path cannot delete a real file.

@@ -25,7 +25,9 @@
 //! stream u64 bytes of live messages and u64 bytes of segments received for
 //! the shown match, f64 ms it has been followed since the counts began and
 //! u8 1 while it is followed; or u8 `POST_DETAIL`,
-//! then a detail stream message (`detail.rs`), none to clear the details.
+//! then a detail stream message (`detail.rs`), none to clear the details;
+//! or u8 `POST_STARTS`, u32 ms until the server shows the match's first
+//! turn, while it holds them all back.
 //!
 //! While the page has something selected (`COMMAND_DETAIL` 1) and for
 //! `DETAIL_LINGER_MS` after (`COMMAND_DETAIL` 0), the worker also follows
@@ -62,6 +64,7 @@ pub const POST_SCENE: u8 = 1;
 pub const POST_STATUS: u8 = 2;
 pub const POST_TERRAIN: u8 = 3;
 pub const POST_DETAIL: u8 = 4;
+pub const POST_STARTS: u8 = 5;
 pub const STATUS_LIVE: u8 = 1;
 pub const STATUS_PAUSED: u8 = 2;
 /// The shown match has ended.
@@ -322,6 +325,17 @@ impl Playback {
             self.drop_stream("empty message");
             return;
         };
+        if envelope == stream::ENVELOPE_STARTS {
+            match stream::read_starts(body) {
+                Ok(wait_ms) => {
+                    let mut out = vec![POST_STARTS];
+                    out.extend_from_slice(&wait_ms.to_le_bytes());
+                    self.post(&out);
+                }
+                Err(error) => self.drop_stream(error),
+            }
+            return;
+        }
         let messages = match envelope {
             stream::ENVELOPE_JOIN => stream::read_join(body).map(|(frame, messages)| {
                 self.frame = Some(frame);

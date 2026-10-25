@@ -77,6 +77,7 @@
   "Match over": "試合終了",
   "Match over. Next match in %(time)s": "試合終了。次の試合まで %(time)s",
   "Match over. Waiting for the next match": "試合終了。次の試合を待っています",
+  "Live stream starts in %(time)s": "ライブ配信開始まで %(time)s",
   "Default (browser: %(name)s)": "既定 (ブラウザ: %(name)s)",
   "warming up": "ウォームアップ",
   "measuring": "計測",

@@ -626,12 +626,22 @@ body:not([data-debug="storage"]) #stats-storage { display: none; }
   font: 600 15px system-ui, sans-serif; font-variant-numeric: tabular-nums;
   color: #e6e9eb; background: rgba(15, 18, 20, 0.85);
   border: 1px solid #3a4248; border-radius: 4px; }
+/* Under the clock, as the engine puts its own under the top panel. */
+#live-delay { padding: 3px 8px; font: 600 12px ui-monospace, monospace;
+  color: #e6e9eb; background: rgba(15, 18, 20, 0.85);
+  border: 1px solid #3a4248; border-radius: 4px; }
+#live-delay[hidden] { display: none; }
 #match-over { position: fixed; left: 50%; top: 30%; transform: translateX(-50%);
   display: flex; align-items: center; gap: 8px; padding: 8px 10px;
   max-width: calc(100vw - 32px); box-sizing: border-box;
   font: 13px system-ui, sans-serif; color: #e6e9eb;
   background: rgba(15, 18, 20, 0.9); border: 1px solid #3a4248; border-radius: 4px; }
 #match-over[hidden], #current[hidden] { display: none; }
+#stream-start { position: fixed; left: 50%; top: 30%; transform: translateX(-50%);
+  padding: 8px 10px; max-width: calc(100vw - 32px); box-sizing: border-box;
+  font: 13px system-ui, sans-serif; color: #e6e9eb;
+  background: rgba(15, 18, 20, 0.9); border: 1px solid #3a4248; border-radius: 4px; }
+#stream-start[hidden] { display: none; }
 /* diplomacyDialogPanel (gui/session/diplomacy/DiplomacyDialog.xml) in the
    ModernDialog sprite (gui/common/modern/sprites.xml); the wasm sets its
    size. Narrow screens scroll the table rather than the page. */
@@ -893,6 +903,7 @@ body:not([data-debug="storage"]) #stats-storage { display: none; }
 </div>
 </div>
 <div id="hud">
+<div id="live-delay" hidden></div>
 <div id="fps" aria-label="Frames per second" data-i18n-attrs="aria-label">- FPS</div>
 <pre id="stats-network" class="stats" aria-label="Network statistics" data-i18n-attrs="aria-label"></pre>
 <pre id="stats-profiling" class="stats" aria-label="Profiling statistics" data-i18n-attrs="aria-label"></pre>
@@ -910,6 +921,7 @@ body:not([data-debug="storage"]) #stats-storage { display: none; }
 <button id="live" type="button" aria-pressed="true" disabled data-i18n>Live</button>
 <button id="current" type="button" hidden disabled data-i18n>Current match</button>
 </div>
+<div id="stream-start" role="status" hidden></div>
 <div id="match-over" role="status" hidden>
 <span id="match-over-text">Match over</span>
 <button id="match-over-current" type="button" disabled data-i18n>Current match</button>

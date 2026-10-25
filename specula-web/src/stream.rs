@@ -19,6 +19,7 @@ pub const ENVELOPE_JOIN: u8 = 1;
 pub const ENVELOPE_FRAME: u8 = 2;
 pub const ENVELOPE_MORE: u8 = 3;
 pub const ENVELOPE_ENDED: u8 = 4;
+pub const ENVELOPE_STARTS: u8 = 5;
 const MESSAGE_KEYFRAME: u8 = 1;
 const MESSAGE_DELTA: u8 = 2;
 const MESSAGE_ENDED: u8 = 3;
@@ -419,6 +420,8 @@ pub struct Scene {
     pub match_id: u64,
     /// The sim rate the match was set up with; 1.0 is normal speed.
     pub game_speed: f32,
+    /// How long after the game the server shows it; 0 for live.
+    pub delay_ms: u32,
     /// The turn segment 0 starts at.
     pub first_turn: u32,
     pub segment_turns: u32,
@@ -542,6 +545,7 @@ impl Scene {
         }
         self.match_id = cursor.u64()?;
         self.game_speed = f32::from_bits(cursor.u32()?);
+        self.delay_ms = cursor.varint_u32()?;
         self.first_turn = cursor.varint_u32()?;
         self.segment_turns = cursor.varint_u32()?;
         if self.segment_turns == 0 {
@@ -881,6 +885,7 @@ impl Scene {
         out.u8(WIRE_VERSION);
         out.u64(self.match_id);
         out.u32(self.game_speed.to_bits());
+        out.varint(u64::from(self.delay_ms));
         out.varint(u64::from(self.first_turn));
         out.varint(u64::from(self.segment_turns));
         out.varint(u64::from(self.map_size));
@@ -1232,12 +1237,13 @@ pub fn message_turn(message: &[u8]) -> Result<u32, &'static str> {
 pub fn keyframe_terrain(message: &[u8]) -> Result<u64, &'static str> {
     let (_, body) = message.split_first().ok_or("empty message")?;
     let mut cursor = ByteReader(body);
-    // Turn, wire version, match id, game speed, first turn, turns per
-    // segment, map size.
+    // Turn, wire version, match id, game speed, delay, first turn, turns
+    // per segment, map size.
     cursor.varint()?;
     cursor.u8()?;
     cursor.u64()?;
     cursor.u32()?;
+    cursor.varint()?;
     cursor.varint()?;
     cursor.varint()?;
     cursor.varint()?;
@@ -1267,6 +1273,11 @@ pub fn read_ended(message: &[u8]) -> Result<(u64, u64), &'static str> {
 /// Splits a segment into its messages, the keyframe first.
 pub fn read_segment(segment: &[u8]) -> Result<Vec<Vec<u8>>, &'static str> {
     Ok(read_keyframe_and_frame(segment)?.1)
+}
+
+/// A starts envelope's ms until the server shows the first turn.
+pub fn read_starts(body: &[u8]) -> Result<u32, &'static str> {
+    ByteReader(body).varint_u32()
 }
 
 /// A join's messages, the keyframe first, and the decoder its frame goes

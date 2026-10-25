@@ -1,10 +1,11 @@
-//! The viewer stream, wire format v16: messages for each keyframe, turn or
+//! The viewer stream, wire format v18: messages for each keyframe, turn or
 //! match end, varints and zigzag as in `wire.rs`, positions and heights in
 //! 1/16 m, carried brotli-compressed as below.
 //!
-//! - kind 1 keyframe: varint turn, u8 wire version (15; a viewer stops
+//! - kind 1 keyframe: varint turn, u8 wire version (18; a viewer stops
 //!   at any other, since nothing after it would read right), u64 match id, f32 game speed (the
-//!   match's sim rate), varint first turn of the match's history, varint
+//!   match's sim rate), varint delay in ms (how long after the game the
+//!   server shows it), varint first turn of the match's history, varint
 //!   turns per segment, varint map size in metres, u64 terrain id (0: none
 //!   yet, else fetch `/terrain/<id as 16 hex digits>`), icon table, player
 //!   table, territory, template table, string table, variant set table,
@@ -242,9 +243,16 @@
 //! - 2 frame: the bytes one turn flushed, starting a new frame.
 //! - 3 more: the bytes one turn flushed, continuing the frame.
 //! - 4 ended: an ended message, uncompressed.
+//! - 5 starts: varint ms until the first turn is shown. Sent while the
+//!   server has turns but holds them all back (the delay), so a viewer
+//!   that has nothing to show yet can tell when it will.
 //!
 //! So the compression is done once per match, not per viewer, and a
 //! viewer joins at the open segment's keyframe (init.md 4).
+//!
+//! The encoding runs as the feed arrives, but each turn's output, and a
+//! match's end, reaches the WebSockets and the segments only the delay
+//! later, so nothing served is newer than that.
 //!
 //! The detail stream (`detail.rs`) is cut into segments on the same turns,
 //! served at `/match/<match id>/detail/<n>`, and sent over its own
@@ -254,6 +262,7 @@
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::collections::VecDeque;
 use std::hash::DefaultHasher;
 use std::hash::Hash;
 use std::hash::Hasher;
@@ -261,8 +270,10 @@ use std::io;
 use std::io::ErrorKind;
 use std::io::Write;
 use std::sync::Arc;
+use std::sync::Condvar;
 use std::sync::Mutex;
 use std::sync::OnceLock;
+use std::time::Duration;
 use std::time::Instant;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
@@ -344,6 +355,7 @@ const ENVELOPE_JOIN: u8 = 1;
 const ENVELOPE_FRAME: u8 = 2;
 const ENVELOPE_MORE: u8 = 3;
 const ENVELOPE_ENDED: u8 = 4;
+const ENVELOPE_STARTS: u8 = 5;
 
 pub type Message = Arc<[u8]>;
 
@@ -653,6 +665,8 @@ struct Tables<'a> {
 
 pub struct Hub {
     state: Mutex<State>,
+    /// Wakes the publisher when something is queued.
+    queued: Condvar,
 }
 
 /// A terrain resource as served, and its brotli copy once made.
@@ -669,7 +683,7 @@ struct Archive {
     segments: Vec<Message>,
     detail_segments: Vec<Message>,
     terrain: Option<(u64, TerrainFile)>,
-    data_files: HashMap<u64, Arc<[u8]>>,
+    data_files: DataFiles,
 }
 
 struct Ended {
@@ -682,9 +696,80 @@ struct Ended {
 }
 
 type Frame = brotli::CompressorWriter<Vec<u8>>;
+/// The kind 18 and 19 JSON of a match, by the hash the detail stream names
+/// it by.
+type DataFiles = HashMap<u64, Arc<[u8]>>;
 
-/// One stream's segments and live subscribers: the visual stream, and the
-/// detail stream (`detail.rs`), which is cut on the same turns.
+/// One turn of a stream as the encoder made it, compressed, waiting to be
+/// shown: the encoding runs live while viewers see it `delay` later.
+enum TrackOp {
+    /// A new match's history starts at this compressed keyframe.
+    Restart(Message),
+    /// A turn's delta. `next` closes the open segment, with the end of its
+    /// frame, and opens one at a compressed keyframe; `bytes` are what the
+    /// turn flushed into the frame.
+    Push {
+        next: Option<(Vec<u8>, Message)>,
+        bytes: Vec<u8>,
+    },
+}
+
+/// The live side of a stream: the open segment's brotli frame.
+struct Compressor {
+    frame: Option<Frame>,
+    /// Segments closed in this match, which places the next keyframe.
+    closed: u32,
+}
+
+impl Compressor {
+    fn new() -> Self {
+        Compressor {
+            frame: None,
+            closed: 0,
+        }
+    }
+
+    fn restart(&mut self, keyframe: &[u8]) -> TrackOp {
+        self.frame = None;
+        self.closed = 0;
+        TrackOp::Restart(compress(keyframe).into())
+    }
+
+    /// Adds a turn's delta, after starting a new segment at `keyframe` if
+    /// there is one.
+    fn push(&mut self, delta: &[u8], keyframe: Option<&[u8]>) -> io::Result<TrackOp> {
+        let next = keyframe.map(|keyframe| {
+            self.closed += 1;
+            (self.finish(), compress(keyframe).into())
+        });
+        let frame = self.frame.get_or_insert_with(|| {
+            Frame::new(Vec::new(), 4096, BROTLI_QUALITY, BROTLI_WINDOW_BITS)
+        });
+        let before = frame.get_ref().len();
+        let mut entry = Vec::with_capacity(delta.len() + 5);
+        append_framed(&mut entry, delta);
+        frame.write_all(&entry)?;
+        frame.flush()?;
+        let bytes = frame.get_ref()[before..].to_vec();
+        Ok(TrackOp::Push { next, bytes })
+    }
+
+    /// Ends the open segment's frame; returns the bytes that finishing it
+    /// added after the last flush.
+    fn finish(&mut self) -> Vec<u8> {
+        let Some(frame) = self.frame.take() else {
+            return Vec::new();
+        };
+        let flushed = frame.get_ref().len();
+        let mut bytes = frame.into_inner();
+        bytes.drain(..flushed);
+        bytes
+    }
+}
+
+/// One stream's segments and live subscribers as viewers see them: the
+/// visual stream, and the detail stream (`detail.rs`), which is cut on the
+/// same turns.
 struct Track {
     /// Closed segments, as served.
     segments: Vec<Message>,
@@ -693,7 +778,7 @@ struct Track {
     /// kept whole, since it is the segment's body and what a joining viewer
     /// is sent.
     open_keyframe: Message,
-    frame: Option<Frame>,
+    frame: Option<Vec<u8>>,
     sender: broadcast::Sender<Message>,
 }
 
@@ -707,51 +792,41 @@ impl Track {
         }
     }
 
-    /// Starts a new match's history at `keyframe`; returns the message
-    /// every viewer is sent.
-    fn restart(&mut self, keyframe: &[u8]) -> Message {
-        self.segments.clear();
-        self.frame = None;
-        self.open_keyframe = compress(keyframe).into();
-        envelope_join(&self.open_keyframe, &[]).into()
-    }
-
-    /// Adds a turn's delta, after starting a new segment at `keyframe` if
-    /// there is one; returns the message every viewer is sent.
-    fn push(&mut self, delta: &[u8], keyframe: Option<&[u8]>) -> io::Result<Message> {
-        if let Some(keyframe) = keyframe {
-            self.close();
-            self.open_keyframe = compress(keyframe).into();
+    /// Returns the message every viewer is sent.
+    fn apply(&mut self, op: TrackOp) -> Message {
+        match op {
+            TrackOp::Restart(keyframe) => {
+                self.segments.clear();
+                self.frame = None;
+                self.open_keyframe = keyframe;
+                envelope_join(&self.open_keyframe, &[]).into()
+            }
+            TrackOp::Push { next, bytes } => {
+                if let Some((tail, keyframe)) = next {
+                    self.close(&tail);
+                    self.open_keyframe = keyframe;
+                }
+                let envelope = if self.frame.is_some() {
+                    ENVELOPE_MORE
+                } else {
+                    ENVELOPE_FRAME
+                };
+                self.frame.get_or_insert_default().extend_from_slice(&bytes);
+                let mut message = vec![envelope];
+                message.extend_from_slice(&bytes);
+                message.into()
+            }
         }
-        let (envelope, frame) = match &mut self.frame {
-            Some(frame) => (ENVELOPE_MORE, frame),
-            None => (
-                ENVELOPE_FRAME,
-                self.frame.insert(Frame::new(
-                    Vec::new(),
-                    4096,
-                    BROTLI_QUALITY,
-                    BROTLI_WINDOW_BITS,
-                )),
-            ),
-        };
-        let before = frame.get_ref().len();
-        let mut entry = Vec::with_capacity(delta.len() + 5);
-        append_framed(&mut entry, delta);
-        frame.write_all(&entry)?;
-        frame.flush()?;
-        let mut message = vec![envelope];
-        message.extend_from_slice(&frame.get_ref()[before..]);
-        Ok(message.into())
     }
 
-    /// Finishes the open segment's frame and keeps the segment.
-    fn close(&mut self) {
+    /// Keeps the open segment, its frame ended by `tail`.
+    fn close(&mut self, tail: &[u8]) {
         let mut segment = Vec::new();
         append_framed(&mut segment, &self.open_keyframe);
         if let Some(frame) = self.frame.take() {
-            segment.extend_from_slice(&frame.into_inner());
+            segment.extend_from_slice(&frame);
         }
+        segment.extend_from_slice(tail);
         self.segments.push(segment.into());
     }
 
@@ -760,7 +835,7 @@ impl Track {
         let mut segment = Vec::new();
         append_framed(&mut segment, &self.open_keyframe);
         if let Some(frame) = &self.frame {
-            segment.extend_from_slice(frame.get_ref());
+            segment.extend_from_slice(frame);
         }
         segment
     }
@@ -778,8 +853,90 @@ impl Track {
 
     /// The open segment's keyframe and its frame so far.
     fn join(&self) -> Message {
-        let frame = self.frame.as_ref().map_or(&[][..], |frame| frame.get_ref());
+        let frame = self.frame.as_deref().unwrap_or_default();
         envelope_join(&self.open_keyframe, frame).into()
+    }
+}
+
+/// What the encoder made, held until it is due.
+enum Release {
+    Turn {
+        /// The id of the match this turn starts.
+        start: Option<u64>,
+        visual: TrackOp,
+        detail: TrackOp,
+    },
+    End {
+        match_id: u64,
+        visual_tail: Vec<u8>,
+        detail_tail: Vec<u8>,
+        ended: Ended,
+        terrain: Option<(u64, TerrainFile)>,
+        data_files: DataFiles,
+    },
+}
+
+/// The stream as viewers see it, `delay` behind the encoder.
+struct Shown {
+    /// Names the shown match's segments, so a URL from an earlier match
+    /// cannot return this one's.
+    match_id: u64,
+    has_turn: bool,
+    visual: Track,
+    detail: Track,
+    /// Set from the end of a match until the next one's first turn.
+    ended: Option<Ended>,
+    previous: Option<Archive>,
+}
+
+impl Shown {
+    fn apply(&mut self, release: Release) {
+        match release {
+            Release::Turn {
+                start,
+                visual,
+                detail,
+            } => {
+                // The history restarts only now, so until the new match's
+                // first turn, viewers and segment requests still get the
+                // old one.
+                if let Some(match_id) = start {
+                    self.match_id = match_id;
+                    self.ended = None;
+                }
+                self.has_turn = true;
+                let visual = self.visual.apply(visual);
+                let detail = self.detail.apply(detail);
+                // No receivers is not an error: nobody is watching yet.
+                let _ = self.visual.sender.send(visual);
+                let _ = self.detail.sender.send(detail);
+            }
+            Release::End {
+                match_id,
+                visual_tail,
+                detail_tail,
+                mut ended,
+                terrain,
+                data_files,
+            } => {
+                self.visual.close(&visual_tail);
+                self.detail.close(&detail_tail);
+                self.previous = Some(Archive {
+                    match_id,
+                    segments: std::mem::take(&mut self.visual.segments),
+                    detail_segments: std::mem::take(&mut self.detail.segments),
+                    terrain,
+                    data_files,
+                });
+                // Viewers learn of the end only now.
+                ended.at = Instant::now();
+                self.ended = Some(ended);
+                let _ = self
+                    .visual
+                    .sender
+                    .send(envelope_ended(&encode_ended(match_id, 0)).into());
+            }
+        }
     }
 }
 
@@ -788,18 +945,23 @@ struct State {
     map_size: u32,
     /// The sim rate the match was set up with.
     game_speed: f32,
-    /// Names the current match's segments, so a URL from an earlier match
-    /// cannot return this one's.
+    /// The match being encoded, which viewers may not see yet.
     match_id: u64,
     /// The turn segment 0 starts at.
     first_turn: u32,
-    visual: Track,
-    detail: Track,
+    /// How far behind the game viewers are held, so that the stream cannot
+    /// be used to scout the opponent.
+    delay: Duration,
+    visual: Compressor,
+    detail: Compressor,
+    /// Oldest first, each with when it is due.
+    pending: VecDeque<(Instant, Release)>,
+    shown: Shown,
     detail_encoder: DetailEncoder,
     terrain: Option<(u64, TerrainFile)>,
     /// The kind 18 and 19 JSON of the match, by the hash the detail
     /// stream names it by.
-    data_files: HashMap<u64, Arc<[u8]>>,
+    data_files: DataFiles,
     ground: Option<Ground>,
     /// What viewers hold after the last turn, which the next delta builds
     /// on; near the simulation's state, not equal to it.
@@ -840,8 +1002,7 @@ struct State {
     /// match, so its first turn must replace, not patch, what viewers have.
     new_feed: bool,
     /// Set from the end of a match until the next one's first turn.
-    ended: Option<Ended>,
-    previous: Option<Archive>,
+    ended: bool,
     /// When the feed last connected or sent a turn, for the observer
     /// watchdog.
     feed_activity: Option<Instant>,
@@ -870,16 +1031,27 @@ impl State {
 }
 
 impl Hub {
-    pub fn new() -> Self {
+    pub fn new(delay: Duration) -> Self {
         Hub {
+            queued: Condvar::new(),
             state: Mutex::new(State {
                 turn: 0,
                 map_size: 0,
                 game_speed: 1.0,
                 match_id: 0,
                 first_turn: 0,
-                visual: Track::new(),
-                detail: Track::new(),
+                delay,
+                visual: Compressor::new(),
+                detail: Compressor::new(),
+                pending: VecDeque::new(),
+                shown: Shown {
+                    match_id: 0,
+                    has_turn: false,
+                    visual: Track::new(),
+                    detail: Track::new(),
+                    ended: None,
+                    previous: None,
+                },
                 detail_encoder: DetailEncoder::new(),
                 terrain: None,
                 data_files: HashMap::new(),
@@ -907,8 +1079,7 @@ impl Hub {
                 shots: BTreeMap::new(),
                 has_turn: false,
                 new_feed: true,
-                ended: None,
-                previous: None,
+                ended: false,
                 feed_activity: None,
             }),
         }
@@ -1080,26 +1251,33 @@ impl Hub {
         hash
     }
 
-    /// Only the current and the previous match's files are kept.
+    /// Only the current and the previous match's files are kept, and those
+    /// of a match whose end viewers have not reached.
     pub fn data(&self, hash: u64) -> Option<Arc<[u8]>> {
         let state = self.state.lock().unwrap();
         let archived = state
+            .shown
             .previous
             .as_ref()
             .and_then(|archive| archive.data_files.get(&hash));
-        state.data_files.get(&hash).or(archived).cloned()
+        let ending = ending(&state.pending)
+            .find_map(|(_, data_files)| data_files.get(&hash))
+            .or(archived);
+        state.data_files.get(&hash).or(ending).cloned()
     }
 
-    /// Only the current and the previous match's terrain are kept; an
-    /// older id is gone.
+    /// Only the current and the previous match's terrain are kept, and that
+    /// of a match whose end viewers have not reached; an older id is gone.
     pub fn terrain(&self, id: u64) -> Option<TerrainFile> {
         let state = self.state.lock().unwrap();
         let archived = state
+            .shown
             .previous
             .as_ref()
             .and_then(|archive| archive.terrain.as_ref());
         [state.terrain.as_ref(), archived]
             .into_iter()
+            .chain(ending(&state.pending).map(|(terrain, _)| terrain))
             .flatten()
             .find(|(known, _)| *known == id)
             .map(|(_, file)| file.clone())
@@ -1113,11 +1291,9 @@ impl Hub {
     /// nothing.
     pub fn end_match(&self) {
         let state = &mut *self.state.lock().unwrap();
-        if !state.has_turn || state.ended.is_some() {
+        if !state.has_turn || state.ended {
             return;
         }
-        state.visual.close();
-        state.detail.close();
         let keyframe: Message = compress(&encode_keyframe(
             state,
             state.turn,
@@ -1132,23 +1308,55 @@ impl Hub {
             |id| state.dots.get(&id).map(|dot| dot.template),
         ))
         .into();
-        state.previous = Some(Archive {
+        let release = Release::End {
             match_id: state.match_id,
-            segments: std::mem::take(&mut state.visual.segments),
-            detail_segments: std::mem::take(&mut state.detail.segments),
+            visual_tail: state.visual.finish(),
+            detail_tail: state.detail.finish(),
+            ended: Ended {
+                at: Instant::now(),
+                keyframe,
+                detail_keyframe,
+            },
             terrain: state.terrain.clone(),
             data_files: std::mem::take(&mut state.data_files),
-        });
-        state.ended = Some(Ended {
-            at: Instant::now(),
-            keyframe,
-            detail_keyframe,
-        });
+        };
+        state.ended = true;
         println!("match {:016x} ended at turn {}", state.match_id, state.turn);
-        let _ = state
-            .visual
-            .sender
-            .send(envelope_ended(&encode_ended(state.match_id, 0)).into());
+        self.queue(state, release);
+    }
+
+    fn queue(&self, state: &mut State, release: Release) {
+        if !state.shown.has_turn
+            && matches!(release, Release::Turn { .. })
+            && first_turn_due(&state.pending).is_none()
+        {
+            let _ = state.shown.visual.sender.send(envelope_starts(state.delay));
+        }
+        state
+            .pending
+            .push_back((Instant::now() + state.delay, release));
+        self.queued.notify_one();
+    }
+
+    /// Shows viewers what the encoder made once it is due; runs for good.
+    pub fn run_publisher(&self) {
+        let mut state = self.state.lock().unwrap();
+        loop {
+            let now = Instant::now();
+            while let Some((due, _)) = state.pending.front()
+                && *due <= now
+            {
+                let (_, release) = state.pending.pop_front().unwrap();
+                state.shown.apply(release);
+            }
+            state = match state.pending.front() {
+                Some((due, _)) => {
+                    let wait = due.saturating_duration_since(now);
+                    self.queued.wait_timeout(state, wait).unwrap().0
+                }
+                None => self.queued.wait(state).unwrap(),
+            };
+        }
     }
 
     pub fn set_map(&self, size: u32, game_speed: f32) {
@@ -1258,90 +1466,96 @@ impl Hub {
             launches.push((launch.id, shot));
         }
         launches.sort_unstable_by_key(|(id, _)| *id);
-        let (message, detail_message, shown): (Message, Message, BTreeMap<u32, Dot>) =
-            if state.new_feed {
-                // The history restarts only now, so until the new match's first
-                // turn, viewers and segment requests still get the old one.
-                state.match_id = new_match_id(state.match_id);
-                state.ended = None;
-                state.first_turn = turn;
-                let ground = state.ground.as_ref();
-                let shown: BTreeMap<u32, Dot> = dots
-                    .iter()
-                    .map(|(id, dot)| (*id, arrive(ground, dot)))
-                    .collect();
-                state.captures = captures;
-                let keyframe = encode_keyframe(state, turn, &state.tables(true), &shown, &shots);
-                let message = state.visual.restart(&keyframe);
-                // The keyframe holds what the turn's delta would bring.
-                state.detail_encoder.reset();
-                state
-                    .detail_encoder
-                    .delta(turn, details, |id| shown.contains_key(&id));
-                let detail_keyframe = state.detail_encoder.keyframe(turn, state.match_id, |id| {
-                    shown.get(&id).map(|dot| dot.template)
-                });
-                let detail_message = state.detail.restart(&detail_keyframe);
-                (message, detail_message, shown)
-            } else {
-                let (delta, shown) = encode_delta(
-                    turn,
-                    &Tables {
-                        icons: state.icons.unsent(),
-                        templates: state.templates.unsent(),
-                        strings: state.strings.unsent(),
-                        variant_sets: state.variant_sets.unsent(),
-                        variable_sets: state.variable_sets.unsent(),
-                        range_sets: state.range_sets.unsent(),
-                    },
-                    state.players_changed.then_some(&state.players),
-                    state
-                        .territory_changed
-                        .then_some(state.territory.as_ref())
-                        .flatten(),
-                    state.ground.as_ref(),
-                    &state.dots,
-                    &dots,
-                    &state.sounds,
-                    &launches,
-                    &removals,
-                    &Status {
-                        templates: &state.templates.items,
-                        previous_captures: &state.captures,
-                        captures: &captures,
-                        economy: &state.economy,
-                        economy_shown: &state.economy_shown,
-                        renames: &details.renames,
-                    },
-                );
-                state.captures = captures;
-                let detail_delta = state
-                    .detail_encoder
-                    .delta(turn, details, |id| dots.contains_key(&id));
-                let next_start =
-                    state.first_turn + SEGMENT_TURNS * (state.visual.segments.len() as u32 + 1);
-                let (keyframe, detail_keyframe) = if turn >= next_start {
-                    (
-                        Some(encode_keyframe(
-                            state,
-                            turn,
-                            &state.tables(true),
-                            &shown,
-                            &shots,
-                        )),
-                        Some(state.detail_encoder.keyframe(turn, state.match_id, |id| {
-                            shown.get(&id).map(|dot| dot.template)
-                        })),
-                    )
-                } else {
-                    (None, None)
-                };
-                let message = state.visual.push(&delta, keyframe.as_deref())?;
-                let detail_message = state
-                    .detail
-                    .push(&detail_delta, detail_keyframe.as_deref())?;
-                (message, detail_message, shown)
+        let (release, shown): (Release, BTreeMap<u32, Dot>) = if state.new_feed {
+            state.match_id = new_match_id(state.match_id);
+            state.ended = false;
+            state.first_turn = turn;
+            let ground = state.ground.as_ref();
+            let shown: BTreeMap<u32, Dot> = dots
+                .iter()
+                .map(|(id, dot)| (*id, arrive(ground, dot)))
+                .collect();
+            state.captures = captures;
+            let keyframe = encode_keyframe(state, turn, &state.tables(true), &shown, &shots);
+            let visual = state.visual.restart(&keyframe);
+            // The keyframe holds what the turn's delta would bring.
+            state.detail_encoder.reset();
+            state
+                .detail_encoder
+                .delta(turn, details, |id| shown.contains_key(&id));
+            let detail_keyframe = state.detail_encoder.keyframe(turn, state.match_id, |id| {
+                shown.get(&id).map(|dot| dot.template)
+            });
+            let detail = state.detail.restart(&detail_keyframe);
+            let release = Release::Turn {
+                start: Some(state.match_id),
+                visual,
+                detail,
             };
+            (release, shown)
+        } else {
+            let (delta, shown) = encode_delta(
+                turn,
+                &Tables {
+                    icons: state.icons.unsent(),
+                    templates: state.templates.unsent(),
+                    strings: state.strings.unsent(),
+                    variant_sets: state.variant_sets.unsent(),
+                    variable_sets: state.variable_sets.unsent(),
+                    range_sets: state.range_sets.unsent(),
+                },
+                state.players_changed.then_some(&state.players),
+                state
+                    .territory_changed
+                    .then_some(state.territory.as_ref())
+                    .flatten(),
+                state.ground.as_ref(),
+                &state.dots,
+                &dots,
+                &state.sounds,
+                &launches,
+                &removals,
+                &Status {
+                    templates: &state.templates.items,
+                    previous_captures: &state.captures,
+                    captures: &captures,
+                    economy: &state.economy,
+                    economy_shown: &state.economy_shown,
+                    renames: &details.renames,
+                },
+            );
+            state.captures = captures;
+            let detail_delta = state
+                .detail_encoder
+                .delta(turn, details, |id| dots.contains_key(&id));
+            let next_start = state.first_turn + SEGMENT_TURNS * (state.visual.closed + 1);
+            let (keyframe, detail_keyframe) = if turn >= next_start {
+                (
+                    Some(encode_keyframe(
+                        state,
+                        turn,
+                        &state.tables(true),
+                        &shown,
+                        &shots,
+                    )),
+                    Some(state.detail_encoder.keyframe(turn, state.match_id, |id| {
+                        shown.get(&id).map(|dot| dot.template)
+                    })),
+                )
+            } else {
+                (None, None)
+            };
+            let visual = state.visual.push(&delta, keyframe.as_deref())?;
+            let detail = state
+                .detail
+                .push(&detail_delta, detail_keyframe.as_deref())?;
+            let release = Release::Turn {
+                start: None,
+                visual,
+                detail,
+            };
+            (release, shown)
+        };
         state.icons.sent = state.icons.items.len();
         state.templates.sent = state.templates.items.len();
         state.strings.sent = state.strings.items.len();
@@ -1362,9 +1576,7 @@ impl Hub {
         state.has_turn = true;
         state.new_feed = false;
         state.feed_activity = Some(Instant::now());
-        // No receivers is not an error: nobody is watching yet.
-        let _ = state.visual.sender.send(message);
-        let _ = state.detail.sender.send(detail_message);
+        self.queue(state, release);
         Ok(())
     }
 
@@ -1380,7 +1592,7 @@ impl Hub {
     }
 
     fn track_segment(&self, match_id: u64, index: usize, detail: bool) -> Option<(Message, bool)> {
-        let state = self.state.lock().unwrap();
+        let state = &self.state.lock().unwrap().shown;
         // An ended match is archived but keeps its id until the next one
         // starts, so the archive is asked first.
         if let Some(archive) = state
@@ -1409,7 +1621,8 @@ impl Hub {
     /// the receiver are taken under one lock, so the first bytes a viewer
     /// receives continue exactly the frame it was sent.
     pub fn subscribe(&self) -> (Vec<Message>, broadcast::Receiver<Message>) {
-        let state = self.state.lock().unwrap();
+        let locked = self.state.lock().unwrap();
+        let state = &locked.shown;
         let first = if let Some(ended) = &state.ended {
             let since = ended.at.elapsed().as_millis() as u64;
             vec![
@@ -1418,6 +1631,10 @@ impl Hub {
             ]
         } else if state.has_turn {
             vec![state.visual.join()]
+        } else if let Some(due) = first_turn_due(&locked.pending) {
+            vec![envelope_starts(
+                due.saturating_duration_since(Instant::now()),
+            )]
         } else {
             Vec::new()
         };
@@ -1427,7 +1644,7 @@ impl Hub {
     /// As `subscribe`, for the detail stream; an ended match's viewers get
     /// its final state.
     pub fn subscribe_detail(&self) -> (Vec<Message>, broadcast::Receiver<Message>) {
-        let state = self.state.lock().unwrap();
+        let state = &self.state.lock().unwrap().shown;
         let first = if let Some(ended) = &state.ended {
             vec![envelope_join(&ended.detail_keyframe, &[]).into()]
         } else if state.has_turn {
@@ -1437,6 +1654,28 @@ impl Hub {
         };
         (first, state.detail.sender.subscribe())
     }
+}
+
+/// When the first queued turn is shown.
+fn first_turn_due(pending: &VecDeque<(Instant, Release)>) -> Option<Instant> {
+    pending
+        .iter()
+        .find(|(_, release)| matches!(release, Release::Turn { .. }))
+        .map(|(due, _)| *due)
+}
+
+/// The terrain and files of each queued match end.
+fn ending(
+    pending: &VecDeque<(Instant, Release)>,
+) -> impl Iterator<Item = (Option<&(u64, TerrainFile)>, &DataFiles)> {
+    pending.iter().filter_map(|(_, release)| match release {
+        Release::End {
+            terrain,
+            data_files,
+            ..
+        } => Some((terrain.as_ref(), data_files)),
+        Release::Turn { .. } => None,
+    })
 }
 
 fn terrain_id(state: &State) -> u64 {
@@ -1475,6 +1714,13 @@ fn envelope_join(keyframe: &[u8], frame: &[u8]) -> Vec<u8> {
     out.0
 }
 
+fn envelope_starts(wait: Duration) -> Message {
+    let mut out = Writer::default();
+    out.u8(ENVELOPE_STARTS);
+    out.varint(wait.as_millis() as u64);
+    out.0.into()
+}
+
 fn envelope_ended(message: &[u8]) -> Vec<u8> {
     let mut out = vec![ENVELOPE_ENDED];
     out.extend_from_slice(message);
@@ -1501,6 +1747,7 @@ fn encode_keyframe(
     out.u8(WIRE_VERSION);
     out.u64(state.match_id);
     out.f32(state.game_speed);
+    out.varint(state.delay.as_millis() as u64);
     out.varint(u64::from(state.first_turn));
     out.varint(u64::from(SEGMENT_TURNS));
     out.varint(u64::from(state.map_size));

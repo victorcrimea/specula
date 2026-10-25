@@ -77,6 +77,7 @@
   "Match over": "比賽結束",
   "Match over. Next match in %(time)s": "比賽結束。%(time)s 後開始下一場比賽",
   "Match over. Waiting for the next match": "比賽結束。正在等待下一場比賽",
+  "Live stream starts in %(time)s": "直播將在 %(time)s 後開始",
   "Default (browser: %(name)s)": "預設（瀏覽器：%(name)s）",
   "warming up": "預熱",
   "measuring": "測量",

@@ -103,6 +103,7 @@ use crate::worker::COMMAND_SEEK;
 use crate::worker::COMMAND_SPEED;
 use crate::worker::POST_DETAIL;
 use crate::worker::POST_SCENE;
+use crate::worker::POST_STARTS;
 use crate::worker::POST_STATUS;
 use crate::worker::POST_TERRAIN;
 use crate::worker::STATUS_ENDED;
@@ -473,6 +474,10 @@ struct App {
     clock: HtmlElement,
     /// The turn the clock shows.
     clock_turn: Option<u32>,
+    /// `/` only.
+    live_delay: Option<HtmlElement>,
+    /// What `live_delay` shows; empty while hidden.
+    live_delay_text: String,
     play_button: HtmlButtonElement,
     speed_select: HtmlSelectElement,
     /// The match speed the speed list was built for; 0 before any.
@@ -485,6 +490,7 @@ struct App {
     paused: bool,
     stream_bytes: StreamBytes,
     match_over: MatchOver,
+    stream_start: StreamStart,
     /// Only the 3D page plays sound.
     sound: Option<SoundControls>,
     /// Only the 3D page has assets to warm up.
@@ -642,6 +648,37 @@ impl MatchOver {
     }
 }
 
+/// The countdown shown while the server holds back the match's first
+/// turns, so that a viewer joining then does not face an empty view.
+struct StreamStart {
+    /// `/` only.
+    element: Option<HtmlElement>,
+    /// When the first turn is due, on the frame clock; `None` once one has
+    /// arrived.
+    at: Option<f64>,
+    shown: String,
+}
+
+impl StreamStart {
+    fn frame(&mut self, now: f64) {
+        let Some(element) = &self.element else {
+            return;
+        };
+        let text = self.at.map_or_else(String::new, |at| {
+            let seconds = ((at - now).max(0.0) / 1000.0).ceil() as u64;
+            lang::format(
+                &lang::translate("Live stream starts in %(time)s"),
+                &[("time", &format!("{}:{:02}", seconds / 60, seconds % 60))],
+            )
+        });
+        if text != self.shown {
+            element.set_hidden(text.is_empty());
+            element.set_text_content(Some(&text));
+            self.shown = text;
+        }
+    }
+}
+
 impl App {
     /// `now` is the requestAnimationFrame timestamp in milliseconds.
     fn frame(&mut self, now: f64) {
@@ -695,6 +732,7 @@ impl App {
             minimap.frame(progress, self.renderer.view_outline());
         }
         self.match_over.frame(now);
+        self.stream_start.frame(now);
         if let Some(warmup) = &mut self.warmup {
             let index_loaded = self
                 .renderer
@@ -939,6 +977,31 @@ impl App {
             self.clock_turn = Some(turn);
             self.clock.set_text_content(Some(&format_clock(turn)));
         }
+        self.show_live_delay();
+    }
+
+    /// The engine's `NetworkDelayOverlay`, here for the server's delay.
+    /// Retranslated on every call, since a formatted text is not one i18n.js
+    /// can redo on a language change.
+    fn show_live_delay(&mut self) {
+        let Some(live_delay) = &self.live_delay else {
+            return;
+        };
+        let text = if self.scene.delay_ms == 0 || self.match_over.ended {
+            String::new()
+        } else {
+            let seconds = f64::from(self.scene.delay_ms) / 1000.0;
+            let delay = format!("{seconds:.*}", if seconds < 5.0 { 1 } else { 0 });
+            lang::format(
+                &lang::translate("Delay to live stream: %(delay)ss"),
+                &[("delay", &delay)],
+            )
+        };
+        if text != self.live_delay_text {
+            live_delay.set_hidden(text.is_empty());
+            live_delay.set_text_content(Some(&text));
+            self.live_delay_text = text;
+        }
     }
 
     fn show_status(&mut self, first: u32, newest: u32, playhead: u32, flags: u8, speed: f32) {
@@ -1139,6 +1202,16 @@ async fn run(
         Page::Map => None,
         Page::Observer => Some(Warmup::new(element(&document, "warmup")?)),
     };
+    let live_delay = match page {
+        Page::Map => None,
+        // A cached older page has no label; the match still shows.
+        Page::Observer => element(&document, "live-delay").ok(),
+    };
+    let stream_start = match page {
+        Page::Map => None,
+        // A cached older page has no countdown; the match still shows.
+        Page::Observer => element(&document, "stream-start").ok(),
+    };
     let options = WorkerOptions::new();
     options.set_type(WorkerType::Module);
     let worker_url = format!(
@@ -1175,6 +1248,8 @@ async fn run(
         worker,
         clock: element(&document, "clock")?,
         clock_turn: None,
+        live_delay,
+        live_delay_text: String::new(),
         play_button: element(&document, "play")?,
         speed_select: element(&document, "speed")?,
         speeds_for: 0.0,
@@ -1194,6 +1269,11 @@ async fn run(
             next_ready: false,
             switch_at: 0.0,
             closed: false,
+            shown: String::new(),
+        },
+        stream_start: StreamStart {
+            element: stream_start,
+            at: None,
             shown: String::new(),
         },
         sound,
@@ -2533,6 +2613,16 @@ fn connect(app: &Rc<RefCell<App>>) {
                 }
             }
             Some((&POST_DETAIL, message)) => receive_detail(&receiver, message),
+            Some((&POST_STARTS, rest)) => {
+                if let Some(wait_ms) = rest.first_chunk::<4>() {
+                    // The frame clock, which the countdown runs on.
+                    let now = web_sys::window()
+                        .and_then(|window| window.performance())
+                        .map_or(0.0, |performance| performance.now());
+                    let at = now + f64::from(u32::from_le_bytes(*wait_ms));
+                    receiver.borrow_mut().stream_start.at = Some(at);
+                }
+            }
             Some((&POST_TERRAIN, rest)) => {
                 if let Some((id, resource)) = rest.split_first_chunk::<8>() {
                     receive_terrain(&receiver, u64::from_le_bytes(*id), resource);
@@ -2596,6 +2686,7 @@ fn connect(app: &Rc<RefCell<App>>) {
                     .borrow_mut()
                     .match_over
                     .show_status(flags, u32_at(33).unwrap_or(0), now);
+                receiver.borrow_mut().show_live_delay();
                 receiver.borrow_mut().show_status(
                     first,
                     newest,
@@ -2636,6 +2727,7 @@ fn receive(app_rc: &Rc<RefCell<App>>, turn_ms: f64, message: &[u8]) {
         // The dots now start where they are drawn, so the new turn plays
         // from 0; a second turn before the next frame starts there too.
         Ok(()) => {
+            app.stream_start.at = None;
             app.progress = 0.0;
             app.turn_arrived = true;
             app.scene_changed = true;
