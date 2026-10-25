@@ -175,6 +175,16 @@ pub struct Icon {
     pub size: f32,
 }
 
+/// The players record: the players and the ceasefire, which
+/// `GetSimulationState` reports beside them.
+#[derive(Clone, Default, PartialEq, Eq)]
+pub struct Players {
+    pub players: Vec<Player>,
+    /// When the ceasefire ends, in simulation milliseconds; 0 for none or
+    /// a hook that does not send it.
+    pub ceasefire_end: u32,
+}
+
 /// A player as `GuiInterface.GetSimulationState` reports it; index 0 is
 /// gaia.
 #[derive(Clone, PartialEq, Eq)]
@@ -594,7 +604,7 @@ pub enum Record {
         speed: f32,
     },
     Terrain(Box<Terrain>),
-    Players(Vec<Player>),
+    Players(Players),
     Territory(Territory),
     /// The sounds of the next turn record, in the order they were played.
     Sounds(Vec<Sound>),
@@ -1010,10 +1020,19 @@ fn decode_players(payload: &[u8]) -> io::Result<Record> {
             battle,
         });
     }
+    // Older hooks end the record with the players.
+    let ceasefire_end = if cursor.0.is_empty() {
+        0
+    } else {
+        cursor.u32()?
+    };
     if !cursor.0.is_empty() {
         return Err(invalid("players record longer than its contents"));
     }
-    Ok(Record::Players(players))
+    Ok(Record::Players(Players {
+        players,
+        ceasefire_end,
+    }))
 }
 
 fn decode_territory(payload: &[u8]) -> io::Result<Record> {

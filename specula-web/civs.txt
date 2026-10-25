@@ -1,0 +1,18 @@
+# Written by specula-tools session-gui: civ code, tab, Identity/GenericName of
+# simulation/templates/special/players/<civ>.xml, as loadCivFiles names a civ.
+athen	Athenians
+brit	Britons
+cart	Carthaginians
+gaia	Gaia
+gaul	Gauls
+germ	Germans
+han	Han
+iber	Iberians
+kush	Kushites
+mace	Macedonians
+maur	Mauryas
+pers	Persians
+ptol	Ptolemies
+rome	Romans
+sele	Seleucids
+spart	Spartans

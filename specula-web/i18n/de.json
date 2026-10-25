@@ -32,6 +32,8 @@
   "Sky": "Himmel",
   "Projectiles": "Geschosse",
   "Tooltips": "Tooltips",
+  "Status bars": "Statusleisten",
+  "Show all status bars": "Alle Statusleisten anzeigen",
   "Range overlays": "Reichweitenanzeigen",
   "Attack ranges (Alt+C)": "Angriffsreichweiten (Alt+C)",
   "Aura ranges (Alt+V)": "Aura-Reichweiten (Alt+V)",

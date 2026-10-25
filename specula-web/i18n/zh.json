@@ -32,6 +32,8 @@
   "Sky": "天空",
   "Projectiles": "投射物",
   "Tooltips": "提示",
+  "Status bars": "状态条",
+  "Show all status bars": "显示所有状态条",
   "Range overlays": "范围显示",
   "Attack ranges (Alt+C)": "攻击范围 (Alt+C)",
   "Aura ranges (Alt+V)": "光环范围 (Alt+V)",

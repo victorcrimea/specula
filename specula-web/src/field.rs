@@ -68,6 +68,7 @@ use crate::detail;
 use crate::detail::Group;
 use crate::detail::RALLY_UNITS_PER_METRE;
 use crate::detail::RallyPoint;
+use crate::diplomacy::Perspective;
 use crate::far;
 use crate::far::Capture;
 use crate::far::CaptureDraw;
@@ -693,6 +694,10 @@ pub struct Field {
     impact_models: HashMap<u32, Option<Rc<Model>>>,
     /// Whether projectiles are drawn at all.
     projectiles: bool,
+    /// Whose on-screen entities show their status bars besides the
+    /// selected and highlighted ones, as `g_ShowAllStatusBars`; `None`
+    /// while it is off.
+    all_status_bars: Option<Perspective>,
     device_pixel_ratio: f32,
     stats: Stats,
     timer: Timer,
@@ -1363,6 +1368,7 @@ impl Field {
             shot_models: HashMap::new(),
             impact_models: HashMap::new(),
             projectiles: true,
+            all_status_bars: None,
             device_pixel_ratio: 1.0,
             stats,
             timer,
@@ -3698,6 +3704,10 @@ impl View for Field {
         self.projectiles = on;
     }
 
+    fn set_all_status_bars(&mut self, shown: Option<Perspective>) {
+        self.all_status_bars = shown;
+    }
+
     fn set_ranges(&mut self, ranges: [bool; 3]) {
         self.camera.borrow_mut().ranges = ranges;
     }
@@ -4182,6 +4192,7 @@ impl View for Field {
             &self.entities,
             &self.selection,
             &self.palette,
+            self.all_status_bars,
         );
         self.overlays
             .prepare_sprites(&self.device, &self.queue, &sprites, right, up);
@@ -5934,23 +5945,33 @@ fn packed(rgb: [f32; 3], alpha: f32) -> u32 {
 }
 
 /// The sprites `StatusBars.js` adds for each drawn entity that is
-/// selected or highlighted, in its order. Experience, pack, upgrade and
-/// finite supply bars need stream 2; aura icons are not in the atlas.
+/// selected or highlighted, or that `all` shows, in its order. Experience,
+/// pack, upgrade and finite supply bars need stream 2; aura icons are not
+/// in the atlas.
 fn status_bar_sprites<'a>(
     pickables: &[Pickable],
     entities: &'a Entities,
     selection: &Selection,
     palette: &[u32],
+    all: Option<Perspective>,
 ) -> Vec<Sprite<'a>> {
     const WHITE: u32 = 0xffff_ffff;
     let mut sprites = Vec::new();
     for pickable in pickables {
-        if !selection.shows_ranges(pickable.id) {
-            continue;
-        }
         let Some(dot) = entity_dot(entities, pickable.id) else {
             continue;
         };
+        // `recalculateStatusBarDisplay`: the drawn entities are the ones on
+        // screen, `PickNonGaiaEntitiesOnScreen` for an observer and
+        // `PickPlayerEntitiesOnScreen` for a player.
+        let shown_by_all = match all {
+            None => false,
+            Some(Perspective::Observer) => dot.owner > 0,
+            Some(Perspective::Player(player)) => usize::try_from(dot.owner) == Ok(player),
+        };
+        if !shown_by_all && !selection.shows_ranges(pickable.id) {
+            continue;
+        }
         let Some(details) = entities
             .template_details
             .get(dot.template as usize)

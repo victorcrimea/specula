@@ -32,6 +32,8 @@
   "Sky": "label: the sky rendering option",
   "Projectiles": "label: arrows and other projectiles shown or hidden",
   "Tooltips": "settings group heading",
+  "Status bars": "settings group heading for the bars (health, capture) drawn over units and buildings",
+  "Show all status bars": "label of an on/off list: draw the health and capture bars of every unit and building on screen, not only the selected ones",
   "Range overlays": "settings group heading for the range circles drawn around selected buildings",
   "Attack ranges (Alt+C)": "label of a list; the key combination in brackets stays as is",
   "Aura ranges (Alt+V)": "label of a list; the key combination in brackets stays as is",

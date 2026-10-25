@@ -3,10 +3,11 @@
 //! good, and `session.css`, which names them in custom properties
 //! (`--gui-<key>`) and declares the engine's fonts.
 //!
-//! Usage: session-gui [mod dir] [output dir]
-//! Defaults: ../0ad/binaries/data/mods/public and specula-web/gui. The
-//! fonts come from the engine's own `mod` next to the mod dir, as the VFS
-//! mounts it under the public mod.
+//! Usage: session-gui [mod dir] [output dir] [civs file]
+//! Defaults: ../0ad/binaries/data/mods/public, specula-web/gui and
+//! specula-web/civs.txt. The fonts and the dialog frame come from the
+//! engine's own `mod` next to the mod dir, as the VFS mounts it under the
+//! public mod. The civs file names each civ, for the panels that show one.
 //!
 //! Most textures are copied as they are, since a browser decodes PNG. Only
 //! what the engine changes when it draws, or what a browser cannot read,
@@ -33,6 +34,9 @@ use fast_image_resize::images::Image;
 
 const DEFAULT_MOD: &str = "../0ad/binaries/data/mods/public";
 const DEFAULT_OUTPUT: &str = "specula-web/gui";
+/// The civ names, which the client embeds; committed, unlike the output
+/// dir, as it changes only with the game data.
+const DEFAULT_CIVS: &str = "specula-web/civs.txt";
 const UI: &str = "art/textures/ui";
 const PLAYERS: &str = "simulation/templates/special/players";
 const CSS: &str = "session.css";
@@ -43,7 +47,7 @@ const BROTLI_QUALITY: u32 = 11;
 const BROTLI_WINDOW_BITS: u32 = 22;
 
 /// (custom property key, path under `UI`), copied as they are.
-const TEXTURES: [(&str, &str); 95] = [
+const TEXTURES: [(&str, &str); 101] = [
     ("hud-panels", "session/hud_panels.png"),
     ("line-horiz", "global/border/line_horiz.png"),
     ("line-vert", "global/border/line_vert.png"),
@@ -201,6 +205,29 @@ const TEXTURES: [(&str, &str); 95] = [
     ("command-unlocked", "session/icons/unlocked_small.png"),
     ("command-autoqueue-on", "session/icons/autoqueue-on.png"),
     ("command-autoqueue-off", "session/icons/autoqueue-off.png"),
+    ("diplomacy", "session/icons/diplomacy.png"),
+    ("diplomacy-on", "session/icons/diplomacy-on.png"),
+    ("victory", "session/icons/victory.png"),
+    ("defeat", "session/icons/defeat.png"),
+    ("stone-button", "global/button/button_stone_unselected.png"),
+    (
+        "stone-button-over",
+        "global/button/button_stone_selected.png",
+    ),
+];
+/// The `ModernDialog` sprite's textures (`gui/common/modern/sprites.xml`),
+/// which only the engine's own `mod` holds, under the same `UI` path.
+const MOD_TEXTURES: [(&str, &str); 7] = [
+    ("dialog-background", "global/modern/background.png"),
+    ("dialog-shadow", "global/modern/shadow-low.png"),
+    ("dialog-border", "global/modern/border.png"),
+    ("dialog-deco-top", "global/modern/dialog-deco-top.png"),
+    ("dialog-deco-bottom", "global/modern/dialog-deco-bottom.png"),
+    (
+        "dialog-titlebar-middle",
+        "global/modern/titlebar-middle.png",
+    ),
+    ("dialog-titlebar-left", "global/modern/titlebar-left.png"),
 ];
 /// The engine's `sans` (config/default.cfg, [fonts.sans]): (family, CSS
 /// weight, file under fonts/). FreeSans is the engine's fallback for what
@@ -222,7 +249,8 @@ fn main() -> ExitCode {
     let mut args = std::env::args().skip(1);
     let mod_dir = PathBuf::from(args.next().unwrap_or_else(|| DEFAULT_MOD.into()));
     let output = PathBuf::from(args.next().unwrap_or_else(|| DEFAULT_OUTPUT.into()));
-    match run(&mod_dir, &output) {
+    let civs = PathBuf::from(args.next().unwrap_or_else(|| DEFAULT_CIVS.into()));
+    match run(&mod_dir, &output, &civs) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("{error}");
@@ -231,13 +259,26 @@ fn main() -> ExitCode {
     }
 }
 
-fn run(mod_dir: &Path, output: &Path) -> Result<(), String> {
+fn run(mod_dir: &Path, output: &Path, civs_path: &Path) -> Result<(), String> {
     fs::create_dir_all(output).map_err(|error| format!("{}: {error}", output.display()))?;
     let ui = mod_dir.join(UI);
+    let engine_mod = mod_dir
+        .parent()
+        .ok_or("the mod dir has no parent")?
+        .join("mod");
+    let engine_ui = engine_mod.join(UI);
     let mut properties = Vec::new();
     let mut written = 0usize;
-    for (key, path) in TEXTURES {
-        let source = ui.join(path);
+    let textures = TEXTURES
+        .iter()
+        .map(|&(key, path)| (key, ui.join(path)))
+        .chain(
+            MOD_TEXTURES
+                .iter()
+                .map(|&(key, path)| (key, engine_ui.join(path))),
+        );
+    for (key, source) in textures {
+        let path = source.to_string_lossy();
         let bytes = read(&source)?;
         let bytes = if path.ends_with(".dds") {
             encode_png(&decode_dds(&bytes).map_err(|error| format!("{path}: {error}"))?)?
@@ -248,7 +289,18 @@ fn run(mod_dir: &Path, output: &Path) -> Result<(), String> {
         written += bytes.len();
         properties.push((key.to_string(), name));
     }
-    for (civ, icon) in civ_emblems(mod_dir)? {
+    let civs = civ_identities(mod_dir)?;
+    let mut civ_names = String::from(
+        "# Written by specula-tools session-gui: civ code, tab, Identity/GenericName of\n# simulation/templates/special/players/<civ>.xml, as loadCivFiles names a civ.\n",
+    );
+    for civ in &civs {
+        civ_names.push_str(&format!("{}\t{}\n", civ.code, civ.name));
+    }
+    write(civs_path, civ_names.as_bytes())?;
+    for Civ {
+        code: civ, icon, ..
+    } in civs
+    {
         let path = format!("session/portraits/{icon}");
         let mut image =
             decode_png(&read(&ui.join(&path))?).map_err(|error| format!("{path}: {error}"))?;
@@ -268,10 +320,7 @@ fn run(mod_dir: &Path, output: &Path) -> Result<(), String> {
         written += bytes.len();
         properties.push((key, name));
     }
-    let fonts_dir = mod_dir
-        .parent()
-        .ok_or("the mod dir has no parent")?
-        .join("mod/fonts");
+    let fonts_dir = engine_mod.join("fonts");
     let mut faces = Vec::new();
     for (family, weight, file) in FONTS {
         let bytes = read(&fonts_dir.join(file))?;
@@ -357,7 +406,14 @@ fn put(
 
 /// (civ code, Identity/Icon) of every player template but the abstract
 /// ones, as `Templates.js` names a civ's `Emblem`.
-fn civ_emblems(mod_dir: &Path) -> Result<Vec<(String, String)>, String> {
+struct Civ {
+    code: String,
+    /// Under `session/portraits/`.
+    icon: String,
+    name: String,
+}
+
+fn civ_identities(mod_dir: &Path) -> Result<Vec<Civ>, String> {
     let dir = mod_dir.join(PLAYERS);
     let entries = fs::read_dir(&dir).map_err(|error| format!("{}: {error}", dir.display()))?;
     let mut emblems = Vec::new();
@@ -374,16 +430,24 @@ fn civ_emblems(mod_dir: &Path) -> Result<Vec<(String, String)>, String> {
             fs::read_to_string(&path).map_err(|error| format!("{}: {error}", path.display()))?;
         let document = roxmltree::Document::parse(&text)
             .map_err(|error| format!("{}: {error}", path.display()))?;
-        let icon = document
+        let identity = document
             .descendants()
-            .find(|node| node.has_tag_name("Identity"))
-            .and_then(|identity| identity.children().find(|node| node.has_tag_name("Icon")))
-            .and_then(|icon| icon.text());
-        if let Some(icon) = icon {
-            emblems.push((civ.to_string(), icon.trim().to_string()));
+            .find(|node| node.has_tag_name("Identity"));
+        let field = |name: &str| {
+            identity
+                .and_then(|identity| identity.children().find(|node| node.has_tag_name(name)))
+                .and_then(|node| node.text())
+                .map(|text| text.trim().to_string())
+        };
+        if let (Some(icon), Some(name)) = (field("Icon"), field("GenericName")) {
+            emblems.push(Civ {
+                code: civ.to_string(),
+                icon,
+                name,
+            });
         }
     }
-    emblems.sort();
+    emblems.sort_by(|a, b| a.code.cmp(&b.code));
     Ok(emblems)
 }
 

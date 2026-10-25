@@ -169,7 +169,8 @@
 //! defeated, 2 won), n x u8 stance towards player j (0 enemy, 1 ally, 2
 //! neutral), varint civ length, UTF-8 civ code (as in
 //! simulation/data/civs/), u8 battle (1 when `BattleDetection` reports
-//! one)}; index 0 is gaia.
+//! one)}, then varint ceasefire end in simulation ms (0: none); index 0 is
+//! gaia.
 //! A territory is varint width, varint height (both 0: none yet), then
 //! runs of {varint length, u8 tile} covering width * height tiles,
 //! row-major, x fastest. A tile is 8 m square, as `ICmpTerritoryManager`'s
@@ -275,7 +276,7 @@ use crate::feed::Economy;
 use crate::feed::Entity;
 use crate::feed::Icon;
 use crate::feed::Launch;
-use crate::feed::Player;
+use crate::feed::Players;
 use crate::feed::Sound;
 use crate::feed::SoundTarget;
 use crate::feed::TemplateDetails;
@@ -821,7 +822,7 @@ struct State {
     template_icons: HashMap<u32, u32>,
     /// Templates whose minimap colour is the owner's.
     player_color_templates: HashSet<u32>,
-    players: Vec<Player>,
+    players: Players,
     /// The next delta must carry the player table.
     players_changed: bool,
     territory: Option<Territory>,
@@ -896,7 +897,7 @@ impl Hub {
                 range_set_ids: HashMap::new(),
                 template_icons: HashMap::new(),
                 player_color_templates: HashSet::new(),
-                players: Vec::new(),
+                players: Players::default(),
                 players_changed: false,
                 territory: None,
                 territory_changed: false,
@@ -928,7 +929,7 @@ impl Hub {
         state.range_set_ids.clear();
         state.template_icons.clear();
         state.player_color_templates.clear();
-        state.players.clear();
+        state.players = Players::default();
         state.territory = None;
         state.economy.clear();
         state.sounds.clear();
@@ -998,7 +999,7 @@ impl Hub {
             .insert(template);
     }
 
-    pub fn set_players(&self, players: Vec<Player>) {
+    pub fn set_players(&self, players: Players) {
         let mut state = self.state.lock().unwrap();
         if state.players != players {
             state.players = players;
@@ -1293,7 +1294,7 @@ impl Hub {
                         variable_sets: state.variable_sets.unsent(),
                         range_sets: state.range_sets.unsent(),
                     },
-                    state.players_changed.then_some(&state.players[..]),
+                    state.players_changed.then_some(&state.players),
                     state
                         .territory_changed
                         .then_some(state.territory.as_ref())
@@ -1540,7 +1541,7 @@ fn encode_keyframe(
 fn encode_delta(
     turn: u32,
     new_tables: &Tables,
-    new_players: Option<&[Player]>,
+    new_players: Option<&Players>,
     new_territory: Option<&Territory>,
     ground: Option<&Ground>,
     previous: &BTreeMap<u32, Dot>,
@@ -2055,9 +2056,9 @@ fn write_icons(out: &mut Writer, icons: &[Icon]) {
     }
 }
 
-fn write_players(out: &mut Writer, players: &[Player]) {
-    out.varint(players.len() as u64);
-    for player in players {
+fn write_players(out: &mut Writer, players: &Players) {
+    out.varint(players.players.len() as u64);
+    for player in &players.players {
         out.varint(player.name.len() as u64);
         out.0.extend_from_slice(player.name.as_bytes());
         out.u32(0xFF00_0000 | player.color);
@@ -2068,6 +2069,7 @@ fn write_players(out: &mut Writer, players: &[Player]) {
         out.0.extend_from_slice(player.civ.as_bytes());
         out.u8(u8::from(player.battle));
     }
+    out.varint(u64::from(players.ceasefire_end));
 }
 
 /// Run-length coded: a territory is a few large areas of one value.

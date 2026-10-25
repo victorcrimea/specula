@@ -84,6 +84,19 @@ html, body { margin: 0; height: 100%; background: #0f1214; }
 #top-toggle::before { content: ""; position: absolute; left: 50%; top: 5px; width: 6px; height: 6px;
   translate: -50% 0; rotate: 225deg; border-right: 2px solid #e6e9eb; border-bottom: 2px solid #e6e9eb; }
 #top-panel.collapsed #top-toggle::before { top: 1px; rotate: 45deg; }
+/* diplomacyButton (top_panel/IconButtons/DiplomacyDialogButton.xml,
+   100%-254 4 100%-226 32) and, beside it, the diplomacy colours toggle,
+   which the engine has in the minimap panel and the dialog. */
+#top-buttons { position: absolute; right: 223px; top: 0; width: 60px; height: 36px;
+  transform: scale(var(--top-scale)); transform-origin: 100% 0; }
+#top-buttons > button { position: absolute; top: 4px; width: 28px; height: 28px; padding: 0;
+  border: 0; cursor: pointer; background-color: transparent;
+  background-size: 100% 100%; background-repeat: no-repeat; }
+#top-diplomacy { left: 0; background-image: var(--gui-diplomacy); }
+#diplomacy { left: 30px; background-image: var(--gui-diplomacy); }
+#diplomacy[aria-pressed="true"] { background-image: var(--gui-diplomacy-on); }
+#top-buttons > button:hover::after { content: ""; position: absolute; inset: 0;
+  background: rgb(42, 42, 42); mix-blend-mode: plus-lighter; pointer-events: none; }
 /* PanelEntities.xml: up to 19 iconButtons in a row, 50 px and a 1 px
    margin, under the controls rather than right under the bar. */
 #heroes { position: absolute; left: 2px; top: calc(var(--top-height) + 42px);
@@ -156,15 +169,15 @@ html, body { margin: 0; height: 100%; background: #0f1214; }
   var(--gui-panel-shader-top-edge) 0 0 / 100% 1px no-repeat; }
 /* The engine's `-stroke` fonts: a 1 px black outline. The top panel
    shares the text and bar styles. */
-:is(#details, #top-panel) .text { position: absolute; display: flex; align-items: center;
+:is(#details, #top-panel, #diplomacy-window) .text { position: absolute; display: flex; align-items: center;
   white-space: pre; overflow: hidden; line-height: 1.1;
   -webkit-text-stroke: 2px black; paint-order: stroke fill; }
-:is(#details, #top-panel) .center { justify-content: center; text-align: center; }
+:is(#details, #top-panel, #diplomacy-window) .center { justify-content: center; text-align: center; }
 :is(#details, #top-panel) .right { justify-content: flex-end; text-align: right; }
 :is(#details, #top-panel) .sans-stroke-12 { font-size: 12px; font-weight: 400; }
 :is(#details, #top-panel) .sans-stroke-14 { font-size: 14px; font-weight: 400; }
 :is(#details, #top-panel) .sans-bold-stroke-13 { font-size: 13px; font-weight: 700; }
-:is(#details, #top-panel) .sans-bold-stroke-14 { font-size: 14px; font-weight: 700; }
+:is(#details, #top-panel, #diplomacy-window) .sans-bold-stroke-14 { font-size: 14px; font-weight: 700; }
 :is(#details, #top-panel) .gold { color: var(--gui-gold); }
 /* A bar: barBorder around it, the background, the foreground and
    statsBarShaderHorizontal or ...Vertical over them. */
@@ -619,6 +632,62 @@ body:not([data-debug="storage"]) #stats-storage { display: none; }
   font: 13px system-ui, sans-serif; color: #e6e9eb;
   background: rgba(15, 18, 20, 0.9); border: 1px solid #3a4248; border-radius: 4px; }
 #match-over[hidden], #current[hidden] { display: none; }
+/* diplomacyDialogPanel (gui/session/diplomacy/DiplomacyDialog.xml) in the
+   ModernDialog sprite (gui/common/modern/sprites.xml); the wasm sets its
+   size. Narrow screens scroll the table rather than the page. */
+#diplomacy-window { position: fixed; left: 50%; top: 50%; translate: -50% -50%;
+  width: var(--dialog-width, 560px); height: var(--dialog-height, 170px);
+  max-width: calc(100vw - 32px);
+  font-family: "0ad sans", "0ad sans fallback", sans-serif; color: white;
+  user-select: none; -webkit-user-select: none; }
+#diplomacy-window[hidden], #diplomacy-window [hidden] { display: none; }
+#diplomacy-window > .frame { position: absolute; pointer-events: none; background-repeat: no-repeat; }
+#diplomacy-window > .background { left: 4px; top: 0; right: 4px; bottom: 4px;
+  background: var(--gui-dialog-background) 0 0 / 512px 512px repeat; }
+#diplomacy-window > .shade { left: 4px; right: 4px; height: 128px;
+  background-image: var(--gui-dialog-shadow); background-size: 100% 100%; }
+#diplomacy-window > .shade.top { top: 0; scale: -1 -1; }
+#diplomacy-window > .shade.bottom { bottom: 4px; }
+#diplomacy-window > .edge { left: 4px; right: 4px; height: 8px;
+  background: var(--gui-dialog-border) 0 0 / 2048px 8px repeat-x; }
+#diplomacy-window > .edge.top { top: -4px; }
+#diplomacy-window > .edge.bottom { bottom: 0; }
+#diplomacy-window > .deco { width: 64px; height: 32px; background-size: 100% 100%; }
+#diplomacy-window > .deco.top-left { left: -14px; top: -21px;
+  background-image: var(--gui-dialog-deco-top); scale: -1 1; }
+#diplomacy-window > .deco.top-right { right: -14px; top: -21px;
+  background-image: var(--gui-dialog-deco-top); }
+#diplomacy-window > .deco.bottom-left { left: -31px; bottom: -10px;
+  background-image: var(--gui-dialog-deco-bottom); scale: -1 1; }
+#diplomacy-window > .deco.bottom-right { right: -31px; bottom: -10px;
+  background-image: var(--gui-dialog-deco-bottom); }
+#diplomacy-window > .titlebar { top: -18px; height: 33px; background-size: 100% 100%; }
+#diplomacy-window > .titlebar.middle { left: calc(50% - 108px); width: 216px;
+  background: var(--gui-dialog-titlebar-middle) 0 0 / 128px 100% repeat-x; }
+#diplomacy-window > .titlebar.left { left: calc(50% - 134px); width: 32px;
+  background-image: var(--gui-dialog-titlebar-left); }
+#diplomacy-window > .titlebar.right { left: calc(50% + 102px); width: 32px;
+  background-image: var(--gui-dialog-titlebar-left); scale: -1 -1; }
+#diplomacy-title { left: calc(50% - 96px); top: -16px; width: 192px; height: 32px; }
+#diplomacy-table { position: absolute; left: 32px; right: 32px; top: 32px;
+  bottom: 90px; overflow-x: auto; overflow-y: hidden; }
+#diplomacy-header, #diplomacy-rows { position: absolute; left: 0;
+  width: calc(var(--dialog-width, 560px) - 64px); }
+#diplomacy-header { top: 0; height: 32px; }
+#diplomacy-header > .text { top: 0; height: 32px; align-items: flex-start; }
+#diplomacy-rows { top: calc(var(--rows-top, 64px) - 32px); bottom: 0; }
+#diplomacy-rows > .row { position: absolute; left: 0; right: 0; height: 20px; }
+#diplomacy-rows .text { top: 0; height: 20px; align-items: flex-start; }
+#diplomacy-rows .outcome { position: absolute; left: 0; top: 0; width: 25px; height: 20px;
+  background: center / contain no-repeat; }
+#diplomacy-header .swatch { width: 12px; height: 12px; margin-top: 2px;
+  box-shadow: 0 0 0 1px black; }
+#diplomacy-window .stone { background: var(--gui-stone-button) 0 0 / 100% 100%; }
+#diplomacy-window .stone.disabled { filter: brightness(0.75); }
+#diplomacy-ceasefire { left: 32px; right: 32px; bottom: 62px; height: 28px; align-items: flex-start; }
+#diplomacy-close { left: calc(50% + 100px); bottom: 22px; width: 128px; height: 28px;
+  padding: 0; border: 0; color: white; font-family: inherit; cursor: pointer; }
+#diplomacy-close:hover { background-image: var(--gui-stone-button-over); }
 #match-over button { font: inherit; color: #e6e9eb; background: rgba(15, 18, 20, 0.85);
   border: 1px solid #3a4248; border-radius: 4px; padding: 4px 8px; }
 #match-over :disabled { opacity: 0.5; }
@@ -700,6 +769,10 @@ body:not([data-debug="storage"]) #stats-storage { display: none; }
 <div id="top-counters"></div>
 <div id="top-players" hidden></div>
 </div>
+<div id="top-buttons">
+<button id="top-diplomacy" type="button" aria-label="Diplomacy" data-tooltip="Diplomacy" data-i18n-attrs="aria-label data-tooltip"></button>
+<button id="diplomacy" type="button" aria-pressed="false" aria-label="Diplomacy colours" data-tooltip="Toggle Diplomacy Colors" data-tooltip-style="sessionToolTipBottom" data-i18n-attrs="aria-label data-tooltip"></button>
+</div>
 </div>
 <button id="top-toggle" type="button" aria-expanded="true" aria-controls="top-bar" aria-label="Fold the top panel"></button>
 <div id="heroes"></div>
@@ -707,7 +780,7 @@ body:not([data-debug="storage"]) #stats-storage { display: none; }
 <div id="controls">
 <button id="menu-open" type="button" aria-expanded="false" aria-controls="controls" data-i18n>Menu</button>
 <button id="settings-open" type="button" aria-expanded="false" aria-controls="settings" data-i18n>Settings</button>
-<button id="diplomacy" type="button" aria-pressed="false" data-i18n>Diplomacy colours</button>
+<button id="diplomacy-open" type="button" data-i18n>Diplomacy</button>
 <select id="perspective" aria-label="Perspective" data-i18n-attrs="aria-label">
 <option value="0" data-i18n>Observer</option>
 </select>
@@ -842,6 +915,20 @@ body:not([data-debug="storage"]) #stats-storage { display: none; }
 <button id="match-over-current" type="button" disabled data-i18n>Current match</button>
 <button id="match-over-close" type="button" aria-label="Close" data-i18n-attrs="aria-label">x</button>
 </div>
+<div id="diplomacy-window" role="dialog" aria-labelledby="diplomacy-title" hidden>
+<span class="frame background"></span><span class="frame shade top"></span><span class="frame shade bottom"></span>
+<span class="frame edge top"></span><span class="frame edge bottom"></span>
+<span class="frame deco top-left"></span><span class="frame deco top-right"></span>
+<span class="frame deco bottom-left"></span><span class="frame deco bottom-right"></span>
+<span class="frame titlebar middle"></span><span class="frame titlebar left"></span><span class="frame titlebar right"></span>
+<div id="diplomacy-title" class="text center sans-bold-stroke-14"></div>
+<div id="diplomacy-table">
+<div id="diplomacy-header"></div>
+<div id="diplomacy-rows"></div>
+</div>
+<div id="diplomacy-ceasefire" class="text sans-bold-stroke-14" hidden></div>
+<button id="diplomacy-close" type="button" class="text center sans-bold-stroke-14 stone"></button>
+</div>
 <div id="settings" role="dialog" aria-labelledby="settings-title" inert>
 <div id="settings-head">
 <h2 id="settings-title" data-i18n>Settings</h2>
@@ -932,6 +1019,11 @@ body:not([data-debug="storage"]) #stats-storage { display: none; }
 </select></label>
 <h3 data-i18n>Tooltips</h3>
 <label data-i18n>Detailed tooltips <select id="detailed-tooltips">
+<option value="0" selected data-i18n>Off</option>
+<option value="1" data-i18n>On</option>
+</select></label>
+<h3 data-i18n>Status bars</h3>
+<label data-i18n>Show all status bars <select id="status-bars">
 <option value="0" selected data-i18n>Off</option>
 <option value="1" data-i18n>On</option>
 </select></label>
@@ -1090,9 +1182,9 @@ settings.</p>
   }
   // Each control's own change handler applies and saves it, so a preset
   // only sets values. Document order puts a parent before its dependents,
-  // so Max enables them before it reaches them. Projectiles, range
-  // overlays and tooltips show what happens rather than how well it is
-  // drawn, so no preset touches them.
+  // so Max enables them before it reaches them. Projectiles, status bars,
+  // range overlays and tooltips show what happens rather than how well it
+  // is drawn, so no preset touches them.
   // Fog hides the far side of the map, which a maximalist wants to see.
   // Balanced takes each control's data-balanced, chosen from benchmark
   // runs for the look per frame time; the benchmark reads them too.
@@ -1101,7 +1193,7 @@ settings.</p>
     const pane = document.getElementById("pane-quality");
     for (const control of pane.querySelectorAll("select, input[type=range]")) {
       if (control.id === "projectiles" || control.id.startsWith("ranges-") ||
-          control.id === "detailed-tooltips") continue;
+          control.id === "detailed-tooltips" || control.id === "status-bars") continue;
       if (preset === "balanced") {
         const value = control.dataset.balanced;
         if (value === undefined) continue;

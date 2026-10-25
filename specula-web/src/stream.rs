@@ -429,6 +429,9 @@ pub struct Scene {
     pub icons: Vec<Icon>,
     /// Index 0 is gaia.
     pub players: Vec<Player>,
+    /// When the ceasefire ends, in simulation ms (a turn is `TURN_MS`); 0
+    /// for none. It travels with the player table.
+    pub ceasefire_end: u32,
     /// Set whenever a message replaces `players`; the reader clears it.
     pub players_changed: bool,
     pub territory: Territory,
@@ -839,6 +842,7 @@ impl Scene {
                 battle,
             });
         }
+        self.ceasefire_end = cursor.varint()? as u32;
         self.players_changed = true;
         Ok(())
     }
@@ -909,6 +913,7 @@ impl Scene {
             out.0.extend_from_slice(player.civ.as_bytes());
             out.u8(u8::from(player.battle));
         }
+        out.varint(u64::from(self.ceasefire_end));
         out.varint(u64::from(self.territory.width));
         out.varint(u64::from(self.territory.height));
         for run in self.territory.tiles.chunk_by(|a, b| a == b) {

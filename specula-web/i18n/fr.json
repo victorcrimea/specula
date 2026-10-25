@@ -32,6 +32,8 @@
   "Sky": "Ciel",
   "Projectiles": "Projectiles",
   "Tooltips": "Infobulles",
+  "Status bars": "Barres d'état",
+  "Show all status bars": "Afficher toutes les barres d'état",
   "Range overlays": "Zones de portée",
   "Attack ranges (Alt+C)": "Portées d'attaque (Alt+C)",
   "Aura ranges (Alt+V)": "Portées d'aura (Alt+V)",

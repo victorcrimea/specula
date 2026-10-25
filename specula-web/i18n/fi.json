@@ -32,6 +32,8 @@
   "Sky": "Taivas",
   "Projectiles": "Ammukset",
   "Tooltips": "Vihjeet",
+  "Status bars": "Tilapalkit",
+  "Show all status bars": "Näytä kaikki tilapalkit",
   "Range overlays": "Kantamanäkymät",
   "Attack ranges (Alt+C)": "Hyökkäyksen kantama (Alt+C)",
   "Aura ranges (Alt+V)": "Auran kantama (Alt+V)",

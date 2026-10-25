@@ -5,6 +5,7 @@ mod blend;
 mod command_row;
 mod detail;
 mod diplomacy;
+mod diplomacy_window;
 mod far;
 mod field;
 mod gpu;
@@ -48,6 +49,7 @@ use std::rc::Rc;
 use specula_assets::files::MusicKind;
 use specula_assets::files::TEXTURE_TIER_SIDES;
 use wasm_bindgen::JsCast;
+use wasm_bindgen::JsValue;
 use wasm_bindgen::closure::Closure;
 use wasm_bindgen::prelude::wasm_bindgen;
 use wasm_bindgen_futures::JsFuture;
@@ -75,6 +77,7 @@ use crate::bench::BenchInfo;
 use crate::bench::CameraPose;
 use crate::detail::Details;
 use crate::diplomacy::Perspective;
+use crate::diplomacy_window::DiplomacyWindow;
 use crate::field::Field;
 use crate::icons::IconAtlas;
 use crate::minimap::Minimap;
@@ -156,6 +159,9 @@ const PROJECTILES_SETTINGS_KEY: &str = "specula.projectiles";
 /// localStorage key of the detailed tooltips setting, the engine's
 /// showdetailedtooltips: 0 off, 1 on.
 const DETAILED_TOOLTIPS_SETTINGS_KEY: &str = "specula.detailedtooltips";
+/// localStorage key of the status bars setting, the engine's
+/// `g_ShowAllStatusBars`: 0 off, 1 on.
+const STATUS_BARS_SETTINGS_KEY: &str = "specula.statusbars";
 /// localStorage keys of the attack, aura and heal range overlays, in that
 /// order: 0 off, 1 on.
 const RANGES_SETTINGS_KEYS: [&str; 3] = [
@@ -224,6 +230,9 @@ trait View {
     }
     /// Whether to draw projectiles, where it draws any.
     fn set_projectiles(&mut self, _on: bool) {}
+    /// Whose on-screen entities show their status bars too, where it draws
+    /// any; `None` for only the selected and highlighted ones.
+    fn set_all_status_bars(&mut self, _shown: Option<Perspective>) {}
     /// Whether the attack, aura and heal range overlays are drawn, where it
     /// draws any. Its own keys toggle them too, hence the getter.
     fn set_ranges(&mut self, _ranges: [bool; 3]) {}
@@ -452,6 +461,8 @@ struct App {
     terrain_image: Option<(u64, TerrainImage)>,
     diplomacy_colors: bool,
     perspective: Perspective,
+    /// The status bars setting, which follows the perspective.
+    all_status_bars: bool,
     /// The displayed colour of each player id.
     palette: Vec<u32>,
     diplomacy_button: HtmlButtonElement,
@@ -489,6 +500,8 @@ struct App {
     details_index: bool,
     /// Only the 3D page has the top panel.
     top: Option<TopPanel>,
+    /// Only the 3D page has the diplomacy window.
+    diplomacy_window: Option<DiplomacyWindow>,
     /// A turn, the palette or the perspective changed since it was filled;
     /// the portrait index is compared.
     top_dirty: bool,
@@ -698,6 +711,13 @@ impl App {
         }
         self.follow_selection();
         self.update_top(now);
+        if let Some(diplomacy_window) = &mut self.diplomacy_window {
+            diplomacy_window.update(&diplomacy_window::View {
+                scene: &self.scene,
+                palette: &self.palette,
+                perspective: self.perspective,
+            });
+        }
         // The frame moves from the turn before the scene's to the scene's.
         if let Some(details) = &mut self.details
             && !self.renderer.selected().is_empty()
@@ -967,6 +987,8 @@ impl App {
     fn update_palette(&mut self) {
         self.palette =
             diplomacy::palette(&self.scene.players, self.diplomacy_colors, self.perspective);
+        self.renderer
+            .set_all_status_bars(self.all_status_bars.then_some(self.perspective));
         self.scene_changed = true;
     }
 }
@@ -1099,6 +1121,15 @@ async fn run(
             .inspect_err(|error| web_sys::console::error_1(&format!("top panel: {error}").into()))
             .ok(),
     };
+    let diplomacy_window = match page {
+        Page::Map => None,
+        // An older page has no diplomacy window; the match still shows.
+        Page::Observer => DiplomacyWindow::new(&document)
+            .inspect_err(|error| {
+                web_sys::console::error_1(&format!("diplomacy window: {error}").into())
+            })
+            .ok(),
+    };
     let tooltips = match page {
         Page::Map => None,
         // An older page has no tooltip box; the panels still show.
@@ -1136,6 +1167,7 @@ async fn run(
         terrain_image: None,
         diplomacy_colors: false,
         perspective: Perspective::Observer,
+        all_status_bars: false,
         palette: Vec::new(),
         diplomacy_button,
         perspective_select,
@@ -1172,6 +1204,7 @@ async fn run(
         details_selected: Vec::new(),
         details_index: false,
         top,
+        diplomacy_window,
         top_dirty: true,
         top_index: false,
         ranges: None,
@@ -1182,6 +1215,7 @@ async fn run(
     wire_controls(&app);
     wire_details(&app);
     wire_top(&app);
+    wire_diplomacy_window(&app, &window);
     if page == Page::Observer {
         let shadows: HtmlSelectElement = element(&document, "shadows")?;
         wire_shadows(&app, shadows.clone());
@@ -1319,6 +1353,7 @@ async fn run(
         );
         wire_projectiles(&app, element(&document, "projectiles")?);
         wire_detailed_tooltips(&app, element(&document, "detailed-tooltips")?);
+        wire_status_bars(&app, element(&document, "status-bars")?);
         wire_ranges(
             &app,
             [
@@ -1431,6 +1466,75 @@ fn apply_request(renderer: &mut dyn View, request: Request, scene: &Scene) {
 
 /// A hero button selects its entity, with Shift (selection.add) adds it,
 /// and on a double click also follows it with the camera.
+/// The buttons that open the window (`#diplomacy-open` in the controls,
+/// `#top-diplomacy` in the top bar, as `diplomacyButton`), its Close, and
+/// the engine's session.gui.diplomacy.toggle (Ctrl+H); Escape closes it,
+/// as `closeOpenDialogs`.
+fn wire_diplomacy_window(app: &Rc<RefCell<App>>, window: &web_sys::Window) {
+    let Some(close) = app
+        .borrow()
+        .diplomacy_window
+        .as_ref()
+        .map(|diplomacy_window| diplomacy_window.close_button().clone())
+    else {
+        return;
+    };
+    let set = |app: &Rc<RefCell<App>>, open: Option<bool>| {
+        if let Some(diplomacy_window) = &mut app.borrow_mut().diplomacy_window {
+            let open = open.unwrap_or(!diplomacy_window.is_open());
+            diplomacy_window.set_open(open);
+        }
+    };
+    let target = Rc::clone(app);
+    on_click(&close, move || set(&target, Some(false)));
+    let Some(document) = window.document() else {
+        return;
+    };
+    for id in ["diplomacy-open", "top-diplomacy"] {
+        // An older page lacks either; the window still opens by key.
+        if let Ok(button) = element::<HtmlElement>(&document, id) {
+            let target = Rc::clone(app);
+            on_click(&button, move || set(&target, None));
+        }
+    }
+    let target = Rc::clone(app);
+    let on_key = Closure::<dyn FnMut(web_sys::Event)>::new(move |event: web_sys::Event| {
+        let text = |object: &JsValue, name: &str| {
+            js_sys::Reflect::get(object, &name.into())
+                .ok()
+                .and_then(|value| value.as_string())
+                .unwrap_or_default()
+        };
+        let flag = |name: &str| {
+            js_sys::Reflect::get(&event, &name.into()).is_ok_and(|value| value.is_truthy())
+        };
+        let tag = event
+            .target()
+            .map(|element| text(&element, "tagName"))
+            .unwrap_or_default();
+        if matches!(tag.as_str(), "INPUT" | "SELECT" | "TEXTAREA")
+            || flag("altKey")
+            || flag("metaKey")
+        {
+            return;
+        }
+        match text(&event, "code").as_str() {
+            "KeyH" if flag("ctrlKey") && !flag("shiftKey") => {
+                // The browser's history panel would take it otherwise.
+                event.prevent_default();
+                if !flag("repeat") {
+                    set(&target, None);
+                }
+            }
+            "Escape" if !flag("ctrlKey") && !flag("shiftKey") => set(&target, Some(false)),
+            _ => {}
+        }
+    });
+    let _ = window.add_event_listener_with_callback("keydown", on_key.as_ref().unchecked_ref());
+    // The window lives as long as the page, so its handler does too.
+    on_key.forget();
+}
+
 fn wire_top(app: &Rc<RefCell<App>>) {
     let buttons = {
         let app = app.borrow();
@@ -1567,6 +1671,37 @@ fn wire_detailed_tooltips(app: &Rc<RefCell<App>>, select: HtmlSelectElement) {
     });
 }
 
+/// The status bars list, kept across visits; off unless turned on, as the
+/// game starts.
+fn wire_status_bars(app: &Rc<RefCell<App>>, select: HtmlSelectElement) {
+    let saved = web_sys::window()
+        .and_then(|window| window.local_storage().ok().flatten())
+        .and_then(|storage| storage.get_item(STATUS_BARS_SETTINGS_KEY).ok().flatten())
+        .is_some_and(|text| text == "1");
+    select.set_value(if saved { "1" } else { "0" });
+    {
+        let app = &mut *app.borrow_mut();
+        app.all_status_bars = saved;
+        app.update_palette();
+    }
+
+    let target = Rc::clone(app);
+    let list = select.clone();
+    on_change(&select, move || {
+        let on = list.value() == "1";
+        // Best effort: without storage the choice lasts only this visit.
+        if let Some(storage) =
+            web_sys::window().and_then(|window| window.local_storage().ok().flatten())
+        {
+            let _ = storage.set_item(STATUS_BARS_SETTINGS_KEY, if on { "1" } else { "0" });
+        }
+        let app = &mut *target.borrow_mut();
+        app.all_status_bars = on;
+        app.update_palette();
+        app.dirty = true;
+    });
+}
+
 /// The range overlay lists, kept across visits; on unless turned off, as the
 /// game's defaults. Alt+C, Alt+V and Alt+B change them too, which
 /// `RangeControls::show` brings back to the lists each frame.
@@ -1662,6 +1797,9 @@ fn wire_language(app: &Rc<RefCell<App>>, select: HtmlSelectElement) {
                     if let Ok(mut app) = app.try_borrow_mut() {
                         app.details_dirty = true;
                         app.top_dirty = true;
+                        if let Some(diplomacy_window) = &mut app.diplomacy_window {
+                            diplomacy_window.invalidate();
+                        }
                         app.dirty = true;
                     }
                 });

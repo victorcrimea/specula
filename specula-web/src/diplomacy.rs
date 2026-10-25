@@ -10,9 +10,9 @@ use crate::stream::Stance;
 // The defaults of [gui.session.diplomacycolors] in default.cfg; a viewer has
 // no user config to override them.
 const SELF: u32 = 0xFF15_3795;
-const ALLY: u32 = 0xFF56_B41F;
-const NEUTRAL: u32 = 0xFFE7_C805;
-const ENEMY: u32 = 0xFF96_1414;
+pub(crate) const ALLY: u32 = 0xFF56_B41F;
+pub(crate) const NEUTRAL: u32 = 0xFFE7_C805;
+pub(crate) const ENEMY: u32 = 0xFF96_1414;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Perspective {

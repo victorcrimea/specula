@@ -32,6 +32,8 @@
   "Sky": "空",
   "Projectiles": "飛び道具",
   "Tooltips": "ツールチップ",
+  "Status bars": "ステータスバー",
+  "Show all status bars": "すべてのステータスバーを表示",
   "Range overlays": "射程表示",
   "Attack ranges (Alt+C)": "攻撃射程 (Alt+C)",
   "Aura ranges (Alt+V)": "オーラ射程 (Alt+V)",

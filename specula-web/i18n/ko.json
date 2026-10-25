@@ -32,6 +32,8 @@
   "Sky": "하늘",
   "Projectiles": "투사체",
   "Tooltips": "툴팁",
+  "Status bars": "상태 표시줄",
+  "Show all status bars": "모든 상태 표시줄 표시",
   "Range overlays": "사거리 표시",
   "Attack ranges (Alt+C)": "공격 사거리 (Alt+C)",
   "Aura ranges (Alt+V)": "오라 사거리 (Alt+V)",

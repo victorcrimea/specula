@@ -32,6 +32,8 @@
   "Sky": "Небо",
   "Projectiles": "Снаряды",
   "Tooltips": "Подсказки",
+  "Status bars": "Полосы состояния",
+  "Show all status bars": "Показывать все полосы состояния",
   "Range overlays": "Радиусы действия",
   "Attack ranges (Alt+C)": "Дальность атаки (Alt+C)",
   "Aura ranges (Alt+V)": "Дальность аур (Alt+V)",
