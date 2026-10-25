@@ -85,16 +85,13 @@ html, body { margin: 0; height: 100%; background: #0f1214; }
   translate: -50% 0; rotate: 225deg; border-right: 2px solid #e6e9eb; border-bottom: 2px solid #e6e9eb; }
 #top-panel.collapsed #top-toggle::before { top: 1px; rotate: 45deg; }
 /* diplomacyButton (top_panel/IconButtons/DiplomacyDialogButton.xml,
-   100%-254 4 100%-226 32) and, beside it, the diplomacy colours toggle,
-   which the engine has in the minimap panel and the dialog. */
-#top-buttons { position: absolute; right: 223px; top: 0; width: 60px; height: 36px;
+   100%-254 4 100%-226 32). */
+#top-buttons { position: absolute; right: 226px; top: 0; width: 28px; height: 36px;
   transform: scale(var(--top-scale)); transform-origin: 100% 0; }
 #top-buttons > button { position: absolute; top: 4px; width: 28px; height: 28px; padding: 0;
   border: 0; cursor: pointer; background-color: transparent;
   background-size: 100% 100%; background-repeat: no-repeat; }
 #top-diplomacy { left: 0; background-image: var(--gui-diplomacy); }
-#diplomacy { left: 30px; background-image: var(--gui-diplomacy); }
-#diplomacy[aria-pressed="true"] { background-image: var(--gui-diplomacy-on); }
 #top-buttons > button:hover::after { content: ""; position: absolute; inset: 0;
   background: rgb(42, 42, 42); mix-blend-mode: plus-lighter; pointer-events: none; }
 /* PanelEntities.xml: up to 19 iconButtons in a row, 50 px and a 1 px
@@ -142,6 +139,17 @@ html, body { margin: 0; height: 100%; background: #0f1214; }
   background: var(--gui-minimap-circle) 0 0 / 100% 100%; pointer-events: none; }
 #minimap { position: absolute; left: 8px; top: 10px; width: 184px; height: 184px;
   cursor: pointer; touch-action: none; }
+/* diplomacyColorsButton (3 100%-121 118 100%-6). The engine takes clicks
+   only where its texture is opaque, the corner outside the map's circle;
+   the clip, a circle about the texture's top right corner, does the same
+   so a click on the map under the rest still reaches the map. */
+#diplomacy { position: absolute; left: 3px; top: 83px; width: 115px; height: 115px;
+  padding: 0; border: 0; cursor: pointer; touch-action: none;
+  background: var(--gui-minimap-diplomacy-off) 0 0 / 100% 100% no-repeat;
+  clip-path: path(evenodd, "M0 0H115V115H0Z M236 0A121 121 0 1 0 -6 0A121 121 0 1 0 236 0Z"); }
+#diplomacy:hover { background-image: var(--gui-minimap-diplomacy-off-highlight); }
+#diplomacy[aria-pressed="true"] { background-image: var(--gui-minimap-diplomacy-on); }
+#diplomacy[aria-pressed="true"]:hover { background-image: var(--gui-minimap-diplomacy-on-highlight); }
 /* selectionDetails, 50%-114 of the bottom bar, with the command row
    (unit_commands.xml) in its bottom 40 px. */
 #details { position: fixed; left: calc(50% - 114px); bottom: var(--panel-bottom);
@@ -788,7 +796,6 @@ body:not([data-debug="storage"]) #stats-storage { display: none; }
 </div>
 <div id="top-buttons">
 <button id="top-diplomacy" type="button" aria-label="Diplomacy" data-tooltip="Diplomacy" data-i18n-attrs="aria-label data-tooltip"></button>
-<button id="diplomacy" type="button" aria-pressed="false" aria-label="Diplomacy colours" data-tooltip="Toggle Diplomacy Colors" data-tooltip-style="sessionToolTipBottom" data-i18n-attrs="aria-label data-tooltip"></button>
 </div>
 </div>
 <button id="top-toggle" type="button" aria-expanded="true" aria-controls="top-bar" aria-label="Fold the top panel"></button>
@@ -814,6 +821,7 @@ body:not([data-debug="storage"]) #stats-storage { display: none; }
 <div id="minimap-background"></div>
 <div id="minimap-circle"></div>
 <canvas id="minimap" aria-label="Minimap" data-i18n-attrs="aria-label"></canvas>
+<button id="diplomacy" type="button" aria-pressed="false" aria-label="Diplomacy colours" data-tooltip="Toggle Diplomacy Colors" data-tooltip-style="sessionToolTipBottom" data-i18n-attrs="aria-label data-tooltip"></button>
 <button id="minimap-toggle" type="button" aria-expanded="true" aria-label="Fold the minimap"></button>
 <span class="edge top"></span><span class="edge right"></span><span class="edge bottom"></span><span class="edge left"></span>
 <span class="edge corner top-right"></span><span class="edge corner bottom-right"></span><span class="edge corner bottom-left"></span><span class="edge corner top-left"></span>
