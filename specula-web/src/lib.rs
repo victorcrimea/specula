@@ -36,6 +36,7 @@ mod tips;
 mod tooltip;
 mod top;
 mod unit;
+mod usage;
 mod variation;
 mod warmup;
 mod water;
@@ -440,6 +441,7 @@ impl LoadingBar {
 }
 
 struct App {
+    page: Page,
     canvas: HtmlCanvasElement,
     renderer: Box<dyn View>,
     minimap: Option<Minimap>,
@@ -703,6 +705,14 @@ impl App {
     /// `now` is the requestAnimationFrame timestamp in milliseconds.
     fn frame(&mut self, now: f64) {
         let start = page_now();
+        usage::frame(
+            now,
+            match (self.page, self.live) {
+                (Page::Map, _) => "map",
+                (Page::Observer, true) => "live",
+                (Page::Observer, false) => "replay",
+            },
+        );
         let mut drew = false;
         let (width, height, ratio) = canvas_size(&self.canvas, self.renderer.max_size());
         if width != self.canvas.width() || height != self.canvas.height() {
@@ -1099,6 +1109,7 @@ pub fn page_main(glue_url: String, wasm_url: String, icons_url: Option<String>) 
     let icons_url = icons_url.unwrap_or_else(|| "/icons.bin".to_string());
     wasm_bindgen_futures::spawn_local(async move {
         if let Err(error) = run(Page::Map, glue_url, wasm_url, icons_url, None).await {
+            usage::fail(&error);
             web_sys::console::error_1(&error.into());
         }
     });
@@ -1130,6 +1141,7 @@ pub fn observer_main(
         )
         .await
         {
+            usage::fail(&error);
             web_sys::console::error_1(&error.into());
         }
     });
@@ -1156,6 +1168,7 @@ async fn run(
     selection_url: Option<String>,
 ) -> Result<(), String> {
     let window = web_sys::window().ok_or("no window")?;
+    usage::start();
     let canvas: HtmlCanvasElement = window
         .document()
         .and_then(|document| document.get_element_by_id("view"))
@@ -1257,6 +1270,7 @@ async fn run(
         .map_err(|_| "cannot start the stream worker")?;
 
     let app = Rc::new(RefCell::new(App {
+        page,
         canvas,
         renderer,
         minimap,

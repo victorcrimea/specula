@@ -5,6 +5,7 @@ mod feed;
 mod history;
 mod observer;
 mod terrain;
+mod usage;
 mod view;
 mod web;
 mod wire;
@@ -25,6 +26,7 @@ use rocket::fairing::AdHoc;
 use rocket::fs::FileServer;
 use rocket::futures::SinkExt;
 use rocket::futures::StreamExt;
+use rocket::http::CookieJar;
 use rocket::http::Header;
 use rocket::tokio::sync::broadcast::Receiver;
 use rocket::tokio::sync::broadcast::error::RecvError;
@@ -36,6 +38,7 @@ use crate::delta::DeltaMeter;
 use crate::feed::Record;
 use crate::history::History;
 use crate::terrain::Ground;
+use crate::usage::Usage;
 use crate::view::Hub;
 use crate::view::Message;
 
@@ -47,8 +50,10 @@ const DEFAULT_DELAY_SECS: u64 = 120;
 const DEFAULT_HISTORY_DIR: &str = "history";
 /// About 70 one-hour 1v1s or 20 large 4v4s.
 const DEFAULT_HISTORY_LIMIT: u64 = 1 << 30;
+/// Relative to the working directory, as `WEB_ROOT`.
+const DEFAULT_USAGE_DIR: &str = "usage";
 const USAGE: &str = "usage: specula-server [SOCKET] [--observe HOST:PORT] [--delay SECONDS] \
-                     [--history DIR] [--history-limit SIZE]";
+                     [--history DIR] [--history-limit SIZE] [--usage DIR] [--stats-key KEY]";
 /// Relative to the working directory, so the server runs from the repo root.
 pub const WEB_ROOT: &str = "specula-web";
 
@@ -60,6 +65,8 @@ async fn main() {
         delay,
         history_dir,
         history_limit,
+        usage_dir,
+        stats_key,
     } = match parse_args() {
         Ok(args) => args,
         Err(error) => {
@@ -100,6 +107,20 @@ async fn main() {
         }
     };
 
+    let usage = match Usage::open(usage_dir.clone(), stats_key) {
+        Ok(usage) => {
+            println!("{}", usage.summary());
+            Arc::new(usage)
+        }
+        Err(error) => {
+            eprintln!(
+                "cannot open the usage log in {}: {error}",
+                usage_dir.display()
+            );
+            std::process::exit(1);
+        }
+    };
+
     let hub = Arc::new(Hub::new(delay, history));
     let publisher_hub = Arc::clone(&hub);
     std::thread::spawn(move || publisher_hub.run_publisher());
@@ -116,6 +137,7 @@ async fn main() {
 
     let result = rocket::build()
         .manage(hub)
+        .manage(usage)
         .manage(web::Pkg::default())
         .manage(web::AssetsSize::default())
         .manage(web::AtlasVersions::default())
@@ -129,6 +151,8 @@ async fn main() {
                 segment_file,
                 detail_segment_file,
                 match_info,
+                beat,
+                stats,
                 web::index,
                 web::page,
                 web::pkg_file,
@@ -183,9 +207,15 @@ fn accept_observers(listener: UnixListener, hub: &Hub) {
 }
 
 #[rocket::get("/ws")]
-fn viewer(socket: WebSocket, hub: &State<Arc<Hub>>) -> Channel<'static> {
+fn viewer(
+    socket: WebSocket,
+    hub: &State<Arc<Hub>>,
+    usage: &State<Arc<Usage>>,
+    cookies: &CookieJar<'_>,
+) -> Channel<'static> {
     let hub = Arc::clone(hub);
-    relay(socket, move || hub.subscribe())
+    let watch = usage.watch(cookies);
+    relay(socket, watch, move || hub.subscribe())
 }
 
 /// The detail stream, which viewers hold open only while they have
@@ -193,15 +223,18 @@ fn viewer(socket: WebSocket, hub: &State<Arc<Hub>>) -> Channel<'static> {
 #[rocket::get("/detail")]
 fn detail_viewer(socket: WebSocket, hub: &State<Arc<Hub>>) -> Channel<'static> {
     let hub = Arc::clone(hub);
-    relay(socket, move || hub.subscribe_detail())
+    relay(socket, (), move || hub.subscribe_detail())
 }
 
+/// `held` is dropped when the stream closes.
 fn relay(
     socket: WebSocket,
+    held: impl Send + 'static,
     subscribe: impl Fn() -> (Vec<Message>, Receiver<Message>) + Send + 'static,
 ) -> Channel<'static> {
     socket.channel(move |mut stream| {
         Box::pin(async move {
+            let _held = held;
             let (mut first, mut receiver) = subscribe();
             loop {
                 for message in first.drain(..) {
@@ -244,8 +277,14 @@ fn detail_segment_file(id: &str, index: usize, hub: &State<Arc<Hub>>) -> Option<
 
 /// "<segments> <live 0|1>", as `view.rs` describes.
 #[rocket::get("/match/<id>/info")]
-fn match_info(id: &str, hub: &State<Arc<Hub>>) -> Option<MatchInfo> {
+fn match_info(
+    id: &str,
+    hub: &State<Arc<Hub>>,
+    usage: &State<Arc<Usage>>,
+    cookies: &CookieJar<'_>,
+) -> Option<MatchInfo> {
     let (segments, live) = hub.match_info(u64::from_str_radix(id, 16).ok()?)?;
+    usage.replay(cookies, id);
     Some(MatchInfo(
         format!("{segments} {}", u8::from(live)),
         // The open match grows a segment every 30 s.
@@ -256,6 +295,24 @@ fn match_info(id: &str, hub: &State<Arc<Hub>>) -> Option<MatchInfo> {
 #[derive(rocket::Responder)]
 #[response(content_type = "text")]
 struct MatchInfo(String, Header<'static>);
+
+/// The client's heartbeat, a `sendBeacon` from `usage.rs` there.
+#[rocket::post("/beat", data = "<body>")]
+fn beat(body: String, usage: &State<Arc<Usage>>, cookies: &CookieJar<'_>) {
+    usage.beat(cookies, &body);
+}
+
+/// For the operator only: 404 unless `key` is `--stats-key`.
+#[rocket::get("/stats?<key>")]
+fn stats(key: Option<&str>, usage: &State<Arc<Usage>>) -> Option<MatchInfo> {
+    usage.authorized(key).then(|| {
+        MatchInfo(
+            usage.report(),
+            // Nor kept by Cloudflare, which would show it without the key.
+            Header::new("Cache-Control", "no-store"),
+        )
+    })
+}
 
 fn segment_bytes((bytes, closed): (Message, bool)) -> Option<SegmentBytes> {
     // The match id is in the URL, so a closed segment never changes; the
@@ -275,16 +332,20 @@ struct Args {
     history_dir: PathBuf,
     /// 0: no history.
     history_limit: u64,
+    usage_dir: PathBuf,
+    stats_key: Option<String>,
 }
 
 /// `[SOCKET] [--observe HOST:PORT] [--delay SECONDS] [--history DIR]
-/// [--history-limit SIZE]`, in any order.
+/// [--history-limit SIZE] [--usage DIR] [--stats-key KEY]`, in any order.
 fn parse_args() -> Result<Args, String> {
     let mut socket = None;
     let mut observe = None;
     let mut delay = Duration::from_secs(DEFAULT_DELAY_SECS);
     let mut history_dir = PathBuf::from(DEFAULT_HISTORY_DIR);
     let mut history_limit = DEFAULT_HISTORY_LIMIT;
+    let mut usage_dir = PathBuf::from(DEFAULT_USAGE_DIR);
+    let mut stats_key = None;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         if arg == "--delay" {
@@ -300,6 +361,11 @@ fn parse_args() -> Result<Args, String> {
             history_limit = history::parse_size(&size).ok_or_else(|| {
                 format!("--history-limit {size}: expected bytes or a size such as 500M or 1G")
             })?;
+        } else if arg == "--usage" {
+            usage_dir = args.next().ok_or("--usage needs DIR")?.into();
+        } else if arg == "--stats-key" {
+            let key = args.next().filter(|key| !key.is_empty());
+            stats_key = Some(key.ok_or("--stats-key needs KEY")?);
         } else if arg == "--observe" {
             let target = args.next().ok_or("--observe needs HOST:PORT")?;
             let (host, port) = target
@@ -319,6 +385,8 @@ fn parse_args() -> Result<Args, String> {
         delay,
         history_dir,
         history_limit,
+        usage_dir,
+        stats_key,
     })
 }
 

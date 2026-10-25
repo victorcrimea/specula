@@ -123,6 +123,7 @@ use crate::unit::cross;
 use crate::unit::frustum_planes;
 use crate::unit::look_at;
 use crate::unit::multiply;
+use crate::usage;
 use crate::variation;
 use crate::variation::Model;
 use crate::variation::ModelAnimation;
@@ -4781,6 +4782,12 @@ impl Field {
         let times = timing::take();
         let gpu_measured = self.timer.measures_gpu();
         let done_measured = stats.backend == "WebGPU";
+        usage::record(
+            stats.backend,
+            rate,
+            times.frame.average(),
+            times.gpu.average().filter(|_| gpu_measured),
+        );
         let ms = |span: timing::Span, measured: bool| {
             if !measured {
                 "n/a".to_string()

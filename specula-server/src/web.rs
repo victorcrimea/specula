@@ -40,6 +40,7 @@ use rocket::Response;
 use rocket::State;
 use rocket::fs::NamedFile;
 use rocket::http::ContentType;
+use rocket::http::CookieJar;
 use rocket::request::FromParam;
 use rocket::request::FromRequest;
 use rocket::request::Outcome;
@@ -50,6 +51,8 @@ use specula_assets::files::file_list_name;
 use specula_assets::files::hash_of_name;
 
 use crate::WEB_ROOT;
+use crate::usage::Referrer;
+use crate::usage::Usage;
 use crate::view::Hub;
 
 const IMMUTABLE: &str = "public, max-age=31536000, immutable";
@@ -349,8 +352,20 @@ pub async fn index(
     pkg: &State<Pkg>,
     assets: &State<AssetsSize>,
     atlases: &State<AtlasVersions>,
+    usage: &State<Arc<Usage>>,
+    cookies: &CookieJar<'_>,
+    referrer: Referrer,
 ) -> Option<RawHtml<String>> {
-    page(Page("index.html"), pkg, assets, atlases).await
+    page(
+        Page("index.html"),
+        pkg,
+        assets,
+        atlases,
+        usage,
+        cookies,
+        referrer,
+    )
+    .await
 }
 
 #[rocket::get("/<page>")]
@@ -359,9 +374,13 @@ pub async fn page(
     pkg: &State<Pkg>,
     assets: &State<AssetsSize>,
     atlases: &State<AtlasVersions>,
+    usage: &State<Arc<Usage>>,
+    cookies: &CookieJar<'_>,
+    referrer: Referrer,
 ) -> Option<RawHtml<String>> {
     let path = Path::new(WEB_ROOT).join(page.0);
     let html = rocket::tokio::fs::read_to_string(path).await.ok()?;
+    usage.page(cookies, page.0, &referrer);
     let glue = pkg.version(GLUE).await;
     let wasm = pkg.version(WASM).await;
     let mut html = html
