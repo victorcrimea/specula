@@ -106,6 +106,7 @@ use crate::worker::POST_SCENE;
 use crate::worker::POST_STARTS;
 use crate::worker::POST_STATUS;
 use crate::worker::POST_TERRAIN;
+use crate::worker::STATUS_ARCHIVE;
 use crate::worker::STATUS_ENDED;
 use crate::worker::STATUS_LIVE;
 use crate::worker::STATUS_NEXT_READY;
@@ -163,6 +164,8 @@ const DETAILED_TOOLTIPS_SETTINGS_KEY: &str = "specula.detailedtooltips";
 /// localStorage key of the status bars setting, the engine's
 /// `g_ShowAllStatusBars`: 0 off, 1 on.
 const STATUS_BARS_SETTINGS_KEY: &str = "specula.statusbars";
+/// How long the copy button says the link was copied.
+const COPIED_MS: i32 = 2000;
 /// localStorage keys of the attack, aura and heal range overlays, in that
 /// order: 0 off, 1 on.
 const RANGES_SETTINGS_KEYS: [&str; 3] = [
@@ -488,6 +491,12 @@ struct App {
     live_button: HtmlButtonElement,
     live: bool,
     paused: bool,
+    /// The turn the timeline shows, for the copied link.
+    playhead: u32,
+    /// `/` only.
+    copy_link: Option<HtmlButtonElement>,
+    /// Puts the button's label back after "Link copied".
+    copy_link_timer: Option<i32>,
     stream_bytes: StreamBytes,
     match_over: MatchOver,
     stream_start: StreamStart,
@@ -600,6 +609,9 @@ struct MatchOver {
     close_button: HtmlButtonElement,
     ended: bool,
     next_ready: bool,
+    /// A stored match opened by its link: it is played from its segments,
+    /// and the button leaves it for the live stream.
+    archived: bool,
     /// When the worker moves on, on the frame clock.
     switch_at: f64,
     /// Closed by the viewer; it opens again when another match ends.
@@ -609,6 +621,14 @@ struct MatchOver {
 
 impl MatchOver {
     fn show_status(&mut self, flags: u8, switch_in_ms: u32, now: f64) {
+        self.archived = flags & STATUS_ARCHIVE != 0;
+        if self.archived {
+            self.ended = false;
+            self.button.set_hidden(false);
+            self.button.set_disabled(false);
+            self.popup.set_hidden(true);
+            return;
+        }
         let ended = flags & STATUS_ENDED != 0;
         if ended && !self.ended {
             self.closed = false;
@@ -987,7 +1007,8 @@ impl App {
         let Some(live_delay) = &self.live_delay else {
             return;
         };
-        let text = if self.scene.delay_ms == 0 || self.match_over.ended {
+        let text = if self.scene.delay_ms == 0 || self.match_over.ended || self.match_over.archived
+        {
             String::new()
         } else {
             let seconds = f64::from(self.scene.delay_ms) / 1000.0;
@@ -1007,6 +1028,12 @@ impl App {
     fn show_status(&mut self, first: u32, newest: u32, playhead: u32, flags: u8, speed: f32) {
         self.live = flags & STATUS_LIVE != 0;
         self.paused = flags & STATUS_PAUSED != 0;
+        self.playhead = playhead;
+        if let Some(copy_link) = &self.copy_link {
+            copy_link.set_disabled(false);
+        }
+        // A stored match has no live edge to go to.
+        self.live_button.set_hidden(flags & STATUS_ARCHIVE != 0);
         self.play_button.set_disabled(false);
         lang::set_text(
             &self.play_button,
@@ -1214,11 +1241,18 @@ async fn run(
     };
     let options = WorkerOptions::new();
     options.set_type(WorkerType::Module);
-    let worker_url = format!(
+    let mut worker_url = format!(
         "worker.js?glue={}&wasm={}",
         js_sys::encode_uri_component(&glue_url),
         js_sys::encode_uri_component(&wasm_url)
     );
+    // A shared link names a match and a moment in it; the worker opens it.
+    let search = window.location().search().unwrap_or_default();
+    for name in ["match", "t"] {
+        if let Some(value) = query_param(&search, name) {
+            worker_url.push_str(&format!("&{name}={}", js_sys::encode_uri_component(&value)));
+        }
+    }
     let worker = Worker::new_with_options(&worker_url, &options)
         .map_err(|_| "cannot start the stream worker")?;
 
@@ -1258,6 +1292,12 @@ async fn run(
         live_button: element(&document, "live")?,
         live: true,
         paused: false,
+        playhead: 0,
+        copy_link: match page {
+            Page::Map => None,
+            Page::Observer => element(&document, "copy-link").ok(),
+        },
+        copy_link_timer: None,
         stream_bytes: StreamBytes::default(),
         match_over: MatchOver {
             button: element(&document, "current")?,
@@ -1267,6 +1307,7 @@ async fn run(
             close_button: element(&document, "match-over-close")?,
             ended: false,
             next_ready: false,
+            archived: false,
             switch_at: 0.0,
             closed: false,
             shown: String::new(),
@@ -2589,7 +2630,16 @@ fn wire_playback(app: &Rc<RefCell<App>>) {
     };
     let target = Rc::clone(app);
     let on_current = Closure::<dyn FnMut()>::new(move || {
-        target.borrow().command(COMMAND_CURRENT_MATCH, 0.0);
+        let app = target.borrow();
+        if app.match_over.archived {
+            // The live stream is a page without the match in its link.
+            if let Some(window) = web_sys::window() {
+                let path = window.location().pathname().unwrap_or_default();
+                let _ = window.location().set_href(&path);
+            }
+            return;
+        }
+        app.command(COMMAND_CURRENT_MATCH, 0.0);
     });
     current.set_onclick(Some(on_current.as_ref().unchecked_ref()));
     popup_current.set_onclick(Some(on_current.as_ref().unchecked_ref()));
@@ -2599,6 +2649,82 @@ fn wire_playback(app: &Rc<RefCell<App>>) {
     on_click(&close, move || {
         target.borrow_mut().match_over.close();
     });
+
+    let copy_link = app.borrow().copy_link.clone();
+    if let Some(copy_link) = copy_link {
+        let target = Rc::clone(app);
+        on_click(&copy_link, move || copy_match_link(&target));
+    }
+}
+
+/// Copies a link to the match at the playhead; `t` is the clock's seconds.
+fn copy_match_link(app: &Rc<RefCell<App>>) {
+    let Some(window) = web_sys::window() else {
+        return;
+    };
+    let (match_id, playhead) = {
+        let app = app.borrow();
+        (app.scene.match_id, app.playhead)
+    };
+    if match_id == 0 {
+        return;
+    }
+    let location = window.location();
+    let seconds = (f64::from(playhead) * TURN_MS / 1000.0) as u64;
+    let link = format!(
+        "{}{}?match={match_id:016x}&t={seconds}",
+        location.origin().unwrap_or_default(),
+        location.pathname().unwrap_or_default()
+    );
+    // Through Reflect: the Clipboard API is not among web-sys's enabled
+    // features, and it is one call.
+    let navigator = window.navigator();
+    let write_text = js_sys::Reflect::get(&navigator, &"clipboard".into())
+        .ok()
+        .filter(|clipboard| !clipboard.is_undefined())
+        .and_then(|clipboard| {
+            let function = js_sys::Reflect::get(&clipboard, &"writeText".into())
+                .ok()?
+                .dyn_into::<js_sys::Function>()
+                .ok()?;
+            function.call1(&clipboard, &link.into()).ok()
+        });
+    // An insecure origin has no clipboard; the label then stays as it is.
+    if write_text.is_none() {
+        return;
+    }
+    let app_ref = &mut *app.borrow_mut();
+    let Some(button) = app_ref.copy_link.clone() else {
+        return;
+    };
+    lang::set_text(&button, "Link copied");
+    if let Some(timer) = app_ref.copy_link_timer.take() {
+        window.clear_timeout_with_handle(timer);
+    }
+    let target = Rc::downgrade(app);
+    let restore = Closure::once_into_js(move || {
+        if let Some(app) = target.upgrade() {
+            let mut app = app.borrow_mut();
+            app.copy_link_timer = None;
+            if let Some(button) = &app.copy_link {
+                lang::set_text(button, "Copy link");
+            }
+        }
+    });
+    app_ref.copy_link_timer = window
+        .set_timeout_with_callback_and_timeout_and_arguments_0(restore.unchecked_ref(), COPIED_MS)
+        .ok();
+}
+
+/// The value of `name` in a `?a=1&b=2` query, undecoded; the values read
+/// here are hex digits and numbers.
+pub fn query_param(search: &str, name: &str) -> Option<String> {
+    search
+        .trim_start_matches('?')
+        .split('&')
+        .filter_map(|pair| pair.split_once('='))
+        .find(|(key, _)| *key == name)
+        .map(|(_, value)| value.to_string())
 }
 
 fn connect(app: &Rc<RefCell<App>>) {

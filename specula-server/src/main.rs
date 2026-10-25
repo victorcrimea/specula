@@ -2,6 +2,7 @@ mod classify;
 mod delta;
 mod detail;
 mod feed;
+mod history;
 mod observer;
 mod terrain;
 mod view;
@@ -15,6 +16,7 @@ use std::io::ErrorKind;
 use std::os::unix::fs::FileTypeExt;
 use std::os::unix::net::UnixListener;
 use std::os::unix::net::UnixStream;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -32,6 +34,7 @@ use rocket_ws::WebSocket;
 use crate::classify::Classifier;
 use crate::delta::DeltaMeter;
 use crate::feed::Record;
+use crate::history::History;
 use crate::terrain::Ground;
 use crate::view::Hub;
 use crate::view::Message;
@@ -40,6 +43,12 @@ const DEFAULT_SOCKET: &str = "/tmp/specula-feed.sock";
 /// As AoE2 DE's ranked spectating: long enough that a player cannot scout
 /// the opponent through the broadcast.
 const DEFAULT_DELAY_SECS: u64 = 120;
+/// Relative to the working directory, as `WEB_ROOT`.
+const DEFAULT_HISTORY_DIR: &str = "history";
+/// About 70 one-hour 1v1s or 20 large 4v4s.
+const DEFAULT_HISTORY_LIMIT: u64 = 1 << 30;
+const USAGE: &str = "usage: specula-server [SOCKET] [--observe HOST:PORT] [--delay SECONDS] \
+                     [--history DIR] [--history-limit SIZE]";
 /// Relative to the working directory, so the server runs from the repo root.
 pub const WEB_ROOT: &str = "specula-web";
 
@@ -49,11 +58,13 @@ async fn main() {
         socket: path,
         observe,
         delay,
+        history_dir,
+        history_limit,
     } = match parse_args() {
         Ok(args) => args,
         Err(error) => {
             eprintln!("{error}");
-            eprintln!("usage: specula-server [SOCKET] [--observe HOST:PORT] [--delay SECONDS]");
+            eprintln!("{USAGE}");
             std::process::exit(2);
         }
     };
@@ -70,8 +81,26 @@ async fn main() {
     };
     println!("waiting for an observer on {path}");
     println!("viewers see the game {} s late", delay.as_secs());
+    let history = if history_limit == 0 {
+        println!("history off: only the current and the previous match are kept");
+        None
+    } else {
+        match History::open(history_dir.clone(), history_limit) {
+            Ok(history) => {
+                println!("{}", history.summary());
+                Some(history)
+            }
+            Err(error) => {
+                eprintln!(
+                    "cannot open the history in {}: {error}",
+                    history_dir.display()
+                );
+                std::process::exit(1);
+            }
+        }
+    };
 
-    let hub = Arc::new(Hub::new(delay));
+    let hub = Arc::new(Hub::new(delay, history));
     let publisher_hub = Arc::clone(&hub);
     std::thread::spawn(move || publisher_hub.run_publisher());
     let feed_hub = Arc::clone(&hub);
@@ -99,6 +128,7 @@ async fn main() {
                 web::data,
                 segment_file,
                 detail_segment_file,
+                match_info,
                 web::index,
                 web::page,
                 web::pkg_file,
@@ -212,6 +242,21 @@ fn detail_segment_file(id: &str, index: usize, hub: &State<Arc<Hub>>) -> Option<
     segment_bytes(hub.detail_segment(u64::from_str_radix(id, 16).ok()?, index)?)
 }
 
+/// "<segments> <live 0|1>", as `view.rs` describes.
+#[rocket::get("/match/<id>/info")]
+fn match_info(id: &str, hub: &State<Arc<Hub>>) -> Option<MatchInfo> {
+    let (segments, live) = hub.match_info(u64::from_str_radix(id, 16).ok()?)?;
+    Some(MatchInfo(
+        format!("{segments} {}", u8::from(live)),
+        // The open match grows a segment every 30 s.
+        Header::new("Cache-Control", "no-store"),
+    ))
+}
+
+#[derive(rocket::Responder)]
+#[response(content_type = "text")]
+struct MatchInfo(String, Header<'static>);
+
 fn segment_bytes((bytes, closed): (Message, bool)) -> Option<SegmentBytes> {
     // The match id is in the URL, so a closed segment never changes; the
     // open one grows every turn.
@@ -227,13 +272,19 @@ struct Args {
     socket: String,
     observe: Option<(String, String)>,
     delay: Duration,
+    history_dir: PathBuf,
+    /// 0: no history.
+    history_limit: u64,
 }
 
-/// `[SOCKET] [--observe HOST:PORT] [--delay SECONDS]`, in any order.
+/// `[SOCKET] [--observe HOST:PORT] [--delay SECONDS] [--history DIR]
+/// [--history-limit SIZE]`, in any order.
 fn parse_args() -> Result<Args, String> {
     let mut socket = None;
     let mut observe = None;
     let mut delay = Duration::from_secs(DEFAULT_DELAY_SECS);
+    let mut history_dir = PathBuf::from(DEFAULT_HISTORY_DIR);
+    let mut history_limit = DEFAULT_HISTORY_LIMIT;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         if arg == "--delay" {
@@ -242,6 +293,13 @@ fn parse_args() -> Result<Args, String> {
                 .parse::<u32>()
                 .map_err(|_| format!("--delay {seconds}: expected whole seconds"))?;
             delay = Duration::from_secs(u64::from(seconds));
+        } else if arg == "--history" {
+            history_dir = args.next().ok_or("--history needs DIR")?.into();
+        } else if arg == "--history-limit" {
+            let size = args.next().ok_or("--history-limit needs SIZE")?;
+            history_limit = history::parse_size(&size).ok_or_else(|| {
+                format!("--history-limit {size}: expected bytes or a size such as 500M or 1G")
+            })?;
         } else if arg == "--observe" {
             let target = args.next().ok_or("--observe needs HOST:PORT")?;
             let (host, port) = target
@@ -259,6 +317,8 @@ fn parse_args() -> Result<Args, String> {
         socket: socket.unwrap_or_else(|| DEFAULT_SOCKET.to_string()),
         observe,
         delay,
+        history_dir,
+        history_limit,
     })
 }
 

@@ -29,6 +29,15 @@
 //! or u8 `POST_STARTS`, u32 ms until the server shows the match's first
 //! turn, while it holds them all back.
 //!
+//! A page opened with `?match=<id>&t=<seconds>` (a copied link) names a
+//! match and a moment of its clock, and the page passes both on in the
+//! worker's own URL. If `/match/<id>/info` says it is the match being
+//! shown, it is followed live as usual and seeks to the moment once joined.
+//! Otherwise it is a stored match: there is no WebSocket, its last segment
+//! is applied as live messages would be, which gives the scene its end, and
+//! playback seeks to the moment and pauses at the end. `STATUS_ARCHIVE`
+//! tells the page.
+//!
 //! While the page has something selected (`COMMAND_DETAIL` 1) and for
 //! `DETAIL_LINGER_MS` after (`COMMAND_DETAIL` 0), the worker also follows
 //! the detail stream: live over `/detail`, and from its segments for turns
@@ -71,6 +80,8 @@ pub const STATUS_PAUSED: u8 = 2;
 pub const STATUS_ENDED: u8 = 4;
 /// The next match has started and can be switched to.
 pub const STATUS_NEXT_READY: u8 = 8;
+/// The shown match is a stored one, played from its segments alone.
+pub const STATUS_ARCHIVE: u8 = 16;
 /// Shows the keyframe at or before the turn; for dragging the timeline.
 pub const COMMAND_SCRUB: u8 = 1;
 /// Shows exactly the turn.
@@ -226,6 +237,11 @@ struct Playback {
     detail_fetching: Option<u32>,
     /// The match and turn of the detail state the page holds.
     page_details: Option<(u64, u32)>,
+    /// A stored match, played from its segments without a WebSocket.
+    archived: bool,
+    /// The match and turn a link asked for, sought once that match is in
+    /// `live_scene`.
+    initial_seek: Option<(u64, u32)>,
 }
 
 impl Playback {
@@ -440,6 +456,13 @@ impl Playback {
         if shown.is_empty() {
             return;
         }
+        if let Some((match_id, turn)) = self.initial_seek
+            && match_id == self.live_scene.match_id
+        {
+            self.initial_seek = None;
+            self.seek(turn, true);
+            return;
+        }
         if self.live {
             if let [message] = &shown[..] {
                 self.post_scene(0.0, message);
@@ -448,6 +471,44 @@ impl Playback {
             }
         }
         self.post_status();
+    }
+
+    /// Plays a stored match: its last segment, applied as a join would be,
+    /// gives the match's end, then `initial_seek` moves to the moment.
+    fn open_archive(&mut self, match_id: u64, segments: u32) {
+        self.archived = true;
+        let url = format!("/match/{match_id:016x}/seg/{}", segments - 1);
+        let this = self.this.clone();
+        wasm_bindgen_futures::spawn_local(async move {
+            let fetched = fetch_bytes(&url).await;
+            let Some(playback) = this.upgrade() else {
+                return;
+            };
+            let mut playback = playback.borrow_mut();
+            let messages = fetched.and_then(|bytes| {
+                playback.segment_bytes += bytes.len() as u64;
+                stream::read_segment(&bytes).map_err(String::from)
+            });
+            let messages = messages.and_then(|messages| {
+                let keyframe_turn = stream::message_turn(messages.first().ok_or("empty segment")?)?;
+                // The delta into the keyframe's turn is for playback
+                // crossing into the segment; the keyframe already holds it.
+                let mut kept = Vec::with_capacity(messages.len());
+                for (position, message) in messages.into_iter().enumerate() {
+                    if position == 0 || stream::message_turn(&message)? > keyframe_turn {
+                        kept.push(message);
+                    }
+                }
+                Ok::<_, String>(kept)
+            });
+            match messages {
+                Ok(messages) => playback.on_live(messages),
+                Err(error) => {
+                    web_sys::console::error_1(&format!("match {match_id:016x}: {error}").into());
+                }
+            }
+            playback.sync_details();
+        });
     }
 
     fn apply_message(&mut self, message: Vec<u8>) -> Applied {
@@ -602,6 +663,7 @@ impl Playback {
             COMMAND_PLAY => self.play(),
             COMMAND_PAUSE => self.pause(),
             COMMAND_SPEED => self.set_speed(value as f32),
+            COMMAND_LIVE if self.archived => self.seek(self.newest_turn, true),
             COMMAND_LIVE => self.go_live(true),
             COMMAND_CURRENT_MATCH => self.switch_match(),
             COMMAND_DETAIL => self.set_detail_wanted(value != 0.0),
@@ -665,7 +727,7 @@ impl Playback {
         }
         let turn = turn.clamp(self.live_scene.first_turn, self.newest_turn);
         self.pending_seek = None;
-        if exact && turn >= self.newest_turn {
+        if exact && turn >= self.newest_turn && !self.archived {
             self.go_live(true);
             return;
         }
@@ -761,6 +823,14 @@ impl Playback {
         let mut moved = false;
         while self.next_due <= now {
             if self.playhead >= self.newest_turn {
+                if self.archived {
+                    // A stored match has nothing after its end.
+                    if moved {
+                        self.post_status();
+                    }
+                    self.pause();
+                    return;
+                }
                 // Caught up: the page is at the newest turn, so the next
                 // live delta applies to it as it is.
                 self.go_live(false);
@@ -941,7 +1011,9 @@ impl Playback {
             self.playhead
         };
         let mut flags = 0;
-        if self.live {
+        if self.archived {
+            flags |= STATUS_ARCHIVE;
+        } else if self.live {
             flags |= STATUS_LIVE;
         }
         if self.paused {
@@ -1035,6 +1107,10 @@ impl Playback {
     /// Opens the detail socket; a closed one is opened again after a
     /// growing pause, as the visual one is, while the details are wanted.
     fn connect_detail(&mut self) {
+        // A stored match's details come from its segments.
+        if self.archived {
+            return;
+        }
         self.detail_generation += 1;
         let generation = self.detail_generation;
         let location = self.scope.location();
@@ -1525,9 +1601,11 @@ fn start() -> Result<(), String> {
             detail_segments: Vec::new(),
             detail_fetching: None,
             page_details: None,
+            archived: false,
+            initial_seek: None,
         })
     });
-    connect(&Rc::downgrade(&playback))?;
+    open(&Rc::downgrade(&playback))?;
 
     let on_command = Closure::<dyn FnMut(MessageEvent)>::new(move |event: MessageEvent| {
         let bytes = js_sys::Uint8Array::new(&event.data()).to_vec();
@@ -1543,6 +1621,62 @@ fn start() -> Result<(), String> {
     });
     scope.set_onmessage(Some(on_command.as_ref().unchecked_ref()));
     on_command.forget();
+    Ok(())
+}
+
+/// Follows the live stream, unless the worker's URL names a match (from the
+/// page's link), which `/match/<id>/info` says how to open.
+fn open(playback: &Weak<RefCell<Playback>>) -> Result<(), String> {
+    let Some(strong) = playback.upgrade() else {
+        return Ok(());
+    };
+    let search = strong.borrow().scope.location().search();
+    let match_id = crate::query_param(&search, "match")
+        .and_then(|id| u64::from_str_radix(&id, 16).ok())
+        .filter(|id| *id != 0);
+    let Some(match_id) = match_id else {
+        return connect(playback);
+    };
+    let seconds = crate::query_param(&search, "t")
+        .and_then(|t| t.parse::<f64>().ok())
+        .filter(|t| t.is_finite() && *t >= 0.0)
+        .unwrap_or(0.0);
+    let turn = (seconds * 1000.0 / TURN_MS) as u32;
+    let playback = playback.clone();
+    wasm_bindgen_futures::spawn_local(async move {
+        let info = fetch_bytes(&format!("/match/{match_id:016x}/info"))
+            .await
+            .and_then(|bytes| {
+                let text = String::from_utf8(bytes).map_err(|_| "not text")?;
+                let (segments, live) = text.trim().split_once(' ').ok_or("no live flag")?;
+                let segments = segments.parse::<u32>().map_err(|_| "bad segment count")?;
+                Ok::<_, String>((segments, live == "1"))
+            });
+        let Some(strong) = playback.upgrade() else {
+            return;
+        };
+        match info {
+            Ok((segments, false)) if segments > 0 => {
+                let mut strong = strong.borrow_mut();
+                strong.initial_seek = Some((match_id, turn));
+                strong.open_archive(match_id, segments);
+            }
+            Ok(_) => {
+                strong.borrow_mut().initial_seek = Some((match_id, turn));
+                if let Err(error) = connect(&playback) {
+                    web_sys::console::error_1(&error.into());
+                }
+            }
+            // Gone from the history, or never stored: the live stream
+            // rather than nothing.
+            Err(error) => {
+                web_sys::console::error_1(&format!("match {match_id:016x}: {error}").into());
+                if let Err(error) = connect(&playback) {
+                    web_sys::console::error_1(&error.into());
+                }
+            }
+        }
+    });
     Ok(())
 }
 

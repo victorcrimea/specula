@@ -230,9 +230,12 @@
 //! varint n, n bytes of the compressed keyframe, then the frame. Every
 //! segment but the last is immutable and its frame finished; the last
 //! one's frame is what has been flushed so far, a stream that needs more
-//! input, until the match ends. The segments and terrain of the match
-//! before the current one stay served, so its viewers can keep watching
-//! it.
+//! input, until the match ends. Each segment is written to the history
+//! (`history.rs`) as it closes and then read from there, so every match it
+//! keeps stays served, with its terrain and data files; with the history
+//! off, only the current and the previous match's, from memory.
+//! `/match/<id>/info` is "<segments> <live>": the segment count, the open
+//! one included, and 1 if it is the match being shown, else 0.
 //!
 //! Each WebSocket message is u8 envelope, then by envelope:
 //! - 1 join: varint n, n bytes of a compressed keyframe, then the bytes of
@@ -292,6 +295,7 @@ use crate::feed::Sound;
 use crate::feed::SoundTarget;
 use crate::feed::TemplateDetails;
 use crate::feed::Territory;
+use crate::history::History;
 use crate::terrain::Ground;
 use crate::web;
 use crate::wire::Writer;
@@ -667,6 +671,9 @@ pub struct Hub {
     state: Mutex<State>,
     /// Wakes the publisher when something is queued.
     queued: Condvar,
+    /// None when storage is off. Locked after `state` when both are, never
+    /// before it; requests read its files with neither held.
+    history: Option<Arc<Mutex<History>>>,
 }
 
 /// A terrain resource as served, and its brotli copy once made.
@@ -680,8 +687,8 @@ pub struct TerrainFile {
 /// starts.
 struct Archive {
     match_id: u64,
-    segments: Vec<Message>,
-    detail_segments: Vec<Message>,
+    segments: Vec<Option<Message>>,
+    detail_segments: Vec<Option<Message>>,
     terrain: Option<(u64, TerrainFile)>,
     data_files: DataFiles,
 }
@@ -771,8 +778,9 @@ impl Compressor {
 /// visual stream, and the detail stream (`detail.rs`), which is cut on the
 /// same turns.
 struct Track {
-    /// Closed segments, as served.
-    segments: Vec<Message>,
+    /// Closed segments, as served; `None` once on disk, so a long match
+    /// does not grow in memory.
+    segments: Vec<Option<Message>>,
     /// The open segment, index `segments.len()`: its compressed keyframe,
     /// and its frame once a delta has gone into it. The frame's output is
     /// kept whole, since it is the segment's body and what a joining viewer
@@ -792,8 +800,9 @@ impl Track {
         }
     }
 
-    /// Returns the message every viewer is sent.
-    fn apply(&mut self, op: TrackOp) -> Message {
+    /// Returns the message every viewer is sent. `store` writes a closed
+    /// segment to disk and tells whether it did.
+    fn apply(&mut self, op: TrackOp, store: impl FnOnce(usize, &[u8]) -> bool) -> Message {
         match op {
             TrackOp::Restart(keyframe) => {
                 self.segments.clear();
@@ -803,7 +812,7 @@ impl Track {
             }
             TrackOp::Push { next, bytes } => {
                 if let Some((tail, keyframe)) = next {
-                    self.close(&tail);
+                    self.close(&tail, store);
                     self.open_keyframe = keyframe;
                 }
                 let envelope = if self.frame.is_some() {
@@ -819,15 +828,17 @@ impl Track {
         }
     }
 
-    /// Keeps the open segment, its frame ended by `tail`.
-    fn close(&mut self, tail: &[u8]) {
+    /// Keeps the open segment, its frame ended by `tail`: on disk if
+    /// `store` manages, else in memory.
+    fn close(&mut self, tail: &[u8], store: impl FnOnce(usize, &[u8]) -> bool) {
         let mut segment = Vec::new();
         append_framed(&mut segment, &self.open_keyframe);
         if let Some(frame) = self.frame.take() {
             segment.extend_from_slice(&frame);
         }
         segment.extend_from_slice(tail);
-        self.segments.push(segment.into());
+        let stored = store(self.segments.len(), &segment);
+        self.segments.push((!stored).then(|| segment.into()));
     }
 
     /// The open segment as served: its frame so far, unfinished.
@@ -841,14 +852,17 @@ impl Track {
     }
 
     /// A segment of the current match, and whether it is closed.
-    fn segment(&self, index: usize) -> Option<(Message, bool)> {
+    fn segment(&self, index: usize) -> Lookup {
         if let Some(closed) = self.segments.get(index) {
-            return Some((Arc::clone(closed), true));
+            return match closed {
+                Some(closed) => Lookup::Found(Arc::clone(closed), true),
+                None => Lookup::OnDisk,
+            };
         }
         if index != self.segments.len() {
-            return None;
+            return Lookup::Missing;
         }
-        Some((self.open_segment().into(), false))
+        Lookup::Found(self.open_segment().into(), false)
     }
 
     /// The open segment's keyframe and its frame so far.
@@ -856,6 +870,14 @@ impl Track {
         let frame = self.frame.as_deref().unwrap_or_default();
         envelope_join(&self.open_keyframe, frame).into()
     }
+}
+
+/// Where a segment asked for is.
+enum Lookup {
+    /// In memory, and whether it is closed.
+    Found(Message, bool),
+    OnDisk,
+    Missing,
 }
 
 /// What the encoder made, held until it is due.
@@ -890,7 +912,28 @@ struct Shown {
 }
 
 impl Shown {
-    fn apply(&mut self, release: Release) {
+    /// `encoding`: the match the encoder is on, which the history must not
+    /// delete to make room.
+    fn apply(&mut self, release: Release, history: Option<&Mutex<History>>, encoding: u64) {
+        let protect = [
+            encoding,
+            self.previous.as_ref().map_or(0, |archive| archive.match_id),
+        ];
+        let store = |match_id: u64, detail: bool| {
+            move |index: usize, bytes: &[u8]| {
+                let Some(history) = history else {
+                    return false;
+                };
+                let written = history
+                    .lock()
+                    .unwrap()
+                    .write_segment(match_id, detail, index, bytes, &protect);
+                if let Err(error) = &written {
+                    eprintln!("cannot store segment {index} of match {match_id:016x}: {error}");
+                }
+                written.is_ok()
+            }
+        };
         match release {
             Release::Turn {
                 start,
@@ -905,8 +948,8 @@ impl Shown {
                     self.ended = None;
                 }
                 self.has_turn = true;
-                let visual = self.visual.apply(visual);
-                let detail = self.detail.apply(detail);
+                let visual = self.visual.apply(visual, store(self.match_id, false));
+                let detail = self.detail.apply(detail, store(self.match_id, true));
                 // No receivers is not an error: nobody is watching yet.
                 let _ = self.visual.sender.send(visual);
                 let _ = self.detail.sender.send(detail);
@@ -919,8 +962,8 @@ impl Shown {
                 terrain,
                 data_files,
             } => {
-                self.visual.close(&visual_tail);
-                self.detail.close(&detail_tail);
+                self.visual.close(&visual_tail, store(match_id, false));
+                self.detail.close(&detail_tail, store(match_id, true));
                 self.previous = Some(Archive {
                     match_id,
                     segments: std::mem::take(&mut self.visual.segments),
@@ -1031,9 +1074,10 @@ impl State {
 }
 
 impl Hub {
-    pub fn new(delay: Duration) -> Self {
+    pub fn new(delay: Duration, history: Option<History>) -> Self {
         Hub {
             queued: Condvar::new(),
+            history: history.map(|history| Arc::new(Mutex::new(history))),
             state: Mutex::new(State {
                 turn: 0,
                 map_size: 0,
@@ -1242,45 +1286,127 @@ impl Hub {
         let mut hasher = DefaultHasher::new();
         json.hash(&mut hasher);
         let hash = hasher.finish();
-        self.state
-            .lock()
-            .unwrap()
-            .data_files
-            .entry(hash)
-            .or_insert_with(|| json.into());
+        let state = &mut *self.state.lock().unwrap();
+        if state.data_files.contains_key(&hash) {
+            return hash;
+        }
+        // Before the match's first turn it has no id yet; then the files
+        // are stored with the terrain.
+        if state.has_turn && !state.new_feed && !state.ended {
+            let match_id = state.match_id;
+            self.store(state, |history, protect| {
+                history.write_data(match_id, hash, &json, protect)
+            });
+        }
+        state.data_files.insert(hash, json.into());
         hash
     }
 
-    /// Only the current and the previous match's files are kept, and those
-    /// of a match whose end viewers have not reached.
+    /// The current and the previous match's files and those of a match
+    /// whose end viewers have not reached are in memory; older ones are
+    /// read from the history, while it keeps them.
     pub fn data(&self, hash: u64) -> Option<Arc<[u8]>> {
-        let state = self.state.lock().unwrap();
-        let archived = state
-            .shown
-            .previous
-            .as_ref()
-            .and_then(|archive| archive.data_files.get(&hash));
-        let ending = ending(&state.pending)
-            .find_map(|(_, data_files)| data_files.get(&hash))
-            .or(archived);
-        state.data_files.get(&hash).or(ending).cloned()
+        {
+            let state = self.state.lock().unwrap();
+            let archived = state
+                .shown
+                .previous
+                .as_ref()
+                .and_then(|archive| archive.data_files.get(&hash));
+            let ending = ending(&state.pending)
+                .find_map(|(_, data_files)| data_files.get(&hash))
+                .or(archived);
+            if let Some(file) = state.data_files.get(&hash).or(ending) {
+                return Some(Arc::clone(file));
+            }
+        }
+        let path = self.history.as_ref()?.lock().unwrap().data_path(hash)?;
+        Some(std::fs::read(path).ok()?.into())
     }
 
-    /// Only the current and the previous match's terrain are kept, and that
-    /// of a match whose end viewers have not reached; an older id is gone.
+    /// As `data`, for terrain.
     pub fn terrain(&self, id: u64) -> Option<TerrainFile> {
-        let state = self.state.lock().unwrap();
-        let archived = state
-            .shown
-            .previous
-            .as_ref()
-            .and_then(|archive| archive.terrain.as_ref());
-        [state.terrain.as_ref(), archived]
-            .into_iter()
-            .chain(ending(&state.pending).map(|(terrain, _)| terrain))
-            .flatten()
-            .find(|(known, _)| *known == id)
-            .map(|(_, file)| file.clone())
+        {
+            let state = self.state.lock().unwrap();
+            let archived = state
+                .shown
+                .previous
+                .as_ref()
+                .and_then(|archive| archive.terrain.as_ref());
+            let known = [state.terrain.as_ref(), archived]
+                .into_iter()
+                .chain(ending(&state.pending).map(|(terrain, _)| terrain))
+                .flatten()
+                .find(|(known, _)| *known == id);
+            if let Some((_, file)) = known {
+                return Some(file.clone());
+            }
+        }
+        let (raw, brotli) = self.history.as_ref()?.lock().unwrap().terrain_paths(id)?;
+        let file = TerrainFile {
+            raw: std::fs::read(raw).ok()?.into(),
+            brotli: Arc::new(OnceLock::new()),
+        };
+        if let Ok(bytes) = std::fs::read(brotli) {
+            let _ = file.brotli.set(bytes.into());
+        }
+        Some(file)
+    }
+
+    /// Writes a file of the match being encoded to the history; a failure
+    /// costs only the stored copy, so it is logged and otherwise ignored.
+    fn store(&self, state: &State, write: impl FnOnce(&mut History, &[u64]) -> io::Result<()>) {
+        let Some(history) = &self.history else {
+            return;
+        };
+        let protect = [
+            state.shown.match_id,
+            state
+                .shown
+                .previous
+                .as_ref()
+                .map_or(0, |archive| archive.match_id),
+        ];
+        if let Err(error) = write(&mut history.lock().unwrap(), &protect) {
+            eprintln!(
+                "cannot store a file of match {:016x}: {error}",
+                state.match_id
+            );
+        }
+    }
+
+    /// The terrain and the files gathered before the first turn of the
+    /// match just started. They are served before the delay anyway, so
+    /// storing them now shows nothing early.
+    fn store_match_files(&self, state: &State) {
+        let Some(history) = &self.history else {
+            return;
+        };
+        let match_id = state.match_id;
+        if let Some((id, file)) = &state.terrain {
+            let id = *id;
+            self.store(state, |history, protect| {
+                history.write_terrain(match_id, id, &file.raw, protect)
+            });
+            // The brotli copy takes seconds on a large map.
+            let (history, brotli) = (Arc::clone(history), Arc::clone(&file.brotli));
+            std::thread::spawn(move || {
+                let bytes = brotli.wait();
+                if let Err(error) =
+                    history
+                        .lock()
+                        .unwrap()
+                        .write_terrain_brotli(match_id, id, bytes, &[])
+                {
+                    eprintln!("cannot store the brotli terrain of match {match_id:016x}: {error}");
+                }
+            });
+        }
+        for (hash, json) in &state.data_files {
+            self.store(state, |history, protect| {
+                history.write_data(match_id, *hash, json, protect)
+            });
+        }
     }
 
     pub fn feed_activity(&self) -> Option<Instant> {
@@ -1347,7 +1473,10 @@ impl Hub {
                 && *due <= now
             {
                 let (_, release) = state.pending.pop_front().unwrap();
-                state.shown.apply(release);
+                let encoding = state.match_id;
+                state
+                    .shown
+                    .apply(release, self.history.as_deref(), encoding);
             }
             state = match state.pending.front() {
                 Some((due, _)) => {
@@ -1487,6 +1616,7 @@ impl Hub {
                 shown.get(&id).map(|dot| dot.template)
             });
             let detail = state.detail.restart(&detail_keyframe);
+            self.store_match_files(state);
             let release = Release::Turn {
                 start: Some(state.match_id),
                 visual,
@@ -1592,6 +1722,24 @@ impl Hub {
     }
 
     fn track_segment(&self, match_id: u64, index: usize, detail: bool) -> Option<(Message, bool)> {
+        match self.memory_segment(match_id, index, detail) {
+            Lookup::Found(bytes, closed) => return Some((bytes, closed)),
+            Lookup::OnDisk => {}
+            Lookup::Missing => return None,
+        }
+        let path = self
+            .history
+            .as_ref()?
+            .lock()
+            .unwrap()
+            .segment_path(match_id, detail, index)?;
+        // Only closed segments are stored. The match may have been deleted
+        // since the lookup; then the file is gone, as it would be after.
+        let bytes = std::fs::read(path).ok()?;
+        Some((bytes.into(), true))
+    }
+
+    fn memory_segment(&self, match_id: u64, index: usize, detail: bool) -> Lookup {
         let state = &self.state.lock().unwrap().shown;
         // An ended match is archived but keeps its id until the next one
         // starts, so the archive is asked first.
@@ -1605,16 +1753,47 @@ impl Hub {
             } else {
                 &archive.segments
             };
-            return Some((Arc::clone(segments.get(index)?), true));
+            return match segments.get(index) {
+                Some(Some(bytes)) => Lookup::Found(Arc::clone(bytes), true),
+                Some(None) => Lookup::OnDisk,
+                None => Lookup::Missing,
+            };
         }
         if match_id != state.match_id || !state.has_turn {
-            return None;
+            return Lookup::OnDisk;
         }
         if detail {
             state.detail.segment(index)
         } else {
             state.visual.segment(index)
         }
+    }
+
+    /// For a page opening a match by its id: how many segments it has
+    /// (the open one included), and whether it is the match being shown,
+    /// which is followed over the WebSocket rather than played from its
+    /// segments alone.
+    pub fn match_info(&self, match_id: u64) -> Option<(usize, bool)> {
+        {
+            let state = &self.state.lock().unwrap().shown;
+            if let Some(archive) = state
+                .previous
+                .as_ref()
+                .filter(|archive| archive.match_id == match_id)
+            {
+                return Some((archive.segments.len(), false));
+            }
+            if match_id == state.match_id && state.has_turn {
+                return Some((state.visual.segments.len() + 1, true));
+            }
+        }
+        let count = self
+            .history
+            .as_ref()?
+            .lock()
+            .unwrap()
+            .segment_count(match_id)?;
+        Some((count, false))
     }
 
     /// What a new viewer is sent first (nothing before the first turn) and
