@@ -228,7 +228,8 @@ impl<'r> FromRequest<'r> for Referrer {
     }
 }
 
-fn visitor(cookies: &CookieJar<'_>) -> Option<String> {
+/// The visitor id, which also binds a player's seat (`play.rs`).
+pub fn visitor(cookies: &CookieJar<'_>) -> Option<String> {
     let value = cookies.get(COOKIE)?.value();
     (value.len() == 16 && value.bytes().all(|byte| byte.is_ascii_hexdigit()))
         .then(|| value.to_string())

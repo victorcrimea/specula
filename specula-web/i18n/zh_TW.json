@@ -85,5 +85,12 @@
   "measuring": "測量",
   "Run %(index)s/%(total)s, %(phase)s: %(name)s": "第 %(index)s/%(total)s 次執行，%(phase)s：%(name)s",
   "%(done)s of %(total)s runs measured": "已測量 %(total)s 次執行中的 %(done)s 次",
-  "%(done)s of %(total)s runs measured, stopped": "已測量 %(total)s 次執行中的 %(done)s 次，已停止"
+  "%(done)s of %(total)s runs measured, stopped": "已測量 %(total)s 次執行中的 %(done)s 次，已停止",
+  "New game": "新遊戲",
+  "A game is in progress.": "有一場遊戲正在進行。",
+  "Watch it": "觀看",
+  "Back to your game": "返回你的遊戲",
+  "Players": "玩家",
+  "You": "你",
+  "Cannot start the game: %(error)s": "無法開始遊戲：%(error)s"
 }

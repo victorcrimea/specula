@@ -144,6 +144,9 @@ enum Next {
 struct Playback {
     this: Weak<RefCell<Playback>>,
     scope: DedicatedWorkerGlobalScope,
+    /// Before every stream URL: "/play" for the player's page, which
+    /// follows the live stream, else empty.
+    prefix: &'static str,
     socket: Option<WebSocket>,
     /// The current socket's handlers, dropped with it.
     socket_handlers: Option<SocketHandlers>,
@@ -477,7 +480,7 @@ impl Playback {
     /// gives the match's end, then `initial_seek` moves to the moment.
     fn open_archive(&mut self, match_id: u64, segments: u32) {
         self.archived = true;
-        let url = format!("/match/{match_id:016x}/seg/{}", segments - 1);
+        let url = format!("{}/match/{match_id:016x}/seg/{}", self.prefix, segments - 1);
         let this = self.this.clone();
         wasm_bindgen_futures::spawn_local(async move {
             let fetched = fetch_bytes(&url).await;
@@ -605,7 +608,13 @@ impl Playback {
     }
 
     fn switch_deadline(&self) -> Option<f64> {
-        self.ended_at.map(|at| at + SWITCH_DELAY_MS)
+        // The player's next game is the one they just started.
+        let delay = if self.prefix.is_empty() {
+            SWITCH_DELAY_MS
+        } else {
+            0.0
+        };
+        self.ended_at.map(|at| at + delay)
     }
 
     fn schedule_switch(&mut self) {
@@ -914,7 +923,7 @@ impl Playback {
         }
         self.fetching = Some(index);
         let match_id = self.live_scene.match_id;
-        let url = format!("/match/{match_id:016x}/seg/{index}");
+        let url = format!("{}/match/{match_id:016x}/seg/{index}", self.prefix);
         let this = self.this.clone();
         wasm_bindgen_futures::spawn_local(async move {
             let fetched = fetch_bytes(&url).await;
@@ -1118,7 +1127,7 @@ impl Playback {
             "https:" => "wss",
             _ => "ws",
         };
-        let url = format!("{scheme}://{}/detail", location.host());
+        let url = format!("{scheme}://{}{}/detail", location.host(), self.prefix);
         let Ok(socket) = WebSocket::new(&url) else {
             web_sys::console::error_1(&format!("cannot open {url}").into());
             return;
@@ -1445,7 +1454,7 @@ impl Playback {
         }
         self.detail_fetching = Some(index);
         let match_id = self.live_scene.match_id;
-        let url = format!("/match/{match_id:016x}/detail/{index}");
+        let url = format!("{}/match/{match_id:016x}/detail/{index}", self.prefix);
         let this = self.this.clone();
         wasm_bindgen_futures::spawn_local(async move {
             let fetched = fetch_bytes(&url).await;
@@ -1547,6 +1556,11 @@ fn start() -> Result<(), String> {
         RefCell::new(Playback {
             this: this.clone(),
             scope: scope.clone(),
+            prefix: if crate::query_param(&scope.location().search(), "play").is_some() {
+                "/play"
+            } else {
+                ""
+            },
             socket: None,
             socket_handlers: None,
             frame: None,
@@ -1697,7 +1711,8 @@ fn connect(playback: &Weak<RefCell<Playback>>) -> Result<(), String> {
         "https:" => "wss",
         _ => "ws",
     };
-    let url = format!("{scheme}://{}/ws", location.host());
+    let prefix = strong.borrow().prefix;
+    let url = format!("{scheme}://{}{prefix}/ws", location.host());
     let socket = WebSocket::new(&url).map_err(|_| format!("cannot open {url}"))?;
     socket.set_binary_type(BinaryType::Arraybuffer);
 

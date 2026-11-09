@@ -164,6 +164,40 @@ pub fn camera_ray(
     }
 }
 
+/// Where `ray` first meets the ground (`ground` gives its height, water
+/// counted as ground) within a map `map_size` metres across, x and z in
+/// metres; the order's target point. Marched in steps, then halved down,
+/// which is near enough for an order.
+pub fn ground_hit(ray: &Ray, ground: impl Fn(f32, f32) -> f32, map_size: f32) -> Option<[f32; 2]> {
+    const STEP: f32 = 2.0;
+    const REACH: f32 = 4000.0;
+    let at = |t: f32| std::array::from_fn::<f32, 3, _>(|i| ray.origin[i] + ray.dir[i] * t);
+    let below = |t: f32| {
+        let point = at(t);
+        point[1] <= ground(point[0], point[2])
+    };
+    let mut near = 0.0;
+    let mut far = STEP;
+    while !below(far) {
+        near = far;
+        far += STEP;
+        if far > REACH {
+            return None;
+        }
+    }
+    for _ in 0..12 {
+        let middle = (near + far) / 2.0;
+        if below(middle) {
+            far = middle;
+        } else {
+            near = middle;
+        }
+    }
+    let point = at(far);
+    let inside = |value: f32| (0.0..=map_size).contains(&value);
+    (inside(point[0]) && inside(point[2])).then_some([point[0], point[2]])
+}
+
 /// `PickEntityAtPoint`: of the boxes the ray goes through, the one whose
 /// centre is nearest the ray, not the nearest to the eye.
 pub fn pick_at_point(pickables: &[Pickable], ray: &Ray) -> Option<u32> {

@@ -85,5 +85,12 @@
   "measuring": "mesura",
   "Run %(index)s/%(total)s, %(phase)s: %(name)s": "Passada %(index)s/%(total)s, %(phase)s: %(name)s",
   "%(done)s of %(total)s runs measured": "%(done)s de %(total)s passades mesurades",
-  "%(done)s of %(total)s runs measured, stopped": "%(done)s de %(total)s passades mesurades, aturat"
+  "%(done)s of %(total)s runs measured, stopped": "%(done)s de %(total)s passades mesurades, aturat",
+  "New game": "Nova partida",
+  "A game is in progress.": "Hi ha una partida en curs.",
+  "Watch it": "Mira-la",
+  "Back to your game": "Torna a la teva partida",
+  "Players": "Jugadors",
+  "You": "Tu",
+  "Cannot start the game: %(error)s": "No es pot començar la partida: %(error)s"
 }

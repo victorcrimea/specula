@@ -11,6 +11,7 @@
 //! That group outlives a server that dies without cleaning up, and the
 //! orphan would join the next game too and feed this server's socket, so
 //! the group is noted in `<socket>.observer` and killed on the next start.
+//! The play host (`play.rs`) is run and noted the same way.
 
 use std::io;
 use std::io::Write;
@@ -50,18 +51,24 @@ pub fn supervise(host: &str, port: &str, socket: &str, hub: &Hub) {
 }
 
 fn run(host: &str, port: &str, socket: &str, hub: &Hub) -> io::Result<String> {
+    let mut command = Command::new(OBSERVE_SCRIPT);
+    command.arg(host).arg(port).arg(socket);
+    run_engine(command, &format!("joining {host}:{port}"), socket, hub)
+}
+
+/// Runs an engine script until it exits or its feed goes quiet, and kills
+/// its process group then; `what` names it in the log. The play host
+/// (`play.rs`) runs through here too.
+pub fn run_engine(mut command: Command, what: &str, socket: &str, hub: &Hub) -> io::Result<String> {
     let started = Instant::now();
-    let mut child = Command::new(OBSERVE_SCRIPT)
-        .arg(host)
-        .arg(port)
-        .arg(socket)
+    let mut child = command
         .stdin(Stdio::piped())
         // The engine writes its own logs; its stdout is a line per turn.
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .process_group(0)
         .spawn()?;
-    println!("observer {} joining {host}:{port}", child.id());
+    println!("engine {} {what}", child.id());
     if let Err(error) = std::fs::write(pid_path(socket), child.id().to_string()) {
         eprintln!("cannot note the observer in {}: {error}", pid_path(socket));
     }

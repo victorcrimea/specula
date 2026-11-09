@@ -13,6 +13,7 @@
 
 use std::cell::RefCell;
 
+use specula_assets::command::Command;
 use wasm_bindgen::JsCast;
 use wasm_bindgen::JsValue;
 use web_sys::Document;
@@ -377,6 +378,19 @@ struct CommandsPanel {
     /// `getNumberOfRightPanelButtons` places them.
     training: Vec<CommandCell>,
     research: Vec<ResearchColumn>,
+    /// What a press of each `training` cell asks, for the player of
+    /// `/play`: an order, or a placement; none for an observer.
+    training_orders: Vec<Option<Request>>,
+    /// Likewise for each research column's bottom and top button.
+    research_orders: Vec<[Option<Command>; 2]>,
+}
+
+/// A commands panel button the page wires: a `training` cell, or a
+/// research column's bottom (false) or top (true) button.
+#[derive(Clone, Copy)]
+pub enum CommandButton {
+    Training(usize),
+    Research(usize, bool),
 }
 
 /// One `unitTrainingButton`, `unitResearchButton`, `unitGateButton`,
@@ -441,6 +455,7 @@ enum Modifier {
 
 /// A selected entity, as the training and research panels read it.
 struct Producer<'a> {
+    id: u32,
     owner: i32,
     upgrading: bool,
     queued: usize,
@@ -474,6 +489,7 @@ struct Queued {
 }
 
 /// What a click on the panel asks of the page.
+#[derive(Clone)]
 pub enum Request {
     Follow(u32),
     Group {
@@ -487,6 +503,26 @@ pub enum Request {
     },
     /// `selectAndMoveTo`.
     SelectAndFollow(u32),
+    /// An order of the player of `/play`.
+    Order(Command),
+    /// A construction button of the player of `/play`:
+    /// `startBuildingPlacement`.
+    Place(Place),
+}
+
+/// A structure to place, and who builds it.
+#[derive(Clone)]
+pub struct Place {
+    pub template: String,
+    /// What the preview draws: the template's VisualActor.
+    pub actor: String,
+    /// The selected entities of the player that can build it.
+    pub builders: Vec<u32>,
+    /// For a wall set, its tower template: the wall is placed between two
+    /// points, as `placementSupport.mode` "wall".
+    pub tower: Option<String>,
+    /// BuildRestrictions' PlacementType: "shore" snaps to the shoreline.
+    pub shore: bool,
 }
 
 /// What one update reads.
@@ -506,6 +542,8 @@ pub struct View<'a> {
     pub data: &'a DataFiles,
     /// The "Detailed tooltips" setting, the engine's showdetailedtooltips.
     pub detailed: bool,
+    /// The player the viewer commands on `/play`, `None` for an observer.
+    pub player: Option<i32>,
 }
 
 impl View<'_> {
@@ -580,6 +618,8 @@ impl DetailsPanel {
                 research: (0..MAX_RESEARCHABLE)
                     .map(|i| ResearchColumn::new(document, &research, i))
                     .collect::<Result<_, _>>()?,
+                training_orders: vec![None; MAX_TRAINABLE],
+                research_orders: vec![[None, None]; MAX_RESEARCHABLE],
             }),
             _ => None,
         };
@@ -652,6 +692,56 @@ impl DetailsPanel {
 
     pub fn group_buttons(&self) -> impl Iterator<Item = &HtmlElement> {
         self.groups.iter().map(|group| &group.button.element)
+    }
+
+    /// The training and research buttons, for the page to wire.
+    pub fn command_buttons(&self) -> Vec<(CommandButton, HtmlElement)> {
+        let Some(commands) = &self.commands else {
+            return Vec::new();
+        };
+        let training = commands
+            .training
+            .iter()
+            .enumerate()
+            .map(|(index, cell)| (CommandButton::Training(index), cell.cell.element.clone()));
+        let research = commands
+            .research
+            .iter()
+            .enumerate()
+            .flat_map(|(index, column)| {
+                [
+                    (
+                        CommandButton::Research(index, false),
+                        column.bottom.cell.element.clone(),
+                    ),
+                    (
+                        CommandButton::Research(index, true),
+                        column.top.cell.element.clone(),
+                    ),
+                ]
+            });
+        training.chain(research).collect()
+    }
+
+    /// A training, construction or research button was pressed: its
+    /// order or placement, if it gives one.
+    pub fn command_clicked(&self, button: CommandButton) {
+        let Some(commands) = &self.commands else {
+            return;
+        };
+        let request = match button {
+            CommandButton::Training(index) => {
+                commands.training_orders.get(index).cloned().flatten()
+            }
+            CommandButton::Research(index, top) => commands
+                .research_orders
+                .get(index)
+                .and_then(|orders| orders[usize::from(top)].clone())
+                .map(Request::Order),
+        };
+        if let Some(request) = request {
+            self.requests.borrow_mut().push(request);
+        }
     }
 
     /// The portrait was clicked: `setCameraFollow`, when it shows an icon.
@@ -1633,6 +1723,7 @@ impl CommandsPanel {
                 _ => &[][..],
             };
             producers.push(Producer {
+                id,
                 owner: dot.owner,
                 upgrading: matches!(
                     groups[detail::PROGRESS],
@@ -1655,6 +1746,10 @@ impl CommandsPanel {
         // `data.player`: the first selected entity's owner.
         let player = producers.first().map_or(-1, |producer| producer.owner);
         let all_upgrading = producers.iter().all(|producer| producer.upgrading);
+        // Only the player of `/play` presses these, and only for their own.
+        let controls = view.player == Some(player);
+        self.training_orders.fill(None);
+        self.research_orders.fill([None, None]);
 
         // `g_PanelsOrder`: Gate, Pack and Upgrade come before Training, and
         // `getNumberOfRightPanelButtons` puts the rest after them.
@@ -1705,7 +1800,8 @@ impl CommandsPanel {
             cell.cell.tooltip(&item.tooltip);
         }
         let (training_cells, construction_cells) = other_cells.split_at_mut(trainable.len());
-        for (cell, &(name, item)) in training_cells.iter_mut().zip(&trainable) {
+        for (index, (cell, &(name, item))) in training_cells.iter_mut().zip(&trainable).enumerate()
+        {
             if item.flags & ListItem::HIDDEN != 0 {
                 cell.cell.hidden(true);
                 continue;
@@ -1742,6 +1838,27 @@ impl CommandsPanel {
             cell.cell
                 .tooltip(&training_tooltip(view, item, player, count, &short));
             drawn = true;
+            // `addTrainingToQueue` without batches: one in each producer
+            // that can; the engine refuses what cannot be paid for.
+            if controls && !matches!(modifier, Modifier::Grey) {
+                let entities: Vec<u32> = producers
+                    .iter()
+                    .filter(|producer| {
+                        producer.owner == player
+                            && !producer.upgrading
+                            && producer
+                                .trainable
+                                .iter()
+                                .any(|other| string(scene, other.name) == Some(name))
+                    })
+                    .map(|producer| producer.id)
+                    .collect();
+                self.training_orders[before + index] = Some(Request::Order(Command::Train {
+                    entities,
+                    template: name.to_string(),
+                    count: 1,
+                }));
+            }
         }
 
         for (i, cell) in construction_cells.iter_mut().enumerate() {
@@ -1766,6 +1883,37 @@ impl CommandsPanel {
             cell.cell
                 .tooltip(&construction_tooltip(view, item, player, &short));
             drawn = true;
+            if controls
+                && !matches!(modifier, Modifier::Grey)
+                && let Some(data) = view.template_data(item.name, player)
+            {
+                let builders = producers
+                    .iter()
+                    .filter(|producer| {
+                        producer.owner == player
+                            && producer
+                                .buildable
+                                .iter()
+                                .any(|other| string(scene, other.name) == Some(name))
+                    })
+                    .map(|producer| producer.id)
+                    .collect();
+                let tower = tips::field(
+                    &tips::field(&tips::field(&data, "wallSet"), "templates"),
+                    "tower",
+                )
+                .as_string();
+                let shore =
+                    tips::text_field(&tips::field(&data, "buildRestrictions"), "placementType")
+                        == "shore";
+                self.training_orders[before + trainable.len() + i] = Some(Request::Place(Place {
+                    template: name.to_string(),
+                    actor: tips::text_field(&data, "actor"),
+                    builders,
+                    tower,
+                    shore,
+                }));
+            }
         }
 
         let research = research_items(
@@ -1823,6 +1971,18 @@ impl CommandsPanel {
                     .map_or(player, |producer| producer.owner);
                 cell.cell
                     .tooltip(&research_tooltip(view, tech.item, owner, &short));
+                // `addResearchToQueue`, at the column's producer.
+                if controls
+                    && !matches!(modifier, Modifier::Grey)
+                    && let Some(producer) = producers.get(producer)
+                    && producer.owner == player
+                {
+                    self.research_orders[i][index] = Some(Command::Research {
+                        flags: 0,
+                        entity: producer.id,
+                        template: tech.name.to_string(),
+                    });
+                }
             }
         }
 

@@ -85,5 +85,12 @@
   "measuring": "μέτρηση",
   "Run %(index)s/%(total)s, %(phase)s: %(name)s": "Εκτέλεση %(index)s/%(total)s, %(phase)s: %(name)s",
   "%(done)s of %(total)s runs measured": "Μετρήθηκαν %(done)s από %(total)s εκτελέσεις",
-  "%(done)s of %(total)s runs measured, stopped": "Μετρήθηκαν %(done)s από %(total)s εκτελέσεις, διακόπηκε"
+  "%(done)s of %(total)s runs measured, stopped": "Μετρήθηκαν %(done)s από %(total)s εκτελέσεις, διακόπηκε",
+  "New game": "Νέο παιχνίδι",
+  "A game is in progress.": "Ένα παιχνίδι βρίσκεται σε εξέλιξη.",
+  "Watch it": "Παρακολούθησέ το",
+  "Back to your game": "Πίσω στο παιχνίδι σου",
+  "Players": "Παίκτες",
+  "You": "Εσύ",
+  "Cannot start the game: %(error)s": "Δεν είναι δυνατή η έναρξη του παιχνιδιού: %(error)s"
 }

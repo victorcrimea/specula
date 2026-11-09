@@ -85,5 +85,12 @@
   "measuring": "mittaus",
   "Run %(index)s/%(total)s, %(phase)s: %(name)s": "Ajo %(index)s/%(total)s, %(phase)s: %(name)s",
   "%(done)s of %(total)s runs measured": "%(done)s/%(total)s ajoa mitattu",
-  "%(done)s of %(total)s runs measured, stopped": "%(done)s/%(total)s ajoa mitattu, pysäytetty"
+  "%(done)s of %(total)s runs measured, stopped": "%(done)s/%(total)s ajoa mitattu, pysäytetty",
+  "New game": "Uusi peli",
+  "A game is in progress.": "Peli on käynnissä.",
+  "Watch it": "Katso sitä",
+  "Back to your game": "Takaisin peliisi",
+  "Players": "Pelaajat",
+  "You": "Sinä",
+  "Cannot start the game: %(error)s": "Peliä ei voi aloittaa: %(error)s"
 }

@@ -4,6 +4,7 @@
 
 pub mod bc;
 pub mod bytes;
+pub mod command;
 pub mod files;
 pub mod half;
 pub mod math;

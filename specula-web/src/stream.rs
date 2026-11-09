@@ -46,23 +46,28 @@ const MOTION_GROUNDED: u8 = 1;
 const MOTION_HITPOINTS: u8 = 2;
 const MOTION_CAPTURE: u8 = 4;
 /// `TemplateDetails::components` bit for Health.
-const COMPONENT_HEALTH: u32 = 1;
+pub const COMPONENT_HEALTH: u32 = 1;
+pub const COMPONENT_CAPTURABLE: u32 = 2;
 /// And for ResourceSupply.
 pub const COMPONENT_RESOURCE_SUPPLY: u32 = 4;
 /// And for RallyPoint.
 pub const COMPONENT_RALLY_POINT: u32 = 1 << 20;
 /// The rest of the hook's component bits, `DETAIL_INTERFACES` in order.
 pub const COMPONENT_GARRISON_HOLDER: u32 = 1 << 4;
+pub const COMPONENT_RESOURCE_GATHERER: u32 = 1 << 6;
 pub const COMPONENT_FOUNDATION: u32 = 1 << 7;
+pub const COMPONENT_REPAIRABLE: u32 = 1 << 8;
 pub const COMPONENT_UNIT_AI: u32 = 1 << 9;
 pub const COMPONENT_TRAINER: u32 = 1 << 10;
 pub const COMPONENT_PACK: u32 = 1 << 12;
 pub const COMPONENT_UPGRADE: u32 = 1 << 13;
 pub const COMPONENT_GARRISONABLE: u32 = 1 << 15;
 pub const COMPONENT_TURRETABLE: u32 = 1 << 16;
+pub const COMPONENT_ATTACK: u32 = 1 << 17;
 pub const COMPONENT_BUILDER: u32 = 1 << 21;
 pub const COMPONENT_GATE: u32 = 1 << 22;
 pub const COMPONENT_ALERT_RAISER: u32 = 1 << 23;
+pub const COMPONENT_RESOURCE_DROPSITE: u32 = 1 << 24;
 pub const COMPONENT_TURRET_HOLDER: u32 = 1 << 25;
 pub const COMPONENT_MARKET: u32 = 1 << 26;
 /// `TemplateDetails::flags`: Identity's Undeletable.

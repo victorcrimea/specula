@@ -32,6 +32,7 @@ const RECORD_TECHNOLOGY_DATA: u8 = 19;
 const RECORD_STATS: u8 = 20;
 const RECORD_PLAYER_GUI: u8 = 21;
 const RECORD_FORMATION_DATA: u8 = 22;
+const RECORD_QUERY_REPLY: u8 = 23;
 const ENTITY_SIZE: usize = 74;
 const SOUND_SIZE: usize = 27;
 const LAUNCH_SIZE: usize = 52;
@@ -659,6 +660,11 @@ pub enum Record {
         index: u32,
         json: Vec<u8>,
     },
+    /// Kind 23: the answer to an uplink query of `--play`, UTF-8 JSON.
+    QueryReply {
+        id: u32,
+        json: Vec<u8>,
+    },
 }
 
 /// `ICmpTerritoryManager`'s grid, whenever it changes: row-major, x
@@ -802,6 +808,14 @@ pub fn read_record(reader: &mut impl Read) -> io::Result<Option<Record>> {
                 let index = cursor.u32()?;
                 return Ok(Some(Record::Stats {
                     index,
+                    json: cursor.0.to_vec(),
+                }));
+            }
+            RECORD_QUERY_REPLY => {
+                let mut cursor = Cursor(&payload);
+                let id = cursor.u32()?;
+                return Ok(Some(Record::QueryReply {
+                    id,
                     json: cursor.0.to_vec(),
                 }));
             }

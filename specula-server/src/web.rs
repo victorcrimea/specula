@@ -102,7 +102,7 @@ impl<'r> FromRequest<'r> for AcceptsBrotli {
 
 /// A page whose glue and wasm URLs are filled in; any other name forwards
 /// to the file server.
-pub struct Page(&'static str);
+pub struct Page(pub &'static str);
 
 impl<'r> FromParam<'r> for Page {
     type Error = &'r str;

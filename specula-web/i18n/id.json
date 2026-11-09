@@ -85,5 +85,12 @@
   "measuring": "pengukuran",
   "Run %(index)s/%(total)s, %(phase)s: %(name)s": "Putaran %(index)s/%(total)s, %(phase)s: %(name)s",
   "%(done)s of %(total)s runs measured": "%(done)s dari %(total)s putaran terukur",
-  "%(done)s of %(total)s runs measured, stopped": "%(done)s dari %(total)s putaran terukur, dihentikan"
+  "%(done)s of %(total)s runs measured, stopped": "%(done)s dari %(total)s putaran terukur, dihentikan",
+  "New game": "Permainan baru",
+  "A game is in progress.": "Sebuah permainan sedang berlangsung.",
+  "Watch it": "Tonton",
+  "Back to your game": "Kembali ke permainan Anda",
+  "Players": "Pemain",
+  "You": "Anda",
+  "Cannot start the game: %(error)s": "Tidak dapat memulai permainan: %(error)s"
 }

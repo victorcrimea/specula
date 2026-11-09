@@ -109,7 +109,8 @@ async fn fetch_json(hash: u64) -> Option<JsValue> {
     js_sys::JSON::parse(&text.as_string()?).ok()
 }
 
-fn field(value: &JsValue, key: &str) -> JsValue {
+/// A member of a JSON object, undefined when it is not there.
+pub fn field(value: &JsValue, key: &str) -> JsValue {
     if !value.is_object() {
         return JsValue::UNDEFINED;
     }

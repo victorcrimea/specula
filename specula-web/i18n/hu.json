@@ -85,5 +85,12 @@
   "measuring": "mérés",
   "Run %(index)s/%(total)s, %(phase)s: %(name)s": "%(index)s/%(total)s. futás, %(phase)s: %(name)s",
   "%(done)s of %(total)s runs measured": "%(done)s / %(total)s futás megmérve",
-  "%(done)s of %(total)s runs measured, stopped": "%(done)s / %(total)s futás megmérve, leállítva"
+  "%(done)s of %(total)s runs measured, stopped": "%(done)s / %(total)s futás megmérve, leállítva",
+  "New game": "Új játék",
+  "A game is in progress.": "Egy játék folyamatban van.",
+  "Watch it": "Megnézem",
+  "Back to your game": "Vissza a játékodhoz",
+  "Players": "Játékosok",
+  "You": "Te",
+  "Cannot start the game: %(error)s": "A játék nem indítható: %(error)s"
 }

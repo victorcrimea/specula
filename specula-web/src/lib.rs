@@ -16,10 +16,12 @@ mod left;
 mod march;
 mod minimap;
 mod opfs;
+mod orders;
 mod overlay;
 mod panel;
 mod particles;
 mod pick;
+mod placement;
 mod pose;
 mod postproc;
 mod projectile;
@@ -36,6 +38,7 @@ mod tips;
 mod tooltip;
 mod top;
 mod unit;
+mod uplink;
 mod usage;
 mod variation;
 mod warmup;
@@ -84,6 +87,7 @@ use crate::icons::IconAtlas;
 use crate::minimap::Minimap;
 use crate::panel::DetailsPanel;
 use crate::panel::Request;
+use crate::placement::Placement;
 use crate::postproc::Upscale;
 use crate::render::Renderer;
 use crate::stream::Ground;
@@ -93,6 +97,7 @@ use crate::stream::Sound;
 use crate::stream::SoundTarget;
 use crate::terrain::TerrainImage;
 use crate::top::TopPanel;
+use crate::uplink::Uplink;
 use crate::warmup::Warmup;
 use crate::worker::COMMAND_CURRENT_MATCH;
 use crate::worker::COMMAND_DETAIL;
@@ -334,6 +339,24 @@ trait View {
     fn take_select_sounds(&mut self) -> Vec<SelectSound> {
         Vec::new()
     }
+    /// Where the right clicks since the last call landed, where it takes
+    /// orders.
+    fn take_order_targets(&mut self) -> Vec<orders::Target> {
+        Vec::new()
+    }
+    /// Whether the left and right buttons place a structure rather than
+    /// select and order.
+    fn set_placing(&mut self, _on: bool) {}
+    /// The placement presses, releases and cancels since the last call.
+    fn take_place_inputs(&mut self) -> Vec<placement::Input> {
+        Vec::new()
+    }
+    /// The mouse over the ground while placing.
+    fn place_pointer(&self) -> Option<placement::Pointer> {
+        None
+    }
+    /// The placement previews to draw.
+    fn set_ghosts(&mut self, _ghosts: Vec<placement::Ghost>) {}
     /// Where the camera is, for the benchmark to hold it there.
     fn camera(&self) -> Option<CameraPose> {
         None
@@ -530,6 +553,12 @@ struct App {
     /// The JSON the tooltips read, fetched as they ask for it.
     data_files: tips::DataFiles,
     detailed_tooltips: bool,
+    /// On `/play`: where the player's orders go, and who they command.
+    uplink: Option<Uplink>,
+    /// The seat the perspective was last moved to.
+    seat_shown: Option<i32>,
+    /// The structure being placed on `/play`.
+    placement: Placement,
 }
 
 /// The range overlay lists, and the values they and the storage last got,
@@ -774,6 +803,7 @@ impl App {
             }
         }
         self.play_sounds(now, progress);
+        self.give_orders();
         if let Some(ranges) = &mut self.ranges {
             ranges.show(self.renderer.ranges());
         }
@@ -798,6 +828,37 @@ impl App {
         timing::frame(page_now() - start, drew);
     }
 
+    /// On `/play`: turns the right clicks into the seat's orders, and shows
+    /// the match from the seat once it is known. Elsewhere the clicks are
+    /// dropped.
+    fn give_orders(&mut self) {
+        let targets = self.renderer.take_order_targets();
+        let Some(seat) = self.uplink.as_ref().and_then(Uplink::seat) else {
+            return;
+        };
+        let players = self.scene.players.len();
+        if self.seat_shown != Some(seat) && usize::try_from(seat).is_ok_and(|seat| seat < players) {
+            self.seat_shown = Some(seat);
+            self.perspective = Perspective::Player(seat as usize);
+            self.perspective_select.set_value(&seat.to_string());
+            self.update_palette();
+            // The panels' buttons work for the seat's own from now on.
+            self.details_dirty = true;
+        }
+        let selected = self.renderer.selected();
+        for target in targets {
+            if let Some(order) = orders::order(&self.scene, selected, seat, &target)
+                && let Some(uplink) = &self.uplink
+            {
+                uplink.send(&order);
+            }
+        }
+        if let Some(uplink) = &self.uplink {
+            self.placement
+                .update(&mut *self.renderer, uplink, &self.scene, seat);
+        }
+    }
+
     /// Asks for the detail stream while something is selected.
     fn follow_selection(&mut self) {
         let selected = self.renderer.selected();
@@ -810,7 +871,19 @@ impl App {
             return;
         };
         for request in details.take_requests() {
-            apply_request(&mut *self.renderer, request, &self.scene);
+            match request {
+                Request::Order(order) => {
+                    if let Some(uplink) = &self.uplink {
+                        uplink.send(&order);
+                    }
+                }
+                Request::Place(place) => {
+                    if let Some(uplink) = &self.uplink {
+                        self.placement.start(place, uplink);
+                    }
+                }
+                request => apply_request(&mut *self.renderer, request, &self.scene),
+            }
         }
         if details.take_redraw() {
             self.details_dirty = true;
@@ -845,6 +918,7 @@ impl App {
             template_portrait: &template_portrait,
             data: &self.data_files,
             detailed: self.detailed_tooltips,
+            player: self.uplink.as_ref().and_then(Uplink::seat),
         });
     }
 
@@ -971,6 +1045,7 @@ impl App {
             // nothing.
             self.perspective = Perspective::Observer;
             self.perspective_select.set_value("0");
+            self.seat_shown = None;
         }
         if let Some(warmup) = &mut self.warmup {
             warmup.set_civs(
@@ -1147,6 +1222,14 @@ pub fn observer_main(
     });
 }
 
+/// Entry point of play.html, the setup of a game the server hosts: only
+/// the language, for the page's own script to translate with.
+#[wasm_bindgen]
+pub fn play_setup_main() {
+    set_panic_hook();
+    lang::start_page();
+}
+
 /// Entry point of unit.html.
 #[wasm_bindgen]
 pub fn unit_main() {
@@ -1242,8 +1325,13 @@ async fn run(
         Page::Map => None,
         Page::Observer => Some(Warmup::new(element(&document, "warmup")?)),
     };
+    // `/play` is the 3D page for the player of a game the server hosts: the
+    // live stream, and orders.
+    let play = page == Page::Observer && window.location().pathname().as_deref() == Ok("/play");
     let live_delay = match page {
         Page::Map => None,
+        // The player's stream has no delay, whatever the observers' is.
+        Page::Observer if play => None,
         // A cached older page has no label; the match still shows.
         Page::Observer => element(&document, "live-delay").ok(),
     };
@@ -1259,6 +1347,9 @@ async fn run(
         js_sys::encode_uri_component(&glue_url),
         js_sys::encode_uri_component(&wasm_url)
     );
+    if play {
+        worker_url.push_str("&play=1");
+    }
     // A shared link names a match and a moment in it; the worker opens it.
     let search = window.location().search().unwrap_or_default();
     for name in ["match", "t"] {
@@ -1346,6 +1437,9 @@ async fn run(
         tooltips,
         data_files: tips::DataFiles::default(),
         detailed_tooltips: false,
+        uplink: play.then(Uplink::open),
+        seat_shown: None,
+        placement: Placement::default(),
     }));
     wire_controls(&app);
     wire_details(&app);
@@ -1532,7 +1626,7 @@ fn element<T: JsCast>(document: &Document, id: &str) -> Result<T, String> {
 /// selects its group, or with Ctrl (session.deselectgroup) or the right
 /// button removes it.
 fn wire_details(app: &Rc<RefCell<App>>) {
-    let (portrait, buttons, sells) = {
+    let (portrait, buttons, sells, commands) = {
         let app = app.borrow();
         let Some(details) = &app.details else {
             return;
@@ -1541,8 +1635,21 @@ fn wire_details(app: &Rc<RefCell<App>>) {
             details.portrait_button().clone(),
             details.group_buttons().cloned().collect::<Vec<_>>(),
             details.barter_buttons(),
+            details.command_buttons(),
         )
     };
+    // On `/play` they give the player's orders; for an observer they do
+    // nothing, as in the game.
+    for (command, button) in commands {
+        let target = Rc::clone(app);
+        let on_click = Closure::<dyn FnMut()>::new(move || {
+            if let Some(details) = &target.borrow().details {
+                details.command_clicked(command);
+            }
+        });
+        button.set_onclick(Some(on_click.as_ref().unchecked_ref()));
+        on_click.forget();
+    }
     let target = Rc::clone(app);
     let on_click = Closure::<dyn FnMut()>::new(move || {
         if let Some(details) = &target.borrow().details {
@@ -1596,6 +1703,8 @@ fn apply_request(renderer: &mut dyn View, request: Request, scene: &Scene) {
                 renderer.follow(id);
             }
         }
+        // The caller sends it, as it holds the uplink.
+        Request::Order(_) | Request::Place(_) => {}
     }
 }
 

@@ -85,5 +85,12 @@
   "measuring": "neurketa",
   "Run %(index)s/%(total)s, %(phase)s: %(name)s": "%(index)s/%(total)s exekuzioa, %(phase)s: %(name)s",
   "%(done)s of %(total)s runs measured": "%(total)s exekuziotatik %(done)s neurtu dira",
-  "%(done)s of %(total)s runs measured, stopped": "%(total)s exekuziotatik %(done)s neurtu dira, geldituta"
+  "%(done)s of %(total)s runs measured, stopped": "%(total)s exekuziotatik %(done)s neurtu dira, geldituta",
+  "New game": "Partida berria",
+  "A game is in progress.": "Partida bat abian da.",
+  "Watch it": "Ikusi",
+  "Back to your game": "Itzuli zure partidara",
+  "Players": "Jokalariak",
+  "You": "Zu",
+  "Cannot start the game: %(error)s": "Ezin da partida hasi: %(error)s"
 }

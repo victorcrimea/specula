@@ -4,6 +4,7 @@ mod detail;
 mod feed;
 mod history;
 mod observer;
+mod play;
 mod terrain;
 mod usage;
 mod view;
@@ -32,11 +33,17 @@ use rocket::tokio::sync::broadcast::Receiver;
 use rocket::tokio::sync::broadcast::error::RecvError;
 use rocket_ws::Channel;
 use rocket_ws::WebSocket;
+use specula_assets::command::COMMAND_VERSION;
+use specula_assets::command::Command as Order;
+use specula_assets::command::QUERY_TAG;
+use specula_assets::command::Query;
 
 use crate::classify::Classifier;
 use crate::delta::DeltaMeter;
 use crate::feed::Record;
 use crate::history::History;
+use crate::play::Play;
+use crate::play::Setup;
 use crate::terrain::Ground;
 use crate::usage::Usage;
 use crate::view::Hub;
@@ -52,8 +59,9 @@ const DEFAULT_HISTORY_DIR: &str = "history";
 const DEFAULT_HISTORY_LIMIT: u64 = 1 << 30;
 /// Relative to the working directory, as `WEB_ROOT`.
 const DEFAULT_USAGE_DIR: &str = "usage";
-const USAGE: &str = "usage: specula-server [SOCKET] [--observe HOST:PORT] [--delay SECONDS] \
-                     [--history DIR] [--history-limit SIZE] [--usage DIR] [--stats-key KEY]";
+const USAGE: &str = "usage: specula-server [SOCKET] [--observe HOST:PORT | --play [--play-port PORT]] \
+                     [--delay SECONDS] [--history DIR] [--history-limit SIZE] [--usage DIR] \
+                     [--stats-key KEY]";
 /// Relative to the working directory, so the server runs from the repo root.
 pub const WEB_ROOT: &str = "specula-web";
 
@@ -62,6 +70,7 @@ async fn main() {
     let Args {
         socket: path,
         observe,
+        play_port,
         delay,
         history_dir,
         history_limit,
@@ -121,14 +130,21 @@ async fn main() {
         }
     };
 
-    let hub = Arc::new(Hub::new(delay, history));
+    let hub = Arc::new(Hub::new(delay, history, play_port.is_some()));
     let publisher_hub = Arc::clone(&hub);
     std::thread::spawn(move || publisher_hub.run_publisher());
+    let play = play_port.map(|port| {
+        // As `observer::supervise`: an engine a dead server left behind.
+        observer::kill_recorded(&path);
+        println!("hosting games for /play on port {port}");
+        Arc::new(Play::new(path.clone(), port, Arc::clone(&hub)))
+    });
     let feed_hub = Arc::clone(&hub);
+    let feed_play = play.clone();
     // The feed is blocking std I/O, so it gets its own thread rather than
     // a slot in Rocket's async runtime.
-    std::thread::spawn(move || accept_observers(listener, &feed_hub));
-    let supervised = observe.is_some();
+    std::thread::spawn(move || accept_observers(listener, &feed_hub, feed_play.as_deref()));
+    let supervised = observe.is_some() || play.is_some();
     if let Some((host, port)) = observe {
         let supervisor_hub = Arc::clone(&hub);
         let socket = path.clone();
@@ -137,6 +153,7 @@ async fn main() {
 
     let result = rocket::build()
         .manage(hub)
+        .manage(play)
         .manage(usage)
         .manage(web::Pkg::default())
         .manage(web::AssetsSize::default())
@@ -146,6 +163,14 @@ async fn main() {
             rocket::routes![
                 viewer,
                 detail_viewer,
+                play_page,
+                play_setup,
+                play_new,
+                play_viewer,
+                play_detail_viewer,
+                play_segment_file,
+                play_detail_segment_file,
+                play_command,
                 web::terrain,
                 web::data,
                 segment_file,
@@ -185,14 +210,22 @@ async fn main() {
     }
 }
 
-fn accept_observers(listener: UnixListener, hub: &Hub) {
+/// `play`: in play mode, where the commands go back over the feed socket.
+fn accept_observers(listener: UnixListener, hub: &Hub, play: Option<&Play>) {
     // One observer at a time: each one is a whole match.
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
                 println!("observer connected");
                 hub.start_feed();
-                match serve(stream, hub) {
+                if let Some(play) = play {
+                    play.set_uplink(stream.try_clone().ok());
+                }
+                let served = serve(stream, hub, play);
+                if let Some(play) = play {
+                    play.set_uplink(None);
+                }
+                match served {
                     Ok(()) => println!("observer disconnected"),
                     Err(error) => eprintln!("observer feed failed: {error}"),
                 }
@@ -215,7 +248,7 @@ fn viewer(
 ) -> Channel<'static> {
     let hub = Arc::clone(hub);
     let watch = usage.watch(cookies);
-    relay(socket, watch, move || hub.subscribe())
+    relay(socket, watch, move || hub.subscribe(false))
 }
 
 /// The detail stream, which viewers hold open only while they have
@@ -223,19 +256,169 @@ fn viewer(
 #[rocket::get("/detail")]
 fn detail_viewer(socket: WebSocket, hub: &State<Arc<Hub>>) -> Channel<'static> {
     let hub = Arc::clone(hub);
-    relay(socket, (), move || hub.subscribe_detail())
+    relay(socket, (), move || hub.subscribe_detail(false))
 }
 
-/// `held` is dropped when the stream closes.
+/// In play mode: the player's page, the 3D page on the live stream, for
+/// the visitor who holds the seat; the setup page for anyone else, or with
+/// `?new`.
+#[rocket::get("/play?<new>")]
+#[allow(clippy::too_many_arguments)]
+async fn play_page(
+    new: Option<&str>,
+    play: &State<Option<Arc<Play>>>,
+    pkg: &State<web::Pkg>,
+    assets: &State<web::AssetsSize>,
+    atlases: &State<web::AtlasVersions>,
+    usage: &State<Arc<Usage>>,
+    cookies: &CookieJar<'_>,
+    referrer: usage::Referrer,
+) -> Option<rocket::response::content::RawHtml<String>> {
+    let play = play.as_ref()?;
+    let seated = play.seat(usage::visitor(cookies).as_deref()).is_some();
+    let page = if seated && new.is_none() {
+        "index.html"
+    } else {
+        "play.html"
+    };
+    web::page(
+        web::Page(page),
+        pkg,
+        assets,
+        atlases,
+        usage,
+        cookies,
+        referrer,
+    )
+    .await
+}
+
+#[rocket::get("/play/setup")]
+fn play_setup(play: &State<Option<Arc<Play>>>, cookies: &CookieJar<'_>) -> Option<Json> {
+    let play = play.as_ref()?;
+    let (running, mine) = play.status(usage::visitor(cookies).as_deref());
+    Some(Json(
+        play::setup_json(running, mine),
+        Header::new("Cache-Control", "no-store"),
+    ))
+}
+
+#[derive(rocket::Responder)]
+#[response(content_type = "json")]
+struct Json(String, Header<'static>);
+
+/// Starts a game from the setup page's form; the text says why not.
+#[rocket::post("/play/new", data = "<form>")]
+fn play_new(
+    form: rocket::form::Form<HashMap<String, String>>,
+    play: &State<Option<Arc<Play>>>,
+    cookies: &CookieJar<'_>,
+) -> Result<(), rocket::response::status::BadRequest<&'static str>> {
+    let refuse = rocket::response::status::BadRequest;
+    let play = play.as_ref().ok_or(refuse("not in play mode"))?;
+    // The page set the cookie when it loaded.
+    let visitor = usage::visitor(cookies).ok_or(refuse("no visitor cookie"))?;
+    let setup = Setup::from_form(&form).map_err(refuse)?;
+    play.start(&visitor, &setup).map_err(refuse)
+}
+
+/// `/ws` without the delay, for `/play`.
+#[rocket::get("/play/ws")]
+fn play_viewer(socket: WebSocket, hub: &State<Arc<Hub>>) -> Channel<'static> {
+    let hub = Arc::clone(hub);
+    relay(socket, (), move || hub.subscribe(true))
+}
+
+#[rocket::get("/play/detail")]
+fn play_detail_viewer(socket: WebSocket, hub: &State<Arc<Hub>>) -> Channel<'static> {
+    let hub = Arc::clone(hub);
+    relay(socket, (), move || hub.subscribe_detail(true))
+}
+
+#[rocket::get("/play/match/<id>/seg/<index>")]
+fn play_segment_file(id: &str, index: usize, hub: &State<Arc<Hub>>) -> Option<SegmentBytes> {
+    segment_bytes(hub.segment(u64::from_str_radix(id, 16).ok()?, index, true)?)
+}
+
+#[rocket::get("/play/match/<id>/detail/<index>")]
+fn play_detail_segment_file(id: &str, index: usize, hub: &State<Arc<Hub>>) -> Option<SegmentBytes> {
+    segment_bytes(hub.detail_segment(u64::from_str_radix(id, 16).ok()?, index, true)?)
+}
+
+/// The player's orders (`specula_assets::command`). The server first sends
+/// the format version and the player number the visitor commands, 0 for
+/// none; orders from a visitor without the seat are dropped, as is the
+/// seat looked up again for each, since a new game may have replaced it.
+#[rocket::get("/play/command")]
+fn play_command(
+    socket: WebSocket,
+    play: &State<Option<Arc<Play>>>,
+    cookies: &CookieJar<'_>,
+) -> Option<Channel<'static>> {
+    let play = Arc::clone(play.as_ref()?);
+    let visitor = usage::visitor(cookies);
+    Some(socket.channel(move |mut stream| {
+        Box::pin(async move {
+            let seat = play.seat(visitor.as_deref()).unwrap_or(0);
+            let mut replies = play.replies();
+            stream
+                .send(rocket_ws::Message::binary(vec![COMMAND_VERSION, seat]))
+                .await?;
+            loop {
+                let message = rocket::tokio::select! {
+                    reply = replies.recv() => match reply {
+                        Ok(reply) => {
+                            // Every page of the seat asks with its own ids;
+                            // a reply to another's is ignored there.
+                            if play.seat(visitor.as_deref()).is_some() {
+                                stream.send(rocket_ws::Message::text(reply)).await?;
+                            }
+                            continue;
+                        }
+                        // A dropped reply only leaves one preview untinted.
+                        Err(RecvError::Lagged(_)) => continue,
+                        Err(RecvError::Closed) => return Ok(()),
+                    },
+                    incoming = stream.next() => match incoming {
+                        None => return Ok(()),
+                        Some(message) => message?,
+                    },
+                };
+                let rocket_ws::Message::Binary(bytes) = message else {
+                    continue;
+                };
+                let Some(seat) = play.seat(visitor.as_deref()) else {
+                    continue;
+                };
+                if bytes.first() == Some(&QUERY_TAG) {
+                    match Query::decode(&bytes) {
+                        Ok(query) => play.query(seat, &query),
+                        Err(error) => eprintln!("bad query from the player: {error}"),
+                    }
+                    continue;
+                }
+                match Order::decode(&bytes) {
+                    Ok(order) => play.send(seat, &order),
+                    Err(error) => eprintln!("bad command from the player: {error}"),
+                }
+            }
+        })
+    }))
+}
+
+/// `held` is dropped when the stream closes. `subscribe` gives None when
+/// there is nothing to follow (`/play/ws` outside play mode).
 fn relay(
     socket: WebSocket,
     held: impl Send + 'static,
-    subscribe: impl Fn() -> (Vec<Message>, Receiver<Message>) + Send + 'static,
+    subscribe: impl Fn() -> Option<(Vec<Message>, Receiver<Message>)> + Send + 'static,
 ) -> Channel<'static> {
     socket.channel(move |mut stream| {
         Box::pin(async move {
             let _held = held;
-            let (mut first, mut receiver) = subscribe();
+            let Some((mut first, mut receiver)) = subscribe() else {
+                return Ok(());
+            };
             loop {
                 for message in first.drain(..) {
                     stream.send(rocket_ws::Message::binary(&*message)).await?;
@@ -245,7 +428,10 @@ fn relay(
                         Ok(message) => stream.send(rocket_ws::Message::binary(&*message)).await?,
                         // Missed deltas cannot be patched over; start again
                         // from a fresh keyframe.
-                        Err(RecvError::Lagged(_)) => (first, receiver) = subscribe(),
+                        Err(RecvError::Lagged(_)) => match subscribe() {
+                            Some(again) => (first, receiver) = again,
+                            None => return Ok(()),
+                        },
                         Err(RecvError::Closed) => return Ok(()),
                     },
                     incoming = stream.next() => match incoming {
@@ -267,12 +453,12 @@ struct SegmentBytes(Vec<u8>, Header<'static>);
 
 #[rocket::get("/match/<id>/seg/<index>")]
 fn segment_file(id: &str, index: usize, hub: &State<Arc<Hub>>) -> Option<SegmentBytes> {
-    segment_bytes(hub.segment(u64::from_str_radix(id, 16).ok()?, index)?)
+    segment_bytes(hub.segment(u64::from_str_radix(id, 16).ok()?, index, false)?)
 }
 
 #[rocket::get("/match/<id>/detail/<index>")]
 fn detail_segment_file(id: &str, index: usize, hub: &State<Arc<Hub>>) -> Option<SegmentBytes> {
-    segment_bytes(hub.detail_segment(u64::from_str_radix(id, 16).ok()?, index)?)
+    segment_bytes(hub.detail_segment(u64::from_str_radix(id, 16).ok()?, index, false)?)
 }
 
 /// "<segments> <live 0|1>", as `view.rs` describes.
@@ -328,6 +514,8 @@ fn segment_bytes((bytes, closed): (Message, bool)) -> Option<SegmentBytes> {
 struct Args {
     socket: String,
     observe: Option<(String, String)>,
+    /// With `--play`: the port the hosted games listen on.
+    play_port: Option<u16>,
     delay: Duration,
     history_dir: PathBuf,
     /// 0: no history.
@@ -336,11 +524,14 @@ struct Args {
     stats_key: Option<String>,
 }
 
-/// `[SOCKET] [--observe HOST:PORT] [--delay SECONDS] [--history DIR]
-/// [--history-limit SIZE] [--usage DIR] [--stats-key KEY]`, in any order.
+/// `[SOCKET] [--observe HOST:PORT | --play [--play-port PORT]] [--delay
+/// SECONDS] [--history DIR] [--history-limit SIZE] [--usage DIR]
+/// [--stats-key KEY]`, in any order.
 fn parse_args() -> Result<Args, String> {
     let mut socket = None;
     let mut observe = None;
+    let mut play = false;
+    let mut play_port = play::DEFAULT_PORT;
     let mut delay = Duration::from_secs(DEFAULT_DELAY_SECS);
     let mut history_dir = PathBuf::from(DEFAULT_HISTORY_DIR);
     let mut history_limit = DEFAULT_HISTORY_LIMIT;
@@ -373,15 +564,27 @@ fn parse_args() -> Result<Args, String> {
                 .filter(|(host, port)| !host.is_empty() && port.parse::<u16>().is_ok())
                 .ok_or_else(|| format!("--observe {target}: expected HOST:PORT"))?;
             observe = Some((host.to_string(), port.to_string()));
+        } else if arg == "--play" {
+            play = true;
+        } else if arg == "--play-port" {
+            let port = args.next().ok_or("--play-port needs PORT")?;
+            play_port = port
+                .parse()
+                .map_err(|_| format!("--play-port {port}: expected a port"))?;
         } else if socket.is_none() && !arg.starts_with("--") {
             socket = Some(arg);
         } else {
             return Err(format!("unexpected argument {arg}"));
         }
     }
+    // Both would feed the one socket.
+    if play && observe.is_some() {
+        return Err("--play and --observe exclude each other".to_string());
+    }
     Ok(Args {
         socket: socket.unwrap_or_else(|| DEFAULT_SOCKET.to_string()),
         observe,
+        play_port: play.then_some(play_port),
         delay,
         history_dir,
         history_limit,
@@ -403,7 +606,7 @@ fn remove_stale_socket(path: &str) -> io::Result<()> {
     }
 }
 
-fn serve(stream: UnixStream, hub: &Hub) -> io::Result<()> {
+fn serve(stream: UnixStream, hub: &Hub, play: Option<&Play>) -> io::Result<()> {
     let mut reader = BufReader::new(stream);
     feed::read_header(&mut reader)?;
     let mut templates = HashMap::new();
@@ -445,6 +648,11 @@ fn serve(stream: UnixStream, hub: &Hub) -> io::Result<()> {
             Record::Data { key, json } => details.set_data(key, hub.add_data(json)),
             Record::Stats { index, json } => details.set_stats(index, hub.add_data(json)),
             Record::PlayerGui(player_gui) => details.set_player_gui(player_gui),
+            Record::QueryReply { id, json } => {
+                if let Some(play) = play {
+                    play.reply(id, &json);
+                }
+            }
             Record::Economy(economy) => {
                 hub.set_economy(&economy);
                 details.set_economy(economy);

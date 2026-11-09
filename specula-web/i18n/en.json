@@ -85,5 +85,12 @@
   "measuring": "benchmark phase, lower case, used inside a status line",
   "Run %(index)s/%(total)s, %(phase)s: %(name)s": "benchmark status line: run number, total, phase word, name of the setting tested",
   "%(done)s of %(total)s runs measured": "benchmark result summary",
-  "%(done)s of %(total)s runs measured, stopped": "benchmark result summary when stopped early"
+  "%(done)s of %(total)s runs measured, stopped": "benchmark result summary when stopped early",
+  "New game": "heading and title of the page that sets up a game against the computer, which the server hosts",
+  "A game is in progress.": "on the game setup page: another game the server hosts is running",
+  "Watch it": "link from the game setup page to watch the game in progress",
+  "Back to your game": "link from the game setup page back to the visitor's own game in progress",
+  "Players": "game setup: label of the list choosing how many players the game has",
+  "You": "game setup: the visitor plays this slot",
+  "Cannot start the game: %(error)s": "game setup error; %(error)s is the server's reason, in English"
 }

@@ -85,5 +85,12 @@
   "measuring": "ölçüm",
   "Run %(index)s/%(total)s, %(phase)s: %(name)s": "Çalıştırma %(index)s/%(total)s, %(phase)s: %(name)s",
   "%(done)s of %(total)s runs measured": "%(total)s çalıştırmadan %(done)s tanesi ölçüldü",
-  "%(done)s of %(total)s runs measured, stopped": "%(total)s çalıştırmadan %(done)s tanesi ölçüldü, durduruldu"
+  "%(done)s of %(total)s runs measured, stopped": "%(total)s çalıştırmadan %(done)s tanesi ölçüldü, durduruldu",
+  "New game": "Yeni oyun",
+  "A game is in progress.": "Devam eden bir oyun var.",
+  "Watch it": "İzle",
+  "Back to your game": "Oyununa dön",
+  "Players": "Oyuncular",
+  "You": "Sen",
+  "Cannot start the game: %(error)s": "Oyun başlatılamıyor: %(error)s"
 }

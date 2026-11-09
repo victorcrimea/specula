@@ -85,5 +85,12 @@
   "measuring": "měření",
   "Run %(index)s/%(total)s, %(phase)s: %(name)s": "Běh %(index)s/%(total)s, %(phase)s: %(name)s",
   "%(done)s of %(total)s runs measured": "Změřeno %(done)s z %(total)s běhů",
-  "%(done)s of %(total)s runs measured, stopped": "Změřeno %(done)s z %(total)s běhů, zastaveno"
+  "%(done)s of %(total)s runs measured, stopped": "Změřeno %(done)s z %(total)s běhů, zastaveno",
+  "New game": "Nová hra",
+  "A game is in progress.": "Probíhá hra.",
+  "Watch it": "Sledovat",
+  "Back to your game": "Zpět do vaší hry",
+  "Players": "Hráči",
+  "You": "Vy",
+  "Cannot start the game: %(error)s": "Hru nelze spustit: %(error)s"
 }

@@ -55,6 +55,8 @@ struct ModelVaryings {
     @location(5) uv2: vec2<f32>,
     @location(6) tangent: vec3<f32>,
     @location(7) bitangent: vec3<f32>,
+    // 1 for SetShadingColor's red of a refused placement preview.
+    @location(8) @interpolate(flat) shading: f32,
 }
 
 fn pose_texel(index: u32) -> vec4<f32> {
@@ -135,7 +137,8 @@ fn vs_model(
     // First texel of frame a, of frame b, bone count (0: not skinned),
     // player colour as RGBA8.
     @location(8) pose: vec4<u32>,
-    // Blend from a to b, 1 when tinted by the player colour, alpha ref.
+    // Blend from a to b, 1 when tinted by the player colour, alpha ref,
+    // shading.
     @location(9) params: vec4<f32>,
 ) -> ModelVaryings {
     var local = position;
@@ -196,6 +199,7 @@ fn vs_model(
     let rgb = vec3<f32>(f32(pose.w & 255u), f32((pose.w >> 8u) & 255u), f32((pose.w >> 16u) & 255u));
     out.color = vec4<f32>(rgb / 255.0, params.y);
     out.alpha_ref = params.z;
+    out.shading = params.w;
     return out;
 }
 
@@ -263,7 +267,10 @@ fn fs_model(in: ModelVaryings) -> @location(0) vec4<f32> {
     // calculateShading.
     let shadow = shadow_at(in.world, light.shadow.x);
     let color = (diffuse * sun_diffuse + specular) * shadow + diffuse * light.ambient.rgb * ao;
-    return vec4<f32>(apply_fog(color, in.world), 1.0);
+    // GuiInterface's SetShadingColor(1.4, 0.4, 0.4), which model_common.fs
+    // multiplies in after the fog.
+    let shading = select(vec3<f32>(1.0), vec3<f32>(1.4, 0.4, 0.4), in.shading > 0.5);
+    return vec4<f32>(apply_fog(color, in.world) * shading, 1.0);
 }
 
 // The shadow map's depth pass: only the alpha test, so leaves cast

@@ -85,5 +85,12 @@
   "measuring": "вимірювання",
   "Run %(index)s/%(total)s, %(phase)s: %(name)s": "Прогін %(index)s/%(total)s, %(phase)s: %(name)s",
   "%(done)s of %(total)s runs measured": "Виміряно прогонів: %(done)s із %(total)s",
-  "%(done)s of %(total)s runs measured, stopped": "Виміряно прогонів: %(done)s із %(total)s, зупинено"
+  "%(done)s of %(total)s runs measured, stopped": "Виміряно прогонів: %(done)s із %(total)s, зупинено",
+  "New game": "Нова гра",
+  "A game is in progress.": "Триває гра.",
+  "Watch it": "Дивитися",
+  "Back to your game": "Повернутися до своєї гри",
+  "Players": "Гравці",
+  "You": "Ви",
+  "Cannot start the game: %(error)s": "Не вдалося почати гру: %(error)s"
 }

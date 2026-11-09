@@ -85,5 +85,12 @@
   "measuring": "mätning",
   "Run %(index)s/%(total)s, %(phase)s: %(name)s": "Körning %(index)s/%(total)s, %(phase)s: %(name)s",
   "%(done)s of %(total)s runs measured": "%(done)s av %(total)s körningar mätta",
-  "%(done)s of %(total)s runs measured, stopped": "%(done)s av %(total)s körningar mätta, stoppad"
+  "%(done)s of %(total)s runs measured, stopped": "%(done)s av %(total)s körningar mätta, stoppad",
+  "New game": "Nytt spel",
+  "A game is in progress.": "Ett spel pågår.",
+  "Watch it": "Titta",
+  "Back to your game": "Tillbaka till ditt spel",
+  "Players": "Spelare",
+  "You": "Du",
+  "Cannot start the game: %(error)s": "Det går inte att starta spelet: %(error)s"
 }

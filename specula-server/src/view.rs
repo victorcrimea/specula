@@ -693,6 +693,7 @@ struct Archive {
     data_files: DataFiles,
 }
 
+#[derive(Clone)]
 struct Ended {
     at: Instant,
     /// The final state, compressed, for viewers who join before the next
@@ -709,6 +710,7 @@ type DataFiles = HashMap<u64, Arc<[u8]>>;
 
 /// One turn of a stream as the encoder made it, compressed, waiting to be
 /// shown: the encoding runs live while viewers see it `delay` later.
+#[derive(Clone)]
 enum TrackOp {
     /// A new match's history starts at this compressed keyframe.
     Restart(Message),
@@ -881,6 +883,7 @@ enum Lookup {
 }
 
 /// What the encoder made, held until it is due.
+#[derive(Clone)]
 enum Release {
     Turn {
         /// The id of the match this turn starts.
@@ -1000,6 +1003,9 @@ struct State {
     /// Oldest first, each with when it is due.
     pending: VecDeque<(Instant, Release)>,
     shown: Shown,
+    /// In play mode, the stream as the player sees it: every release at
+    /// once, never stored, while `shown` keeps the delay for observers.
+    live: Option<Shown>,
     detail_encoder: DetailEncoder,
     terrain: Option<(u64, TerrainFile)>,
     /// The kind 18 and 19 JSON of the match, by the hash the detail
@@ -1073,8 +1079,22 @@ impl State {
     }
 }
 
+impl Shown {
+    fn new() -> Self {
+        Shown {
+            match_id: 0,
+            has_turn: false,
+            visual: Track::new(),
+            detail: Track::new(),
+            ended: None,
+            previous: None,
+        }
+    }
+}
+
 impl Hub {
-    pub fn new(delay: Duration, history: Option<History>) -> Self {
+    /// `live`: also keep the undelayed stream `/play` reads.
+    pub fn new(delay: Duration, history: Option<History>, live: bool) -> Self {
         Hub {
             queued: Condvar::new(),
             history: history.map(|history| Arc::new(Mutex::new(history))),
@@ -1088,14 +1108,8 @@ impl Hub {
                 visual: Compressor::new(),
                 detail: Compressor::new(),
                 pending: VecDeque::new(),
-                shown: Shown {
-                    match_id: 0,
-                    has_turn: false,
-                    visual: Track::new(),
-                    detail: Track::new(),
-                    ended: None,
-                    previous: None,
-                },
+                shown: Shown::new(),
+                live: live.then(Shown::new),
                 detail_encoder: DetailEncoder::new(),
                 terrain: None,
                 data_files: HashMap::new(),
@@ -1458,6 +1472,10 @@ impl Hub {
         {
             let _ = state.shown.visual.sender.send(envelope_starts(state.delay));
         }
+        let encoding = state.match_id;
+        if let Some(live) = &mut state.live {
+            live.apply(release.clone(), None, encoding);
+        }
         state
             .pending
             .push_back((Instant::now() + state.delay, release));
@@ -1712,17 +1730,29 @@ impl Hub {
 
     /// A segment of the current or the previous match, and whether it is
     /// closed.
-    pub fn segment(&self, match_id: u64, index: usize) -> Option<(Message, bool)> {
-        self.track_segment(match_id, index, false)
+    /// `live`: as `/play` sees the stream, else as `/` does.
+    pub fn segment(&self, match_id: u64, index: usize, live: bool) -> Option<(Message, bool)> {
+        self.track_segment(match_id, index, false, live)
     }
 
     /// A detail stream segment, as `segment`.
-    pub fn detail_segment(&self, match_id: u64, index: usize) -> Option<(Message, bool)> {
-        self.track_segment(match_id, index, true)
+    pub fn detail_segment(
+        &self,
+        match_id: u64,
+        index: usize,
+        live: bool,
+    ) -> Option<(Message, bool)> {
+        self.track_segment(match_id, index, true, live)
     }
 
-    fn track_segment(&self, match_id: u64, index: usize, detail: bool) -> Option<(Message, bool)> {
-        match self.memory_segment(match_id, index, detail) {
+    fn track_segment(
+        &self,
+        match_id: u64,
+        index: usize,
+        detail: bool,
+        live: bool,
+    ) -> Option<(Message, bool)> {
+        match self.memory_segment(match_id, index, detail, live) {
             Lookup::Found(bytes, closed) => return Some((bytes, closed)),
             Lookup::OnDisk => {}
             Lookup::Missing => return None,
@@ -1739,8 +1769,11 @@ impl Hub {
         Some((bytes.into(), true))
     }
 
-    fn memory_segment(&self, match_id: u64, index: usize, detail: bool) -> Lookup {
-        let state = &self.state.lock().unwrap().shown;
+    fn memory_segment(&self, match_id: u64, index: usize, detail: bool, live: bool) -> Lookup {
+        let locked = self.state.lock().unwrap();
+        let Some(state) = locked.view(live) else {
+            return Lookup::Missing;
+        };
         // An ended match is archived but keeps its id until the next one
         // starts, so the archive is asked first.
         if let Some(archive) = state
@@ -1799,9 +1832,10 @@ impl Hub {
     /// What a new viewer is sent first (nothing before the first turn) and
     /// the receiver are taken under one lock, so the first bytes a viewer
     /// receives continue exactly the frame it was sent.
-    pub fn subscribe(&self) -> (Vec<Message>, broadcast::Receiver<Message>) {
+    /// `live` as for `segment`; None when there is no live stream.
+    pub fn subscribe(&self, live: bool) -> Option<(Vec<Message>, broadcast::Receiver<Message>)> {
         let locked = self.state.lock().unwrap();
-        let state = &locked.shown;
+        let state = locked.view(live)?;
         let first = if let Some(ended) = &state.ended {
             let since = ended.at.elapsed().as_millis() as u64;
             vec![
@@ -1810,20 +1844,24 @@ impl Hub {
             ]
         } else if state.has_turn {
             vec![state.visual.join()]
-        } else if let Some(due) = first_turn_due(&locked.pending) {
+        } else if let Some(due) = first_turn_due(&locked.pending).filter(|_| !live) {
             vec![envelope_starts(
                 due.saturating_duration_since(Instant::now()),
             )]
         } else {
             Vec::new()
         };
-        (first, state.visual.sender.subscribe())
+        Some((first, state.visual.sender.subscribe()))
     }
 
     /// As `subscribe`, for the detail stream; an ended match's viewers get
     /// its final state.
-    pub fn subscribe_detail(&self) -> (Vec<Message>, broadcast::Receiver<Message>) {
-        let state = &self.state.lock().unwrap().shown;
+    pub fn subscribe_detail(
+        &self,
+        live: bool,
+    ) -> Option<(Vec<Message>, broadcast::Receiver<Message>)> {
+        let locked = self.state.lock().unwrap();
+        let state = locked.view(live)?;
         let first = if let Some(ended) = &state.ended {
             vec![envelope_join(&ended.detail_keyframe, &[]).into()]
         } else if state.has_turn {
@@ -1831,7 +1869,18 @@ impl Hub {
         } else {
             Vec::new()
         };
-        (first, state.detail.sender.subscribe())
+        Some((first, state.detail.sender.subscribe()))
+    }
+}
+
+impl State {
+    /// The stream `/play` (`live`) or `/` sees.
+    fn view(&self, live: bool) -> Option<&Shown> {
+        if live {
+            self.live.as_ref()
+        } else {
+            Some(&self.shown)
+        }
     }
 }
 

@@ -85,5 +85,12 @@
   "measuring": "計測",
   "Run %(index)s/%(total)s, %(phase)s: %(name)s": "実行 %(index)s/%(total)s、%(phase)s: %(name)s",
   "%(done)s of %(total)s runs measured": "%(total)s 回中 %(done)s 回の実行を計測",
-  "%(done)s of %(total)s runs measured, stopped": "%(total)s 回中 %(done)s 回の実行を計測、停止"
+  "%(done)s of %(total)s runs measured, stopped": "%(total)s 回中 %(done)s 回の実行を計測、停止",
+  "New game": "新しいゲーム",
+  "A game is in progress.": "ゲームが進行中です。",
+  "Watch it": "観戦する",
+  "Back to your game": "自分のゲームに戻る",
+  "Players": "プレイヤー数",
+  "You": "あなた",
+  "Cannot start the game: %(error)s": "ゲームを開始できません: %(error)s"
 }

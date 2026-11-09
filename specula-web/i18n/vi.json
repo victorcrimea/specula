@@ -85,5 +85,12 @@
   "measuring": "đo",
   "Run %(index)s/%(total)s, %(phase)s: %(name)s": "Lượt chạy %(index)s/%(total)s, %(phase)s: %(name)s",
   "%(done)s of %(total)s runs measured": "Đã đo %(done)s trên %(total)s lượt chạy",
-  "%(done)s of %(total)s runs measured, stopped": "Đã đo %(done)s trên %(total)s lượt chạy, đã dừng"
+  "%(done)s of %(total)s runs measured, stopped": "Đã đo %(done)s trên %(total)s lượt chạy, đã dừng",
+  "New game": "Trò chơi mới",
+  "A game is in progress.": "Một trò chơi đang diễn ra.",
+  "Watch it": "Xem",
+  "Back to your game": "Quay lại trò chơi của bạn",
+  "Players": "Người chơi",
+  "You": "Bạn",
+  "Cannot start the game: %(error)s": "Không thể bắt đầu trò chơi: %(error)s"
 }

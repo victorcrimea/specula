@@ -77,6 +77,7 @@ use crate::far::LookKey;
 use crate::far::Request;
 use crate::gpu;
 use crate::impostor;
+use crate::orders;
 use crate::overlay::Mark;
 use crate::overlay::OverlayShape;
 use crate::overlay::Overlays;
@@ -88,6 +89,8 @@ use crate::particles::Particles;
 use crate::pick;
 use crate::pick::OrientedBox;
 use crate::pick::Pickable;
+use crate::placement;
+use crate::placement::Ghost;
 use crate::pose;
 use crate::postproc;
 use crate::postproc::Post;
@@ -380,6 +383,9 @@ struct Camera {
     hover: Option<[f32; 2]>,
     /// The left button's drag past `DRAG_DELTA` while it is held.
     band: Option<Band>,
+    /// The right button's press, its client point and the canvas's client
+    /// offset then; a release near it gives an order.
+    order_press: Option<([f32; 2], [f32; 2])>,
     /// A lone finger's press, which ends as a tap, a pan or a bandbox.
     touch: Option<TouchPress>,
     /// The last tap's end time, client point and click count, so taps in
@@ -389,9 +395,38 @@ struct Camera {
     /// `m_FollowEntity`, until a pan, a move to a point or the entity
     /// leaving the world.
     follow: Option<u32>,
+    /// While a structure is placed, the left button places and the right
+    /// one cancels instead of selecting and ordering, as `input.js`'
+    /// INPUT_BUILDING_* states.
+    placing: bool,
+    /// The left button went down on the canvas while placing: the canvas's
+    /// client offset then.
+    place_pressed: Option<[f32; 2]>,
+    place_inputs: Vec<PlaceInput>,
+    /// The mouse in client pixels, and Ctrl and Shift held, as of its last
+    /// move.
+    mouse_client: [f32; 2],
+    ctrl: bool,
+    shift: bool,
 }
 
-/// A left click or drag on the canvas, points 0..1 across it from its top
+/// A placement press or release, points 0..1 across the canvas, or a
+/// cancel.
+enum PlaceInput {
+    Press(PlaceAt),
+    Release(PlaceAt),
+    Cancel,
+}
+
+#[derive(Clone, Copy)]
+struct PlaceAt {
+    at: [f32; 2],
+    client: [f32; 2],
+    ctrl: bool,
+    shift: bool,
+}
+
+/// A click or drag on the canvas, points 0..1 across it from its top
 /// left, with the engine's selection.add (Shift) and selection.remove
 /// (Ctrl) held or not; or selection.cancel (Escape).
 enum PickInput {
@@ -415,6 +450,12 @@ enum PickInput {
         ids: Vec<u32>,
         add: bool,
         remove: bool,
+    },
+    /// A right click: an order to the selection, queued with Shift
+    /// (session.queue).
+    Order {
+        at: [f32; 2],
+        queued: bool,
     },
 }
 
@@ -470,7 +511,7 @@ const RGB_DESATURATION: f32 = 0.333_333;
 
 /// `gui.session.dragdelta`: how far, in pixels, a press may move and still
 /// be a click.
-const DRAG_DELTA: f32 = 4.0;
+pub const DRAG_DELTA: f32 = 4.0;
 
 const KEY_FORWARD: u8 = 1;
 const KEY_BACK: u8 = 2;
@@ -689,6 +730,17 @@ pub struct Field {
     sound_clocks: HashMap<u32, SoundClock>,
     /// The select sounds of the selections made since the last call.
     select_sounds: Vec<SelectSound>,
+    /// Where the right clicks since the last call landed.
+    order_targets: Vec<orders::Target>,
+    place_inputs: Vec<placement::Input>,
+    /// The mouse over the ground while placing.
+    place_pointer: Option<placement::Pointer>,
+    ghosts: Vec<Ghost>,
+    /// By actor and seed.
+    ghost_models: HashMap<(String, u32), Option<Rc<Model>>>,
+    /// The instance's shading, as `ICmpVisual::SetShadingColor`: 1 for the
+    /// red of a placement the engine refuses.
+    shading: f32,
     shots: HashMap<u32, Flying>,
     shot_models: HashMap<ShotModelKey, Option<Rc<Model>>>,
     /// By 1-based string index of the impact actor.
@@ -1236,12 +1288,19 @@ impl Field {
             keys: 0,
             last_step: now(),
             press: None,
+            order_press: None,
             picks: Vec::new(),
             hover: None,
             band: None,
             touch: None,
             last_tap: None,
             follow: None,
+            placing: false,
+            place_pressed: None,
+            place_inputs: Vec::new(),
+            mouse_client: [0.0; 2],
+            ctrl: false,
+            shift: false,
         }));
         wire_camera(&canvas, &camera)?;
         let document = web_sys::window()
@@ -1365,6 +1424,12 @@ impl Field {
             last_fade: now(),
             sound_clocks: HashMap::new(),
             select_sounds: Vec::new(),
+            order_targets: Vec::new(),
+            place_inputs: Vec::new(),
+            place_pointer: None,
+            ghosts: Vec::new(),
+            ghost_models: HashMap::new(),
+            shading: 0.0,
             shots: HashMap::new(),
             shot_models: HashMap::new(),
             impact_models: HashMap::new(),
@@ -1556,6 +1621,7 @@ impl Field {
             self.place_shots(progress, view_proj, &planes, pixel_scale, &mut groups);
         }
         self.place_rally_flags(progress, view_proj, &planes, pixel_scale, &mut groups);
+        self.place_ghosts(progress, view_proj, &planes, pixel_scale, &mut groups);
         if self.particles_visible {
             let dots = &self.entities.dots;
             let shots = &self.shots;
@@ -1799,6 +1865,23 @@ impl Field {
                 } => (self.in_band(view_proj, from, to), add, remove),
                 PickInput::Clear => (Vec::new(), false, false),
                 PickInput::Group { ids, add, remove } => (ids, add, remove),
+                PickInput::Order { at, queued } => {
+                    let ray = ray(at);
+                    let point = self.ground.as_ref().and_then(|ground| {
+                        let image = &ground.image;
+                        pick::ground_hit(
+                            &ray,
+                            |x, z| image.ground(x, z).max(image.water_level),
+                            self.entities.map_size as f32,
+                        )
+                    });
+                    self.order_targets.push(orders::Target {
+                        entity: pick::pick_at_point(&self.pickables, &ray),
+                        point,
+                        queued,
+                    });
+                    continue;
+                }
             };
             let first = if add {
                 self.selection.add_list(&ids, look)
@@ -1813,6 +1896,48 @@ impl Field {
                 self.select_sounds.push(sound);
             }
         }
+        let (place_inputs, placing, client, ctrl, shift) = {
+            let mut camera = self.camera.borrow_mut();
+            (
+                std::mem::take(&mut camera.place_inputs),
+                camera.placing,
+                camera.mouse_client,
+                camera.ctrl,
+                camera.shift,
+            )
+        };
+        let ground_at = |at: [f32; 2]| {
+            let image = &self.ground.as_ref()?.image;
+            pick::ground_hit(
+                &ray(at),
+                |x, z| image.ground(x, z).max(image.water_level),
+                self.entities.map_size as f32,
+            )
+        };
+        let pointer = |place: PlaceAt| placement::Pointer {
+            ground: ground_at(place.at),
+            client: place.client,
+            ctrl: place.ctrl,
+            shift: place.shift,
+        };
+        for input in place_inputs {
+            self.place_inputs.push(match input {
+                PlaceInput::Press(place) => placement::Input::Press(pointer(place)),
+                PlaceInput::Release(place) => placement::Input::Release(pointer(place)),
+                PlaceInput::Cancel => placement::Input::Cancel,
+            });
+        }
+        self.place_pointer = hover.filter(|_| placing).map(|at| {
+            pointer(PlaceAt {
+                at,
+                client,
+                ctrl,
+                shift,
+            })
+        });
+        // Nothing is highlighted while placing, as the engine's
+        // placement states pass no hover on.
+        let hover = hover.filter(|_| !placing);
         let highlighted = match (band, hover) {
             (Some(band), _) => self.in_band(view_proj, band.from, band.to),
             (None, Some(at)) => pick::pick_at_point(&self.pickables, &ray(at))
@@ -2589,7 +2714,7 @@ impl Field {
             .flatten()
             .map(|value| value.to_le_bytes())
             .chain([pose[0], pose[1], pose[2], entity.color].map(|value| value.to_le_bytes()))
-            .chain([blend, tinted, model.alpha_ref, 0.0f32].map(|value| value.to_le_bytes()));
+            .chain([blend, tinted, model.alpha_ref, self.shading].map(|value| value.to_le_bytes()));
         for (slot, bytes) in instance.chunks_exact_mut(4).zip(values) {
             slot.copy_from_slice(&bytes);
         }
@@ -3146,6 +3271,82 @@ impl Field {
                 groups,
             );
         }
+    }
+
+    /// The placement previews, as `SetBuildingPlacementPreview` and
+    /// `SetWallPlacementPreview` show them: the actor on the ground (a dock
+    /// floats), turned by the angle, red where the engine refuses it.
+    fn place_ghosts(
+        &mut self,
+        progress: f32,
+        view_proj: &[[f32; 4]; 4],
+        planes: &[[f32; 4]; 6],
+        pixel_scale: f32,
+        groups: &mut HashMap<GroupKey, Vec<u8>>,
+    ) {
+        let Some(ground) = &self.ground else {
+            return;
+        };
+        let image = &ground.image;
+        let placed: Vec<(Ghost, f32)> = self
+            .ghosts
+            .iter()
+            .map(|ghost| {
+                (
+                    ghost.clone(),
+                    image.ground(ghost.x, ghost.z).max(image.water_level),
+                )
+            })
+            .collect();
+        let time = self.sim_time(progress) as f32 * 1000.0;
+        for (ghost, y) in placed {
+            let Some(model) = self.ghost_model(&ghost.actor, ghost.seed) else {
+                continue;
+            };
+            // CCmpPosition::GetInterpolatedTransform turns models by rotY + PI.
+            let half = (ghost.angle + std::f32::consts::PI) / 2.0;
+            let mut transform = Mat4::from_quat(Quat {
+                x: 0.0,
+                y: half.sin(),
+                z: 0.0,
+                w: half.cos(),
+            });
+            transform.translate(Vec3::new(ghost.x, y, ghost.z));
+            let place = ShotPlace {
+                owner: ghost.owner,
+                // A preview has no particles to own.
+                emitter: Owner::Entity(0),
+                time,
+                progress,
+            };
+            self.shading = if ghost.invalid { 1.0 } else { 0.0 };
+            let particles = std::mem::replace(&mut self.particles_visible, false);
+            self.place_shot_model(
+                &model,
+                &transform,
+                &place,
+                view_proj,
+                planes,
+                pixel_scale,
+                groups,
+            );
+            self.particles_visible = particles;
+            self.shading = 0.0;
+        }
+    }
+
+    fn ghost_model(&mut self, actor: &str, seed: u32) -> Option<Rc<Model>> {
+        let key = (actor.to_string(), seed);
+        if let Some(model) = self.ghost_models.get(&key) {
+            return model.clone();
+        }
+        let manifest = match self.store.borrow_mut().actor(actor) {
+            Get::Ready(manifest) => manifest,
+            Get::Pending | Get::Missing => return None,
+        };
+        let model = variation::resolve(&manifest, &BTreeSet::new(), seed).map(Rc::new);
+        self.ghost_models.insert(key, model.clone());
+        model
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -4078,6 +4279,34 @@ impl View for Field {
 
     fn take_select_sounds(&mut self) -> Vec<SelectSound> {
         std::mem::take(&mut self.select_sounds)
+    }
+
+    fn take_order_targets(&mut self) -> Vec<orders::Target> {
+        std::mem::take(&mut self.order_targets)
+    }
+
+    fn set_placing(&mut self, on: bool) {
+        let mut camera = self.camera.borrow_mut();
+        if camera.placing != on {
+            camera.placing = on;
+            camera.place_pressed = None;
+            camera.place_inputs.clear();
+            camera.press = None;
+            camera.band = None;
+            camera.order_press = None;
+        }
+    }
+
+    fn take_place_inputs(&mut self) -> Vec<placement::Input> {
+        std::mem::take(&mut self.place_inputs)
+    }
+
+    fn place_pointer(&self) -> Option<placement::Pointer> {
+        self.place_pointer
+    }
+
+    fn set_ghosts(&mut self, ghosts: Vec<Ghost>) {
+        self.ghosts = ghosts;
     }
 
     fn selected(&self) -> &[u32] {
@@ -6197,6 +6426,7 @@ fn wire_camera(canvas: &HtmlCanvasElement, camera: &Rc<RefCell<Camera>>) -> Resu
         };
 
     let target = Rc::clone(camera);
+    let down_canvas = canvas.clone();
     listen(
         canvas,
         "pointerdown",
@@ -6219,7 +6449,15 @@ fn wire_camera(canvas: &HtmlCanvasElement, camera: &Rc<RefCell<Camera>>) -> Resu
                 at[0] - event.offset_x() as f32,
                 at[1] - event.offset_y() as f32,
             ];
-            if mouse && event.button() == 0 {
+            if mouse && event.button() == 0 && camera.placing {
+                camera.place_pressed = Some(offset);
+                camera.place_inputs.push(PlaceInput::Press(PlaceAt {
+                    at: on_canvas(&down_canvas, at, offset),
+                    client: at,
+                    ctrl: event.ctrl_key(),
+                    shift: event.shift_key(),
+                }));
+            } else if mouse && event.button() == 0 {
                 camera.press = Some((id, at, offset));
             } else if !mouse {
                 // A second finger makes a pinch of the first one's press.
@@ -6288,6 +6526,18 @@ fn wire_camera(canvas: &HtmlCanvasElement, camera: &Rc<RefCell<Camera>>) -> Resu
                 }
                 return;
             }
+            if let Some(offset) = camera.place_pressed
+                && event.button() == 0
+            {
+                camera.place_pressed = None;
+                camera.place_inputs.push(PlaceInput::Release(PlaceAt {
+                    at: on_canvas(&up_canvas, to, offset),
+                    client: to,
+                    ctrl: event.ctrl_key(),
+                    shift: event.shift_key(),
+                }));
+                return;
+            }
             let Some((id, from, offset)) = camera.press else {
                 return;
             };
@@ -6346,11 +6596,22 @@ fn wire_camera(canvas: &HtmlCanvasElement, camera: &Rc<RefCell<Camera>>) -> Resu
         canvas,
         "mousedown",
         Closure::new(move |event: MouseEvent| {
-            // The right button cancels a bandbox, as the engine's.
+            // The right button cancels a bandbox, as the engine's, and
+            // else gives an order on release.
             if event.button() == 2 {
                 let camera = &mut *target.borrow_mut();
-                if camera.band.take().is_some() {
+                if camera.placing {
+                    camera.place_pressed = None;
+                    camera.place_inputs.push(PlaceInput::Cancel);
+                } else if camera.band.take().is_some() {
                     camera.press = None;
+                } else {
+                    let at = [event.client_x() as f32, event.client_y() as f32];
+                    let offset = [
+                        at[0] - event.offset_x() as f32,
+                        at[1] - event.offset_y() as f32,
+                    ];
+                    camera.order_press = Some((at, offset));
                 }
                 return;
             }
@@ -6362,6 +6623,28 @@ fn wire_camera(canvas: &HtmlCanvasElement, camera: &Rc<RefCell<Camera>>) -> Resu
             };
             event.prevent_default();
             target.borrow_mut().yaw_ahead += turn;
+        }),
+    );
+    let target = Rc::clone(camera);
+    let order_canvas = canvas.clone();
+    listen(
+        canvas,
+        "mouseup",
+        Closure::new(move |event: MouseEvent| {
+            if event.button() != 2 {
+                return;
+            }
+            let camera = &mut *target.borrow_mut();
+            let Some((from, offset)) = camera.order_press.take() else {
+                return;
+            };
+            let at = [event.client_x() as f32, event.client_y() as f32];
+            if !dragged(from, at) {
+                camera.picks.push(PickInput::Order {
+                    at: on_canvas(&order_canvas, at, offset),
+                    queued: event.shift_key(),
+                });
+            }
         }),
     );
     for name in ["mouseup", "auxclick"] {
@@ -6409,6 +6692,9 @@ fn wire_camera(canvas: &HtmlCanvasElement, camera: &Rc<RefCell<Camera>>) -> Resu
                     });
                 }
             }
+            camera.mouse_client = at;
+            camera.ctrl = event.ctrl_key();
+            camera.shift = event.shift_key();
             camera.pointer_moved(id, event.buttons(), at[0], at[1]);
             if let Some((pressed, from, offset)) = camera.press
                 && pressed == id
@@ -6563,7 +6849,10 @@ fn wire_camera(canvas: &HtmlCanvasElement, camera: &Rc<RefCell<Camera>>) -> Resu
                 }
                 // The engine's selection.cancel.
                 "Escape" if !ctrl && !shift => {
-                    if press {
+                    if press && camera.placing {
+                        camera.place_pressed = None;
+                        camera.place_inputs.push(PlaceInput::Cancel);
+                    } else if press {
                         camera.picks.push(PickInput::Clear);
                     }
                     return;

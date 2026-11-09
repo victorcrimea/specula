@@ -85,5 +85,12 @@
   "measuring": "측정",
   "Run %(index)s/%(total)s, %(phase)s: %(name)s": "실행 %(index)s/%(total)s, %(phase)s: %(name)s",
   "%(done)s of %(total)s runs measured": "%(total)s회 중 %(done)s회 실행 측정됨",
-  "%(done)s of %(total)s runs measured, stopped": "%(total)s회 중 %(done)s회 실행 측정됨, 중지됨"
+  "%(done)s of %(total)s runs measured, stopped": "%(total)s회 중 %(done)s회 실행 측정됨, 중지됨",
+  "New game": "새 게임",
+  "A game is in progress.": "게임이 진행 중입니다.",
+  "Watch it": "관전하기",
+  "Back to your game": "내 게임으로 돌아가기",
+  "Players": "플레이어",
+  "You": "나",
+  "Cannot start the game: %(error)s": "게임을 시작할 수 없습니다: %(error)s"
 }

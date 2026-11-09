@@ -1,0 +1,163 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./i18n.js"></script>
+<title data-i18n>New game</title>
+<style>
+html, body { margin: 0; min-height: 100%; background: #0f1214; color: #e6e9eb;
+  font: 14px system-ui, sans-serif; }
+main { max-width: 640px; margin: 0 auto; padding: 24px 16px; }
+h1 { font-size: 20px; font-weight: 600; margin: 0 0 16px; }
+label { display: inline-flex; align-items: center; gap: 6px; }
+select, button { font: inherit; color: #e6e9eb; background: rgba(15, 18, 20, 0.85);
+  border: 1px solid #3a4248; border-radius: 4px; padding: 4px 8px; }
+button { cursor: pointer; }
+:disabled { opacity: 0.5; }
+.row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin: 0 0 12px; }
+#slots { display: grid; grid-template-columns: auto 1fr 1fr 1fr; gap: 8px; align-items: center;
+  margin: 0 0 16px; }
+#slots .swatch { width: 14px; height: 14px; border-radius: 2px; }
+#status, #error { margin: 0 0 16px; }
+#status[hidden], #error[hidden] { display: none; }
+#error { color: #e8a0a0; }
+a { color: #8fc1e3; }
+@media (max-width: 480px) {
+  #slots { grid-template-columns: auto 1fr; }
+  #slots .civ, #slots .difficulty { grid-column: 2; }
+}
+</style>
+</head>
+<body>
+<main>
+<h1 data-i18n>New game</h1>
+<p id="status" hidden>
+<span data-i18n>A game is in progress.</span>
+<a id="watch" href="/" data-i18n>Watch it</a>
+<a id="back" href="/play" hidden data-i18n>Back to your game</a>
+</p>
+<form id="setup">
+<div class="row">
+<label><span data-i18n>Map</span> <select id="map" name="map"></select></label>
+<label><span data-i18n>Players</span> <select id="players" name="players"></select></label>
+</div>
+<div id="slots"></div>
+<p id="error" hidden></p>
+<button id="start" type="submit" data-i18n>Start Game!</button>
+</form>
+</main>
+<script>
+// The engine's default player colours (simulation/data/settings/
+// player_defaults.json), so the rows read as in the game setup.
+const COLORS = ["#153795", "#961414", "#56b41f", "#e7c805", "#32aaaa", "#a050c8", "#dc7310",
+  "#404040"];
+// Petra's difficulties, 0 to 5, as the game setup names them.
+const DIFFICULTIES = ["Sandbox", "Very Easy", "Easy", "Medium", "Hard", "Very Hard"];
+const DEFAULT_DIFFICULTY = 3;
+const T = (text) => window.speculaT(text);
+
+const form = document.getElementById("setup");
+const mapSelect = document.getElementById("map");
+const playersSelect = document.getElementById("players");
+const slots = document.getElementById("slots");
+const error = document.getElementById("error");
+let setup = null;
+
+const option = (value, text) => {
+  const element = document.createElement("option");
+  element.value = value;
+  element.textContent = text;
+  return element;
+};
+
+// Keeps what was chosen in each row when the count or the language
+// changes.
+const buildSlots = () => {
+  const kept = new FormData(form);
+  slots.replaceChildren();
+  const count = +playersSelect.value;
+  for (let player = 1; player <= count; ++player) {
+    const swatch = document.createElement("span");
+    swatch.className = "swatch";
+    swatch.style.background = COLORS[player - 1];
+    const slot = document.createElement("select");
+    slot.name = `slot${player}`;
+    slot.append(option("you", T("You")), option("petra", T("Petra Bot")),
+      option("empty", T("Unassigned")));
+    slot.value = kept.get(slot.name) ?? (player === 1 ? "you" : "petra");
+    const civ = document.createElement("select");
+    civ.name = `civ${player}`;
+    civ.className = "civ";
+    civ.setAttribute("aria-label", T("Civilization"));
+    civ.append(option("random", T("Random")),
+      ...setup.civs.map(([code, name]) => option(code, T(name))));
+    civ.value = kept.get(civ.name) ?? "random";
+    const difficulty = document.createElement("select");
+    difficulty.name = `difficulty${player}`;
+    difficulty.className = "difficulty";
+    difficulty.setAttribute("aria-label", T("Difficulty"));
+    difficulty.append(...DIFFICULTIES.map((name, index) => option(index, T(name))));
+    difficulty.value = kept.get(difficulty.name) ?? DEFAULT_DIFFICULTY;
+    const showDifficulty = () => { difficulty.style.visibility = slot.value === "petra" ? "" : "hidden"; };
+    // One seat is the player's: choosing "You" elsewhere gives this one to
+    // Petra.
+    slot.addEventListener("change", () => {
+      if (slot.value === "you")
+        for (const other of slots.querySelectorAll("select[name^=slot]"))
+          if (other !== slot && other.value === "you") {
+            other.value = "petra";
+            other.dispatchEvent(new Event("change"));
+          }
+      showDifficulty();
+    });
+    showDifficulty();
+    slots.append(swatch, slot, civ, difficulty);
+  }
+};
+
+const buildMaps = () => {
+  const chosen = mapSelect.value;
+  mapSelect.replaceChildren(...setup.maps.map(([code, name]) => option(code, T(name))));
+  if (chosen) mapSelect.value = chosen;
+};
+
+const showStatus = () => {
+  document.getElementById("status").hidden = !setup.running;
+  document.getElementById("watch").hidden = setup.mine;
+  document.getElementById("back").hidden = !setup.mine;
+  // Someone else's game is not this visitor's to end.
+  document.getElementById("start").disabled = setup.running && !setup.mine;
+};
+
+form.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  error.hidden = true;
+  const body = new URLSearchParams(new FormData(form));
+  const response = await fetch("/play/new", { method: "POST", body }).catch(() => null);
+  if (response?.ok) {
+    location.href = "/play";
+    return;
+  }
+  const reason = response ? await response.text() : "";
+  error.textContent = T("Cannot start the game: %(error)s").replace("%(error)s", reason);
+  error.hidden = false;
+});
+
+(async () => {
+  setup = await (await fetch("/play/setup")).json();
+  for (let count = 2; count <= 8; ++count) playersSelect.append(option(count, count));
+  playersSelect.addEventListener("change", buildSlots);
+  showStatus();
+  window.speculaOnLanguage(() => { buildMaps(); buildSlots(); });
+})();
+</script>
+<script type="module">
+const glue = "./pkg/specula_web.js?v=GLUE";
+const wasm = "./pkg/specula_web_bg.wasm?v=WASM";
+const { default: init, play_setup_main } = await import(glue);
+await init({ module_or_path: wasm });
+play_setup_main();
+</script>
+</body>
+</html>

@@ -85,5 +85,12 @@
   "measuring": "meten",
   "Run %(index)s/%(total)s, %(phase)s: %(name)s": "Run %(index)s/%(total)s, %(phase)s: %(name)s",
   "%(done)s of %(total)s runs measured": "%(done)s van %(total)s runs gemeten",
-  "%(done)s of %(total)s runs measured, stopped": "%(done)s van %(total)s runs gemeten, gestopt"
+  "%(done)s of %(total)s runs measured, stopped": "%(done)s van %(total)s runs gemeten, gestopt",
+  "New game": "Nieuw spel",
+  "A game is in progress.": "Er is een spel bezig.",
+  "Watch it": "Bekijken",
+  "Back to your game": "Terug naar je spel",
+  "Players": "Spelers",
+  "You": "Jij",
+  "Cannot start the game: %(error)s": "Kan het spel niet starten: %(error)s"
 }
