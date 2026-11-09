@@ -8,6 +8,10 @@
 <link rel="stylesheet" href="./gui/session.css?v=SESSION">
 <style>
 html, body { margin: 0; height: 100%; background: #0f1214; }
+/* The session GUI shows the engine's arrow everywhere, but for a right
+   click's cursor over the map, which the view's data-cursor picks
+   (session.css). */
+body { cursor: var(--gui-cursor-default, default); }
 #view { display: block; width: 100vw; height: 100vh; }
 #controls { position: fixed; top: calc(var(--top-height) + 8px); left: 8px; right: 128px; display: flex;
   flex-wrap: wrap; align-items: center; gap: 6px; font: 13px system-ui, sans-serif; }
@@ -35,7 +39,7 @@ html, body { margin: 0; height: 100%; background: #0f1214; }
 #loading-track { height: 3px; margin-top: 2px; border-radius: 2px; background: #2a3035;
   overflow: hidden; }
 #loading-fill { height: 100%; width: 0; background: #8fa3b0; transition: width 0.2s; }
-#view { cursor: grab; touch-action: none; }
+#view { touch-action: none; }
 /* The engine's bandbox sprite: black outside, white inside. */
 #bandbox { position: fixed; box-sizing: border-box; border: 1px solid black;
   box-shadow: inset 0 0 0 1px white; pointer-events: none; }
@@ -89,7 +93,7 @@ html, body { margin: 0; height: 100%; background: #0f1214; }
 #top-buttons { position: absolute; right: 226px; top: 0; width: 28px; height: 36px;
   transform: scale(var(--top-scale)); transform-origin: 100% 0; }
 #top-buttons > button { position: absolute; top: 4px; width: 28px; height: 28px; padding: 0;
-  border: 0; cursor: pointer; background-color: transparent;
+  border: 0; background-color: transparent;
   background-size: 100% 100%; background-repeat: no-repeat; }
 #top-diplomacy { left: 0; background-image: var(--gui-diplomacy); }
 #top-buttons > button:hover::after { content: ""; position: absolute; inset: 0;
@@ -100,7 +104,7 @@ html, body { margin: 0; height: 100%; background: #0f1214; }
   width: calc((100vw - 4px) / var(--top-scale)); display: flex; flex-wrap: wrap; gap: 6px 1px;
   transform: scale(var(--top-scale)); transform-origin: 0 0; pointer-events: none; }
 #heroes .hero { position: relative; width: 50px; height: 50px; padding: 0; margin: 0; border: 0;
-  background: var(--gui-portrait-black) 0 0 / 100% 100%; cursor: pointer; pointer-events: auto; }
+  background: var(--gui-portrait-black) 0 0 / 100% 100%; pointer-events: auto; }
 #heroes .hero:hover::after { content: ""; position: absolute; inset: 0;
   background: rgb(42, 42, 42); mix-blend-mode: plus-lighter; pointer-events: none; }
 #heroes .hero > img { position: absolute; left: 5px; top: 5px; width: 40px; height: 40px; display: block; }
@@ -138,13 +142,13 @@ html, body { margin: 0; height: 100%; background: #0f1214; }
 #minimap-circle { position: absolute; left: 4px; top: 6px; right: 4px; bottom: 6px;
   background: var(--gui-minimap-circle) 0 0 / 100% 100%; pointer-events: none; }
 #minimap { position: absolute; left: 8px; top: 10px; width: 184px; height: 184px;
-  cursor: pointer; touch-action: none; }
+  touch-action: none; }
 /* diplomacyColorsButton (3 100%-121 118 100%-6). The engine takes clicks
    only where its texture is opaque, the corner outside the map's circle;
    the clip, a circle about the texture's top right corner, does the same
    so a click on the map under the rest still reaches the map. */
 #diplomacy { position: absolute; left: 3px; top: 83px; width: 115px; height: 115px;
-  padding: 0; border: 0; cursor: pointer; touch-action: none;
+  padding: 0; border: 0; touch-action: none;
   background: var(--gui-minimap-diplomacy-off) 0 0 / 100% 100% no-repeat;
   clip-path: path(evenodd, "M0 0H115V115H0Z M236 0A121 121 0 1 0 -6 0A121 121 0 1 0 236 0Z"); }
 #diplomacy:hover { background-image: var(--gui-minimap-diplomacy-off-highlight); }
@@ -229,8 +233,7 @@ html, body { margin: 0; height: 100%; background: #0f1214; }
   background: none 0 0 / 100% 100% no-repeat; }
 /* iconBorder: a 1 px gold frame; clicking follows the entity. */
 #details-portrait { left: 0; top: 0; width: 96px; height: 96px; padding: 0; margin: 0;
-  border: 1px solid var(--gui-gold); box-sizing: border-box; background: none;
-  cursor: pointer; }
+  border: 1px solid var(--gui-gold); box-sizing: border-box; background: none; }
 #details-icon { position: absolute; left: 0; top: 0; width: 94px; height: 94px;
   display: block; background: black; }
 #details-experience { left: 1px; top: 1px; width: 4px; height: 92px; }
@@ -244,7 +247,7 @@ html, body { margin: 0; height: 100%; background: #0f1214; }
   padding: 0; margin: 0; border: 0;
   background: var(--gui-portrait-black) 0 0 / 100% 100%; }
 /* A button takes neither colour nor font from its parent by default. */
-#details .group { cursor: pointer; color: inherit; font-family: inherit; }
+#details .group { color: inherit; font-family: inherit; }
 #details .group:hover::after { content: ""; position: absolute; inset: 0;
   background: rgb(42, 42, 42); mix-blend-mode: plus-lighter; pointer-events: none; }
 #details :is(.group, .cell) > .owner { position: absolute; inset: 0; }
@@ -711,7 +714,7 @@ body:not([data-debug="storage"]) #stats-storage { display: none; }
 #diplomacy-window .stone.disabled { filter: brightness(0.75); }
 #diplomacy-ceasefire { left: 32px; right: 32px; bottom: 62px; height: 28px; align-items: flex-start; }
 #diplomacy-close { left: calc(50% + 100px); bottom: 22px; width: 128px; height: 28px;
-  padding: 0; border: 0; color: white; font-family: inherit; cursor: pointer; }
+  padding: 0; border: 0; color: white; font-family: inherit; }
 #diplomacy-close:hover { background-image: var(--gui-stone-button-over); }
 #match-over button { font: inherit; color: #e6e9eb; background: rgba(15, 18, 20, 0.85);
   border: 1px solid #3a4248; border-radius: 4px; padding: 4px 8px; }

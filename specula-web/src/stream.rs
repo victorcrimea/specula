@@ -72,6 +72,8 @@ pub const COMPONENT_TURRET_HOLDER: u32 = 1 << 25;
 pub const COMPONENT_MARKET: u32 = 1 << 26;
 /// `TemplateDetails::flags`: Identity's Undeletable.
 pub const TEMPLATE_UNDELETABLE: u32 = 2048;
+/// And Identity's Controllable false.
+pub const TEMPLATE_UNCONTROLLABLE: u32 = 4096;
 const SOUND_ENTITY: u8 = 0;
 const SOUND_POSITION: u8 = 1;
 const SOUND_PLAYER: u8 = 2;
@@ -393,6 +395,15 @@ pub struct TemplateDetails {
     /// 0 flat, 1 round, 2 sharp, 3 square.
     pub rally_start_cap: u8,
     pub rally_end_cap: u8,
+    /// What a right click's action is picked by, 1-based strings, 0 from a
+    /// hook or a stored match without them: ResourceSupply's type (e.g.
+    /// `wood.tree`), ResourceGatherer's rate names and ResourceDropsite's
+    /// types as token lists, and the Attack types, each `Type` or
+    /// `Type:Class,Class` with its RestrictedClasses.
+    pub supply_type: u32,
+    pub gather_rates: u32,
+    pub dropsite_types: u32,
+    pub attack_types: u32,
 }
 
 /// A player's top panel numbers.
@@ -421,6 +432,8 @@ pub struct Resource {
 #[derive(Default)]
 pub struct Scene {
     pub turn: u32,
+    /// The last keyframe's, which its deltas are read by.
+    wire_version: u8,
     /// Names the match's segments.
     pub match_id: u64,
     /// The sim rate the match was set up with; 1.0 is normal speed.
@@ -545,7 +558,10 @@ impl Scene {
 
     fn apply_keyframe(&mut self, cursor: &mut ByteReader) -> Result<(), &'static str> {
         self.turn = cursor.varint_u32()?;
-        if cursor.u8()? != WIRE_VERSION {
+        self.wire_version = cursor.u8()?;
+        // Stored matches from before the template action strings still
+        // play.
+        if self.wire_version != WIRE_VERSION && self.wire_version != WIRE_VERSION - 1 {
             return Err("unknown wire version, reload the page");
         }
         self.match_id = cursor.u64()?;
@@ -753,7 +769,7 @@ impl Scene {
             self.templates.push(cursor.text()?);
             let details = match cursor.u8()? {
                 0 => None,
-                1 => Some(cursor.template_details()?),
+                1 => Some(cursor.template_details(self.wire_version)?),
                 _ => return Err("unknown template details flag"),
             };
             self.template_details.push(details);
@@ -974,6 +990,14 @@ impl Scene {
             out.u32(details.rally_thickness.to_bits());
             out.u8(details.rally_start_cap);
             out.u8(details.rally_end_cap);
+            for string in [
+                details.supply_type,
+                details.gather_rates,
+                details.dropsite_types,
+                details.attack_types,
+            ] {
+                out.varint(u64::from(string));
+            }
         }
         out.varint(self.strings.len() as u64);
         for text in &self.strings {
@@ -1443,7 +1467,7 @@ impl Writer {
 
 /// What only the visual stream records are read with.
 trait Records {
-    fn template_details(&mut self) -> Result<TemplateDetails, &'static str>;
+    fn template_details(&mut self, version: u8) -> Result<TemplateDetails, &'static str>;
     fn seed(&mut self, id: u32) -> Result<u32, &'static str>;
     fn dot(
         &mut self,
@@ -1466,8 +1490,8 @@ trait Records {
 }
 
 impl Records for ByteReader<'_> {
-    fn template_details(&mut self) -> Result<TemplateDetails, &'static str> {
-        Ok(TemplateDetails {
+    fn template_details(&mut self, version: u8) -> Result<TemplateDetails, &'static str> {
+        let mut details = TemplateDetails {
             flags: self.varint_u32()?,
             overlay_texture: self.varint_u32()?,
             overlay_mask: self.varint_u32()?,
@@ -1496,7 +1520,18 @@ impl Records for ByteReader<'_> {
             rally_thickness: self.f32()?,
             rally_start_cap: self.u8()?,
             rally_end_cap: self.u8()?,
-        })
+            supply_type: 0,
+            gather_rates: 0,
+            dropsite_types: 0,
+            attack_types: 0,
+        };
+        if version == WIRE_VERSION {
+            details.supply_type = self.varint_u32()?;
+            details.gather_rates = self.varint_u32()?;
+            details.dropsite_types = self.varint_u32()?;
+            details.attack_types = self.varint_u32()?;
+        }
+        Ok(details)
     }
 
     /// Sent as the difference from the entity id, which is the default.

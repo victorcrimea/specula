@@ -186,7 +186,9 @@
 //! varint classes, varint visible classes, varint select sound group,
 //! varint lang, varint phenotypes, varint components, varint rally line
 //! texture, varint rally line mask, f32 rally line thickness, u8 rally line
-//! start cap, u8 rally line end cap}. The flags and
+//! start cap, u8 rally line end cap, varint resource supply type, varint
+//! gather rate names, varint dropsite types, varint attack types}. The
+//! flags and
 //! component bits are those of the hook's template details (`SpeculaFeed.h`, kind 11), and so are the
 //! meanings of the strings, which are 1-based indices into the string
 //! table, 0 for none. A template the hook had no details for has none; the
@@ -2609,6 +2611,14 @@ fn write_templates(out: &mut Writer, templates: &[Template]) {
         out.f32(details.rally_thickness);
         out.u8(details.rally_start_cap);
         out.u8(details.rally_end_cap);
+        for string in [
+            details.supply_type,
+            details.gather_rates,
+            details.dropsite_types,
+            details.attack_types,
+        ] {
+            out.varint(one_based(string));
+        }
     }
 }
 

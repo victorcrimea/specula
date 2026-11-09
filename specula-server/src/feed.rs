@@ -251,6 +251,14 @@ pub struct TemplateDetails {
     /// 0 flat, 1 round, 2 sharp, 3 square.
     pub rally_start_cap: u8,
     pub rally_end_cap: u8,
+    /// What a right click's action is picked by: ResourceSupply's type
+    /// (e.g. `wood.tree`), ResourceGatherer's rate names and
+    /// ResourceDropsite's types as token lists, and the Attack types, each
+    /// `Type` or `Type:Class,Class` with its RestrictedClasses.
+    pub supply_type: Option<u32>,
+    pub gather_rates: Option<u32>,
+    pub dropsite_types: Option<u32>,
+    pub attack_types: Option<u32>,
 }
 
 /// One item of a trainable or researchable list, read for the producer's
@@ -1188,6 +1196,10 @@ fn decode_template_details(payload: &[u8]) -> io::Result<Record> {
         rally_thickness: 0.0,
         rally_start_cap: 0,
         rally_end_cap: 0,
+        supply_type: None,
+        gather_rates: None,
+        dropsite_types: None,
+        attack_types: None,
     };
     // A hook from before lang and phenotypes ends here; the feed version
     // stayed, so both lengths are read.
@@ -1202,6 +1214,13 @@ fn decode_template_details(payload: &[u8]) -> io::Result<Record> {
         details.rally_thickness = cursor.f32()?;
         details.rally_start_cap = cursor.u8()?;
         details.rally_end_cap = cursor.u8()?;
+    }
+    // And for a hook from before the right click's action strings.
+    if !cursor.0.is_empty() {
+        details.supply_type = optional(cursor.u32()?);
+        details.gather_rates = optional(cursor.u32()?);
+        details.dropsite_types = optional(cursor.u32()?);
+        details.attack_types = optional(cursor.u32()?);
     }
     if !cursor.0.is_empty() {
         return Err(invalid("template details record longer than its contents"));

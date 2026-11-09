@@ -1,7 +1,9 @@
 //! The textures and fonts the session GUI's panels are drawn with, for the
 //! page's DOM panels: each file named by its content, so it is kept for
 //! good, and `session.css`, which names them in custom properties
-//! (`--gui-<key>`) and declares the engine's fonts.
+//! (`--gui-<key>`), declares the engine's fonts and gives each of the
+//! engine's cursors a `[data-cursor="<name>"]` rule, with the default
+//! arrow as `--gui-cursor-default` too.
 //!
 //! Usage: session-gui [mod dir] [output dir] [civs file]
 //! Defaults: ../0ad/binaries/data/mods/public, specula-web/gui and
@@ -19,6 +21,7 @@
 //! Old files are left in the output directory, so a page that still names
 //! them keeps working until the next deploy clears it.
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::hash::DefaultHasher;
 use std::hash::Hasher;
@@ -38,6 +41,10 @@ const DEFAULT_OUTPUT: &str = "specula-web/gui";
 /// dir, as it changes only with the game data.
 const DEFAULT_CIVS: &str = "specula-web/civs.txt";
 const UI: &str = "art/textures/ui";
+/// `CVideoMode::CCursor`'s, each a PNG with a `.txt` of its hotspot.
+const CURSORS: &str = "art/textures/cursors";
+/// What `Engine.ResetCursor` shows.
+const DEFAULT_CURSOR: &str = "default-arrow";
 const PLAYERS: &str = "simulation/templates/special/players";
 const CSS: &str = "session.css";
 /// Twice the minimap's 192 px background, for high density screens.
@@ -330,6 +337,25 @@ fn run(mod_dir: &Path, output: &Path, civs_path: &Path) -> Result<(), String> {
         written += bytes.len();
         properties.push((key, name));
     }
+    // The engine's own mod first, so a public cursor of the same name
+    // wins, as the VFS mounts public over it.
+    let mut cursors = BTreeMap::new();
+    for dir in [engine_mod.join(CURSORS), mod_dir.join(CURSORS)] {
+        for cursor in read_cursors(&dir)? {
+            cursors.insert(cursor.name.clone(), cursor);
+        }
+    }
+    let mut cursor_rules = Vec::new();
+    for CursorFile {
+        name,
+        bytes,
+        hotspot: [x, y],
+    } in cursors.into_values()
+    {
+        let file = put(output, &format!("cursor-{name}"), "png", &bytes, false)?;
+        written += bytes.len();
+        cursor_rules.push((name, format!("url(\"/gui/{file}\") {x} {y}, auto")));
+    }
     let fonts_dir = engine_mod.join("fonts");
     let mut faces = Vec::new();
     for (family, weight, file) in FONTS {
@@ -355,13 +381,22 @@ fn run(mod_dir: &Path, output: &Path, civs_path: &Path) -> Result<(), String> {
     for (key, name) in &properties {
         css.push_str(&format!("  --gui-{key}: url(\"/gui/{name}\");\n"));
     }
+    if let Some((_, value)) = cursor_rules.iter().find(|(name, _)| name == DEFAULT_CURSOR) {
+        css.push_str(&format!("  --gui-cursor-default: {value};\n"));
+    }
     css.push_str("}\n");
+    for (name, value) in &cursor_rules {
+        css.push_str(&format!(
+            "[data-cursor=\"{name}\"] {{ cursor: {value}; }}\n"
+        ));
+    }
     let css_path = output.join(CSS);
     write(&css_path, css.as_bytes())?;
     write_brotli(&css_path, css.as_bytes())?;
     println!(
-        "{} textures and {} fonts, {written} bytes, named in {}",
+        "{} textures, {} cursors and {} fonts, {written} bytes, named in {}",
         properties.len(),
+        cursor_rules.len(),
         faces.len(),
         css_path.display()
     );
@@ -392,6 +427,50 @@ fn write_brotli(path: &Path, bytes: &[u8]) -> Result<(), String> {
     let mut copy = path.as_os_str().to_owned();
     copy.push(".br");
     write(&PathBuf::from(copy), &writer.into_inner())
+}
+
+struct CursorFile {
+    name: String,
+    /// The PNG.
+    bytes: Vec<u8>,
+    hotspot: [u32; 2],
+}
+
+/// Each cursor in `dir` that has its hotspot file, as `CCursor::Load`
+/// reads them.
+fn read_cursors(dir: &Path) -> Result<Vec<CursorFile>, String> {
+    let entries = fs::read_dir(dir).map_err(|error| format!("{}: {error}", dir.display()))?;
+    let mut cursors = Vec::new();
+    for entry in entries {
+        let path = entry
+            .map_err(|error| format!("{}: {error}", dir.display()))?
+            .path();
+        if path.extension().is_none_or(|extension| extension != "png") {
+            continue;
+        }
+        let Ok(hotspot) = fs::read_to_string(path.with_extension("txt")) else {
+            continue;
+        };
+        let hotspot: Vec<u32> = hotspot
+            .split_whitespace()
+            .map(str::parse)
+            .collect::<Result<_, _>>()
+            .map_err(|error| format!("{}: {error}", path.display()))?;
+        let [x, y] = hotspot[..] else {
+            return Err(format!("{}: not an x and y hotspot", path.display()));
+        };
+        let name = path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .ok_or_else(|| format!("{}: not UTF-8", path.display()))?
+            .to_string();
+        cursors.push(CursorFile {
+            name,
+            bytes: read(&path)?,
+            hotspot: [x, y],
+        });
+    }
+    Ok(cursors)
 }
 
 /// Writes `<key>-<hash>.<extension>`, with a brotli copy if asked, and

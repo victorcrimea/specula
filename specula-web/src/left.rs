@@ -556,7 +556,7 @@ fn stance_tooltip(name: &str) -> String {
 /// `MatchesClassList(classes, list)` for a `list` of tokens, the whole
 /// string an OR of its space separated words, each an AND of its
 /// `+`-joined classes; a `!` negates a class.
-fn matches_class_list(classes: &[&str], list: &str) -> bool {
+pub(crate) fn matches_class_list(classes: &[&str], list: &str) -> bool {
     list.split_whitespace().any(|group| {
         group.split('+').all(|class| match class.strip_prefix('!') {
             Some(class) => !classes.contains(&class),

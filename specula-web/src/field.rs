@@ -732,6 +732,8 @@ pub struct Field {
     select_sounds: Vec<SelectSound>,
     /// Where the right clicks since the last call landed.
     order_targets: Vec<orders::Target>,
+    /// What the mouse is over, as `View::hovered` gives it.
+    hovered: Option<Option<u32>>,
     place_inputs: Vec<placement::Input>,
     /// The mouse over the ground while placing.
     place_pointer: Option<placement::Pointer>,
@@ -1425,6 +1427,7 @@ impl Field {
             sound_clocks: HashMap::new(),
             select_sounds: Vec::new(),
             order_targets: Vec::new(),
+            hovered: None,
             place_inputs: Vec::new(),
             place_pointer: None,
             ghosts: Vec::new(),
@@ -1944,6 +1947,10 @@ impl Field {
                 .into_iter()
                 .collect(),
             (None, None) => Vec::new(),
+        };
+        self.hovered = match (band, hover) {
+            (None, Some(_)) => Some(highlighted.first().copied()),
+            _ => None,
         };
         self.selection.set_highlight_list(&highlighted, look);
         if let Some(element) = &self.bandbox {
@@ -4303,6 +4310,10 @@ impl View for Field {
 
     fn place_pointer(&self) -> Option<placement::Pointer> {
         self.place_pointer
+    }
+
+    fn hovered(&self) -> Option<Option<u32>> {
+        self.hovered
     }
 
     fn set_ghosts(&mut self, ghosts: Vec<Ghost>) {

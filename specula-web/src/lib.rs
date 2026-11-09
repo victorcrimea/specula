@@ -355,6 +355,12 @@ trait View {
     fn place_pointer(&self) -> Option<placement::Pointer> {
         None
     }
+    /// The entity the mouse is over, if any, while the mouse is over the
+    /// view and neither places nor drags a bandbox: the input states the
+    /// engine picks a right click's cursor in.
+    fn hovered(&self) -> Option<Option<u32>> {
+        None
+    }
     /// The placement previews to draw.
     fn set_ghosts(&mut self, _ghosts: Vec<placement::Ghost>) {}
     /// Where the camera is, for the benchmark to hold it there.
@@ -557,6 +563,8 @@ struct App {
     uplink: Option<Uplink>,
     /// The seat the perspective was last moved to.
     seat_shown: Option<i32>,
+    /// The `data-cursor` of the view, empty for the default arrow.
+    cursor: String,
     /// The structure being placed on `/play`.
     placement: Placement,
 }
@@ -852,6 +860,29 @@ impl App {
             {
                 uplink.send(&order);
             }
+        }
+        // As `updateCursorAndTooltip`: the right click's cursor, else the
+        // default arrow.
+        let cursor = self
+            .renderer
+            .hovered()
+            .and_then(|entity| {
+                let target = orders::Target {
+                    entity,
+                    point: None,
+                    queued: false,
+                };
+                orders::action(&self.scene, selected, seat, &target)
+            })
+            .map(|action| action.cursor)
+            .unwrap_or_default();
+        if cursor != self.cursor {
+            let _ = if cursor.is_empty() {
+                self.canvas.remove_attribute("data-cursor")
+            } else {
+                self.canvas.set_attribute("data-cursor", &cursor)
+            };
+            self.cursor = cursor;
         }
         if let Some(uplink) = &self.uplink {
             self.placement
@@ -1439,6 +1470,7 @@ async fn run(
         detailed_tooltips: false,
         uplink: play.then(Uplink::open),
         seat_shown: None,
+        cursor: String::new(),
         placement: Placement::default(),
     }));
     wire_controls(&app);
