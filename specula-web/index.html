@@ -1100,6 +1100,11 @@ body:not([data-debug="storage"]) #stats-storage { display: none; }
 <option value="0" data-i18n>Off</option>
 <option value="1" selected data-i18n>On</option>
 </select></label>
+<h3 data-i18n>Silhouettes</h3>
+<label data-i18n>Unit silhouettes (Alt+Shift+S) <select id="silhouettes" data-balanced="1">
+<option value="0" data-i18n>Off</option>
+<option value="1" data-i18n>On</option>
+</select></label>
 <h3 data-i18n>Tooltips</h3>
 <label data-i18n>Detailed tooltips <select id="detailed-tooltips">
 <option value="0" selected data-i18n>Off</option>
@@ -1254,6 +1259,17 @@ settings.</p>
   document.getElementById("settings-close").addEventListener("click", () => show(false));
   window.addEventListener("keydown", (event) => {
     if (event.key === "Escape" && panel.classList.contains("open")) show(false);
+  });
+  // The engine's silhouettes hotkey. Through the list, so its change
+  // handler applies and saves it as a click would.
+  const silhouettes = document.getElementById("silhouettes");
+  window.addEventListener("keydown", (event) => {
+    if (event.code !== "KeyS" || !event.altKey || !event.shiftKey || event.repeat
+        || event.ctrlKey || event.metaKey) return;
+    if (["INPUT", "SELECT", "TEXTAREA"].includes(event.target.tagName)) return;
+    event.preventDefault();
+    silhouettes.value = silhouettes.value === "1" ? "0" : "1";
+    silhouettes.dispatchEvent(new Event("change"));
   });
   const tabs = [...panel.querySelectorAll("[role=tab]")];
   for (const tab of tabs) {

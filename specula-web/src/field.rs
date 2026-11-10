@@ -102,6 +102,7 @@ use crate::selection::Selectee;
 use crate::selection::Selection;
 use crate::shadow;
 use crate::shadow::Shadow;
+use crate::silhouette::Silhouette;
 use crate::sky::Sky;
 use crate::stream::COMPONENT_RALLY_POINT;
 use crate::stream::COMPONENT_RESOURCE_SUPPLY;
@@ -109,6 +110,8 @@ use crate::stream::Dot;
 use crate::stream::RangeSet;
 use crate::stream::Scene;
 use crate::stream::Shot;
+use crate::stream::TEMPLATE_SILHOUETTE_DISPLAY;
+use crate::stream::TEMPLATE_SILHOUETTE_OCCLUDER;
 use crate::stream::TemplateDetails;
 use crate::stream::VariableSet;
 use crate::stream::VariantSet;
@@ -237,6 +240,9 @@ const DECAL_GROUND_ATTRIBUTES: [wgpu::VertexAttribute; 2] =
     wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3];
 /// `PlacedDecal::place`, two f32x4; decal.wgsl.
 const DECAL_INSTANCE_SIZE: usize = 32;
+/// Indices into `Field::silhouette_groups`.
+const SILHOUETTE_CASTERS: usize = 0;
+const SILHOUETTE_OCCLUDERS: usize = 1;
 const DECAL_ATTRIBUTES: [wgpu::VertexAttribute; 2] =
     wgpu::vertex_attr_array![3 => Float32x4, 4 => Float32x4];
 /// The anisotropy terrain textures are sampled with, as the engine's
@@ -706,6 +712,14 @@ pub struct Field {
     shadow_planes: Vec<[[f32; 4]; 6]>,
     /// A bit per cascade the model being placed casts into.
     casting: u8,
+    /// The viewer's silhouettes setting, the pass, and this frame's near
+    /// models by role, `SILHOUETTE_CASTERS` and `SILHOUETTE_OCCLUDERS`.
+    silhouettes: bool,
+    silhouette: Silhouette,
+    silhouette_groups: [HashMap<GroupKey, Vec<u8>>; 2],
+    silhouette_instances: [wgpu::Buffer; 2],
+    /// A bit per role of the model being placed, `1 << role`.
+    silhouette_roles: u8,
     /// Model instances placed this frame, captures included.
     placed: u32,
     far: Far,
@@ -1044,6 +1058,16 @@ impl Field {
             ],
             immediate_size: 0,
         });
+        let silhouette = Silhouette::new(
+            &device,
+            config.format,
+            &view_layout,
+            &model_layout,
+            &model_shader,
+            &model_buffers,
+            &field_shader,
+            &terrain_buffers,
+        );
         let terrain_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("terrain"),
             // Group 2 is the blend pass's masks.
@@ -1275,6 +1299,15 @@ impl Field {
                 wgpu::BufferUsages::VERTEX,
             )
         });
+        let silhouette_instances = std::array::from_fn(|_| {
+            create_buffer(
+                &device,
+                &queue,
+                "silhouette instances",
+                &[],
+                wgpu::BufferUsages::VERTEX,
+            )
+        });
         let camera = Rc::new(RefCell::new(Camera {
             target: [0.0, 0.0],
             yaw: START_YAW,
@@ -1409,6 +1442,11 @@ impl Field {
             shadow_groups: Default::default(),
             shadow_planes: Vec::new(),
             casting: 0,
+            silhouettes: false,
+            silhouette,
+            silhouette_groups: Default::default(),
+            silhouette_instances,
+            silhouette_roles: 0,
             placed: 0,
             far,
             far_instances,
@@ -1592,6 +1630,11 @@ impl Field {
             .values_mut()
             .chain(self.far_groups.values_mut())
             .chain(self.shadow_groups.iter_mut().flat_map(HashMap::values_mut))
+            .chain(
+                self.silhouette_groups
+                    .iter_mut()
+                    .flat_map(HashMap::values_mut),
+            )
         {
             group.clear();
         }
@@ -1787,8 +1830,10 @@ impl Field {
         let placed = self.placed;
         self.emitting = self.particles_visible.then_some(Owner::Entity(id));
         self.casting = casting;
+        self.silhouette_roles = self.silhouette_roles(dot);
         self.place_model(&model, &transform, &entity, None, 0, Some(groups));
         self.casting = 0;
+        self.silhouette_roles = 0;
         self.emitting = None;
         // Counted once something of it is drawn, not while it loads.
         if self.placed > placed {
@@ -2068,6 +2113,29 @@ impl Field {
         self.place_model(model, transform, &entity, None, 0, None);
         self.casting = 0;
         self.placed = placed;
+    }
+
+    /// `CCmpVisualActor`'s silhouette model flags, from the template, as
+    /// `silhouette_roles`; none while silhouettes are off.
+    fn silhouette_roles(&self, dot: &Dot) -> u8 {
+        if !self.silhouettes {
+            return 0;
+        }
+        let Some(details) = self
+            .entities
+            .template_details
+            .get(dot.template as usize)
+            .and_then(Option::as_ref)
+        else {
+            return 0;
+        };
+        [
+            (SILHOUETTE_CASTERS, TEMPLATE_SILHOUETTE_DISPLAY),
+            (SILHOUETTE_OCCLUDERS, TEMPLATE_SILHOUETTE_OCCLUDER),
+        ]
+        .into_iter()
+        .filter(|(_, flag)| details.flags & flag != 0)
+        .fold(0, |roles, (role, _)| roles | 1 << role)
     }
 
     /// A bit per cascade whose box a sphere touches.
@@ -2724,6 +2792,17 @@ impl Field {
             .chain([blend, tinted, model.alpha_ref, self.shading].map(|value| value.to_le_bytes()));
         for (slot, bytes) in instance.chunks_exact_mut(4).zip(values) {
             slot.copy_from_slice(&bytes);
+        }
+        // Drawn models only, as the engine submits silhouettes with them.
+        if groups.is_some() {
+            for (role, role_groups) in self.silhouette_groups.iter_mut().enumerate() {
+                if self.silhouette_roles & 1 << role != 0 {
+                    role_groups
+                        .entry(key)
+                        .or_default()
+                        .extend_from_slice(&instance);
+                }
+            }
         }
         if let Some(groups) = groups {
             groups.entry(key).or_default().extend_from_slice(&instance);
@@ -4004,6 +4083,13 @@ impl View for Field {
         self.sky_visible = on;
     }
 
+    fn set_silhouettes(&mut self, on: bool) {
+        self.silhouettes = on;
+        if !on {
+            self.silhouette.release();
+        }
+    }
+
     fn set_particles(&mut self, on: bool) {
         self.particles_visible = on;
         if !on {
@@ -4481,6 +4567,13 @@ impl View for Field {
             .take(if shadowed { self.shadow.cascades() } else { 0 })
             .map(|(groups, instances)| upload_groups(&self.device, &self.queue, groups, instances))
             .collect();
+        let silhouette_draws: Vec<_> = self
+            .silhouette_groups
+            .iter()
+            .zip(&mut self.silhouette_instances)
+            .take(if self.silhouettes { 2 } else { 0 })
+            .map(|(groups, instances)| upload_groups(&self.device, &self.queue, groups, instances))
+            .collect();
         let mut far_bytes = Vec::new();
         let mut far_draws = Vec::new();
         for (key, group) in &self.far_groups {
@@ -4884,6 +4977,38 @@ impl View for Field {
         }
         if let Some(plan) = post {
             self.post.draw(&mut encoder, plan, &screen, &self.timer);
+        }
+        if let [casters, occluders] = silhouette_draws.as_slice()
+            && !casters.is_empty()
+        {
+            let size = (self.config.width, self.config.height);
+            let mut pass = self
+                .silhouette
+                .begin(&self.device, &mut encoder, &screen, size, None);
+            pass.set_bind_group(0, &self.view_bind_group, &[]);
+            if let Some(ground) = &self.ground {
+                pass.set_pipeline(&self.silhouette.terrain_pipeline);
+                pass.set_vertex_buffer(0, ground.vertices.slice(..));
+                pass.set_index_buffer(ground.indices.slice(..), wgpu::IndexFormat::Uint32);
+                for splat in &ground.base {
+                    pass.draw_indexed(splat.first..splat.first + splat.count, 0, 0..1);
+                }
+                self.count_draws(ground.base.len());
+            }
+            pass.set_bind_group(1, &self.pose_bind_group, &[]);
+            pass.set_bind_group(3, &self.shadow.bind_group, &[]);
+            pass.set_pipeline(&self.silhouette.occluder_pipeline);
+            self.draw_models(
+                &mut pass,
+                occluders,
+                &self.silhouette_instances[SILHOUETTE_OCCLUDERS],
+            );
+            pass.set_pipeline(&self.silhouette.caster_pipeline);
+            self.draw_models(
+                &mut pass,
+                casters,
+                &self.silhouette_instances[SILHOUETTE_CASTERS],
+            );
         }
         self.timer.resolve(&mut encoder);
         let encoded = now();

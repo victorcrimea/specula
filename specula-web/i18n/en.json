@@ -40,6 +40,8 @@
   "Attack ranges (Alt+C)": "label of a list; the key combination in brackets stays as is",
   "Aura ranges (Alt+V)": "label of a list; the key combination in brackets stays as is",
   "Heal ranges (Alt+B)": "label of a list; the key combination in brackets stays as is",
+  "Silhouettes": "settings group heading for the unit silhouettes option",
+  "Unit silhouettes (Alt+Shift+S)": "label of an on/off list: draw units hidden behind buildings, trees or hills as flat shapes in their player colour; the key combination in brackets stays as is",
   "Bloom": "label: glow effect around bright areas, technical term",
   "Depth of field": "label: camera blur effect for distant objects, technical term",
   "Assets for the 3D view": "heading of a dialog about downloading and storing game files in the browser",

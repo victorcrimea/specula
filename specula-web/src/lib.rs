@@ -29,6 +29,7 @@ mod projectile;
 mod render;
 mod selection;
 mod shadow;
+mod silhouette;
 mod sky;
 mod stored;
 mod stream;
@@ -166,6 +167,7 @@ const FOG_SETTINGS_KEY: &str = "specula.fog";
 const WATER_SETTINGS_KEY: &str = "specula.water";
 const SKY_SETTINGS_KEY: &str = "specula.sky";
 const PARTICLES_SETTINGS_KEY: &str = "specula.particles";
+const SILHOUETTES_SETTINGS_KEY: &str = "specula.silhouettes";
 const PROJECTILES_SETTINGS_KEY: &str = "specula.projectiles";
 /// localStorage key of the detailed tooltips setting, the engine's
 /// showdetailedtooltips: 0 off, 1 on.
@@ -292,6 +294,9 @@ trait View {
     fn set_sky(&mut self, _on: bool) {}
     /// Whether the actors' particles are drawn, likewise.
     fn set_particles(&mut self, _on: bool) {}
+    /// Whether units behind structures, gaia and the ground are drawn as
+    /// silhouettes, likewise.
+    fn set_silhouettes(&mut self, _on: bool) {}
     /// Whether the water refracts what is under it, and takes its depth
     /// from that, likewise.
     fn set_water_refraction(&mut self, _on: bool) {}
@@ -1635,6 +1640,13 @@ async fn run(
             element(&document, "particles")?,
             PARTICLES_SETTINGS_KEY,
             |view, on| view.set_particles(on),
+            Vec::new(),
+        );
+        wire_switch(
+            &app,
+            element(&document, "silhouettes")?,
+            SILHOUETTES_SETTINGS_KEY,
+            |view, on| view.set_silhouettes(on),
             Vec::new(),
         );
         wire_projectiles(&app, element(&document, "projectiles")?);

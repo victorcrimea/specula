@@ -63,7 +63,7 @@ pub struct BenchInfo {
 /// The quality pane's controls in document order, which puts a parent
 /// before its dependents, so a parent's handler enables them before they
 /// are set; and their names in the pane.
-const CONTROLS: [(&str, &str); 23] = [
+const CONTROLS: [(&str, &str); 24] = [
     ("textures", "Textures"),
     ("maps", "Material maps"),
     ("triplanar", "Triplanar cliffs"),
@@ -78,6 +78,7 @@ const CONTROLS: [(&str, &str); 23] = [
     ("sky", "Sky"),
     ("fog", "Fog"),
     ("particles", "Particles"),
+    ("silhouettes", "Unit silhouettes"),
     ("projectiles", "Projectiles"),
     ("postproc", "Post-processing"),
     ("bloom", "Bloom"),

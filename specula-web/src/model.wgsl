@@ -283,6 +283,13 @@ fn fs_shadow(in: ModelVaryings) {
     }
 }
 
+// model_solid_player.fs, for a unit hidden behind an occluder; the
+// pipeline's blend constant is its opacity.
+@fragment
+fn fs_silhouette(in: ModelVaryings) -> @location(0) vec4<f32> {
+    return vec4<f32>(apply_fog(in.color.rgb, in.world), 1.0);
+}
+
 struct Captured {
     @location(0) albedo: vec4<f32>,
     // Octahedral model-space normal in rg, the player colour's weight in b.

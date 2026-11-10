@@ -74,6 +74,11 @@ pub const COMPONENT_MARKET: u32 = 1 << 26;
 pub const TEMPLATE_UNDELETABLE: u32 = 2048;
 /// And Identity's Controllable false.
 pub const TEMPLATE_UNCONTROLLABLE: u32 = 4096;
+/// And VisualActor's SilhouetteDisplay: drawn flat where an occluder hides
+/// it.
+pub const TEMPLATE_SILHOUETTE_DISPLAY: u32 = 8192;
+/// And its SilhouetteOccluder: hides those.
+pub const TEMPLATE_SILHOUETTE_OCCLUDER: u32 = 16384;
 const SOUND_ENTITY: u8 = 0;
 const SOUND_POSITION: u8 = 1;
 const SOUND_PLAYER: u8 = 2;
