@@ -30,6 +30,7 @@ use crate::diplomacy::Perspective;
 use crate::lang;
 use crate::left::LeftPanel;
 use crate::pick;
+use crate::predict::Predictions;
 use crate::stream::COMPONENT_GATE;
 use crate::stream::COMPONENT_PACK;
 use crate::stream::COMPONENT_UPGRADE;
@@ -390,13 +391,14 @@ struct CommandsPanel {
 
 /// A button that gives orders, which the page wires: a commands panel
 /// `training` cell, a research column's bottom (false) or top (true)
-/// button, a queue cell, or a command row button.
+/// button, a queue cell, a command row button, or a stance button.
 #[derive(Clone, Copy)]
 pub enum CommandButton {
     Training(usize),
     Research(usize, bool),
     Queue(usize),
     Row(usize),
+    Stance(usize),
 }
 
 /// One `unitTrainingButton`, `unitResearchButton`, `unitGateButton`,
@@ -552,6 +554,8 @@ pub struct View<'a> {
     pub detailed: bool,
     /// The player the viewer commands on `/play`, `None` for an observer.
     pub player: Option<i32>,
+    /// Drawn in place of the streamed state, marked as predicted.
+    pub predicted: &'a Predictions,
 }
 
 impl View<'_> {
@@ -703,8 +707,8 @@ impl DetailsPanel {
         self.groups.iter().map(|group| &group.button.element)
     }
 
-    /// The training, research, queue and command row buttons, for the
-    /// page to wire.
+    /// The training, research, queue, command row and stance buttons, for
+    /// the page to wire.
     pub fn command_buttons(&self) -> Vec<(CommandButton, HtmlElement)> {
         let mut buttons = Vec::new();
         if let Some(commands) = &self.commands {
@@ -746,6 +750,17 @@ impl DetailsPanel {
                     .map(|(index, button)| (CommandButton::Row(index), button.clone())),
             );
         }
+        if let Some(left) = self
+            .garrison
+            .as_ref()
+            .and_then(|garrison| garrison.left.as_ref())
+        {
+            buttons.extend(
+                left.stance_buttons()
+                    .enumerate()
+                    .map(|(index, button)| (CommandButton::Stance(index), button.clone())),
+            );
+        }
         buttons
     }
 
@@ -773,6 +788,12 @@ impl DetailsPanel {
                 .command_row
                 .as_ref()
                 .and_then(|row| row.clicked(index, shift)),
+            CommandButton::Stance(index) => self
+                .garrison
+                .as_ref()
+                .and_then(|garrison| garrison.left.as_ref())
+                .and_then(|left| left.stance_clicked(index))
+                .map(Request::Order),
         };
         if let Some(request) = request {
             self.requests.borrow_mut().push(request);
@@ -1491,7 +1512,14 @@ impl QueuePanel {
             .filter_map(|&id| {
                 let dot = scene.dots.get(&id)?;
                 match &entity_groups(scene, id, dot.template)[detail::QUEUE] {
-                    Some(Group::Queue(queue)) => Some((id, queue.clone())),
+                    Some(Group::Queue(queue)) => {
+                        let mut queue = queue.clone();
+                        // The ghosts come and go with the autoqueue button.
+                        if let Some(on) = view.predicted.autoqueue(id) {
+                            queue.autoqueue = on;
+                        }
+                        Some((id, queue))
+                    }
                     _ => None,
                 }
             })

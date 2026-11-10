@@ -3,10 +3,12 @@
 //! `Barter` in selection_panels.js), drawn into the page's `#garrison`
 //! frame next to the garrison buttons, in the engine's layout
 //! (`selection_panels_left/`). An observer's buttons are all disabled, so
-//! only barter's sell buttons answer a press, as the engine's do.
+//! only barter's sell buttons answer a press, as the engine's do; the
+//! player of `/play` also orders its own units' stances.
 
 use std::cell::Cell;
 
+use specula_assets::command::Command;
 use wasm_bindgen::JsValue;
 use web_sys::Document;
 use web_sys::HtmlElement;
@@ -58,6 +60,7 @@ const ALERT_TRADER: &str = "Trader";
 
 /// A selected entity, as the panels read it.
 struct Selected {
+    id: u32,
     owner: i32,
     template: u32,
     groups: Groups,
@@ -143,6 +146,9 @@ struct BarterItem {
 pub(crate) struct LeftPanel {
     stance_root: Out,
     stances: Vec<Tile>,
+    /// What a press of each stance button orders, for the player of
+    /// `/play`: `performStance`.
+    stance_orders: Vec<Option<Command>>,
     alert_root: Out,
     alerts: Vec<Tile>,
     formation_root: Out,
@@ -206,6 +212,7 @@ impl LeftPanel {
         Ok(LeftPanel {
             stance_root: Out::new(crate::element(document, "stance")?),
             stances,
+            stance_orders: vec![None; MAX_STANCES],
             alert_root: Out::new(crate::element(document, "alert")?),
             alerts,
             formation_root: Out::new(crate::element(document, "formation")?),
@@ -221,6 +228,16 @@ impl LeftPanel {
     /// The sell buttons, for the page to wire to `sell_clicked`.
     pub(crate) fn sell_buttons(&self) -> impl Iterator<Item = &HtmlElement> {
         self.barter.iter().map(|item| &item.sell.tile.element)
+    }
+
+    /// The stance buttons, for the page to wire to `stance_clicked`.
+    pub(crate) fn stance_buttons(&self) -> impl Iterator<Item = &HtmlElement> {
+        self.stances.iter().map(|tile| &tile.tile.element)
+    }
+
+    /// Stance button `index` was pressed: its order, if it gives one.
+    pub(crate) fn stance_clicked(&self, index: usize) -> Option<Command> {
+        self.stance_orders.get(index).cloned().flatten()
     }
 
     /// `BarterButtonManager.setSelectedResource`.
@@ -354,19 +371,47 @@ impl LeftPanel {
         let scene = view.scene;
         let items = stance_items(scene, selected);
         self.stance_root.hidden(items.is_empty());
+        // `controlsPlayer(data.player)`, the first selected entity's owner.
+        let controls = selected
+            .first()
+            .is_some_and(|entity| view.player == Some(entity.owner));
+        let ids: Vec<u32> = selected.iter().map(|entity| entity.id).collect();
+        self.stance_orders.fill(None);
         for (index, tile) in self.stances.iter_mut().enumerate() {
             let Some(&name) = items.get(index) else {
                 tile.tile.hidden(true);
                 continue;
             };
-            // `IsStanceSelected`: some selected entity is in it.
-            let current = selected.iter().any(|entity| {
-                matches!(
-                    &entity.groups[detail::UNIT_AI],
-                    Some(Group::UnitAi { stance, .. }) if string(scene, *stance) == Some(name)
-                )
-            });
+            // `IsStanceSelected`: some selected entity is in it, its
+            // ordered stance standing in for the streamed one.
+            let in_stance = |entity: &Selected| match view.predicted.stance(entity.id) {
+                Some(predicted) => Some(predicted == name),
+                None => match &entity.groups[detail::UNIT_AI] {
+                    Some(Group::UnitAi { stance, .. }) => {
+                        Some(string(scene, *stance) == Some(name))
+                    }
+                    _ => None,
+                },
+            };
+            let current = selected
+                .iter()
+                .any(|entity| in_stance(entity) == Some(true));
+            let predicted = current
+                && selected
+                    .iter()
+                    .any(|entity| view.predicted.stance(entity.id) == Some(name));
             tile.show(&format!("stance-{name}"), current);
+            tile.tile.class(String::from(if predicted {
+                "item predicted"
+            } else {
+                "item"
+            }));
+            if controls {
+                self.stance_orders[index] = Some(Command::Stance {
+                    entities: ids.clone(),
+                    name: name.to_string(),
+                });
+            }
             tile.tile.tooltip(&format!(
                 "{}\n{}",
                 stance_name(name),
@@ -492,6 +537,7 @@ fn selected(view: &View, entities: &[u32]) -> Vec<Selected> {
         .filter_map(|&id| {
             let dot = view.scene.dots.get(&id)?;
             Some(Selected {
+                id,
                 owner: dot.owner,
                 template: dot.template,
                 groups: entity_groups(view.scene, id, dot.template),

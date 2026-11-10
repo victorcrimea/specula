@@ -21,6 +21,7 @@ use crate::panel::create;
 use crate::panel::entity_groups;
 use crate::panel::template_details;
 use crate::pick;
+use crate::predict::Predictions;
 use crate::stream::COMPONENT_BUILDER;
 use crate::stream::COMPONENT_GARRISON_HOLDER;
 use crate::stream::COMPONENT_GARRISONABLE;
@@ -73,6 +74,7 @@ struct Context<'a> {
     selected: &'a [Selected],
     /// The player the viewer controls, `None` for an observer.
     player: Option<i32>,
+    predicted: &'a Predictions,
 }
 
 impl Context<'_> {
@@ -564,7 +566,14 @@ fn infos(context: &Context) -> Vec<Info> {
     );
 
     // autoqueue-on and autoqueue-off
-    let autoqueue = |entity: &Selected| context.queue(entity).is_some_and(|queue| queue.autoqueue);
+    let autoqueue = |entity: &Selected| {
+        context.queue(entity).is_some_and(|queue| {
+            context
+                .predicted
+                .autoqueue(entity.id)
+                .unwrap_or(queue.autoqueue)
+        })
+    };
     // `turnAutoQueueOn` and `turnAutoQueueOff`: the trainers it changes.
     let switched = |on: bool| Command::Autoqueue {
         on,
@@ -685,6 +694,7 @@ impl CommandRow {
             scene,
             selected: &selected,
             player: view.player,
+            predicted: view.predicted,
         };
         let mut infos = infos(&context);
         infos.truncate(MAX_COMMANDS);
@@ -701,11 +711,19 @@ impl CommandRow {
                 "left: calc(50% + {}px)",
                 (index as f64 - total / 2.0) * COMMAND_STEP
             ));
-            button.button.class(String::from(if info.enabled {
-                "command"
-            } else {
-                "command disabled"
-            }));
+            // An autoqueue button drawn from an order not yet confirmed.
+            let predicted = matches!(&self.orders[index], Some(Command::Autoqueue { .. }))
+                && context
+                    .selected
+                    .iter()
+                    .any(|entity| context.predicted.autoqueue(entity.id).is_some());
+            button
+                .button
+                .class(String::from(match (info.enabled, predicted) {
+                    (true, false) => "command",
+                    (true, true) => "command predicted",
+                    (false, _) => "command disabled",
+                }));
             button
                 .icon
                 .style(format!("background-image: var(--gui-{})", info.icon));

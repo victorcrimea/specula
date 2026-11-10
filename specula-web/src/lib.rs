@@ -25,6 +25,7 @@ mod pick;
 mod placement;
 mod pose;
 mod postproc;
+mod predict;
 mod projectile;
 mod render;
 mod selection;
@@ -93,6 +94,7 @@ use crate::panel::DetailsPanel;
 use crate::panel::Request;
 use crate::placement::Placement;
 use crate::postproc::Upscale;
+use crate::predict::Predictions;
 use crate::render::Renderer;
 use crate::stream::Ground;
 use crate::stream::PlayerState;
@@ -558,6 +560,8 @@ struct App {
     diplomacy_window: Option<DiplomacyWindow>,
     /// Only `/play` asks before deleting.
     message_box: Option<MessageBox>,
+    /// The toggles `/play` ordered that the stream has not reported yet.
+    predictions: Predictions,
     /// A turn, the palette or the perspective changed since it was filled;
     /// the portrait index is compared.
     top_dirty: bool,
@@ -916,6 +920,8 @@ impl App {
                 Request::Order(order) => {
                     if let Some(uplink) = &self.uplink {
                         uplink.send(&order);
+                        self.predictions.record(&order, page_now());
+                        self.details_dirty = true;
                     }
                 }
                 Request::Place(place) => {
@@ -946,6 +952,9 @@ impl App {
         if self.data_files.take_loaded() {
             self.details_dirty = true;
         }
+        if self.predictions.reconcile(&self.scene, page_now()) {
+            self.details_dirty = true;
+        }
         let selected = self.renderer.selected();
         if !self.details_dirty && index == self.details_index && selected == self.details_selected {
             return;
@@ -969,6 +978,7 @@ impl App {
             data: &self.data_files,
             detailed: self.detailed_tooltips,
             player: self.uplink.as_ref().and_then(Uplink::seat),
+            predicted: &self.predictions,
         });
     }
 
@@ -1491,6 +1501,7 @@ async fn run(
         top,
         diplomacy_window,
         message_box,
+        predictions: Predictions::default(),
         top_dirty: true,
         top_index: false,
         ranges: None,

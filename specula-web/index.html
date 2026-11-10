@@ -355,6 +355,12 @@ body { cursor: var(--gui-cursor-default, default); }
 #details .item > .tint { background-repeat: no-repeat; }
 #details .item.grey > .icon, #details .item.selected > .icon { filter: grayscale(1); }
 #details .item > .caption { inset: 0 0 50% 0; justify-content: flex-start; }
+/* Not the engine's: on /play a toggle ordered but not yet streamed back
+   blinks until the stream agrees or the order times out. */
+/* Off first, so even an order confirmed within half a cycle shows. */
+@keyframes predicted { 0% { opacity: 0; } 50% { opacity: 1; } }
+#details .item.predicted > .selection, #details .command.predicted > .icon {
+  animation: predicted 0.1s steps(1) infinite; }
 /* Not the engine's: on a phone both panels are scaled down to leave the
    view free, the details sit right of the minimap so neither moves when
    the selection changes, and the details fold to a strip. */
