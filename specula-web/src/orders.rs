@@ -1,29 +1,37 @@
 //! What a right click orders the player's selection to do, and the cursor
 //! that shows it beforehand: a part of `gui/session/unit_actions.js`, the
-//! actions a plain right click can pick (`determineAction` without
-//! hotkeys), in the engine's order of `specificness`. The engine checks
-//! every order again; what this gets wrong only sends an order the units
-//! cannot carry out.
+//! actions a right click can pick (`determineAction`, with the hotkeys of
+//! the actions ported here), in the engine's order of `specificness`, and
+//! the left click of a command button's preselected action. The engine
+//! checks every order again; what this gets wrong only sends an order the
+//! units cannot carry out.
 
 use specula_assets::command::ALLOW_CAPTURE;
 use specula_assets::command::Command;
 use specula_assets::command::QUEUED;
 
 use crate::detail;
+use crate::detail::Commands;
 use crate::detail::Group;
 use crate::left::matches_class_list;
 use crate::panel::entity_groups;
+use crate::panel::mutual_allies;
 use crate::panel::string;
 use crate::panel::template_details;
 use crate::stream::COMPONENT_ATTACK;
 use crate::stream::COMPONENT_BUILDER;
 use crate::stream::COMPONENT_CAPTURABLE;
 use crate::stream::COMPONENT_FOUNDATION;
+use crate::stream::COMPONENT_GARRISON_HOLDER;
+use crate::stream::COMPONENT_GARRISONABLE;
+use crate::stream::COMPONENT_GUARD;
 use crate::stream::COMPONENT_RALLY_POINT;
 use crate::stream::COMPONENT_REPAIRABLE;
 use crate::stream::COMPONENT_RESOURCE_DROPSITE;
 use crate::stream::COMPONENT_RESOURCE_GATHERER;
 use crate::stream::COMPONENT_RESOURCE_SUPPLY;
+use crate::stream::COMPONENT_TURRET_HOLDER;
+use crate::stream::COMPONENT_TURRETABLE;
 use crate::stream::COMPONENT_UNIT_AI;
 use crate::stream::Dot;
 use crate::stream::Scene;
@@ -37,6 +45,29 @@ pub struct Target {
     pub entity: Option<u32>,
     pub point: Option<[f32; 2]>,
     pub queued: bool,
+    /// The `HOTKEY_*` modifiers held.
+    pub hotkeys: u8,
+    /// A left click, which only a preselected action takes.
+    pub left: bool,
+}
+
+/// The engine's session.garrison and session.occupyturret (Ctrl),
+/// session.guard (G), session.patrol (P) and session.repair (J).
+pub const HOTKEY_GARRISON: u8 = 1;
+pub const HOTKEY_GUARD: u8 = 2;
+pub const HOTKEY_PATROL: u8 = 4;
+pub const HOTKEY_REPAIR: u8 = 8;
+
+/// A command button's `preSelectedAction`: the action the next left
+/// click on the view takes.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Preselect {
+    CallToArms,
+    Garrison,
+    OccupyTurret,
+    Repair,
+    Guard,
+    Patrol,
 }
 
 /// What a right click would do: the cursor the engine shows for it, the
@@ -60,14 +91,7 @@ pub fn action(
     target: &Target,
     formation: &str,
 ) -> Option<Action> {
-    let own: Vec<u32> = selected
-        .iter()
-        .copied()
-        .filter(|id| scene.dots.get(id).is_some_and(|dot| dot.owner == player))
-        .collect();
-    if own.is_empty() {
-        return None;
-    }
+    let (own, able) = own_and_able(scene, selected, player)?;
     let details = |id: u32| {
         scene
             .dots
@@ -75,14 +99,6 @@ pub fn action(
             .and_then(|dot| template_details(scene, dot.template))
     };
     let components = |id: u32| details(id).map_or(0, |details| details.components);
-    // getActionInfo skips what the player cannot control.
-    let able: Vec<u32> = own
-        .iter()
-        .copied()
-        .filter(|&id| {
-            details(id).is_none_or(|details| details.flags & TEMPLATE_UNCONTROLLABLE == 0)
-        })
-        .collect();
     if able.is_empty() {
         // The "uncontrollable" action.
         return Some(Action {
@@ -98,6 +114,33 @@ pub fn action(
         .entity
         .and_then(|id| Some((id, scene.dots.get(&id)?)));
     let unit_ai = able.iter().any(|&id| has(id, COMPONENT_UNIT_AI));
+    let actions = Actions {
+        scene,
+        own: &own,
+        able: &able,
+        player,
+        target,
+        target_dot,
+        flags,
+        formation,
+    };
+
+    // `hotkeyActionCheck`, before the plain actions.
+    let held = |hotkey: u8| target.hotkeys & hotkey != 0;
+    let by_hotkey = None
+        .or_else(|| held(HOTKEY_REPAIR).then(|| actions.repair()).flatten())
+        .or_else(|| held(HOTKEY_GARRISON).then(|| actions.garrison()).flatten())
+        .or_else(|| {
+            held(HOTKEY_GARRISON)
+                .then(|| actions.occupy_turret())
+                .flatten()
+        })
+        .or_else(|| held(HOTKEY_PATROL).then(|| actions.patrol()).flatten())
+        .or_else(|| held(HOTKEY_GUARD).then(|| actions.guard()).flatten())
+        .or_else(|| held(HOTKEY_GUARD).then(|| actions.remove_guard()).flatten());
+    if by_hotkey.is_some() {
+        return by_hotkey;
+    }
 
     if let Some((id, dot)) = target_dot {
         let target_details = template_details(scene, dot.template);
@@ -204,28 +247,8 @@ pub fn action(
                 sound: Some(("order_attack", attacker)),
             });
         }
-        // "repair": builders on a friendly foundation or damaged building.
-        if matches!(relation, Relation::Own | Relation::Ally)
-            && let Some(&builder) = able.iter().find(|&&unit| has(unit, COMPONENT_BUILDER))
-            && (bits & COMPONENT_FOUNDATION != 0
-                || (bits & COMPONENT_REPAIRABLE != 0 && dot.hitpoints < 255))
-        {
-            return Some(Action {
-                cursor: "action-repair".to_string(),
-                command: Some(Command::Repair {
-                    flags,
-                    entities: entities(),
-                    target: id,
-                }),
-                sound: Some((
-                    if bits & COMPONENT_FOUNDATION != 0 {
-                        "order_build"
-                    } else {
-                        "order_repair"
-                    },
-                    builder,
-                )),
-            });
+        if let Some(action) = actions.repair() {
+            return Some(action);
         }
     }
 
@@ -245,6 +268,294 @@ pub fn action(
         }),
         sound: Some(("order_walk", walker)),
     })
+}
+
+/// The action a left click takes in `preselect`'s mode, as its
+/// `preSelectedActionCheck`: a disabled cursor where it cannot, which a
+/// click still ends the mode on. None without any of the player's own
+/// selected, where the engine leaves the mode as it is.
+pub fn preselected(
+    scene: &Scene,
+    selected: &[u32],
+    player: i32,
+    target: &Target,
+    formation: &str,
+    preselect: Preselect,
+) -> Option<Action> {
+    let (own, able) = own_and_able(scene, selected, player)?;
+    let actions = Actions {
+        scene,
+        own: &own,
+        able: &able,
+        player,
+        target,
+        target_dot: target
+            .entity
+            .and_then(|id| Some((id, scene.dots.get(&id)?))),
+        flags: if target.queued { QUEUED } else { 0 },
+        formation,
+    };
+    let (action, disabled) = match preselect {
+        Preselect::CallToArms => (actions.call_to_arms(), ""),
+        Preselect::Garrison => (actions.garrison(), "action-garrison-disabled"),
+        Preselect::OccupyTurret => (actions.occupy_turret(), "action-occupy-turret-disabled"),
+        Preselect::Repair => (actions.repair(), "action-repair-disabled"),
+        Preselect::Guard => (actions.guard(), "action-guard-disabled"),
+        Preselect::Patrol => (actions.patrol(), ""),
+    };
+    Some(action.unwrap_or_else(|| Action {
+        cursor: disabled.to_string(),
+        command: None,
+        sound: None,
+    }))
+}
+
+/// The player's own among `selected`, and of those the ones getActionInfo
+/// does not skip as uncontrollable; none without any own.
+fn own_and_able(scene: &Scene, selected: &[u32], player: i32) -> Option<(Vec<u32>, Vec<u32>)> {
+    let own: Vec<u32> = selected
+        .iter()
+        .copied()
+        .filter(|id| scene.dots.get(id).is_some_and(|dot| dot.owner == player))
+        .collect();
+    if own.is_empty() {
+        return None;
+    }
+    let able = own
+        .iter()
+        .copied()
+        .filter(|id| {
+            scene
+                .dots
+                .get(id)
+                .and_then(|dot| template_details(scene, dot.template))
+                .is_none_or(|details| details.flags & TEMPLATE_UNCONTROLLABLE == 0)
+        })
+        .collect();
+    Some((own, able))
+}
+
+/// What the actions that both a hotkey and a command button pick read:
+/// each one's `actionCheck`, through `getActionInfo`'s first able entity.
+struct Actions<'a> {
+    scene: &'a Scene,
+    own: &'a [u32],
+    able: &'a [u32],
+    player: i32,
+    target: &'a Target,
+    target_dot: Option<(u32, &'a Dot)>,
+    flags: u8,
+    formation: &'a str,
+}
+
+impl Actions<'_> {
+    fn details(&self, id: u32) -> Option<&TemplateDetails> {
+        let dot = self.scene.dots.get(&id)?;
+        template_details(self.scene, dot.template)
+    }
+
+    fn has(&self, id: u32, bit: u32) -> bool {
+        self.details(id)
+            .is_some_and(|details| details.components & bit != 0)
+    }
+
+    /// UnitAI's and the like, as the hook reports them.
+    fn command_flags(&self, id: u32) -> u32 {
+        let Some(dot) = self.scene.dots.get(&id) else {
+            return 0;
+        };
+        match &entity_groups(self.scene, id, dot.template)[detail::COMMANDS] {
+            Some(Group::Commands(commands)) => commands.flags,
+            _ => 0,
+        }
+    }
+
+    /// The target, its details' component bits and the player's relation
+    /// to its owner.
+    fn target(&self) -> Option<(u32, &Dot, u32, Relation)> {
+        let (id, dot) = self.target_dot?;
+        let bits =
+            template_details(self.scene, dot.template).map_or(0, |details| details.components);
+        Some((id, dot, bits, relation(self.scene, self.player, dot.owner)))
+    }
+
+    /// `playerCheck` with "Player" and "MutualAlly".
+    fn own_or_mutual_ally(&self, owner: i32) -> bool {
+        owner == self.player
+            || matches!(
+                (usize::try_from(self.player), usize::try_from(owner)),
+                (Ok(player), Ok(owner)) if owner > 0 && mutual_allies(self.scene, player, owner)
+            )
+    }
+
+    /// The ground clicked, else the target's position, as
+    /// `GetTerrainAtScreenPoint` always has one.
+    fn point(&self) -> Option<[f32; 2]> {
+        self.target
+            .point
+            .or_else(|| self.target_dot.map(|(_, dot)| position(dot)))
+    }
+
+    /// "repair": builders on a friendly foundation or damaged building.
+    fn repair(&self) -> Option<Action> {
+        let (id, dot, bits, relation) = self.target()?;
+        if !matches!(relation, Relation::Own | Relation::Ally)
+            || (bits & COMPONENT_FOUNDATION == 0
+                && (bits & COMPONENT_REPAIRABLE == 0 || dot.hitpoints == u8::MAX))
+        {
+            return None;
+        }
+        let &builder = self
+            .able
+            .iter()
+            .find(|&&unit| self.has(unit, COMPONENT_BUILDER))?;
+        Some(Action {
+            cursor: "action-repair".to_string(),
+            command: Some(Command::Repair {
+                flags: self.flags,
+                entities: self.own.to_vec(),
+                target: id,
+            }),
+            sound: Some((
+                if bits & COMPONENT_FOUNDATION != 0 {
+                    "order_build"
+                } else {
+                    "order_repair"
+                },
+                builder,
+            )),
+        })
+    }
+
+    /// "garrison": into an own or mutually allied holder whose List the
+    /// unit matches; any, from a hook that does not send the List.
+    fn garrison(&self) -> Option<Action> {
+        let (id, dot, bits, _) = self.target()?;
+        if bits & COMPONENT_GARRISON_HOLDER == 0 || !self.own_or_mutual_ally(dot.owner) {
+            return None;
+        }
+        let list = self
+            .details(id)
+            .map_or(0, |details| details.garrison_classes);
+        let &unit = self.able.iter().find(|&&unit| {
+            self.has(unit, COMPONENT_GARRISONABLE)
+                && (list == 0
+                    || string(self.scene, list).is_some_and(|list| {
+                        matches_class_list(&target_classes(self.scene, self.details(unit)), list)
+                    }))
+        })?;
+        Some(Action {
+            cursor: "action-garrison".to_string(),
+            command: Some(Command::Garrison {
+                flags: self.flags,
+                entities: self.own.to_vec(),
+                target: id,
+            }),
+            sound: Some(("order_garrison", unit)),
+        })
+    }
+
+    /// "occupy-turret": an own or mutually allied holder with a point the
+    /// unit may take, full or not.
+    fn occupy_turret(&self) -> Option<Action> {
+        let (id, dot, bits, _) = self.target()?;
+        if bits & COMPONENT_TURRET_HOLDER == 0 || !self.own_or_mutual_ally(dot.owner) {
+            return None;
+        }
+        let points = self.details(id).map_or(0, |details| details.turret_classes);
+        let &unit = self.able.iter().find(|&&unit| {
+            self.has(unit, COMPONENT_TURRETABLE)
+                && (points == 0
+                    || string(self.scene, points).is_some_and(|points| {
+                        let classes = target_classes(self.scene, self.details(unit));
+                        points.split(';').any(|allowed| {
+                            allowed.trim().is_empty() || matches_class_list(&classes, allowed)
+                        })
+                    }))
+        })?;
+        Some(Action {
+            cursor: "action-occupy-turret".to_string(),
+            command: Some(Command::OccupyTurret {
+                flags: self.flags,
+                entities: self.own.to_vec(),
+                target: id,
+            }),
+            sound: Some(("order_garrison", unit)),
+        })
+    }
+
+    /// "guard": an own or allied entity with Guard, other than the unit.
+    fn guard(&self) -> Option<Action> {
+        let (id, _, bits, relation) = self.target()?;
+        if bits & COMPONENT_GUARD == 0 || !matches!(relation, Relation::Own | Relation::Ally) {
+            return None;
+        }
+        let &unit = self.able.iter().find(|&&unit| {
+            unit != id
+                && self.has(unit, COMPONENT_UNIT_AI)
+                && self.command_flags(unit) & Commands::CAN_GUARD != 0
+        })?;
+        Some(Action {
+            cursor: "action-guard".to_string(),
+            command: Some(Command::Guard {
+                flags: self.flags,
+                entities: self.own.to_vec(),
+                target: id,
+            }),
+            sound: Some(("order_guard", unit)),
+        })
+    }
+
+    /// "remove-guard", wherever the mouse is.
+    fn remove_guard(&self) -> Option<Action> {
+        let &unit = self.able.iter().find(|&&unit| {
+            self.has(unit, COMPONENT_UNIT_AI) && self.command_flags(unit) & Commands::GUARDING != 0
+        })?;
+        Some(Action {
+            cursor: "action-remove-guard".to_string(),
+            command: Some(Command::RemoveGuard {
+                entities: self.own.to_vec(),
+            }),
+            sound: Some(("order_guard", unit)),
+        })
+    }
+
+    /// "patrol" to the point, in the default formation.
+    fn patrol(&self) -> Option<Action> {
+        let &unit = self.able.iter().find(|&&unit| {
+            self.has(unit, COMPONENT_UNIT_AI)
+                && self.command_flags(unit) & Commands::CAN_PATROL != 0
+        })?;
+        Some(Action {
+            cursor: "action-patrol".to_string(),
+            command: self.point().map(|[x, z]| Command::Patrol {
+                flags: self.flags,
+                entities: self.own.to_vec(),
+                x,
+                z,
+                target: self.target.entity.unwrap_or(0),
+                formation: self.formation.to_string(),
+            }),
+            sound: Some(("order_patrol", unit)),
+        })
+    }
+
+    /// "call-to-arms", which plays no sound.
+    fn call_to_arms(&self) -> Option<Action> {
+        self.able
+            .iter()
+            .find(|&&unit| self.has(unit, COMPONENT_UNIT_AI))?;
+        Some(Action {
+            cursor: "action-attack".to_string(),
+            command: self.point().map(|[x, z]| Command::CallToArms {
+                flags: self.flags,
+                entities: self.own.to_vec(),
+                x,
+                z,
+            }),
+            sound: None,
+        })
+    }
 }
 
 #[derive(Clone, Copy, PartialEq)]

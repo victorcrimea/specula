@@ -3,7 +3,8 @@
 //! selection_panels.js and unit_actions.js): up to six 32 px buttons, which
 //! only the commands the viewer is allowed to see make. A pure observer is
 //! allowed only focus-rally and the shared dropsite lock; the player of
-//! `/play` sees the rest, of which autoqueue, stop and delete give orders.
+//! `/play` sees the rest, all of which act but Barter & Trade, as there is
+//! no trade dialog. Their hotkeys go through `CommandRow::hotkey`.
 
 use specula_assets::command::Command;
 use web_sys::Document;
@@ -14,6 +15,7 @@ use crate::detail::Commands;
 use crate::detail::Group;
 use crate::detail::Groups;
 use crate::lang;
+use crate::orders::Preselect;
 use crate::panel::Out;
 use crate::panel::Request;
 use crate::panel::View;
@@ -49,15 +51,95 @@ const PLAYER: u8 = 1;
 const ALLY: u8 = 2;
 const OBSERVER: u8 = 4;
 
+/// `g_HotkeyTags`.
+const HOTKEY_COLOR: &str = "255 251 131";
+
 /// What a command shows: `getInfo`'s result.
 struct Info {
+    /// Its key in `g_EntityCommands`.
+    name: &'static str,
     /// The key of the icon in `session.css`.
     icon: &'static str,
     tooltip: String,
     count: u32,
     enabled: bool,
-    /// What a press orders, for the player of `/play`.
-    order: Option<Command>,
+    /// What `execute` does.
+    press: Option<Press>,
+}
+
+/// What a command's `execute` does.
+#[derive(Clone)]
+enum Press {
+    /// Orders, for the player of `/play`; some commands post two.
+    Orders(Vec<Command>),
+    /// Waits for a left click on the view.
+    Preselect(Preselect),
+    /// `Engine.CameraMoveTo`, x and z in metres.
+    Focus([f32; 2]),
+}
+
+impl Press {
+    /// The orders, none when they would command nothing.
+    fn orders(orders: Vec<Command>) -> Option<Press> {
+        let orders: Vec<Command> = orders
+            .into_iter()
+            .filter(|order| !commands_none(order))
+            .collect();
+        (!orders.is_empty()).then_some(Press::Orders(orders))
+    }
+
+    fn order(order: Command) -> Option<Press> {
+        Press::orders(vec![order])
+    }
+}
+
+/// An order to an empty list, which `PostNetworkCommand` would still send
+/// but which does nothing.
+fn commands_none(order: &Command) -> bool {
+    match order {
+        Command::UnloadAll { holders } | Command::UnloadAllByOwner { holders } => {
+            holders.is_empty()
+        }
+        Command::UnloadTurrets { entities }
+        | Command::LeaveTurret { entities }
+        | Command::BackToWork { entities }
+        | Command::RemoveGuard { entities }
+        | Command::DropsiteSharing { entities, .. }
+        | Command::Autoqueue { entities, .. }
+        | Command::Stop { entities, .. }
+        | Command::Delete { entities } => entities.is_empty(),
+        _ => false,
+    }
+}
+
+/// The keys of the command row's hotkeys, as `formatHotkeyCombinations`
+/// writes the engine's defaults (`config/default.cfg`); none for the
+/// unassigned ones. Barter's Ctrl+B is left out, as nothing here opens
+/// the trade dialog.
+fn hotkey_keys(hotkey: &str) -> Option<&'static str> {
+    Some(match hotkey {
+        "session.unload" | "session.unloadturrets" => "U",
+        "session.kill" => "Delete, Backspace",
+        "session.stop" => "H",
+        "session.garrison" | "session.occupyturret" => "Ctrl",
+        "session.repair" => "J",
+        "session.backtowork" => "Y",
+        "session.guard" => "G",
+        "session.patrol" => "P",
+        _ => return None,
+    })
+}
+
+/// `colorizeHotkey("%(hotkey)s" + " ", hotkey)`.
+fn hotkey_prefix(hotkey: &str) -> String {
+    let key = match hotkey_keys(hotkey) {
+        Some(key) => key.to_string(),
+        None => lang::format(
+            &lang::translate("Unassigned hotkey: %(hotkeyName)s"),
+            &[("hotkeyName", hotkey)],
+        ),
+    };
+    format!("{} ", tooltip::colored(&format!("\\[{key}]"), HOTKEY_COLOR))
 }
 
 /// A selected entity.
@@ -131,6 +213,38 @@ impl Context<'_> {
         }
     }
 
+    /// Whether the dropsite is shared, as predicted before the stream says.
+    fn shared(&self, entity: &Selected) -> bool {
+        self.predicted
+            .dropsite_shared(entity.id)
+            .unwrap_or(self.flags(entity) & Commands::SHARED != 0)
+    }
+
+    /// The player's entities on `holder`'s turret points, which
+    /// `unloadAllTurrets` finds through the points and here through each
+    /// occupant's holder.
+    fn own_turrets_on(&self, holder: u32) -> Vec<u32> {
+        let Some(player) = self.player else {
+            return Vec::new();
+        };
+        self.scene
+            .dots
+            .iter()
+            .filter(|(_, dot)| dot.owner == player)
+            .filter(|(_, dot)| {
+                template_details(self.scene, dot.template)
+                    .is_some_and(|details| details.components & COMPONENT_TURRETABLE != 0)
+            })
+            .filter(|&(&id, dot)| {
+                matches!(
+                    &entity_groups(self.scene, id, dot.template)[detail::HOLDER],
+                    Some(Group::Holder(on)) if *on == holder
+                )
+            })
+            .map(|(&id, _)| id)
+            .collect()
+    }
+
     fn queue<'a>(&self, entity: &'a Selected) -> Option<&'a detail::Queue> {
         match &entity.groups[detail::QUEUE] {
             Some(Group::Queue(queue)) => Some(queue),
@@ -175,8 +289,12 @@ fn tip(title: &str, body: &str) -> String {
     )
 }
 
-/// `g_EntityCommands`, in its order: name-less, as only the order and the
-/// allowed players matter here.
+/// `tip` after its hotkey.
+fn hotkey_tip(hotkey: &str, title: &str, body: &str) -> String {
+    format!("{}{}", hotkey_prefix(hotkey), tip(title, body))
+}
+
+/// `g_EntityCommands`, in its order.
 fn infos(context: &Context) -> Vec<Info> {
     let selected = context.selected;
     let scene = context.scene;
@@ -187,6 +305,13 @@ fn infos(context: &Context) -> Vec<Info> {
         }
     };
     let any = |test: &dyn Fn(&Selected) -> bool| selected.iter().any(test);
+    let ids = |test: &dyn Fn(&Selected) -> bool| -> Vec<u32> {
+        selected
+            .iter()
+            .filter(|entity| test(entity))
+            .map(|entity| entity.id)
+            .collect()
+    };
 
     // unload-all
     let unloadable: u32 = selected
@@ -207,41 +332,77 @@ fn infos(context: &Context) -> Vec<Info> {
             _ => 0,
         })
         .sum();
+    // `unloadAll`: the own holders emptied, the others' of the player's.
+    let holders = |own: bool| {
+        ids(&|entity| {
+            context.has_component(entity, COMPONENT_GARRISON_HOLDER)
+                && context.controls(entity.owner) == own
+        })
+    };
     add(
         PLAYER | ALLY,
         (unloadable > 0).then(|| Info {
+            name: "unload-all",
             icon: "command-garrison-out",
-            tooltip: tip(
+            tooltip: hotkey_tip(
+                "session.unload",
                 "Unload All",
                 "Order all units to leave the selected entities.",
             ),
             count: unloadable,
             enabled: true,
-            order: None,
+            press: Press::orders(vec![
+                Command::UnloadAll {
+                    holders: holders(true),
+                },
+                Command::UnloadAllByOwner {
+                    holders: holders(false),
+                },
+            ]),
         }),
     );
 
-    // unload-all-turrets
-    let turrets: u32 = selected
+    // unload-all-turrets: the ejectable occupants of the own holders, and
+    // the player's own on the others'.
+    let mut turrets = 0;
+    let mut own_turret_holders = Vec::new();
+    let mut ejectables = Vec::new();
+    for entity in selected
         .iter()
         .filter(|entity| context.has_component(entity, COMPONENT_TURRET_HOLDER))
-        .filter(|entity| context.controls(entity.owner))
-        .map(|entity| match &entity.groups[detail::COMMANDS] {
-            Some(Group::Commands(commands)) => commands.turrets,
-            _ => 0,
-        })
-        .sum();
+    {
+        if context.controls(entity.owner) {
+            own_turret_holders.push(entity.id);
+            turrets += match &entity.groups[detail::COMMANDS] {
+                Some(Group::Commands(commands)) => commands.turrets,
+                _ => 0,
+            };
+        } else {
+            let occupants = context.own_turrets_on(entity.id);
+            turrets += occupants.len() as u32;
+            ejectables.extend(occupants);
+        }
+    }
     add(
         PLAYER | ALLY,
         (turrets > 0).then(|| Info {
+            name: "unload-all-turrets",
             icon: "command-garrison-out",
-            tooltip: tip(
+            tooltip: hotkey_tip(
+                "session.unloadturrets",
                 "Unload Turrets",
                 "Order all units to leave the selected turret points.",
             ),
             count: turrets,
             enabled: true,
-            order: None,
+            press: Press::orders(vec![
+                Command::LeaveTurret {
+                    entities: ejectables,
+                },
+                Command::UnloadTurrets {
+                    entities: own_turret_holders,
+                },
+            ]),
         }),
     );
 
@@ -254,16 +415,17 @@ fn infos(context: &Context) -> Vec<Info> {
         PLAYER,
         Some(if reasons.iter().any(Option::is_none) {
             Info {
+                name: "delete",
                 icon: "command-delete",
-                tooltip: tip("Self-Destruct", "Destroy the selected entities."),
+                tooltip: hotkey_tip(
+                    "session.kill",
+                    "Self-Destruct",
+                    "Destroy the selected entities.",
+                ),
                 count: 0,
                 enabled: true,
-                order: Some(Command::Delete {
-                    entities: selected
-                        .iter()
-                        .filter(|entity| context.undeletable(entity).is_none())
-                        .map(|entity| entity.id)
-                        .collect(),
+                press: Press::order(Command::Delete {
+                    entities: ids(&|entity| context.undeletable(entity).is_none()),
                 }),
             }
         } else {
@@ -274,11 +436,12 @@ fn infos(context: &Context) -> Vec<Info> {
                 }
             }
             Info {
+                name: "delete",
                 icon: "command-delete-disabled",
                 tooltip: unique.join("\n"),
                 count: 0,
                 enabled: false,
-                order: None,
+                press: None,
             }
         }),
     );
@@ -295,13 +458,18 @@ fn infos(context: &Context) -> Vec<Info> {
     add(
         PLAYER,
         (!selected.iter().all(idle)).then(|| Info {
+            name: "stop",
             icon: "stop",
-            tooltip: tip("Abort", "Cancel the current orders for the selected units."),
+            tooltip: hotkey_tip(
+                "session.stop",
+                "Abort",
+                "Cancel the current orders for the selected units.",
+            ),
             count: 0,
             enabled: true,
-            order: Some(Command::Stop {
+            press: Press::order(Command::Stop {
                 flags: 0,
-                entities: selected.iter().map(|entity| entity.id).collect(),
+                entities: ids(&|_| true),
             }),
         }),
     );
@@ -311,14 +479,16 @@ fn infos(context: &Context) -> Vec<Info> {
         PLAYER,
         any(&|entity| ATTACK_CLASSES.iter().any(|class| context.has_class(entity, class))).then(
             || Info {
+                name: "call-to-arms",
                 icon: "command-call-to-arms",
-                tooltip: tip(
+                tooltip: hotkey_tip(
+                    "session.calltoarms",
                     "Attack",
                     "Send the selected units on attack move to the specified location after dropping resources.",
                 ),
                 count: 0,
                 enabled: true,
-                order: None,
+                press: Some(Press::Preselect(Preselect::CallToArms)),
             },
         ),
     );
@@ -330,14 +500,16 @@ fn infos(context: &Context) -> Vec<Info> {
             context.has_component(entity, COMPONENT_GARRISONABLE) && context.holder(entity) == 0
         })
         .then(|| Info {
+            name: "garrison",
             icon: "command-garrison",
-            tooltip: tip(
+            tooltip: hotkey_tip(
+                "session.garrison",
                 "Garrison",
                 "Order the selected units to garrison in a structure or another unit.",
             ),
             count: 0,
             enabled: true,
-            order: None,
+            press: Some(Press::Preselect(Preselect::Garrison)),
         }),
     );
 
@@ -348,79 +520,110 @@ fn infos(context: &Context) -> Vec<Info> {
             context.has_component(entity, COMPONENT_TURRETABLE) && context.holder(entity) == 0
         })
         .then(|| Info {
+            name: "occupy-turret",
             icon: "command-occupy-turret",
-            tooltip: tip(
+            tooltip: hotkey_tip(
+                "session.occupyturret",
                 "Occupy Turret",
                 "Order the selected units to occupy a turret point.",
             ),
             count: 0,
             enabled: true,
-            order: None,
+            press: Some(Press::Preselect(Preselect::OccupyTurret)),
         }),
     );
 
     // leave-turret
+    let on_turret = |entity: &Selected| {
+        context.has_component(entity, COMPONENT_TURRETABLE) && context.holder(entity) != 0
+    };
     add(
         PLAYER,
-        any(&|entity| {
-            context.has_component(entity, COMPONENT_TURRETABLE)
-                && context.holder(entity) != 0
-                && context.flags(entity) & Commands::EJECTABLE != 0
-        })
-        .then(|| Info {
-            icon: "command-leave-turret",
-            tooltip: tip(
-                "Unload",
-                "Order the selected units to leave their turret points.",
-            ),
-            count: 0,
-            enabled: true,
-            order: None,
-        }),
+        any(&|entity| on_turret(entity) && context.flags(entity) & Commands::EJECTABLE != 0).then(
+            || Info {
+                name: "leave-turret",
+                icon: "command-leave-turret",
+                tooltip: tip(
+                    "Unload",
+                    "Order the selected units to leave their turret points.",
+                ),
+                count: 0,
+                enabled: true,
+                press: Press::order(Command::LeaveTurret {
+                    entities: ids(&on_turret),
+                }),
+            },
+        ),
     );
 
     // repair
     add(
         PLAYER,
         any(&|entity| context.has_component(entity, COMPONENT_BUILDER)).then(|| Info {
+            name: "repair",
             icon: "repair",
-            tooltip: tip(
+            tooltip: hotkey_tip(
+                "session.repair",
                 "Repair",
                 "Order the selected units to repair a structure, ship, or siege engine.",
             ),
             count: 0,
             enabled: true,
-            order: None,
+            press: Some(Press::Preselect(Preselect::Repair)),
         }),
     );
 
-    // focus-rally
+    // focus-rally: the first rally point, else the first entity.
+    let focus = selected
+        .iter()
+        .find_map(|entity| match &entity.groups[detail::RALLY] {
+            Some(Group::Rally { points, .. }) => points.first().map(|point| {
+                [
+                    point.x as f32 / detail::RALLY_UNITS_PER_METRE,
+                    point.z as f32 / detail::RALLY_UNITS_PER_METRE,
+                ]
+            }),
+            _ => None,
+        })
+        .or_else(|| {
+            selected.iter().find_map(|entity| {
+                let dot = scene.dots.get(&entity.id)?;
+                Some([dot.x as f32 / 16.0, dot.z as f32 / 16.0])
+            })
+        });
     add(
         PLAYER | OBSERVER,
         any(&|entity| context.has_component(entity, COMPONENT_RALLY_POINT)).then(|| Info {
+            name: "focus-rally",
             icon: "command-focus-rally",
-            tooltip: tip(
+            tooltip: hotkey_tip(
+                "camera.rallypointfocus",
                 "Focus on Rally Point",
                 "Center the view on the selected rally point.",
             ),
             count: 0,
             enabled: true,
-            order: None,
+            press: focus.map(Press::Focus),
         }),
     );
 
     // back-to-work
+    let working = |entity: &Selected| context.flags(entity) & Commands::WORK_ORDERS != 0;
     add(
         PLAYER,
-        any(&|entity| context.flags(entity) & Commands::WORK_ORDERS != 0).then(|| Info {
+        any(&working).then(|| Info {
+            name: "back-to-work",
             icon: "command-back-to-work",
-            tooltip: tip(
+            tooltip: hotkey_tip(
+                "session.backtowork",
                 "Back to Work",
                 "Order the selected units to resume their work.",
             ),
             count: 0,
             enabled: true,
-            order: None,
+            press: Press::order(Command::BackToWork {
+                entities: ids(&working),
+            }),
         }),
     );
 
@@ -433,31 +636,41 @@ fn infos(context: &Context) -> Vec<Info> {
     add(
         PLAYER,
         any(&can_guard).then(|| Info {
+            name: "add-guard",
             icon: "command-add-guard",
-            tooltip: tip(
+            tooltip: hotkey_tip(
+                "session.guard",
                 "Guard",
                 "Order the selected units to guard a structure or unit.",
             ),
             count: 0,
             enabled: true,
-            order: None,
+            press: Some(Press::Preselect(Preselect::Guard)),
         }),
     );
+    let guarding = |entity: &Selected| {
+        context.has_component(entity, COMPONENT_UNIT_AI)
+            && context.flags(entity) & Commands::GUARDING != 0
+    };
     add(
         PLAYER,
-        any(&|entity| context.flags(entity) & Commands::GUARDING != 0).then(|| Info {
+        any(&guarding).then(|| Info {
+            name: "remove-guard",
             icon: "command-remove-guard",
             tooltip: tip("Abort Guard", "Order the selected units to stop guarding."),
             count: 0,
             enabled: true,
-            order: None,
+            press: Press::order(Command::RemoveGuard {
+                entities: ids(&guarding),
+            }),
         }),
     );
 
-    // select-trading-goods
+    // select-trading-goods, which would open the trade dialog.
     add(
         PLAYER,
         any(&|entity| context.has_component(entity, COMPONENT_MARKET)).then(|| Info {
+            name: "select-trading-goods",
             icon: "command-economics",
             tooltip: tip(
                 "Barter & Trade",
@@ -465,7 +678,7 @@ fn infos(context: &Context) -> Vec<Info> {
             ),
             count: 0,
             enabled: true,
-            order: None,
+            press: None,
         }),
     );
 
@@ -473,14 +686,16 @@ fn infos(context: &Context) -> Vec<Info> {
     add(
         PLAYER,
         any(&|entity| context.flags(entity) & Commands::CAN_PATROL != 0).then(|| Info {
+            name: "patrol",
             icon: "command-patrol",
-            tooltip: tip(
+            tooltip: hotkey_tip(
+                "session.patrol",
                 "Patrol",
                 "Order to repeatedly go to a point and come back, attacking all enemies along the way.",
             ),
             count: 0,
             enabled: true,
-            order: None,
+            press: Some(Press::Preselect(Preselect::Patrol)),
         }),
     );
 
@@ -498,15 +713,20 @@ fn infos(context: &Context) -> Vec<Info> {
                     .any(|other| other != owner && crate::panel::mutual_allies(scene, owner, other))
             })
     };
+    let shared = |entity: &Selected| context.shared(entity);
     add(
         PLAYER,
         (!sharable.is_empty() && selected.iter().any(|entity| has_allies(entity.owner))).then(
             || {
-                if sharable
-                    .iter()
-                    .any(|entity| context.flags(entity) & Commands::SHARED == 0)
-                {
+                let locked = sharable.iter().any(|entity| !shared(entity));
+                // `shared` is whether any was locked.
+                let press = Press::order(Command::DropsiteSharing {
+                    shared: locked,
+                    entities: sharable.iter().map(|entity| entity.id).collect(),
+                });
+                if locked {
                     Info {
+                        name: "share-dropsite",
                         icon: "command-locked",
                         tooltip: tip(
                             "Share Dropsite",
@@ -514,10 +734,11 @@ fn infos(context: &Context) -> Vec<Info> {
                         ),
                         count: 0,
                         enabled: true,
-                        order: None,
+                        press,
                     }
                 } else {
                     Info {
+                        name: "share-dropsite",
                         icon: "command-unlocked",
                         tooltip: tip(
                             "Lock Dropsite",
@@ -525,7 +746,7 @@ fn infos(context: &Context) -> Vec<Info> {
                         ),
                         count: 0,
                         enabled: true,
-                        order: None,
+                        press,
                     }
                 }
             },
@@ -535,11 +756,9 @@ fn infos(context: &Context) -> Vec<Info> {
         ALLY | OBSERVER,
         (!sharable.is_empty() && !sharable.iter().all(|entity| context.controls(entity.owner)))
             .then(|| {
-                if sharable
-                    .iter()
-                    .all(|entity| context.flags(entity) & Commands::SHARED != 0)
-                {
+                if sharable.iter().all(|entity| shared(entity)) {
                     Info {
+                        name: "is-dropsite-shared",
                         icon: "command-unlocked",
                         tooltip: tip(
                             "Shared Dropsite",
@@ -551,15 +770,16 @@ fn infos(context: &Context) -> Vec<Info> {
                         ),
                         count: 0,
                         enabled: false,
-                        order: None,
+                        press: None,
                     }
                 } else {
                     Info {
+                        name: "is-dropsite-shared",
                         icon: "command-locked",
                         tooltip: tip("Locked Dropsite", "The use of this dropsite is prohibited."),
                         count: 0,
                         enabled: false,
-                        order: None,
+                        press: None,
                     }
                 }
             }),
@@ -575,17 +795,15 @@ fn infos(context: &Context) -> Vec<Info> {
         })
     };
     // `turnAutoQueueOn` and `turnAutoQueueOff`: the trainers it changes.
-    let switched = |on: bool| Command::Autoqueue {
-        on,
-        entities: selected
-            .iter()
-            .filter(|entity| {
+    let switched = |on: bool| {
+        Press::order(Command::Autoqueue {
+            on,
+            entities: ids(&|entity| {
                 context.has_component(entity, COMPONENT_TRAINER)
                     && context.queue(entity).is_some()
                     && autoqueue(entity) != on
-            })
-            .map(|entity| entity.id)
-            .collect(),
+            }),
+        })
     };
     add(
         PLAYER,
@@ -595,27 +813,31 @@ fn infos(context: &Context) -> Vec<Info> {
                 && !autoqueue(entity)
         })
         .then(|| Info {
+            name: "autoqueue-on",
             icon: "command-autoqueue-on",
-            tooltip: tip(
+            tooltip: hotkey_tip(
+                "session.queueunit.autoqueueon",
                 "Activate Auto-Queue",
                 "Activate the production auto-queue for the selected structures.",
             ),
             count: 0,
             enabled: true,
-            order: Some(switched(true)),
+            press: switched(true),
         }),
     );
     add(
         PLAYER,
         any(&autoqueue).then(|| Info {
+            name: "autoqueue-off",
             icon: "command-autoqueue-off",
-            tooltip: tip(
+            tooltip: hotkey_tip(
+                "session.queueunit.autoqueueoff",
                 "Deactivate Auto-Queue",
                 "Deactivate the production auto-queue for the selected structures.",
             ),
             count: 0,
             enabled: true,
-            order: Some(switched(false)),
+            press: switched(false),
         }),
     );
     infos
@@ -631,8 +853,11 @@ struct Button {
 pub(crate) struct CommandRow {
     root: Out,
     buttons: Vec<Button>,
-    /// What a press of each shown button orders.
-    orders: Vec<Option<Command>>,
+    /// What a press of each shown button does.
+    presses: Vec<Option<Press>>,
+    /// Every command the viewer may use on the selection, shown or past
+    /// the sixth, by name, for the hotkeys.
+    named: Vec<(&'static str, Press)>,
 }
 
 impl CommandRow {
@@ -670,7 +895,8 @@ impl CommandRow {
         Ok(CommandRow {
             root: Out::new(row.clone()),
             buttons,
-            orders: vec![None; MAX_COMMANDS],
+            presses: vec![None; MAX_COMMANDS],
+            named: Vec::new(),
         })
     }
 
@@ -697,26 +923,38 @@ impl CommandRow {
             predicted: view.predicted,
         };
         let mut infos = infos(&context);
+        self.named = infos
+            .iter()
+            .filter(|info| info.enabled)
+            .filter_map(|info| Some((info.name, info.press.clone()?)))
+            .collect();
         infos.truncate(MAX_COMMANDS);
         self.root.hidden(infos.is_empty());
         let total = infos.len() as f64;
-        self.orders.fill(None);
+        self.presses.fill(None);
         for (index, button) in self.buttons.iter_mut().enumerate() {
             let Some(info) = infos.get_mut(index) else {
                 button.button.hidden(true);
                 continue;
             };
-            self.orders[index] = info.order.take().filter(|_| info.enabled);
+            self.presses[index] = info.press.take().filter(|_| info.enabled);
             button.button.style(format!(
                 "left: calc(50% + {}px)",
                 (index as f64 - total / 2.0) * COMMAND_STEP
             ));
-            // An autoqueue button drawn from an order not yet confirmed.
-            let predicted = matches!(&self.orders[index], Some(Command::Autoqueue { .. }))
-                && context
+            // An autoqueue or dropsite button drawn from an order not yet
+            // confirmed.
+            let predicted = match info.name {
+                "autoqueue-on" | "autoqueue-off" => context
                     .selected
                     .iter()
-                    .any(|entity| context.predicted.autoqueue(entity.id).is_some());
+                    .any(|entity| context.predicted.autoqueue(entity.id).is_some()),
+                "share-dropsite" => context
+                    .selected
+                    .iter()
+                    .any(|entity| context.predicted.dropsite_shared(entity.id).is_some()),
+                _ => false,
+            };
             button
                 .button
                 .class(String::from(match (info.enabled, predicted) {
@@ -741,13 +979,28 @@ impl CommandRow {
         self.buttons.iter().map(|button| &button.button.element)
     }
 
-    /// Button `index` was pressed: its order, but for delete without the
-    /// session.noconfirmation key (Shift), which asks first, as
+    /// Button `index` was pressed: what it does, but delete without the
+    /// session.noconfirmation key (Shift) asks first, as
     /// `DeleteSelectionConfirmation`.
     pub(crate) fn clicked(&self, index: usize, shift: bool) -> Option<Request> {
-        match self.orders.get(index)?.clone()? {
-            Command::Delete { entities } if !shift => Some(Request::ConfirmDelete(entities)),
-            order => Some(Request::Order(order)),
-        }
+        request(self.presses.get(index)?.clone()?, shift)
     }
+
+    /// A hotkey of command `name`, which acts as its button would, shown
+    /// or not, and does nothing where there is no such button.
+    pub(crate) fn hotkey(&self, name: &str, shift: bool) -> Option<Request> {
+        let (_, press) = self.named.iter().find(|(named, _)| *named == name)?;
+        request(press.clone(), shift)
+    }
+}
+
+fn request(press: Press, shift: bool) -> Option<Request> {
+    Some(match press {
+        Press::Orders(orders) => match orders.as_slice() {
+            [Command::Delete { entities }] if !shift => Request::ConfirmDelete(entities.clone()),
+            _ => Request::Orders(orders),
+        },
+        Press::Preselect(preselect) => Request::Preselect(preselect),
+        Press::Focus([x, z]) => Request::Focus { x, z },
+    })
 }

@@ -570,6 +570,81 @@ fn order_json(order: &Order) -> String {
             }
             out.text("formation", NULL_FORMATION);
         }
+        Order::UnloadAllByOwner { holders } => {
+            out.text("type", "unload-all-by-owner");
+            out.entities("garrisonHolders", holders);
+        }
+        Order::UnloadTurrets { entities } => {
+            out.text("type", "unload-turrets");
+            out.entities("entities", entities);
+        }
+        Order::LeaveTurret { entities } => {
+            out.text("type", "leave-turret");
+            out.entities("entities", entities);
+        }
+        Order::BackToWork { entities } => {
+            out.text("type", "back-to-work");
+            out.entities("entities", entities);
+        }
+        Order::RemoveGuard { entities } => {
+            out.text("type", "remove-guard");
+            out.entities("entities", entities);
+        }
+        Order::DropsiteSharing { shared, entities } => {
+            out.text("type", "set-dropsite-sharing");
+            out.entities("entities", entities);
+            out.boolean("shared", *shared);
+        }
+        Order::Guard {
+            flags,
+            entities,
+            target,
+        } => out.targeted("guard", *flags, entities, *target),
+        Order::OccupyTurret {
+            flags,
+            entities,
+            target,
+        } => out.targeted("occupy-turret", *flags, entities, *target),
+        Order::Patrol {
+            flags,
+            entities,
+            x,
+            z,
+            target,
+            formation,
+        } => {
+            out.text("type", "patrol");
+            out.entities("entities", entities);
+            out.number("x", *x);
+            out.number("z", *z);
+            // `action.target`, undefined over the ground.
+            if *target != 0 {
+                out.raw("target", &target.to_string());
+            }
+            out.raw("targetClasses", r#"{"attack":["Unit"]}"#);
+            out.boolean("queued", flags & QUEUED != 0);
+            out.boolean("allowCapture", flags & ALLOW_CAPTURE != 0);
+            if !formation.is_empty() {
+                out.text("formation", formation);
+            }
+        }
+        Order::CallToArms {
+            flags,
+            entities,
+            x,
+            z,
+        } => {
+            out.text("type", "call-to-arms");
+            out.entities("entities", entities);
+            let mut position = Json::new();
+            position.number("x", *x);
+            position.number("z", *z);
+            out.raw("position", &position.finish());
+            out.raw("targetClasses", r#"{"attack":["Unit","Structure"]}"#);
+            out.order_flags(*flags);
+            out.boolean("allowCapture", flags & ALLOW_CAPTURE != 0);
+            out.text("formation", NULL_FORMATION);
+        }
     }
     out.finish()
 }

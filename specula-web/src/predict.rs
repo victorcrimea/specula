@@ -8,6 +8,7 @@
 use specula_assets::command::Command;
 
 use crate::detail;
+use crate::detail::Commands;
 use crate::detail::Group;
 use crate::panel::entity_groups;
 use crate::panel::string;
@@ -26,6 +27,7 @@ enum Value {
     Stance(String),
     Autoqueue(bool),
     Formation(String),
+    DropsiteShared(bool),
 }
 
 impl Value {
@@ -51,6 +53,9 @@ impl Predictions {
         let (entities, value) = match order {
             Command::Stance { entities, name } => (entities.clone(), Value::Stance(name.clone())),
             Command::Autoqueue { on, entities } => (entities.clone(), Value::Autoqueue(*on)),
+            Command::DropsiteSharing { shared, entities } => {
+                (entities.clone(), Value::DropsiteShared(*shared))
+            }
             // `GetFormationUnitAIs` leaves out those that cannot use it.
             Command::Formation { entities, name } => (
                 entities
@@ -100,6 +105,15 @@ impl Predictions {
             })
     }
 
+    pub(crate) fn dropsite_shared(&self, entity: u32) -> Option<bool> {
+        self.list
+            .iter()
+            .find_map(|prediction| match prediction.value {
+                Value::DropsiteShared(shared) if prediction.entity == entity => Some(shared),
+                _ => None,
+            })
+    }
+
     /// Drops the predictions the stream confirmed and those timed out;
     /// true when any was dropped, so the panels redraw. An entity without
     /// the group (gone, or out of the detail stream) waits for the
@@ -125,6 +139,11 @@ impl Predictions {
                 Value::Autoqueue(on) => matches!(
                     &groups[detail::QUEUE],
                     Some(Group::Queue(queue)) if queue.autoqueue == *on
+                ),
+                Value::DropsiteShared(shared) => matches!(
+                    &groups[detail::COMMANDS],
+                    Some(Group::Commands(commands))
+                        if (commands.flags & Commands::SHARED != 0) == *shared
                 ),
                 Value::Formation(name) => matches!(
                     &groups[detail::FORMATIONS],

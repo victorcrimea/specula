@@ -41,6 +41,16 @@ const CONSTRUCT_WALL: u8 = 16;
 const STOP_PRODUCTION: u8 = 17;
 const AUTOQUEUE: u8 = 18;
 const FORMATION: u8 = 19;
+const UNLOAD_ALL_BY_OWNER: u8 = 20;
+const UNLOAD_TURRETS: u8 = 21;
+const LEAVE_TURRET: u8 = 22;
+const BACK_TO_WORK: u8 = 23;
+const REMOVE_GUARD: u8 = 24;
+const DROPSITE_SHARING: u8 = 25;
+const GUARD: u8 = 26;
+const OCCUPY_TURRET: u8 = 27;
+const PATROL: u8 = 28;
+const CALL_TO_ARMS: u8 = 29;
 
 /// Above every command kind.
 pub const QUERY_TAG: u8 = 0x80;
@@ -159,6 +169,54 @@ pub enum Command {
     Formation {
         entities: Vec<u32>,
         name: String,
+    },
+    /// "unload-all-by-owner": the player's own units out of others'
+    /// holders.
+    UnloadAllByOwner {
+        holders: Vec<u32>,
+    },
+    UnloadTurrets {
+        entities: Vec<u32>,
+    },
+    LeaveTurret {
+        entities: Vec<u32>,
+    },
+    BackToWork {
+        entities: Vec<u32>,
+    },
+    RemoveGuard {
+        entities: Vec<u32>,
+    },
+    /// "set-dropsite-sharing".
+    DropsiteSharing {
+        shared: bool,
+        entities: Vec<u32>,
+    },
+    Guard {
+        flags: u8,
+        entities: Vec<u32>,
+        target: u32,
+    },
+    OccupyTurret {
+        flags: u8,
+        entities: Vec<u32>,
+        target: u32,
+    },
+    /// `formation` as in `Walk`; `target` is the entity clicked, 0 for
+    /// none.
+    Patrol {
+        flags: u8,
+        entities: Vec<u32>,
+        x: f32,
+        z: f32,
+        target: u32,
+        formation: String,
+    },
+    CallToArms {
+        flags: u8,
+        entities: Vec<u32>,
+        x: f32,
+        z: f32,
     },
 }
 
@@ -461,6 +519,63 @@ impl Command {
                 out.entities(entities);
                 out.text(name);
             }
+            Command::UnloadAllByOwner { holders } => {
+                out.0.push(UNLOAD_ALL_BY_OWNER);
+                out.entities(holders);
+            }
+            Command::UnloadTurrets { entities } => {
+                out.0.push(UNLOAD_TURRETS);
+                out.entities(entities);
+            }
+            Command::LeaveTurret { entities } => {
+                out.0.push(LEAVE_TURRET);
+                out.entities(entities);
+            }
+            Command::BackToWork { entities } => {
+                out.0.push(BACK_TO_WORK);
+                out.entities(entities);
+            }
+            Command::RemoveGuard { entities } => {
+                out.0.push(REMOVE_GUARD);
+                out.entities(entities);
+            }
+            Command::DropsiteSharing { shared, entities } => {
+                out.0
+                    .extend_from_slice(&[DROPSITE_SHARING, u8::from(*shared)]);
+                out.entities(entities);
+            }
+            Command::Guard {
+                flags,
+                entities,
+                target,
+            } => out.targeted(GUARD, *flags, entities, *target),
+            Command::OccupyTurret {
+                flags,
+                entities,
+                target,
+            } => out.targeted(OCCUPY_TURRET, *flags, entities, *target),
+            Command::Patrol {
+                flags,
+                entities,
+                x,
+                z,
+                target,
+                formation,
+            } => {
+                out.head(PATROL, *flags, entities);
+                out.point(*x, *z);
+                out.varint(u64::from(*target));
+                out.text(formation);
+            }
+            Command::CallToArms {
+                flags,
+                entities,
+                x,
+                z,
+            } => {
+                out.head(CALL_TO_ARMS, *flags, entities);
+                out.point(*x, *z);
+            }
         }
         out.0
     }
@@ -490,7 +605,7 @@ impl Command {
                     }
                 }
             }
-            ATTACK | GATHER | REPAIR | GARRISON | RETURN_RESOURCE => {
+            ATTACK | GATHER | REPAIR | GARRISON | RETURN_RESOURCE | GUARD | OCCUPY_TURRET => {
                 let flags = input.u8()?;
                 let entities = entities(&mut input)?;
                 let target = input.varint_u32()?;
@@ -511,6 +626,16 @@ impl Command {
                         target,
                     },
                     GARRISON => Command::Garrison {
+                        flags,
+                        entities,
+                        target,
+                    },
+                    GUARD => Command::Guard {
+                        flags,
+                        entities,
+                        target,
+                    },
+                    OCCUPY_TURRET => Command::OccupyTurret {
                         flags,
                         entities,
                         target,
@@ -614,6 +739,49 @@ impl Command {
                 on: input.u8()? != 0,
                 entities: entities(&mut input)?,
             },
+            UNLOAD_ALL_BY_OWNER => Command::UnloadAllByOwner {
+                holders: entities(&mut input)?,
+            },
+            UNLOAD_TURRETS => Command::UnloadTurrets {
+                entities: entities(&mut input)?,
+            },
+            LEAVE_TURRET => Command::LeaveTurret {
+                entities: entities(&mut input)?,
+            },
+            BACK_TO_WORK => Command::BackToWork {
+                entities: entities(&mut input)?,
+            },
+            REMOVE_GUARD => Command::RemoveGuard {
+                entities: entities(&mut input)?,
+            },
+            DROPSITE_SHARING => Command::DropsiteSharing {
+                shared: input.u8()? != 0,
+                entities: entities(&mut input)?,
+            },
+            PATROL => {
+                let flags = input.u8()?;
+                let entities = entities(&mut input)?;
+                let (x, z) = point(&mut input)?;
+                Command::Patrol {
+                    flags,
+                    entities,
+                    x,
+                    z,
+                    target: input.varint_u32()?,
+                    formation: input.text()?,
+                }
+            }
+            CALL_TO_ARMS => {
+                let flags = input.u8()?;
+                let entities = entities(&mut input)?;
+                let (x, z) = point(&mut input)?;
+                Command::CallToArms {
+                    flags,
+                    entities,
+                    x,
+                    z,
+                }
+            }
             _ => return Err("unknown command"),
         };
         if !input.0.is_empty() {

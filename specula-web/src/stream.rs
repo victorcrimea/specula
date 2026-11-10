@@ -70,6 +70,7 @@ pub const COMPONENT_ALERT_RAISER: u32 = 1 << 23;
 pub const COMPONENT_RESOURCE_DROPSITE: u32 = 1 << 24;
 pub const COMPONENT_TURRET_HOLDER: u32 = 1 << 25;
 pub const COMPONENT_MARKET: u32 = 1 << 26;
+pub const COMPONENT_GUARD: u32 = 1 << 27;
 /// `TemplateDetails::flags`: Identity's Undeletable.
 pub const TEMPLATE_UNDELETABLE: u32 = 2048;
 /// And Identity's Controllable false.
@@ -412,6 +413,11 @@ pub struct TemplateDetails {
     /// The groups gui/session plays on an order, a 1-based string of
     /// `name=path` tokens, 0 from a hook or a stored match without them.
     pub order_sounds: u32,
+    /// GarrisonHolder's List, and TurretHolder's points' AllowedClasses
+    /// with `;` between points (an empty one open to all), 1-based
+    /// strings, 0 when older.
+    pub garrison_classes: u32,
+    pub turret_classes: u32,
 }
 
 /// A player's top panel numbers.
@@ -567,8 +573,9 @@ impl Scene {
     fn apply_keyframe(&mut self, cursor: &mut ByteReader) -> Result<(), &'static str> {
         self.turn = cursor.varint_u32()?;
         self.wire_version = cursor.u8()?;
-        // Stored matches from before the template order sounds still play.
-        if self.wire_version != WIRE_VERSION && self.wire_version != WIRE_VERSION - 1 {
+        // Stored matches from before the template order sounds, and the
+        // garrison and turret classes, still play.
+        if !(WIRE_VERSION - 2..=WIRE_VERSION).contains(&self.wire_version) {
             return Err("unknown wire version, reload the page");
         }
         self.match_id = cursor.u64()?;
@@ -1006,6 +1013,8 @@ impl Scene {
                 out.varint(u64::from(string));
             }
             out.varint(u64::from(details.order_sounds));
+            out.varint(u64::from(details.garrison_classes));
+            out.varint(u64::from(details.turret_classes));
         }
         out.varint(self.strings.len() as u64);
         for text in &self.strings {
@@ -1533,15 +1542,21 @@ impl Records for ByteReader<'_> {
             dropsite_types: 0,
             attack_types: 0,
             order_sounds: 0,
+            garrison_classes: 0,
+            turret_classes: 0,
         };
-        if version >= WIRE_VERSION - 1 {
+        if version >= WIRE_VERSION - 2 {
             details.supply_type = self.varint_u32()?;
             details.gather_rates = self.varint_u32()?;
             details.dropsite_types = self.varint_u32()?;
             details.attack_types = self.varint_u32()?;
         }
-        if version == WIRE_VERSION {
+        if version >= WIRE_VERSION - 1 {
             details.order_sounds = self.varint_u32()?;
+        }
+        if version == WIRE_VERSION {
+            details.garrison_classes = self.varint_u32()?;
+            details.turret_classes = self.varint_u32()?;
         }
         Ok(details)
     }

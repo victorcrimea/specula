@@ -29,6 +29,7 @@ use crate::detail::ListItem;
 use crate::diplomacy::Perspective;
 use crate::lang;
 use crate::left::LeftPanel;
+use crate::orders::Preselect;
 use crate::pick;
 use crate::predict::Predictions;
 use crate::stream::COMPONENT_GATE;
@@ -515,6 +516,16 @@ pub enum Request {
     SelectAndFollow(u32),
     /// An order of the player of `/play`.
     Order(Command),
+    /// Orders posted together, as a command button's `execute` may.
+    Orders(Vec<Command>),
+    /// A command button's action that waits for a left click on its
+    /// target.
+    Preselect(Preselect),
+    /// `Engine.CameraMoveTo`, x and z in metres.
+    Focus {
+        x: f32,
+        z: f32,
+    },
     /// A construction button of the player of `/play`:
     /// `startBuildingPlacement`.
     Place(Place),
@@ -809,6 +820,18 @@ impl DetailsPanel {
                 .map(Request::Order),
         };
         if let Some(request) = request {
+            self.requests.borrow_mut().push(request);
+        }
+    }
+
+    /// A command row hotkey: command `name`'s action, if the viewer may
+    /// use it on the selection; `shift` as in `command_clicked`.
+    pub fn command_hotkey(&self, name: &str, shift: bool) {
+        if let Some(request) = self
+            .command_row
+            .as_ref()
+            .and_then(|row| row.hotkey(name, shift))
+        {
             self.requests.borrow_mut().push(request);
         }
     }

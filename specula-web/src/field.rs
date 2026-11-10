@@ -420,6 +420,29 @@ struct Camera {
     mouse_client: [f32; 2],
     ctrl: bool,
     shift: bool,
+    /// While a command button's action waits for its target, a left click
+    /// gives it rather than selects, as `input.js`' INPUT_PRESELECTEDACTION.
+    preselecting: bool,
+    /// The right click's hotkey letters held, `orders::HOTKEY_*` bits but
+    /// Ctrl's, which the events carry.
+    hotkey_keys: u8,
+}
+
+impl Camera {
+    /// The `orders::HOTKEY_*` held, with Ctrl as of `ctrl`.
+    fn hotkeys(&self, ctrl: bool) -> u8 {
+        self.hotkey_keys | if ctrl { orders::HOTKEY_GARRISON } else { 0 }
+    }
+}
+
+/// The right click's hotkey a letter is, the engine's defaults.
+fn hotkey_bit(code: &str) -> u8 {
+    match code {
+        "KeyG" => orders::HOTKEY_GUARD,
+        "KeyP" => orders::HOTKEY_PATROL,
+        "KeyJ" => orders::HOTKEY_REPAIR,
+        _ => 0,
+    }
 }
 
 /// A placement press or release, points 0..1 across the canvas, or a
@@ -464,10 +487,13 @@ enum PickInput {
         remove: bool,
     },
     /// A right click: an order to the selection, queued with Shift
-    /// (session.queue).
+    /// (session.queue), with the `orders::HOTKEY_*` held; or a left one
+    /// while preselecting.
     Order {
         at: [f32; 2],
         queued: bool,
+        hotkeys: u8,
+        left: bool,
     },
 }
 
@@ -1345,6 +1371,8 @@ impl Field {
             mouse_client: [0.0; 2],
             ctrl: false,
             shift: false,
+            preselecting: false,
+            hotkey_keys: 0,
         }));
         wire_camera(&canvas, &camera)?;
         let document = web_sys::window()
@@ -1924,7 +1952,12 @@ impl Field {
                 } => (self.in_band(view_proj, from, to), add, remove),
                 PickInput::Clear => (Vec::new(), false, false),
                 PickInput::Group { ids, add, remove } => (ids, add, remove),
-                PickInput::Order { at, queued } => {
+                PickInput::Order {
+                    at,
+                    queued,
+                    hotkeys,
+                    left,
+                } => {
                     let ray = ray(at);
                     let point = self.ground.as_ref().and_then(|ground| {
                         let image = &ground.image;
@@ -1938,6 +1971,8 @@ impl Field {
                         entity: pick::pick_at_point(&self.pickables, &ray),
                         point,
                         queued,
+                        hotkeys,
+                        left,
                     });
                     continue;
                 }
@@ -4472,6 +4507,20 @@ impl View for Field {
         }
     }
 
+    fn set_preselecting(&mut self, on: bool) {
+        let mut camera = self.camera.borrow_mut();
+        if camera.preselecting != on {
+            camera.preselecting = on;
+            camera.press = None;
+            camera.band = None;
+        }
+    }
+
+    fn hotkeys(&self) -> u8 {
+        let camera = self.camera.borrow();
+        camera.hotkeys(camera.ctrl)
+    }
+
     fn take_place_inputs(&mut self) -> Vec<placement::Input> {
         std::mem::take(&mut self.place_inputs)
     }
@@ -6690,6 +6739,14 @@ fn wire_camera(canvas: &HtmlCanvasElement, camera: &Rc<RefCell<Camera>>) -> Resu
                     ctrl: event.ctrl_key(),
                     shift: event.shift_key(),
                 }));
+            } else if mouse && event.button() == 0 && camera.preselecting {
+                // On the press, as the engine's mousebuttondown.
+                camera.picks.push(PickInput::Order {
+                    at: on_canvas(&down_canvas, at, offset),
+                    queued: event.shift_key(),
+                    hotkeys: camera.hotkeys(event.ctrl_key()),
+                    left: true,
+                });
             } else if mouse && event.button() == 0 {
                 camera.press = Some((id, at, offset));
             } else if !mouse {
@@ -6739,11 +6796,21 @@ fn wire_camera(canvas: &HtmlCanvasElement, camera: &Rc<RefCell<Camera>>) -> Resu
                             _ => 1,
                         };
                         camera.last_tap = Some((now, to, count));
-                        camera.picks.push(PickInput::Click {
-                            at: on_canvas(&up_canvas, touch.from, touch.offset),
-                            count,
-                            add: false,
-                            remove: false,
+                        let at = on_canvas(&up_canvas, touch.from, touch.offset);
+                        camera.picks.push(if camera.preselecting {
+                            PickInput::Order {
+                                at,
+                                queued: false,
+                                hotkeys: 0,
+                                left: true,
+                            }
+                        } else {
+                            PickInput::Click {
+                                at,
+                                count,
+                                add: false,
+                                remove: false,
+                            }
                         });
                     }
                     Gesture::Band => {
@@ -6873,9 +6940,12 @@ fn wire_camera(canvas: &HtmlCanvasElement, camera: &Rc<RefCell<Camera>>) -> Resu
             };
             let at = [event.client_x() as f32, event.client_y() as f32];
             if !dragged(from, at) {
+                let hotkeys = camera.hotkeys(event.ctrl_key());
                 camera.picks.push(PickInput::Order {
                     at: on_canvas(&order_canvas, at, offset),
                     queued: event.shift_key(),
+                    hotkeys,
+                    left: false,
                 });
             }
         }),
@@ -7041,6 +7111,7 @@ fn wire_camera(canvas: &HtmlCanvasElement, camera: &Rc<RefCell<Camera>>) -> Resu
             // Ctrl may be let go before the arrow, or after.
             if !down {
                 camera.keys &= !(key_bit(&code, false) | key_bit(&code, true));
+                camera.hotkey_keys &= !hotkey_bit(&code);
                 return;
             }
             let tag = event
@@ -7070,6 +7141,7 @@ fn wire_camera(canvas: &HtmlCanvasElement, camera: &Rc<RefCell<Camera>>) -> Resu
             }
             let ctrl = flag("ctrlKey");
             let shift = flag("shiftKey");
+            camera.hotkey_keys |= hotkey_bit(&code);
             // Once, as the engine's hotkey press, not on each repeat.
             let press = !flag("repeat");
             match code.as_str() {
@@ -7114,7 +7186,9 @@ fn wire_camera(canvas: &HtmlCanvasElement, camera: &Rc<RefCell<Camera>>) -> Resu
     // A key let go in another window never sends its keyup here.
     let target = Rc::clone(camera);
     let on_blur = Closure::<dyn FnMut(Event)>::new(move |_: Event| {
-        target.borrow_mut().keys = 0;
+        let mut camera = target.borrow_mut();
+        camera.keys = 0;
+        camera.hotkey_keys = 0;
     });
     let _ = window.add_event_listener_with_callback("blur", on_blur.as_ref().unchecked_ref());
     on_blur.forget();

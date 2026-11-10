@@ -90,6 +90,7 @@ use crate::field::Field;
 use crate::icons::IconAtlas;
 use crate::message_box::MessageBox;
 use crate::minimap::Minimap;
+use crate::orders::Preselect;
 use crate::panel::DetailsPanel;
 use crate::panel::Request;
 use crate::placement::Placement;
@@ -361,6 +362,13 @@ trait View {
     /// Whether the left and right buttons place a structure rather than
     /// select and order.
     fn set_placing(&mut self, _on: bool) {}
+    /// Whether a left click gives the preselected action's order rather
+    /// than select.
+    fn set_preselecting(&mut self, _on: bool) {}
+    /// The `orders::HOTKEY_*` held now.
+    fn hotkeys(&self) -> u8 {
+        0
+    }
     /// The placement presses, releases and cancels since the last call.
     fn take_place_inputs(&mut self) -> Vec<placement::Input> {
         Vec::new()
@@ -587,6 +595,8 @@ struct App {
     cursor: String,
     /// The structure being placed on `/play`.
     placement: Placement,
+    /// The command button action waiting for a left click on `/play`.
+    preselected: Option<Preselect>,
 }
 
 /// The range overlay lists, and the values they and the storage last got,
@@ -879,20 +889,49 @@ impl App {
             .and_then(DetailsPanel::default_formation)
             .unwrap_or_default();
         let selected = self.renderer.selected();
+        // The engine's "slight hack": no selection, no preselected action.
+        if selected.is_empty() || self.placement.active() {
+            self.preselected = None;
+        }
         let mut sounds = Vec::new();
         let mut markers = Vec::new();
         for target in targets {
-            if let Some(action) = orders::action(&self.scene, selected, seat, &target, &formation)
+            let action = match (self.preselected, target.left) {
+                (Some(preselect), true) => {
+                    let action = orders::preselected(
+                        &self.scene,
+                        selected,
+                        seat,
+                        &target,
+                        &formation,
+                        preselect,
+                    );
+                    // The mode stays for more with session.queue (Shift).
+                    if action.is_some() && !target.queued {
+                        self.preselected = None;
+                    }
+                    action
+                }
+                // The right button only ends the mode.
+                (Some(_), false) => {
+                    self.preselected = None;
+                    None
+                }
+                (None, true) => None,
+                (None, false) => orders::action(&self.scene, selected, seat, &target, &formation),
+            };
+            if let Some(action) = action
                 && let Some(order) = action.command
                 && let Some(uplink) = &self.uplink
             {
                 uplink.send(&order);
-                if let Command::Walk { x, z, .. } = order {
+                if let Command::Walk { x, z, .. } | Command::Patrol { x, z, .. } = order {
                     markers.push((x, z));
                 }
                 sounds.extend(action.sound);
             }
         }
+        self.renderer.set_preselecting(self.preselected.is_some());
         for (name, id) in sounds {
             self.renderer.queue_sound(id, name);
         }
@@ -900,8 +939,9 @@ impl App {
             self.renderer.add_target_marker(x, z);
         }
         let selected = self.renderer.selected();
-        // As `updateCursorAndTooltip`: the right click's cursor, else the
-        // default arrow.
+        let hotkeys = self.renderer.hotkeys();
+        // As `updateCursorAndTooltip`: the preselected action's or the
+        // right click's cursor, else the default arrow.
         let cursor = self
             .renderer
             .hovered()
@@ -910,8 +950,20 @@ impl App {
                     entity,
                     point: None,
                     queued: false,
+                    hotkeys,
+                    left: false,
                 };
-                orders::action(&self.scene, selected, seat, &target, &formation)
+                match self.preselected {
+                    Some(preselect) => orders::preselected(
+                        &self.scene,
+                        selected,
+                        seat,
+                        &target,
+                        &formation,
+                        preselect,
+                    ),
+                    None => orders::action(&self.scene, selected, seat, &target, &formation),
+                }
             })
             .map(|action| action.cursor)
             .unwrap_or_default();
@@ -947,6 +999,20 @@ impl App {
                         uplink.send(&order);
                         self.predictions.record(&order, &self.scene, page_now());
                         self.details_dirty = true;
+                    }
+                }
+                Request::Orders(orders) => {
+                    if let Some(uplink) = &self.uplink {
+                        for order in &orders {
+                            uplink.send(order);
+                            self.predictions.record(order, &self.scene, page_now());
+                        }
+                        self.details_dirty = true;
+                    }
+                }
+                Request::Preselect(preselect) => {
+                    if self.uplink.is_some() {
+                        self.preselected = Some(preselect);
                     }
                 }
                 Request::Place(place) => {
@@ -1538,12 +1604,14 @@ async fn run(
         seat_shown: None,
         cursor: String::new(),
         placement: Placement::default(),
+        preselected: None,
     }));
     wire_controls(&app);
     wire_details(&app);
     wire_top(&app);
     wire_diplomacy_window(&app, &window);
     wire_message_box(&app, &window);
+    wire_command_hotkeys(&app, &window);
     if page == Page::Observer {
         let shadows: HtmlSelectElement = element(&document, "shadows")?;
         wire_shadows(&app, shadows.clone());
@@ -1821,8 +1889,13 @@ fn apply_request(renderer: &mut dyn View, request: Request, scene: &Scene) {
                 renderer.follow(id);
             }
         }
+        Request::Focus { x, z } => renderer.move_to(x, z),
         // The caller sends it, as it holds the uplink.
-        Request::Order(_) | Request::Place(_) | Request::ConfirmDelete(_) => {}
+        Request::Order(_)
+        | Request::Orders(_)
+        | Request::Preselect(_)
+        | Request::Place(_)
+        | Request::ConfirmDelete(_) => {}
     }
 }
 
@@ -1938,6 +2011,59 @@ fn wire_message_box(app: &Rc<RefCell<App>>, window: &web_sys::Window) {
     });
     let _ = window.add_event_listener_with_callback("keydown", on_key.as_ref().unchecked_ref());
     // The box lives as long as the page, so its handler does too.
+    on_key.forget();
+}
+
+/// The command row's bound hotkeys (`hotkeys/misc.xml`, the engine's
+/// default keys): session.unload, unloadturrets and leaveturret (U, all
+/// three), session.backtowork (Y), session.stop (H) and session.kill
+/// (Delete, Backspace), which asks first but with Shift. Each acts as its
+/// button would, so only for the commands the viewer may use.
+fn wire_command_hotkeys(app: &Rc<RefCell<App>>, window: &web_sys::Window) {
+    let target = Rc::clone(app);
+    let on_key = Closure::<dyn FnMut(web_sys::Event)>::new(move |event: web_sys::Event| {
+        let text = |object: &JsValue, name: &str| {
+            js_sys::Reflect::get(object, &name.into())
+                .ok()
+                .and_then(|value| value.as_string())
+                .unwrap_or_default()
+        };
+        let flag = |name: &str| {
+            js_sys::Reflect::get(&event, &name.into()).is_ok_and(|value| value.is_truthy())
+        };
+        let tag = event
+            .target()
+            .map(|element| text(&element, "tagName"))
+            .unwrap_or_default();
+        if matches!(tag.as_str(), "INPUT" | "SELECT" | "TEXTAREA")
+            || flag("ctrlKey")
+            || flag("altKey")
+            || flag("metaKey")
+            || flag("repeat")
+        {
+            return;
+        }
+        let names: &[&str] = match text(&event, "code").as_str() {
+            "KeyU" => &["unload-all", "unload-all-turrets", "leave-turret"],
+            "KeyY" => &["back-to-work"],
+            "KeyH" => &["stop"],
+            "Delete" | "Backspace" => &["delete"],
+            _ => return,
+        };
+        let Ok(app) = target.try_borrow() else {
+            return;
+        };
+        if app.message_box.as_ref().is_some_and(MessageBox::is_open) {
+            return;
+        }
+        if let Some(details) = &app.details {
+            for name in names {
+                details.command_hotkey(name, flag("shiftKey"));
+            }
+        }
+    });
+    let _ = window.add_event_listener_with_callback("keydown", on_key.as_ref().unchecked_ref());
+    // The window lives as long as the page, so its handler does too.
     on_key.forget();
 }
 

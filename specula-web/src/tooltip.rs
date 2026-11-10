@@ -404,6 +404,13 @@ pub fn to_html(markup: &str) -> String {
     let mut out = String::new();
     let mut rest = markup;
     while let Some(open) = rest.find('[') {
+        // `\[` is a bracket, as `colorizeHotkey` writes the key in.
+        if let Some(text) = rest[..open].strip_suffix('\\') {
+            escape(text, &mut out);
+            out.push('[');
+            rest = &rest[open + 1..];
+            continue;
+        }
         escape(&rest[..open], &mut out);
         let Some(close) = rest[open..].find(']') else {
             escape(&rest[open..], &mut out);

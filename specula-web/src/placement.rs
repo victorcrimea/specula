@@ -186,6 +186,11 @@ impl Placement {
         self.set_tooltip(Some(""));
     }
 
+    /// Whether a structure is being placed.
+    pub fn active(&self) -> bool {
+        self.active.is_some()
+    }
+
     /// `placementSupport.Reset`: the engine's preview ends too.
     fn stop(&mut self, uplink: &Uplink) {
         let Some(active) = self.active.take() else {

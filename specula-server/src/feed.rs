@@ -261,6 +261,11 @@ pub struct TemplateDetails {
     pub attack_types: Option<u32>,
     /// The groups gui/session plays on an order, as `name=path` tokens.
     pub order_sounds: Option<u32>,
+    /// GarrisonHolder's List, and TurretHolder's points' AllowedClasses
+    /// with `;` between points, what the garrison and occupy-turret
+    /// actions match.
+    pub garrison_classes: Option<u32>,
+    pub turret_classes: Option<u32>,
 }
 
 /// One item of a trainable or researchable list, read for the producer's
@@ -1203,6 +1208,8 @@ fn decode_template_details(payload: &[u8]) -> io::Result<Record> {
         dropsite_types: None,
         attack_types: None,
         order_sounds: None,
+        garrison_classes: None,
+        turret_classes: None,
     };
     // A hook from before lang and phenotypes ends here; the feed version
     // stayed, so both lengths are read.
@@ -1228,6 +1235,11 @@ fn decode_template_details(payload: &[u8]) -> io::Result<Record> {
     // And for one from before the order sounds.
     if !cursor.0.is_empty() {
         details.order_sounds = optional(cursor.u32()?);
+    }
+    // And for one from before the garrison and turret classes.
+    if !cursor.0.is_empty() {
+        details.garrison_classes = optional(cursor.u32()?);
+        details.turret_classes = optional(cursor.u32()?);
     }
     if !cursor.0.is_empty() {
         return Err(invalid("template details record longer than its contents"));
