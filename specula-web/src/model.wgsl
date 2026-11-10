@@ -40,6 +40,9 @@ override MAPS: bool = true;
 @group(3) @binding(0) var<uniform> light: Light;
 @group(3) @binding(1) var shadow_map: texture_depth_2d;
 @group(3) @binding(2) var shadow_sampler: sampler_comparison;
+@group(3) @binding(3) var los_now: texture_2d<f32>;
+@group(3) @binding(4) var los_before: texture_2d<f32>;
+@group(3) @binding(5) var los_sampler: sampler;
 
 // Texels per pose atlas row, pose.rs WIDTH.
 const POSE_WIDTH: u32 = 2048u;
@@ -55,7 +58,8 @@ struct ModelVaryings {
     @location(5) uv2: vec2<f32>,
     @location(6) tangent: vec3<f32>,
     @location(7) bitangent: vec3<f32>,
-    // 1 for SetShadingColor's red of a refused placement preview.
+    // 1 for SetShadingColor's red of a refused placement preview, 2 for
+    // a model the LOS does not darken (field.rs SHADING_IGNORE_LOS).
     @location(8) @interpolate(flat) shading: f32,
 }
 
@@ -269,8 +273,13 @@ fn fs_model(in: ModelVaryings) -> @location(0) vec4<f32> {
     let color = (diffuse * sun_diffuse + specular) * shadow + diffuse * light.ambient.rgb * ao;
     // GuiInterface's SetShadingColor(1.4, 0.4, 0.4), which model_common.fs
     // multiplies in after the fog.
-    let shading = select(vec3<f32>(1.0), vec3<f32>(1.4, 0.4, 0.4), in.shading > 0.5);
-    return vec4<f32>(apply_fog(color, in.world) * shading, 1.0);
+    let red = in.shading > 0.5 && in.shading < 1.5;
+    let shading = select(vec3<f32>(1.0), vec3<f32>(1.4, 0.4, 0.4), red);
+    var los = 1.0;
+    if in.shading < 1.5 {
+        los = los_at(in.world);
+    }
+    return vec4<f32>(apply_fog(color, in.world) * shading * los, 1.0);
 }
 
 // The shadow map's depth pass: only the alpha test, so leaves cast

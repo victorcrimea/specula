@@ -234,6 +234,10 @@ impl DiplomacyWindow {
                             continue;
                         }
                         let stance = player.stances.get(column).copied().unwrap_or(Stance::Enemy);
+                        // A seat is not told the stances between others.
+                        if stance == Stance::Unknown {
+                            continue;
+                        }
                         let (caption, label, color) = stance_text(stance);
                         let cell = self.cell(
                             &row,
@@ -361,7 +365,7 @@ fn stance_text(stance: Stance) -> (&'static str, &'static str, u32) {
     match stance {
         Stance::Ally => ("A", "Ally", diplomacy::ALLY),
         Stance::Neutral => ("N", "Neutral", diplomacy::NEUTRAL),
-        Stance::Enemy => ("E", "Enemy", diplomacy::ENEMY),
+        Stance::Enemy | Stance::Unknown => ("E", "Enemy", diplomacy::ENEMY),
     }
 }
 

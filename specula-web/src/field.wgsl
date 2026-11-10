@@ -56,6 +56,9 @@ override TRIPLANAR: bool = true;
 @group(3) @binding(0) var<uniform> light: Light;
 @group(3) @binding(1) var shadow_map: texture_depth_2d;
 @group(3) @binding(2) var shadow_sampler: sampler_comparison;
+@group(3) @binding(3) var los_now: texture_2d<f32>;
+@group(3) @binding(4) var los_before: texture_2d<f32>;
+@group(3) @binding(5) var los_sampler: sampler;
 
 fn water_clipped(height: f32) -> bool {
     return (WATER_CLIP == 1u && height > view.water.x + 2.0)
@@ -188,7 +191,7 @@ fn fs_terrain(in: TerrainVaryings) -> @location(0) vec4<f32> {
         discard;
     }
     let world = vec3<f32>(in.ground.x, in.height, in.ground.y);
-    return vec4<f32>(apply_fog(color, world), 1.0);
+    return vec4<f32>(apply_fog(color, world) * los_at(world), 1.0);
 }
 
 // A neighbour's texture over the tile, through its mask: the atlas holds
@@ -205,7 +208,7 @@ fn fs_blend(in: TerrainVaryings) -> @location(0) vec4<f32> {
         discard;
     }
     let world = vec3<f32>(in.ground.x, in.height, in.ground.y);
-    return vec4<f32>(apply_fog(color, world), alpha);
+    return vec4<f32>(apply_fog(color, world) * los_at(world), alpha);
 }
 
 // The water plane over the whole map at the water level.
@@ -227,7 +230,8 @@ fn fs_water(in: TerrainVaryings) -> @location(0) vec4<f32> {
     if view.misc.w > 0.5 && distance(in.ground, vec2<f32>(size * 0.5)) > size * 0.5 {
         discard;
     }
-    // CMiniMapTexture's deep water colour, half see-through.
+    // CMiniMapTexture's deep water colour, half see-through, darkened by
+    // the LOS as water_simple.fs does.
     let world = vec3<f32>(in.ground.x, in.height, in.ground.y);
-    return vec4<f32>(apply_fog(vec3<f32>(0.31, 0.47, 0.63), world), 0.6);
+    return vec4<f32>(apply_fog(vec3<f32>(0.31, 0.47, 0.63), world) * los_at(world), 0.6);
 }

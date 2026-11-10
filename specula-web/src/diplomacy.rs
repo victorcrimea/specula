@@ -3,9 +3,13 @@
 
 use std::collections::HashMap;
 
+use crate::stream::Dot;
+use crate::stream::HIDDEN;
 use crate::stream::Player;
 use crate::stream::PlayerState;
 use crate::stream::Stance;
+use crate::stream::VISIBLE;
+use crate::stream::visibility_of;
 
 // The defaults of [gui.session.diplomacycolors] in default.cfg; a viewer has
 // no user config to override them.
@@ -22,13 +26,35 @@ pub enum Perspective {
 }
 
 impl Perspective {
-    /// Whether an entity with `Dot::visibility` is visible to it. An
-    /// observer sees all, as a 0 A.D. observer does.
-    pub fn sees(self, visibility: u16) -> bool {
+    /// Whether an entity with `Dot::visibility` is shown to it, visible or
+    /// in the fog: what the engine draws and picks (`CCmpUnitRenderer`,
+    /// `Selection.cpp` skip only HIDDEN). An observer sees all, as a 0 A.D.
+    /// observer does.
+    pub fn sees(self, visibility: u32) -> bool {
         match self {
             Perspective::Observer => true,
-            Perspective::Player(player) => player < 16 && visibility & (1 << player) != 0,
+            Perspective::Player(player) => visibility_of(visibility, player) != HIDDEN,
         }
+    }
+
+    /// Whether it hears the entity's sounds: in sight, not in the fog
+    /// (`CCmpSoundManager::PlaySoundGroup`).
+    pub fn hears(self, visibility: u32) -> bool {
+        match self {
+            Perspective::Observer => true,
+            Perspective::Player(player) => visibility_of(visibility, player) == VISIBLE,
+        }
+    }
+
+    /// Whether the view draws the entity. A mirage is its player's alone.
+    /// `filtered`: the stream has this player's LOS, so its visibility
+    /// tells the fog from the hidden; older streams only had "visible",
+    /// and drew everything.
+    pub fn shows(self, dot: &Dot, filtered: bool) -> bool {
+        if dot.mirage != 0 {
+            return self == Perspective::Player(dot.mirage as usize - 1);
+        }
+        !filtered || self.sees(dot.visibility)
     }
 
     /// The player whose entities it views, `None` for an observer.

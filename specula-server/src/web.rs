@@ -54,6 +54,7 @@ use crate::WEB_ROOT;
 use crate::usage::Referrer;
 use crate::usage::Usage;
 use crate::view::Hub;
+use crate::view::View;
 
 const IMMUTABLE: &str = "public, max-age=31536000, immutable";
 const REVALIDATE: &str = "no-cache";
@@ -464,7 +465,7 @@ pub fn terrain(
 /// A kind 18 or 19 JSON the detail stream names by its hash.
 #[rocket::get("/data/<id>")]
 pub fn data(id: &str, hub: &State<Arc<Hub>>) -> Option<Encoded<Vec<u8>>> {
-    let file = hub.data(u64::from_str_radix(id, 16).ok()?)?;
+    let file = hub.data(u64::from_str_radix(id, 16).ok()?, View::Observer)?;
     Some(Encoded {
         brotli: false,
         body: file.to_vec(),

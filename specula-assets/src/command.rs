@@ -278,6 +278,14 @@ pub enum QueryKind {
 }
 
 impl Query {
+    /// As `Command::entity_ids_mut`.
+    pub fn entity_ids_mut(&mut self) -> Vec<&mut u32> {
+        match &mut self.kind {
+            QueryKind::Wall { snap, .. } => snap.iter_mut().filter(|id| **id != 0).collect(),
+            _ => Vec::new(),
+        }
+    }
+
     pub fn encode(&self) -> Vec<u8> {
         let mut out = Out(vec![QUERY_TAG]);
         out.varint(u64::from(self.id));
@@ -386,6 +394,80 @@ impl Query {
 }
 
 impl Command {
+    /// Every entity id the command names, for a server that numbers the
+    /// entities its player is shown on its own (a seat's handles). An id
+    /// of 0, "none", is left out.
+    pub fn entity_ids_mut(&mut self) -> Vec<&mut u32> {
+        let mut ids: Vec<&mut u32> = Vec::new();
+        match self {
+            Command::Walk { entities, .. }
+            | Command::AttackWalk { entities, .. }
+            | Command::Construct { entities, .. }
+            | Command::Train { entities, .. }
+            | Command::Stop { entities, .. }
+            | Command::Delete { entities }
+            | Command::Stance { entities, .. }
+            | Command::Autoqueue { entities, .. }
+            | Command::Formation { entities, .. }
+            | Command::UnloadTurrets { entities }
+            | Command::LeaveTurret { entities }
+            | Command::BackToWork { entities }
+            | Command::RemoveGuard { entities }
+            | Command::DropsiteSharing { entities, .. }
+            | Command::CallToArms { entities, .. }
+            | Command::AlertRaise { entities }
+            | Command::AlertEnd { entities } => ids.extend(entities.iter_mut()),
+            Command::Attack {
+                entities, target, ..
+            }
+            | Command::Gather {
+                entities, target, ..
+            }
+            | Command::Repair {
+                entities, target, ..
+            }
+            | Command::Garrison {
+                entities, target, ..
+            }
+            | Command::ReturnResource {
+                entities, target, ..
+            }
+            | Command::Guard {
+                entities, target, ..
+            }
+            | Command::OccupyTurret {
+                entities, target, ..
+            }
+            | Command::Rally {
+                entities, target, ..
+            }
+            | Command::Patrol {
+                entities, target, ..
+            } => {
+                ids.extend(entities.iter_mut());
+                ids.push(target);
+            }
+            Command::UnloadAll { holders } | Command::UnloadAllByOwner { holders } => {
+                ids.extend(holders.iter_mut())
+            }
+            Command::Research { entity, .. } | Command::StopProduction { entity, .. } => {
+                ids.push(entity)
+            }
+            Command::ConstructWall {
+                entities,
+                start_snapped,
+                end_snapped,
+                ..
+            } => {
+                ids.extend(entities.iter_mut());
+                ids.push(start_snapped);
+                ids.push(end_snapped);
+            }
+        }
+        ids.retain(|id| **id != 0);
+        ids
+    }
+
     pub fn encode(&self) -> Vec<u8> {
         let mut out = Out(Vec::new());
         match self {

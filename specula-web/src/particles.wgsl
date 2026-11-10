@@ -37,6 +37,9 @@ struct Light {
 }
 
 @group(2) @binding(0) var<uniform> light: Light;
+@group(2) @binding(3) var los_now: texture_2d<f32>;
+@group(2) @binding(4) var los_before: texture_2d<f32>;
+@group(2) @binding(5) var los_sampler: sampler;
 
 struct ParticleVaryings {
     @builtin(position) position: vec4<f32>,
@@ -97,5 +100,5 @@ fn fs_particle(in: ParticleVaryings) -> @location(0) vec4<f32> {
         discard;
     }
     let color = texel * vec4<f32>((in.color.rgb + light.sun_color.rgb) / 2.0, in.color.a);
-    return vec4<f32>(apply_fog(color.rgb, in.world), color.a);
+    return vec4<f32>(apply_fog(color.rgb, in.world) * los_at(in.world), color.a);
 }

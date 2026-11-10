@@ -1,5 +1,6 @@
-//! The terrain resource, format v4, served once per match at
-//! `/terrain/<id>`. Little-endian:
+//! The terrain resource, format v5, served once per match at
+//! `/terrain/<id>`, and as a seat has had it revealed at
+//! `/play/terrain/<id>`. Little-endian:
 //!
 //! u8 version, u32 tiles per side n, f32 water level (m), f32 shallow water
 //! depth (m), u8 circular, f32 sun elevation, f32 sun rotation (radians),
@@ -8,10 +9,30 @@
 //! bloom, u8 post effect (0 default, 1 hdr, 2 DOF), 3 x f32 water colour,
 //! 3 x f32 water tint, f32 waviness, f32 murkiness, f32 wind angle
 //! (radians), u16 length and UTF-8 water type, u16 length and UTF-8 sky set
-//! (empty: none), u32 palette count, count x {u32 0xRRGGBB, u16 name
-//! length, UTF-8 name}, (n+1)^2 x u16 heights (1/92 m), n^2 x u16
-//! palette index (0xFFFF: none), n^2 x u32 blend priority. Heights and
-//! tiles are row-major, x fastest.
+//! (empty: none), u8 kind, then by kind:
+//! - 0 whole: u32 palette count, count x {u32 0xRRGGBB, u16 name length,
+//!   UTF-8 name}, (n+1)^2 x u16 heights (1/92 m), n^2 x u16 palette index
+//!   (0xFFFF: none), n^2 x u32 blend priority. Heights and tiles are
+//!   row-major, x fastest. (v4 had no kind and was always whole.)
+//! - 1 a seat's: u32 its revision (the stream's count of reveals so far),
+//!   then a reveal (below) of everything it has been revealed; the
+//!   rest is unknown, and so is what the engine's water derives from the
+//!   whole heightmap, which the reveal carries instead.
+//!
+//! A reveal, in a seat's terrain and in its stream's deltas (`view.rs`),
+//! adds to what the seat holds, with varints as in `wire.rs`: varint n,
+//! n x {varint index, u32 0xRRGGBB, varint name length, UTF-8 name}
+//! palette entries, numbered by the seat in the order it first gets them
+//! (so a reveal applied twice, once in a terrain and once in a delta,
+//! changes nothing); varint runs, runs x {varint vertices
+//! skipped since the last run, varint count, count x {u16 height, f32
+//! wind strength (`WaterManager::RecomputeWindStrength`)}}; varint runs,
+//! runs x {varint tiles skipped, varint count, count x {u16 palette index
+//! (0xFFFF: none), u32 blend priority}}; varint waves, waves x {varint
+//! wave (numbered by the seat as it first gets one), varint columns in the
+//! wave, varint count, count x {varint column, 9 x 18 f32}}, the shore
+//! waves' columns (`specula_assets::shore`). The first run of each list
+//! starts skipping from 0.
 //!
 //! The palette holds each texture's minimap base colour, so the client can
 //! shade the tiles itself, as the engine's minimap does, and its name, by
@@ -55,23 +76,63 @@ pub struct Resource {
     pub unknown: usize,
 }
 
+/// A texture's minimap colour, and whether it is in the table.
+pub fn color(name: &str) -> (u32, bool) {
+    match COLORS.get(name) {
+        Some(color) => (*color, true),
+        None => {
+            if REPORTED.lock().unwrap().insert(name.to_string()) {
+                eprintln!("terrain texture {name} is not in the colour table");
+            }
+            (UNKNOWN_COLOR, false)
+        }
+    }
+}
+
+const KIND_WHOLE: u8 = 0;
+const KIND_PARTIAL: u8 = 1;
+
 pub fn encode(terrain: &Terrain) -> Resource {
     let mut unknown = 0;
     let palette: Vec<u32> = terrain
         .textures
         .iter()
         .map(|name| {
-            COLORS.get(name.as_str()).copied().unwrap_or_else(|| {
+            let (color, known) = color(name);
+            if !known {
                 unknown += 1;
-                if REPORTED.lock().unwrap().insert(name.clone()) {
-                    eprintln!("terrain texture {name} is not in the colour table");
-                }
-                UNKNOWN_COLOR
-            })
+            }
+            color
         })
         .collect();
 
     let mut out = Writer::default();
+    write_header(&mut out, terrain);
+    out.u8(KIND_WHOLE);
+    write_whole(&mut out, terrain, &palette);
+    // Only this process serves the id, so a hash that is not stable across
+    // Rust versions is fine; content-derived ids let browsers cache forever.
+    let mut hasher = DefaultHasher::new();
+    out.0.hash(&mut hasher);
+    Resource {
+        id: hasher.finish().max(1),
+        bytes: out.0,
+        unknown,
+    }
+}
+
+/// A seat's terrain: the header, then a reveal of all it holds.
+pub fn encode_partial(terrain: &Terrain, revision: u32, reveal: &[u8]) -> Vec<u8> {
+    let mut out = Writer::default();
+    write_header(&mut out, terrain);
+    out.u8(KIND_PARTIAL);
+    out.u32(revision);
+    out.0.extend_from_slice(reveal);
+    out.0
+}
+
+/// What every kind starts with: the map's settings, none of them hidden.
+fn write_header(out: &mut Writer, terrain: &Terrain) {
     out.u8(TERRAIN_VERSION);
     out.u32(terrain.tiles_per_side);
     out.f32(terrain.water_level as f32 / 65536.0);
@@ -110,6 +171,10 @@ pub fn encode(terrain: &Terrain) -> Resource {
         out.u16(name.len() as u16);
         out.0.extend_from_slice(name.as_bytes());
     }
+}
+
+/// The rest of a whole terrain, after its kind.
+fn write_whole(out: &mut Writer, terrain: &Terrain, palette: &[u32]) {
     out.u32(palette.len() as u32);
     for (color, name) in palette.iter().zip(&terrain.textures) {
         out.u32(*color);
@@ -124,16 +189,6 @@ pub fn encode(terrain: &Terrain) -> Resource {
     }
     for priority in &terrain.priorities {
         out.u32(*priority);
-    }
-
-    // Only this process serves the id, so a hash that is not stable across
-    // Rust versions is fine; content-derived ids let browsers cache forever.
-    let mut hasher = DefaultHasher::new();
-    out.0.hash(&mut hasher);
-    Resource {
-        id: hasher.finish().max(1),
-        bytes: out.0,
-        unknown,
     }
 }
 

@@ -245,6 +245,7 @@ impl Far {
             source: wgpu::ShaderSource::Wgsl(
                 concat!(
                     include_str!("far.wgsl"),
+                    include_str!("shared/los.wgsl"),
                     include_str!("shared/turn.wgsl"),
                     include_str!("shared/fog.wgsl"),
                 )

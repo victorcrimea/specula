@@ -21,6 +21,24 @@ struct Params {
 @group(1) @binding(2) var mask_texture: texture_2d<f32>;
 @group(1) @binding(3) var border_sampler: sampler;
 
+// The light uniform as far as the LOS needs it (shared/light.wgsl): the
+// overlay line shader darkens by the LOS.
+struct Light {
+    sun_color: vec4<f32>,
+    ambient: vec4<f32>,
+    shadow_matrix: mat4x4<f32>,
+    eye: vec4<f32>,
+    forward: vec4<f32>,
+    shadow: vec4<f32>,
+    fog_color: vec4<f32>,
+    fog: vec4<f32>,
+}
+
+@group(2) @binding(0) var<uniform> light: Light;
+@group(2) @binding(3) var los_now: texture_2d<f32>;
+@group(2) @binding(4) var los_before: texture_2d<f32>;
+@group(2) @binding(5) var los_sampler: sampler;
+
 // territorymanager.xml's BorderThickness and BorderSeparation: the line's
 // half width, and how far inside the border its middle runs, in metres.
 const THICKNESS: f32 = 0.75;
@@ -46,6 +64,7 @@ struct Varyings {
     @location(1) color: vec4<f32>,
     // 0 for the engine's look, 1 for the plain one.
     @location(2) far: f32,
+    @location(3) world: vec3<f32>,
 }
 
 @vertex
@@ -67,7 +86,8 @@ fn vs_main(
     let inwards = outer + (1.0 - uv.x) * 2.0 * half_width;
     let lift = vec3<f32>(0.0, (half_width - THICKNESS) * LIFT, 0.0);
     var out: Varyings;
-    out.position = view.view_proj * vec4<f32>(position + miter * inwards + lift, 1.0);
+    out.world = position + miter * inwards + lift;
+    out.position = view.view_proj * vec4<f32>(out.world, 1.0);
     out.far = clamp((half_width / THICKNESS - 1.0) / (FULL_WIDEN - 1.0), 0.0, 1.0);
     out.uv = uv;
     // CCmpTerritoryManager::Interpolate.
@@ -83,5 +103,6 @@ fn fs_main(in: Varyings) -> @location(0) vec4<f32> {
     let near = vec4<f32>(mix(base.rgb, in.color.rgb, mask.r), in.color.a * base.a);
     let rim = smoothstep(0.85, 0.95, in.uv.x);
     let far = vec4<f32>(mix(in.color.rgb, RIM, rim), in.color.a * FAR_ALPHA);
-    return mix(near, far, in.far);
+    let color = mix(near, far, in.far);
+    return vec4<f32>(color.rgb * los_at(in.world), color.a);
 }

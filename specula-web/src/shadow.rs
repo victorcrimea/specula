@@ -4,6 +4,7 @@
 //! `shadowscutoffdistance`, filtered with `shadowpcf`. Very High splits it
 //! into four cascades, as `shadowscascadecount = 4` does.
 
+use crate::los::LosTexture;
 use crate::terrain::Light;
 use crate::unit::frustum_planes;
 use crate::unit::multiply;
@@ -81,6 +82,10 @@ pub struct Shadow {
     pub model_pipeline: wgpu::RenderPipeline,
     /// The map, when shadows are on.
     target: Option<wgpu::TextureView>,
+    /// The map the bind group holds, a placeholder when shadows are off.
+    bound_map: wgpu::TextureView,
+    /// The shown player's LOS, which the bind group also holds.
+    pub los: LosTexture,
     size: u32,
     /// 1, or `CASCADES` at Very High.
     cascades: usize,
@@ -128,6 +133,15 @@ impl Shadow {
                     binding: 2,
                     visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
+                    count: None,
+                },
+                // The LOS now and as the fade started (`los.rs`).
+                los_entry(3),
+                los_entry(4),
+                wgpu::BindGroupLayoutEntry {
+                    binding: 5,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
             ],
@@ -233,7 +247,8 @@ impl Shadow {
         });
 
         let placeholder = create_map(device, 1);
-        let bind_group = light_bind_group(device, &layout, &buffer, &placeholder, &sampler);
+        let los = LosTexture::new(device);
+        let bind_group = light_bind_group(device, &layout, &buffer, &placeholder, &sampler, &los);
         Shadow {
             layout,
             bind_group,
@@ -243,6 +258,8 @@ impl Shadow {
             terrain_pipeline,
             model_pipeline,
             target: None,
+            bound_map: placeholder,
+            los,
             size: 0,
             cascades: 1,
             cutoff: DEFAULT_CUTOFF,
@@ -258,8 +275,37 @@ impl Shadow {
         }
         self.size = size;
         let map = create_map(device, size.max(1));
-        self.bind_group = light_bind_group(device, &self.layout, &self.buffer, &map, &self.sampler);
-        self.target = (size > 0).then_some(map);
+        self.bind_group = light_bind_group(
+            device,
+            &self.layout,
+            &self.buffer,
+            &map,
+            &self.sampler,
+            &self.los,
+        );
+        self.target = (size > 0).then_some(map.clone());
+        self.bound_map = map;
+    }
+
+    /// Recomputes the LOS texture from the shown player's grid, `None`
+    /// for none.
+    pub fn set_los(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        grid: Option<(&[u8], u32)>,
+        now_ms: f64,
+    ) {
+        if self.los.update(device, queue, grid, now_ms) {
+            self.bind_group = light_bind_group(
+                device,
+                &self.layout,
+                &self.buffer,
+                &self.bound_map,
+                &self.sampler,
+                &self.los,
+            );
+        }
     }
 
     pub fn set_cutoff(&mut self, cutoff: f32) {
@@ -270,7 +316,8 @@ impl Shadow {
     /// with the map's fog when `fog`, and the view's `wind` into each
     /// cascade's; per cascade, the planes of the box its casters must
     /// touch, `GetShadowCasterCullFrustum`, `None` when there is no shadow
-    /// to draw.
+    /// to draw. `now_ms` is the frame clock, for the LOS fade.
+    #[allow(clippy::too_many_arguments)]
     pub fn prepare(
         &self,
         queue: &wgpu::Queue,
@@ -279,6 +326,7 @@ impl Shadow {
         eye: &Eye,
         bounds: Option<&Bounds>,
         wind: [f32; 2],
+        now_ms: f64,
     ) -> Option<Vec<[[f32; 4]; 6]>> {
         let fitted = match bounds {
             Some(bounds) if self.size > 0 => fit(
@@ -326,7 +374,8 @@ impl Shadow {
         uniform.extend_from_slice(&[r, g, b, 0.0]);
         // CLightEnv::Bind: a max of 1 keeps every fragment clear.
         let fog_max = if fog { light.fog_max } else { 1.0 };
-        uniform.extend_from_slice(&[light.fog_factor, fog_max, 0.0, 0.0]);
+        let [los_fade, los_side] = self.los.uniform(now_ms);
+        uniform.extend_from_slice(&[light.fog_factor, fog_max, los_fade, los_side]);
         for cascade in 0..CASCADES {
             push_matrix(&mut uniform, &matrix(cascade));
         }
@@ -425,13 +474,28 @@ fn create_map(device: &wgpu::Device, size: u32) -> wgpu::TextureView {
         .create_view(&Default::default())
 }
 
+fn los_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        ty: wgpu::BindingType::Texture {
+            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+            view_dimension: wgpu::TextureViewDimension::D2,
+            multisampled: false,
+        },
+        count: None,
+    }
+}
+
 fn light_bind_group(
     device: &wgpu::Device,
     layout: &wgpu::BindGroupLayout,
     buffer: &wgpu::Buffer,
     map: &wgpu::TextureView,
     sampler: &wgpu::Sampler,
+    los: &LosTexture,
 ) -> wgpu::BindGroup {
+    let [now, before] = los.views();
     device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("light"),
         layout,
@@ -447,6 +511,18 @@ fn light_bind_group(
             wgpu::BindGroupEntry {
                 binding: 2,
                 resource: wgpu::BindingResource::Sampler(sampler),
+            },
+            wgpu::BindGroupEntry {
+                binding: 3,
+                resource: wgpu::BindingResource::TextureView(now),
+            },
+            wgpu::BindGroupEntry {
+                binding: 4,
+                resource: wgpu::BindingResource::TextureView(before),
+            },
+            wgpu::BindGroupEntry {
+                binding: 5,
+                resource: wgpu::BindingResource::Sampler(&los.sampler),
             },
         ],
     })

@@ -42,6 +42,10 @@ a { color: #8fc1e3; }
 <label><span data-i18n>Map</span> <select id="map" name="map"></select></label>
 <label><span data-i18n>Players</span> <select id="players" name="players"></select></label>
 </div>
+<div class="row">
+<label title="Toggle explored map (see initial map)." data-i18n-attrs="title"><input id="explored" name="explored" type="checkbox"> <span data-i18n>Explored Map</span></label>
+<label title="Toggle revealed map (see everything)." data-i18n-attrs="title"><input id="revealed" name="revealed" type="checkbox"> <span data-i18n>Revealed Map</span></label>
+</div>
 <div id="slots"></div>
 <p id="error" hidden></p>
 <button id="start" type="submit" data-i18n>Start Game!</button>
@@ -129,6 +133,13 @@ const showStatus = () => {
   // Someone else's game is not this visitor's to end.
   document.getElementById("start").disabled = setup.running && !setup.mine;
 };
+
+// As the game setup's MapExploration: revealing explores, and an
+// unexplored map is not revealed.
+const explored = document.getElementById("explored");
+const revealed = document.getElementById("revealed");
+revealed.addEventListener("change", () => { if (revealed.checked) explored.checked = true; });
+explored.addEventListener("change", () => { if (!explored.checked) revealed.checked = false; });
 
 form.addEventListener("submit", async (event) => {
   event.preventDefault();

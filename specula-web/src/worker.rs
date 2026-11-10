@@ -211,8 +211,9 @@ struct Playback {
     /// Live messages waiting, by WebSocket message, from the first
     /// keyframe whose terrain is being fetched on.
     held: Vec<Vec<Vec<u8>>>,
-    /// The terrain the page was last handed.
-    page_terrain: Cell<u64>,
+    /// The terrain the page was last handed, and for a seat's the reveals
+    /// it holds, those of the deltas it was handed since included.
+    page_terrain: Cell<(u64, u32)>,
     /// The turn of the last scene message the page was handed.
     page_turn: Cell<u32>,
     /// The page has something selected, or had until less than
@@ -275,18 +276,34 @@ impl Playback {
         }
     }
 
-    fn ground(&self, id: u64) -> Option<Rc<Ground>> {
+    /// A fetched terrain of `id` holding at least `revision` reveals (0: a
+    /// whole one).
+    fn ground(&self, id: u64, revision: u32) -> Option<Rc<Ground>> {
         self.terrains
             .iter()
-            .find(|(ground, _)| ground.id == id)
+            .find(|(ground, _)| ground.id == id && ground.revision >= revision)
             .map(|(ground, _)| Rc::clone(ground))
     }
 
-    /// Gives `scene` the heightmap a keyframe names before it is applied.
+    /// Gives `scene` the heightmap a keyframe names before it is applied:
+    /// its own or the live scene's when they hold enough of a seat's, as
+    /// reveals only add.
     fn prepare(&self, scene: &mut Scene, message: &[u8]) -> Result<(), &'static str> {
         if stream::is_keyframe(message) {
-            let id = stream::keyframe_terrain(message)?;
-            scene.ground = self.ground(id);
+            let (id, revision) = stream::keyframe_terrain(message)?;
+            let enough = |ground: &Option<Rc<Ground>>| {
+                ground
+                    .as_ref()
+                    .is_some_and(|ground| ground.id == id && ground.revision >= revision)
+            };
+            if enough(&scene.ground) {
+                return Ok(());
+            }
+            scene.ground = if enough(&self.live_scene.ground) {
+                self.live_scene.ground.clone()
+            } else {
+                self.ground(id, revision)
+            };
         }
         Ok(())
     }
@@ -392,9 +409,18 @@ impl Playback {
             && stream::is_keyframe(first)
         {
             match stream::keyframe_terrain(first) {
-                Ok(id) if id != 0 && self.ground(id).is_none() => {
+                // A seat's terrain is fetched again when a join's keyframe
+                // has more reveals than any heightmap held; the deltas
+                // after it bring their own.
+                Ok((id, revision))
+                    if id != 0
+                        && self.ground(id, revision).is_none()
+                        && !self.live_scene.ground.as_ref().is_some_and(|ground| {
+                            ground.id == id && ground.revision >= revision
+                        }) =>
+                {
                     self.held.push(messages);
-                    self.request_terrain(id);
+                    self.request_terrain(id, revision);
                     return;
                 }
                 Ok(_) => {}
@@ -407,8 +433,13 @@ impl Playback {
         self.apply_live(messages);
     }
 
-    fn request_terrain(&mut self, id: u64) {
-        let url = format!("/terrain/{id:016x}");
+    fn request_terrain(&mut self, id: u64, revision: u32) {
+        // A seat's own, as revealed so far.
+        let url = if revision > 0 {
+            format!("{}/terrain/{id:016x}", self.prefix)
+        } else {
+            format!("/terrain/{id:016x}")
+        };
         let this = self.this.clone();
         wasm_bindgen_futures::spawn_local(async move {
             let result = fetch_bytes(&url).await.and_then(|bytes| {
@@ -427,6 +458,8 @@ impl Playback {
         let held = std::mem::take(&mut self.held);
         match result {
             Ok(terrain) => {
+                // A seat's newer one replaces its older.
+                self.terrains.retain(|(ground, _)| ground.id != id);
                 if self.terrains.len() == KEPT_TERRAINS {
                     self.terrains.remove(0);
                 }
@@ -990,18 +1023,26 @@ impl Playback {
     }
 
     fn post_scene(&self, turn_ms: f64, message: &[u8]) {
+        let (page_id, page_revision) = self.page_terrain.get();
         if stream::is_keyframe(message)
-            && let Ok(id) = stream::keyframe_terrain(message)
+            && let Ok((id, revision)) = stream::keyframe_terrain(message)
             && id != 0
-            && id != self.page_terrain.get()
-            && let Some((_, bytes)) = self.terrains.iter().find(|(ground, _)| ground.id == id)
+            && (id != page_id || page_revision < revision)
+            && let Some((ground, bytes)) = self
+                .terrains
+                .iter()
+                .find(|(ground, _)| ground.id == id && ground.revision >= revision)
         {
             let mut out = Vec::with_capacity(9 + bytes.len());
             out.push(POST_TERRAIN);
             out.extend_from_slice(&id.to_le_bytes());
             out.extend_from_slice(bytes);
             self.post(&out);
-            self.page_terrain.set(id);
+            self.page_terrain.set((id, ground.revision));
+        } else if !stream::is_keyframe(message) && page_id == self.live_scene.terrain_id {
+            // The page applies the delta's reveals itself.
+            self.page_terrain
+                .set((page_id, page_revision.max(self.live_scene.terrain_revision)));
         }
         if let Ok(turn) = stream::message_turn(message) {
             self.page_turn.set(turn);
@@ -1599,7 +1640,7 @@ fn start() -> Result<(), String> {
             detail_since: None,
             terrains: Vec::new(),
             held: Vec::new(),
-            page_terrain: Cell::new(0),
+            page_terrain: Cell::new((0, 0)),
             page_turn: Cell::new(0),
             detail_wanted: false,
             detail_linger: None,

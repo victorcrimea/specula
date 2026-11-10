@@ -40,6 +40,9 @@ struct Light {
 }
 
 @group(2) @binding(0) var<uniform> light: Light;
+@group(2) @binding(3) var los_now: texture_2d<f32>;
+@group(2) @binding(4) var los_before: texture_2d<f32>;
+@group(2) @binding(5) var los_sampler: sampler;
 
 // shading.h calculateShading, without specular and ambient occlusion, and
 // unshadowed: an impostor is too small on screen for a shadow on it to
@@ -116,5 +119,5 @@ fn fs_impostor(in: ImpostorVaryings) -> @location(0) vec4<f32> {
     }
     let normal = turn(from_octahedral(packed.xy), in.turn.x, in.turn.y);
     let diffuse = albedo.rgb * mix(vec3<f32>(1.0), in.color, packed.z);
-    return vec4<f32>(apply_fog(lit(diffuse, normal), in.world), 1.0);
+    return vec4<f32>(apply_fog(lit(diffuse, normal), in.world) * los_at(in.world), 1.0);
 }

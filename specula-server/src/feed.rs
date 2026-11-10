@@ -1,5 +1,7 @@
-//! Decoder for the observer hook's feed, format v14. The writer is
-//! `source/network/SpeculaFeed.cpp` in the `specula` branch of 0ad-specula.
+//! Decoder for the observer hook's feed, format v15 (and v14, which had
+//! one visibility bit per player, no mirages, no LOS and no shared LOS
+//! flag). The writer is `source/network/SpeculaFeed.cpp` in the `specula`
+//! branch of 0ad-specula.
 
 use std::collections::BTreeMap;
 use std::collections::HashMap;
@@ -9,7 +11,8 @@ use std::io::ErrorKind;
 use std::io::Read;
 
 const MAGIC: [u8; 4] = *b"SPCF";
-const VERSION: u32 = 14;
+const VERSION: u32 = 15;
+const OLDEST_VERSION: u32 = 14;
 const RECORD_TEMPLATE: u8 = 1;
 const RECORD_TURN: u8 = 2;
 const RECORD_MAP: u8 = 3;
@@ -33,8 +36,11 @@ const RECORD_STATS: u8 = 20;
 const RECORD_PLAYER_GUI: u8 = 21;
 const RECORD_FORMATION_DATA: u8 = 22;
 const RECORD_QUERY_REPLY: u8 = 23;
-const ENTITY_SIZE: usize = 74;
-const SOUND_SIZE: usize = 27;
+const RECORD_LOS: u8 = 24;
+const ENTITY_SIZE: usize = 84;
+const ENTITY_SIZE_V14: usize = 74;
+const SOUND_SIZE: usize = 29;
+const SOUND_SIZE_V14: usize = 27;
 const LAUNCH_SIZE: usize = 52;
 const COLOR_MINIMAP: u8 = 1;
 const HAS_VISUAL: u8 = 2;
@@ -94,8 +100,39 @@ pub struct Entity {
     /// Raw 16.16 fixed point, 0..=1 of the model risen out of the ground;
     /// 0 means not offset at all.
     pub construction: i32,
-    /// Bit p is set when player p sees the entity, for p below 16.
-    pub visibility: u16,
+    /// Bits 2p and 2p+1 are `GetLosVisibility` for player p below 16 (see
+    /// `HIDDEN`, 1 fogged, `VISIBLE`).
+    pub visibility: u32,
+    /// Set for a mirage (`Fogging.js`), which only its player sees.
+    pub mirage: Option<Mirage>,
+}
+
+/// `LosVisibility`; 1 is FOGGED.
+pub const HIDDEN: u32 = 0;
+pub const VISIBLE: u32 = 2;
+
+/// Player p's `LosVisibility` in a visibility mask.
+pub fn visibility_of(mask: u32, player: usize) -> u32 {
+    if player < 16 {
+        (mask >> (2 * player)) & 3
+    } else {
+        HIDDEN
+    }
+}
+
+/// What one player last saw of an entity in the fog.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct Mirage {
+    pub player: i32,
+    /// `None` once the entity it stands for is gone.
+    pub parent: Option<u32>,
+}
+
+/// A v14 mask had a bit per player for VISIBLE.
+fn widen_visibility(bits: u16) -> u32 {
+    (0..16)
+        .filter(|player| bits & (1 << player) != 0)
+        .fold(0, |mask, player| mask | VISIBLE << (2 * player))
 }
 
 /// What the entity's VisualActor shows.
@@ -132,9 +169,9 @@ pub struct Sound {
     pub x: i32,
     pub y: i32,
     pub z: i32,
-    /// Bit p is set when player p hears it; all bits unless it is an
-    /// entity's.
-    pub visibility: u16,
+    /// The entity's visibility mask as of the call (VISIBLE for all
+    /// unless it is an entity's); player p hears it when it is VISIBLE.
+    pub visibility: u32,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -169,6 +206,7 @@ pub struct Launch {
 }
 
 /// A template's minimap icon, as the in-game minimap draws it.
+#[derive(Clone)]
 pub struct Icon {
     /// Relative to art/textures/ui/session/icons/minimap/.
     pub name: String,
@@ -203,10 +241,13 @@ pub struct Player {
     pub civ: String,
     /// `BattleDetection` reports a battle.
     pub battle: bool,
+    /// `Diplomacy.HasSharedLos`; false from a v14 hook.
+    pub shared_los: bool,
 }
 
 /// What a template gives the selection overlay, the status bars and the
 /// panels, read from the template as is. Strings are string record indices.
+#[derive(Clone)]
 pub struct TemplateDetails {
     /// The template flag bits of `SpeculaFeed.h`, kind 11.
     pub flags: u16,
@@ -293,7 +334,7 @@ impl ProductionItem {
 
 /// An entity's kind 12 groups; `None` is a group it does not have, or, in
 /// a record, one that did not change.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct EntityDetails {
     /// Hitpoints, max.
     pub health: Option<(f32, f32)>,
@@ -370,12 +411,14 @@ impl EntityDetails {
     }
 }
 
+#[derive(Clone)]
 pub struct Capture {
     /// By player index.
     pub points: Vec<f32>,
     pub max: f32,
 }
 
+#[derive(Clone)]
 pub struct Carried {
     /// String record index.
     pub kind: Option<u32>,
@@ -383,11 +426,13 @@ pub struct Carried {
     pub capacity: f32,
 }
 
+#[derive(Clone)]
 pub struct Queue {
     pub autoqueue: bool,
     pub items: Vec<QueueItem>,
 }
 
+#[derive(Clone)]
 pub struct QueueItem {
     pub id: u32,
     pub technology: bool,
@@ -402,6 +447,7 @@ pub struct QueueItem {
     pub missing_population: u16,
 }
 
+#[derive(Clone)]
 pub struct Garrison {
     pub capacity: u16,
     pub occupied: u16,
@@ -410,11 +456,13 @@ pub struct Garrison {
 }
 
 /// A foundation or a repair.
+#[derive(Clone)]
 pub struct Building {
     pub builders: u8,
     pub seconds_remaining: f32,
 }
 
+#[derive(Clone)]
 pub struct UnitAi {
     /// String record indices.
     #[expect(
@@ -447,6 +495,7 @@ pub struct Commands {
     pub turrets: u16,
 }
 
+#[derive(Clone)]
 pub struct Progress {
     /// -1 when not packing or upgrading.
     pub pack: f32,
@@ -455,6 +504,7 @@ pub struct Progress {
     pub upgrade_target: Option<u32>,
 }
 
+#[derive(Clone)]
 pub struct Trader {
     /// String record index.
     pub goods: Option<u32>,
@@ -463,6 +513,7 @@ pub struct Trader {
 
 /// A range circle the selection shows, as `RangeOverlayManager` hands it to
 /// the renderer.
+#[derive(Clone)]
 pub struct RangeOverlay {
     /// 0 attack, 1 aura, 2 heal.
     pub kind: u8,
@@ -474,12 +525,14 @@ pub struct RangeOverlay {
 }
 
 /// An entity's rally points, none when unset.
+#[derive(Clone)]
 pub struct Rally {
     /// String record index of the flag's actor.
     pub marker: Option<u32>,
     pub points: Vec<RallyPoint>,
 }
 
+#[derive(Clone)]
 pub struct RallyPoint {
     /// In metres.
     pub x: f32,
@@ -680,6 +733,22 @@ pub enum Record {
         id: u32,
         json: Vec<u8>,
     },
+    /// Kind 24: players 1 up, the runs of vertex states that changed.
+    Los {
+        /// Vertices per side.
+        side: u32,
+        players: Vec<Vec<LosRun>>,
+    },
+}
+
+/// `LOS_EXPLORED` and `LOS_VISIBLE` of a vertex state.
+pub const LOS_EXPLORED: u8 = 1;
+pub const LOS_VISIBLE: u8 = 2;
+
+/// Consecutive vertices from `start`, row-major, x fastest.
+pub struct LosRun {
+    pub start: u32,
+    pub states: Vec<u8>,
 }
 
 /// `ICmpTerritoryManager`'s grid, whenever it changes: row-major, x
@@ -693,6 +762,7 @@ pub struct Territory {
 }
 
 /// Sent once per match; heights and tiles are row-major, x fastest.
+#[derive(Clone)]
 pub struct Terrain {
     pub tiles_per_side: u32,
     /// Raw 16.16 fixed point, in metres.
@@ -715,6 +785,7 @@ pub struct Terrain {
 }
 
 /// The map's `WaterManager` settings.
+#[derive(Clone)]
 pub struct Water {
     pub color: [f32; 3],
     pub tint: [f32; 3],
@@ -727,6 +798,7 @@ pub struct Water {
 }
 
 /// The map's `CLightEnv`, as it lights the match in the game.
+#[derive(Clone)]
 pub struct Light {
     /// Radians.
     pub elevation: f32,
@@ -764,23 +836,25 @@ impl PostEffect {
     }
 }
 
-pub fn read_header(reader: &mut impl Read) -> io::Result<()> {
+/// The feed's version.
+pub fn read_header(reader: &mut impl Read) -> io::Result<u32> {
     let mut header = [0u8; 8];
     reader.read_exact(&mut header)?;
     if header[..4] != MAGIC {
         return Err(invalid("not a Specula feed"));
     }
     let version = u32::from_le_bytes(header[4..].try_into().unwrap());
-    if version != VERSION {
+    if !(OLDEST_VERSION..=VERSION).contains(&version) {
         return Err(invalid(format!(
-            "feed version {version}, expected {VERSION}"
+            "feed version {version}, expected {OLDEST_VERSION} to {VERSION}"
         )));
     }
-    Ok(())
+    Ok(version)
 }
 
-/// `None` when the observer closed the feed between records.
-pub fn read_record(reader: &mut impl Read) -> io::Result<Option<Record>> {
+/// `None` when the observer closed the feed between records. `version` is
+/// the header's.
+pub fn read_record(reader: &mut impl Read, version: u32) -> io::Result<Option<Record>> {
     loop {
         let mut head = [0u8; 5];
         match reader.read_exact(&mut head) {
@@ -793,7 +867,7 @@ pub fn read_record(reader: &mut impl Read) -> io::Result<Option<Record>> {
         reader.read_exact(&mut payload)?;
         match head[0] {
             RECORD_TEMPLATE => return decode_template(&payload).map(Some),
-            RECORD_TURN => return decode_turn(&payload).map(Some),
+            RECORD_TURN => return decode_turn(&payload, version).map(Some),
             RECORD_MAP => {
                 let mut cursor = Cursor(&payload);
                 let size = cursor.u32()?;
@@ -801,7 +875,7 @@ pub fn read_record(reader: &mut impl Read) -> io::Result<Option<Record>> {
                 return Ok(Some(Record::Map { size, speed }));
             }
             RECORD_TERRAIN => return decode_terrain(&payload).map(Some),
-            RECORD_PLAYERS => return decode_players(&payload).map(Some),
+            RECORD_PLAYERS => return decode_players(&payload, version).map(Some),
             RECORD_STRING => {
                 let mut cursor = Cursor(&payload);
                 let index = cursor.u32()?;
@@ -811,7 +885,8 @@ pub fn read_record(reader: &mut impl Read) -> io::Result<Option<Record>> {
             }
             RECORD_VARIANT_SET => return decode_variant_set(&payload).map(Some),
             RECORD_TERRITORY => return decode_territory(&payload).map(Some),
-            RECORD_SOUNDS => return decode_sounds(&payload).map(Some),
+            RECORD_SOUNDS => return decode_sounds(&payload, version).map(Some),
+            RECORD_LOS => return decode_los(&payload).map(Some),
             RECORD_PROJECTILES => return decode_projectiles(&payload).map(Some),
             RECORD_VARIABLE_SET => return decode_variable_set(&payload).map(Some),
             RECORD_TEMPLATE_DETAILS => return decode_template_details(&payload).map(Some),
@@ -868,11 +943,16 @@ fn decode_template(payload: &[u8]) -> io::Result<Record> {
     })
 }
 
-fn decode_turn(payload: &[u8]) -> io::Result<Record> {
+fn decode_turn(payload: &[u8], version: u32) -> io::Result<Record> {
     let mut cursor = Cursor(payload);
     let turn = cursor.u32()?;
     let count = cursor.u32()? as usize;
-    if cursor.0.len() != count * ENTITY_SIZE {
+    let size = if version < 15 {
+        ENTITY_SIZE_V14
+    } else {
+        ENTITY_SIZE
+    };
+    if cursor.0.len() != count * size {
         return Err(invalid(
             "turn record length does not match its entity count",
         ));
@@ -916,8 +996,18 @@ fn decode_turn(payload: &[u8]) -> io::Result<Record> {
             y,
             visual: (flags & HAS_VISUAL != 0).then_some(visual),
             construction,
-            visibility: cursor.u16()?,
+            visibility: 0,
+            mirage: None,
         });
+        let entity = entities.last_mut().unwrap();
+        if version < 15 {
+            entity.visibility = widen_visibility(cursor.u16()?);
+        } else {
+            entity.visibility = cursor.u32()?;
+            let player = cursor.i32()?;
+            let parent = optional(cursor.u32()?).filter(|parent| *parent != 0);
+            entity.mirage = (player >= 0).then_some(Mirage { player, parent });
+        }
     }
     Ok(Record::Turn { turn, entities })
 }
@@ -1023,7 +1113,7 @@ fn decode_terrain(payload: &[u8]) -> io::Result<Record> {
     })))
 }
 
-fn decode_players(payload: &[u8]) -> io::Result<Record> {
+fn decode_players(payload: &[u8], version: u32) -> io::Result<Record> {
     let mut cursor = Cursor(payload);
     let count = cursor.u32()? as usize;
     let mut players = Vec::new();
@@ -1039,6 +1129,7 @@ fn decode_players(payload: &[u8]) -> io::Result<Record> {
         let civ = String::from_utf8(cursor.bytes(length)?.to_vec())
             .map_err(|_| invalid("civ not UTF-8"))?;
         let battle = cursor.u8()? != 0;
+        let shared_los = version >= 15 && cursor.u8()? != 0;
         players.push(Player {
             name,
             color: u32::from_be_bytes([0, r, g, b]),
@@ -1047,6 +1138,7 @@ fn decode_players(payload: &[u8]) -> io::Result<Record> {
             stances,
             civ,
             battle,
+            shared_los,
         });
     }
     // Older hooks end the record with the players.
@@ -1079,10 +1171,15 @@ fn decode_territory(payload: &[u8]) -> io::Result<Record> {
     }))
 }
 
-fn decode_sounds(payload: &[u8]) -> io::Result<Record> {
+fn decode_sounds(payload: &[u8], version: u32) -> io::Result<Record> {
     let mut cursor = Cursor(payload);
     let count = cursor.u32()? as usize;
-    if cursor.0.len() != count * SOUND_SIZE {
+    let size = if version < 15 {
+        SOUND_SIZE_V14
+    } else {
+        SOUND_SIZE
+    };
+    if cursor.0.len() != count * size {
         return Err(invalid("sounds record length does not match its count"));
     }
     let mut sounds = Vec::with_capacity(count);
@@ -1103,10 +1200,43 @@ fn decode_sounds(payload: &[u8]) -> io::Result<Record> {
             x: cursor.i32()?,
             y: cursor.i32()?,
             z: cursor.i32()?,
-            visibility: cursor.u16()?,
+            visibility: if version < 15 {
+                widen_visibility(cursor.u16()?)
+            } else {
+                cursor.u32()?
+            },
         });
     }
     Ok(Record::Sounds(sounds))
+}
+
+fn decode_los(payload: &[u8]) -> io::Result<Record> {
+    let mut cursor = Cursor(payload);
+    let side = cursor.u32()?;
+    let vertices = side as usize * side as usize;
+    let count = cursor.u8()?;
+    let mut players = Vec::with_capacity(usize::from(count));
+    for _ in 0..count {
+        let runs = cursor.u32()? as usize;
+        let mut player = Vec::with_capacity(runs.min(vertices));
+        for _ in 0..runs {
+            let start = cursor.u32()?;
+            let length = cursor.u32()? as usize;
+            if start as usize + length > vertices {
+                return Err(invalid("LOS run past the grid"));
+            }
+            let packed = cursor.bytes(length.div_ceil(4))?;
+            let states = (0..length)
+                .map(|k| (packed[k / 4] >> (2 * (k % 4))) & 3)
+                .collect();
+            player.push(LosRun { start, states });
+        }
+        players.push(player);
+    }
+    if !cursor.0.is_empty() {
+        return Err(invalid("LOS record longer than its contents"));
+    }
+    Ok(Record::Los { side, players })
 }
 
 fn decode_projectiles(payload: &[u8]) -> io::Result<Record> {

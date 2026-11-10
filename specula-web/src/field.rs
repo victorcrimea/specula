@@ -107,6 +107,9 @@ use crate::sky::Sky;
 use crate::stream::COMPONENT_RALLY_POINT;
 use crate::stream::COMPONENT_RESOURCE_SUPPLY;
 use crate::stream::Dot;
+use crate::stream::LOS_EXPLORED;
+use crate::stream::LOS_VISIBLE;
+use crate::stream::Los;
 use crate::stream::RangeSet;
 use crate::stream::Scene;
 use crate::stream::Shot;
@@ -207,6 +210,9 @@ const ZOOM_ANCHOR_MAX: f32 = 4.0;
 /// Props reach past the root mesh (riders, spears, banners); a sphere
 /// this much larger than its bounds still holds them.
 const REACH_MARGIN: f32 = 1.5;
+/// `model.wgsl`'s shading for a model drawn whatever the LOS, as the
+/// engine's IGNORE_LOS.
+const SHADING_IGNORE_LOS: f32 = 2.0;
 /// The elephants the flat world stands on.
 /// TODO: they should stand on a world turtle, which the game has no model
 /// of (a crocodile scaled up looked wrong), so one has to be made first;
@@ -268,9 +274,9 @@ const DECAL_ATTRIBUTES: [wgpu::VertexAttribute; 2] =
 /// default for them; seen at a slant, they would blur without it.
 const TERRAIN_ANISOTROPY: u16 = 16;
 
-/// (actor, variant set, animation, seed) as the stream indexes them: what
-/// decides an entity's variation.
-type ModelKey = (u32, u32, u32, u32);
+/// (actor, variant set, animation, seed, choices) as the stream indexes
+/// them: what decides an entity's variation.
+type ModelKey = (u32, u32, u32, u32, u32);
 /// The level count and first uploaded level of a texture on the GPU: a
 /// tier of detail adds levels, the texture quality moves the first.
 type Uploaded = (usize, usize);
@@ -279,8 +285,8 @@ type Uploaded = (usize, usize);
 type GroupKey = (u64, usize, u64);
 const SHOOTING_ANIMATION: &str = "attack_ranged";
 /// What a shot's model resolves from: its projectile actor, else the
-/// shooter's actor, variant set and seed.
-type ShotModelKey = (u32, u32, u32, u32);
+/// shooter's actor, variant set, seed and choices.
+type ShotModelKey = (u32, u32, u32, u32, u32);
 
 /// A projectile the view draws, with what it works out once.
 struct Flying {
@@ -611,6 +617,46 @@ struct Entities {
     captures: BTreeMap<u32, Vec<u8>>,
     /// The rally points the detail stream holds, by entity, none unset.
     rallies: BTreeMap<u32, Rally>,
+    /// `Scene::los` and `Scene::choices`.
+    los: Los,
+    los_generation: u32,
+    choices: Vec<[Vec<u32>; 3]>,
+}
+
+impl Entities {
+    /// Whether the stream carries the LOS of `perspective`'s player, so
+    /// the visibility tells the fog from the hidden and the view is
+    /// darkened by it.
+    fn filtered(&self, perspective: Perspective) -> bool {
+        match perspective {
+            Perspective::Observer => false,
+            Perspective::Player(player) => self.los.players.contains_key(&(player as u32)),
+        }
+    }
+
+    /// `CCmpProjectileManager`'s test for a projectile at x, z (metres):
+    /// the shown player sees the LOS vertex nearest it. True without LOS.
+    fn sees_point(&self, perspective: Perspective, x: f32, z: f32) -> bool {
+        let Some((grid, side)) = self.los_of(perspective) else {
+            return true;
+        };
+        let (i, j) = ((x / 4.0).round(), (z / 4.0).round());
+        let side = side as f32;
+        i >= 0.0
+            && j >= 0.0
+            && i < side
+            && j < side
+            && grid[(j * side + i) as usize] & LOS_VISIBLE != 0
+    }
+
+    /// `perspective`'s LOS grid and its side, if the stream has it.
+    fn los_of(&self, perspective: Perspective) -> Option<(&[u8], u32)> {
+        let Perspective::Player(player) = perspective else {
+            return None;
+        };
+        let grid = self.los.players.get(&(player as u32))?;
+        Some((grid.as_slice(), self.los.side))
+    }
 }
 
 struct Rally {
@@ -805,7 +851,7 @@ pub struct Field {
     /// By actor and seed.
     ghost_models: HashMap<(String, u32), Option<Rc<Model>>>,
     /// The instance's shading, as `ICmpVisual::SetShadingColor`: 1 for the
-    /// red of a placement the engine refuses.
+    /// red of a placement the engine refuses; or `SHADING_IGNORE_LOS`.
     shading: f32,
     shots: HashMap<u32, Flying>,
     shot_models: HashMap<ShotModelKey, Option<Rc<Model>>>,
@@ -873,6 +919,7 @@ impl Field {
             source: wgpu::ShaderSource::Wgsl(
                 concat!(
                     include_str!("model.wgsl"),
+                    include_str!("shared/los.wgsl"),
                     include_str!("shared/light.wgsl"),
                     include_str!("shared/pass_fog.wgsl"),
                 )
@@ -884,6 +931,7 @@ impl Field {
             source: wgpu::ShaderSource::Wgsl(
                 concat!(
                     include_str!("field.wgsl"),
+                    include_str!("shared/los.wgsl"),
                     include_str!("shared/light.wgsl"),
                     include_str!("shared/pass_fog.wgsl"),
                 )
@@ -1189,6 +1237,7 @@ impl Field {
             source: wgpu::ShaderSource::Wgsl(
                 concat!(
                     include_str!("decal.wgsl"),
+                    include_str!("shared/los.wgsl"),
                     include_str!("shared/light.wgsl"),
                     include_str!("shared/fog.wgsl"),
                 )
@@ -1246,7 +1295,7 @@ impl Field {
             cache: None,
         });
 
-        let borders = Borders::new(&device, &queue, config.format, &view_layout)?;
+        let borders = Borders::new(&device, &queue, config.format, &view_layout, light_layout)?;
         let overlays = Overlays::new(&device, &queue, config.format, &view_layout);
         let sky = Sky::new(&device, &queue, config.format);
         let particle_pipelines = particles::Pipelines::new(
@@ -1708,7 +1757,13 @@ impl Field {
             self.particles.begin(self.sim_time(progress));
         }
         let dots = std::mem::take(&mut self.entities.dots);
+        let filtered = self.entities.filtered(self.perspective);
         for (id, dot) in &dots {
+            // `CCmpUnitRenderer` skips what the displayed player's LOS
+            // hides, and a mirage is its own player's.
+            if !self.perspective.shows(dot, filtered) {
+                continue;
+            }
             self.place_entity(
                 *id,
                 dot,
@@ -1753,7 +1808,13 @@ impl Field {
         pixel_scale: f32,
         groups: &mut HashMap<GroupKey, Vec<u8>>,
     ) {
-        let key = (dot.actor, dot.variants, dot.animation, dot.seed);
+        let key = (
+            dot.actor,
+            dot.variants,
+            dot.animation,
+            dot.seed,
+            dot.choices,
+        );
         let Some(model) = self.entity_model(dot) else {
             return;
         };
@@ -2274,14 +2335,38 @@ impl Field {
             Get::Ready(manifest) => manifest,
             Get::Pending | Get::Missing => return None,
         };
-        let key = (dot.actor, dot.variants, dot.animation, dot.seed);
+        let key = (
+            dot.actor,
+            dot.variants,
+            dot.animation,
+            dot.seed,
+            dot.choices,
+        );
         if let Some(model) = self.models.get(&key) {
             return model.clone();
         }
         let selections = self.selections(dot);
-        let model = variation::resolve(&manifest, &selections, dot.seed).map(Rc::new);
+        let model = match self.chosen(dot.choices) {
+            Some(chosen) => variation::resolve_chosen(&manifest, 0, &selections, &chosen),
+            None => variation::resolve(&manifest, &selections, dot.seed),
+        }
+        .map(Rc::new);
         self.models.insert(key, model.clone());
         model
+    }
+
+    /// The variant picks a seat's stream sends instead of the seed, as
+    /// the names `variation` compares; `None` for 0, to pick from the seed.
+    fn chosen(&self, choices: u32) -> Option<[BTreeSet<String>; 3]> {
+        let sets = self
+            .entities
+            .choices
+            .get((choices as usize).checked_sub(1)?)?;
+        Some(sets.each_ref().map(|set| {
+            set.iter()
+                .filter_map(|index| self.entities.strings.get(*index as usize).cloned())
+                .collect()
+        }))
     }
 
     /// The sound groups whose point the animations passed since the last
@@ -3221,7 +3306,13 @@ impl Field {
     /// The model a shot flies as: its projectile actor, else the shooter's
     /// `projectile` prop, as `Attack.js` and `CObjectEntry` pick it.
     fn shot_model(&mut self, shot: &Shot) -> Option<Rc<Model>> {
-        let key = (shot.projectile_actor, shot.actor, shot.variants, shot.seed);
+        let key = (
+            shot.projectile_actor,
+            shot.actor,
+            shot.variants,
+            shot.seed,
+            shot.choices,
+        );
         if let Some(model) = self.shot_models.get(&key) {
             return model.clone();
         }
@@ -3249,11 +3340,12 @@ impl Field {
             // plays "attack_" + type while it shoots: the variant that
             // holds the projectile prop.
             selections.insert(SHOOTING_ANIMATION.to_string());
-            variation::resolve(&manifest, &selections, shot.seed)
-                .and_then(|shooter| shooter.projectile)
-                .and_then(|object| {
-                    variation::resolve_object(&manifest, object, &BTreeSet::new(), 0)
-                })
+            match self.chosen(shot.choices) {
+                Some(chosen) => variation::resolve_chosen(&manifest, 0, &selections, &chosen),
+                None => variation::resolve(&manifest, &selections, shot.seed),
+            }
+            .and_then(|shooter| shooter.projectile)
+            .and_then(|object| variation::resolve_object(&manifest, object, &BTreeSet::new(), 0))
         }
         .map(Rc::new);
         self.shot_models.insert(key, model.clone());
@@ -3329,6 +3421,10 @@ impl Field {
         self.shots = shots;
 
         for (id, shot, flight, stop, rest, t) in placing {
+            let at = flight.position(t.min(stop));
+            if !self.entities.sees_point(self.perspective, at.x, at.z) {
+                continue;
+            }
             if t - flight.time_hit() <= projectile::DECAY_SECS
                 && let Some(model) = self.shot_model(&shot)
             {
@@ -3666,6 +3762,8 @@ impl Field {
         groups: &mut HashMap<GroupKey, Vec<u8>>,
     ) {
         let particles = std::mem::replace(&mut self.particles_visible, false);
+        // Under the map, where no player's LOS reaches.
+        self.shading = SHADING_IGNORE_LOS;
         self.place_shot_model(
             model,
             transform,
@@ -3675,6 +3773,7 @@ impl Field {
             pixel_scale,
             groups,
         );
+        self.shading = 0.0;
         self.particles_visible = particles;
     }
 
@@ -4275,6 +4374,10 @@ impl View for Field {
     fn set_perspective(&mut self, perspective: Perspective, controls: bool) {
         self.selection.set_viewer(perspective.player(), controls);
         if perspective != self.perspective {
+            // `PlayerViewControl` makes the LOS texture dirty, and it fades
+            // to the new player's.
+            let grid = self.entities.los_of(perspective);
+            self.shadow.set_los(&self.device, &self.queue, grid, now());
             // `PlayerViewControl.onSelectionChange` clears the selection
             // when the viewed player changes.
             let entities = &self.entities;
@@ -4430,6 +4533,7 @@ impl View for Field {
             entities.variant_sets.clear();
             entities.variable_sets.clear();
             entities.range_sets.clear();
+            entities.choices.clear();
             self.particles.clear();
             self.camera.borrow_mut().placed = false;
             self.selection = Selection::default();
@@ -4481,6 +4585,19 @@ impl View for Field {
             .dots
             .extend(scene.dots.iter().map(|(id, dot)| (*id, *dot)));
         entities.captures.clone_from(&scene.captures);
+        if scene.choices.len() < entities.choices.len() {
+            entities.choices.clear();
+        }
+        let known = entities.choices.len();
+        entities
+            .choices
+            .extend(scene.choices[known..].iter().cloned());
+        if scene.los_generation != entities.los_generation || entities.los != scene.los {
+            entities.los.clone_from(&scene.los);
+            entities.los_generation = scene.los_generation;
+            let grid = entities.los_of(self.perspective);
+            self.shadow.set_los(&self.device, &self.queue, grid, now());
+        }
         entities.rallies.clear();
         if scene.details.known && scene.details.match_id == scene.match_id {
             for (id, dot) in &scene.dots {
@@ -4803,6 +4920,7 @@ impl View for Field {
             },
             bounds.as_ref(),
             wind,
+            now(),
         );
         if let Some(bake) = self.store.borrow().index_name() {
             self.far.open_storage(bake);
@@ -4823,7 +4941,12 @@ impl View for Field {
             &self.palette,
             ranges,
         );
-        let rally_lines = rally_lines(&self.entities, self.selection.selected(), &self.palette);
+        let rally_lines = rally_lines(
+            &self.entities,
+            self.selection.selected(),
+            &self.palette,
+            self.perspective,
+        );
         self.overlays.prepare(
             &self.device,
             &self.queue,
@@ -5275,7 +5398,7 @@ impl View for Field {
                 }
                 // After the water, as the engine draws overlays, so a line
                 // floating on it shows.
-                self.borders.draw(&mut pass);
+                self.borders.draw(&mut pass, &self.shadow.bind_group);
                 self.overlays.draw(&mut pass);
             }
             // Last, as the engine draws them after the water and the
@@ -6570,12 +6693,28 @@ fn overlay_marks<'a>(
 
 /// The lines to the rally points of the `selected` entities, as
 /// `DisplayRallyPoint` shows them for the selection, here whoever owns
-/// them, in the owner's colour and solid all along.
+/// them, in the owner's colour, dashed in `LineDashColor` where the shown
+/// player has not explored (`CCmpRallyPointRenderer::ConstructOverlayLines`).
 fn rally_lines<'a>(
     entities: &'a Entities,
     selected: &[u32],
     palette: &[u32],
+    perspective: Perspective,
 ) -> Vec<RallyLine<'a>> {
+    let los = entities.los_of(perspective);
+    // `GetLosQuerier` of an observer reveals all.
+    let explored = |point: &[f32; 2]| {
+        let Some((grid, side)) = los else {
+            return true;
+        };
+        let (i, j) = ((point[0] / 4.0).round(), (point[1] / 4.0).round());
+        let side = side as f32;
+        i >= 0.0
+            && j >= 0.0
+            && i < side
+            && j < side
+            && grid[(j * side + i) as usize] & LOS_EXPLORED != 0
+    };
     let mut lines = Vec::new();
     for id in selected {
         let (Some(rally), Some(dot)) = (entities.rallies.get(id), entity_dot(entities, *id)) else {
@@ -6595,28 +6734,157 @@ fn rally_lines<'a>(
             if point.path.len() < 2 {
                 continue;
             }
-            lines.push(RallyLine {
-                texture,
-                thickness: details.rally_thickness,
-                // The path runs from the flag back to the building, so the
-                // engine swaps the template's caps.
-                start_cap: details.rally_end_cap,
-                end_cap: details.rally_start_cap,
-                color: packed(owner_rgb(palette, dot.owner), 1.0),
-                points: point
-                    .path
-                    .iter()
-                    .map(|[x, z]| {
-                        [
-                            *x as f32 / RALLY_UNITS_PER_METRE,
-                            *z as f32 / RALLY_UNITS_PER_METRE,
-                        ]
-                    })
-                    .collect(),
-            });
+            let path: Vec<[f32; 2]> = point
+                .path
+                .iter()
+                .map(|[x, z]| {
+                    [
+                        *x as f32 / RALLY_UNITS_PER_METRE,
+                        *z as f32 / RALLY_UNITS_PER_METRE,
+                    ]
+                })
+                .collect();
+            let last = path.len() - 1;
+            for (visible, start, end) in visibility_segments(&path, &explored) {
+                if visible {
+                    lines.push(RallyLine {
+                        texture,
+                        thickness: details.rally_thickness,
+                        // The path runs from the flag back to the building,
+                        // so the engine swaps the template's caps; a
+                        // segment's end next to a dashed one is round.
+                        start_cap: if start == 0 {
+                            details.rally_end_cap
+                        } else {
+                            territory::CAP_ROUND
+                        },
+                        end_cap: if end == last {
+                            details.rally_start_cap
+                        } else {
+                            territory::CAP_ROUND
+                        },
+                        color: packed(owner_rgb(palette, dot.owner), 1.0),
+                        points: path[start..=end].to_vec(),
+                    });
+                    continue;
+                }
+                for dash in rally_dashes(path[start], path[end]) {
+                    lines.push(RallyLine {
+                        texture,
+                        thickness: details.rally_thickness,
+                        start_cap: territory::CAP_ROUND,
+                        end_cap: territory::CAP_ROUND,
+                        color: RALLY_DASH_COLOR,
+                        points: dash,
+                    });
+                }
+            }
         }
     }
     lines
+}
+
+/// `template_structure.xml`'s LineDashColor, which no template overrides.
+const RALLY_DASH_COLOR: u32 = 0xFF9E_0B0F;
+
+/// `GetVisibilitySegments` and `MergeVisibilitySegments`: (explored, first,
+/// last point) runs of the path, each at least two points long.
+fn visibility_segments(
+    path: &[[f32; 2]],
+    explored: &impl Fn(&[f32; 2]) -> bool,
+) -> Vec<(bool, usize, usize)> {
+    if path.len() < 2 {
+        return Vec::new();
+    }
+    let mut segments = Vec::new();
+    let mut last_visible = explored(&path[0]);
+    let mut start = 0;
+    for (k, point) in path.iter().enumerate().skip(1) {
+        let visible = explored(point);
+        if visible != last_visible {
+            segments.push((last_visible, start, k - 1));
+            start = k - 1;
+            last_visible = visible;
+        }
+    }
+    segments.push((last_visible, start, path.len() - 1));
+    let single = |segment: &(bool, usize, usize)| segment.1 == segment.2;
+    let mut i = 1;
+    while i + 1 < segments.len() {
+        if single(&segments[i]) {
+            segments[i - 1].2 = segments[i + 1].2;
+            segments.drain(i..i + 2);
+        } else {
+            i += 1;
+        }
+    }
+    if segments.len() >= 2 && single(&segments[0]) {
+        let first = segments.remove(0).1;
+        segments[0].1 = first;
+    }
+    if segments.len() >= 2 && single(&segments[segments.len() - 1]) {
+        let last = segments.pop().unwrap().2;
+        segments.last_mut().unwrap().2 = last;
+    }
+    segments
+}
+
+/// The dashes of an unexplored stretch, straight from `from` to `to`:
+/// 3 m dashes and gaps, scaled so it ends on a whole dash
+/// (`ConstructOverlayLines`, `SimRender::ConstructDashedLine`).
+fn rally_dashes(from: [f32; 2], to: [f32; 2]) -> Vec<Vec<[f32; 2]>> {
+    const MAX_DASH: f32 = 3.0;
+    const MAX_CLEAR: f32 = 3.0;
+    let mut dash = MAX_DASH;
+    let mut clear = MAX_CLEAR;
+    let ratio = dash / (dash + clear);
+    let distance = (from[0] - to[0]).hypot(from[1] - to[1]);
+    let fit = (distance / (dash + clear)).floor() as i32;
+    let remainder = distance - fit as f32 * (dash + clear);
+    let fit = fit.max(1);
+    let difference = (remainder - MAX_DASH) / fit as f32;
+    dash += ratio * difference;
+    clear += (1.0 - ratio) * difference;
+    if dash <= 0.0 || clear <= 0.0 {
+        return Vec::new();
+    }
+    let key = [from, to];
+    let mut points = vec![from];
+    let mut starts = vec![0];
+    let mut building = true;
+    let mut length = 0.0;
+    let mut last = from;
+    let mut i = 0;
+    while i < key.len() - 1 {
+        let segment = [key[i + 1][0] - last[0], key[i + 1][1] - last[1]];
+        let segment_length = segment[0].hypot(segment[1]);
+        let target = if building { dash } else { clear };
+        if length + segment_length > target {
+            let cut = (target - length) / segment_length;
+            let point = [last[0] + segment[0] * cut, last[1] + segment[1] * cut];
+            length = 0.0;
+            building = !building;
+            last = point;
+            points.push(point);
+            if building {
+                starts.push(points.len() - 1);
+            }
+        } else {
+            if building {
+                points.push(key[i + 1]);
+            }
+            length += segment_length;
+            last = key[i + 1];
+            i += 1;
+        }
+    }
+    (0..starts.len())
+        .map(|n| {
+            let end = starts.get(n + 1).copied().unwrap_or(points.len());
+            points[starts[n]..end].to_vec()
+        })
+        .filter(|dash| dash.len() >= 2)
+        .collect()
 }
 
 /// Player `owner`'s displayed colour, white without an owner.

@@ -8,6 +8,9 @@
 //! where territories end. It widens inwards only, so neighbours' lines
 //! stay back to back.
 
+use std::collections::VecDeque;
+
+use crate::stream::TERRITORY_UNKNOWN;
 use crate::stream::Territory;
 use crate::terrain::TerrainImage;
 use crate::unit::DEPTH_FORMAT;
@@ -59,7 +62,51 @@ const BORDER_TEXTURES: &[u8] = include_bytes!("../territory-border.bin");
 /// row-major, row 0 at z = 0. As `CTerritoryTexture::GenerateBitmap`:
 /// opaque-ish at each border, fading inwards, and clear on the border tiles
 /// themselves, so neighbours' bands are apart.
+/// A seat's territory with each tile it was not shown taken from the
+/// nearest it was: the server leaves those out, so no border may run along
+/// them. They lie where the LOS is black, so what is made up there is not
+/// seen.
+fn filled(territory: &Territory) -> Option<Territory> {
+    if !territory.tiles.contains(&TERRITORY_UNKNOWN) {
+        return None;
+    }
+    let w = territory.width as usize;
+    let h = territory.height as usize;
+    let mut tiles = territory.tiles.clone();
+    let mut queue: VecDeque<usize> = (0..tiles.len())
+        .filter(|index| tiles[*index] != TERRITORY_UNKNOWN)
+        .collect();
+    while let Some(index) = queue.pop_front() {
+        let (i, j) = (index % w, index / w);
+        let neighbours = [
+            (i > 0).then(|| index - 1),
+            (i + 1 < w).then(|| index + 1),
+            (j > 0).then(|| index - w),
+            (j + 1 < h).then(|| index + w),
+        ];
+        for next in neighbours.into_iter().flatten() {
+            if tiles[next] == TERRITORY_UNKNOWN {
+                tiles[next] = tiles[index];
+                queue.push_back(next);
+            }
+        }
+    }
+    // Nothing known at all: no territory.
+    for tile in &mut tiles {
+        if *tile == TERRITORY_UNKNOWN {
+            *tile = 0;
+        }
+    }
+    Some(Territory {
+        width: territory.width,
+        height: territory.height,
+        tiles,
+    })
+}
+
 pub fn minimap_bitmap(territory: &Territory, palette: &[u32]) -> Vec<u8> {
+    let filled = filled(territory);
+    let territory = filled.as_ref().unwrap_or(territory);
     let w = territory.width as usize;
     let h = territory.height as usize;
     let owner = |i: usize, j: usize| territory.tiles[j * w + i] & OWNER_MASK;
@@ -121,6 +168,8 @@ struct Boundary {
 
 /// `CTerritoryBoundaryCalculator::ComputeBoundaries`.
 fn boundaries(territory: &Territory) -> Vec<Boundary> {
+    let filled = filled(territory);
+    let territory = filled.as_ref().unwrap_or(territory);
     const TILE_BOTTOM: u8 = 0;
     const TILE_RIGHT: u8 = 1;
     const TILE_TOP: u8 = 2;
@@ -668,6 +717,7 @@ impl Borders {
         queue: &wgpu::Queue,
         format: wgpu::TextureFormat,
         view_layout: &wgpu::BindGroupLayout,
+        light_layout: &wgpu::BindGroupLayout,
     ) -> Result<Self, String> {
         let (width, height, base, mask) = decode_textures(BORDER_TEXTURES)?;
         let rgba = wgpu::TextureFormat::Rgba8Unorm;
@@ -754,11 +804,17 @@ impl Borders {
         });
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("territory border"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("borders.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(
+                concat!(
+                    include_str!("borders.wgsl"),
+                    include_str!("shared/los.wgsl")
+                )
+                .into(),
+            ),
         });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("territory border"),
-            bind_group_layouts: &[Some(view_layout), Some(&layout)],
+            bind_group_layouts: &[Some(view_layout), Some(&layout), Some(light_layout)],
             immediate_size: 0,
         });
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -928,13 +984,15 @@ impl Borders {
         queue.write_buffer(&self.params, 0, &bytes);
     }
 
-    /// Expects the view bind group at 0.
-    pub fn draw(&self, pass: &mut wgpu::RenderPass) {
+    /// Expects the view bind group at 0; `light` is the light group, for
+    /// the LOS.
+    pub fn draw(&self, pass: &mut wgpu::RenderPass, light: &wgpu::BindGroup) {
         if self.index_count == 0 {
             return;
         }
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(1, &self.bind_group, &[]);
+        pass.set_bind_group(2, light, &[]);
         pass.set_vertex_buffer(0, self.vertices.slice(..));
         pass.set_index_buffer(self.indices.slice(..), wgpu::IndexFormat::Uint32);
         pass.draw_indexed(0..self.index_count, 0, 0..1);

@@ -108,12 +108,17 @@ pub struct Setup {
     pub map: String,
     /// One per player, in order.
     pub slots: Vec<Slot>,
+    /// The game setup's Explored Map and Revealed Map; revealed implies
+    /// explored, as `MapExploration.setRevealed` makes it.
+    pub explored: bool,
+    pub revealed: bool,
 }
 
 impl Setup {
-    /// From the setup page's form: `map`, `players`, and for each player
-    /// i from 1, `civ<i>`, `slot<i>` ("you", "petra" or "empty") and
-    /// `difficulty<i>` for Petra. Checked when the game starts.
+    /// From the setup page's form: `map`, `players`, `explored` and
+    /// `revealed` when checked, and for each player i from 1, `civ<i>`,
+    /// `slot<i>` ("you", "petra" or "empty") and `difficulty<i>` for Petra.
+    /// Checked when the game starts.
     pub fn from_form(form: &HashMap<String, String>) -> Result<Setup, &'static str> {
         let field = |name: &str| form.get(name).map(String::as_str).ok_or("field missing");
         let players: usize = field("players")?.parse().map_err(|_| "bad player count")?;
@@ -137,9 +142,12 @@ impl Setup {
                 kind,
             });
         }
+        let revealed = form.contains_key("revealed");
         Ok(Setup {
             map: field("map")?.to_string(),
             slots,
+            explored: revealed || form.contains_key("explored"),
+            revealed,
         })
     }
 }
@@ -228,6 +236,9 @@ impl Play {
             running: true,
         });
         println!("game {generation} for {owner}: {}", args.join(" "));
+        // The engine connects the feed after this, so its first turn
+        // already has the seat's stream.
+        self.hub.set_seats(vec![u32::from(seat)]);
         let previous = inner.runner.take();
         let play = Arc::clone(self);
         inner.runner = Some(std::thread::spawn(move || {
@@ -349,6 +360,13 @@ fn engine_args(setup: &Setup) -> Result<Vec<String>, &'static str> {
         "-autostart-seed=-1".to_string(),
         "-autostart-aiseed=-1".to_string(),
     ];
+    // Read by autostart_specula_play.js.
+    if setup.explored {
+        args.push("-autostart-specula-explored".to_string());
+    }
+    if setup.revealed {
+        args.push("-autostart-specula-revealed".to_string());
+    }
     for (index, slot) in setup.slots.iter().enumerate() {
         let player = index + 1;
         if slot.civ != "random" && !civs().any(|(code, _)| code == slot.civ) {
@@ -786,4 +804,31 @@ pub fn push_string(out: &mut String, text: &str) {
         }
     }
     out.push('"');
+}
+
+/// The entity ids a query reply names (`SetWallPlacementPreview`'s
+/// `startSnappedEnt` and `endSnappedEnt`, `GetFoundationSnapData`'s
+/// `ent`), as the seat's handles; one the seat does not hold reads as
+/// none, `INVALID_ENTITY`.
+pub fn map_reply_ids(reply: &str, handle: impl Fn(u32) -> Option<u32>) -> String {
+    const KEYS: [&str; 3] = ["\"startSnappedEnt\":", "\"endSnappedEnt\":", "\"ent\":"];
+    let mut out = String::with_capacity(reply.len());
+    let mut rest = reply;
+    while let Some((at, key)) = KEYS
+        .iter()
+        .filter_map(|key| Some((rest.find(key)?, *key)))
+        .min_by_key(|(at, _)| *at)
+    {
+        let value_start = at + key.len();
+        out.push_str(&rest[..value_start]);
+        rest = &rest[value_start..];
+        let digits = rest.len() - rest.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+        if let Ok(id) = rest[..digits].parse::<u32>() {
+            let mapped = if id == 0 { 0 } else { handle(id).unwrap_or(0) };
+            out.push_str(&mapped.to_string());
+            rest = &rest[digits..];
+        }
+    }
+    out.push_str(rest);
+    out
 }

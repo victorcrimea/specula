@@ -2,10 +2,10 @@
 //! one place so a change to one side cannot be missed on the other.
 
 /// In every visual keyframe; deltas follow one, so they need none.
-pub const WIRE_VERSION: u8 = 21;
+pub const WIRE_VERSION: u8 = 22;
 /// The detail stream's keyframes.
 pub const DETAIL_VERSION: u8 = 8;
 /// The terrain resource's layout.
-pub const TERRAIN_VERSION: u8 = 4;
+pub const TERRAIN_VERSION: u8 = 5;
 /// Engine heights are u16 in these units.
 pub const HEIGHT_UNITS_PER_METRE: f32 = 92.0;

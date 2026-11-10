@@ -10,6 +10,7 @@ use wasm_bindgen::closure::Closure;
 use web_sys::HtmlCanvasElement;
 use web_sys::MouseEvent;
 
+use crate::diplomacy::Perspective;
 use crate::icons::IconAtlas;
 use crate::render::Renderer;
 use crate::stream::Scene;
@@ -57,6 +58,11 @@ impl Minimap {
     pub fn set_scene(&mut self, scene: &Scene, palette: &[u32]) {
         self.map_size.set(scene.map_size as f32);
         self.renderer.set_scene(scene, palette);
+        self.dirty = true;
+    }
+
+    pub fn set_perspective(&mut self, perspective: Perspective) {
+        self.renderer.set_perspective(perspective);
         self.dirty = true;
     }
 

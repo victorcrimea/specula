@@ -17,6 +17,9 @@ struct View {
 @group(2) @binding(0) var<uniform> light: Light;
 @group(2) @binding(1) var shadow_map: texture_depth_2d;
 @group(2) @binding(2) var shadow_sampler: sampler_comparison;
+@group(2) @binding(3) var los_now: texture_2d<f32>;
+@group(2) @binding(4) var los_before: texture_2d<f32>;
+@group(2) @binding(5) var los_sampler: sampler;
 
 // shading.h calculateShading, without specular and ambient occlusion.
 fn lit(albedo: vec3<f32>, normal: vec3<f32>, shadow: f32) -> vec3<f32> {
@@ -74,5 +77,5 @@ fn fs_decal(in: Varyings) -> @location(0) vec4<f32> {
     }
     let world = vec3<f32>(in.ground.x, in.height, in.ground.y);
     let color = lit(tex.rgb, in.normal, shadow_at(world, light.shadow.y));
-    return vec4<f32>(apply_fog(color, world), tex.a);
+    return vec4<f32>(apply_fog(color, world) * los_at(world), tex.a);
 }

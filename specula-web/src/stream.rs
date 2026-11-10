@@ -1,5 +1,6 @@
 //! Decoder for specula-server's viewer stream and match segments, wire
-//! format v13; the layout is documented in `specula-server/src/view.rs`.
+//! format v22 (and v19 to v21 of stored matches); the layout is documented
+//! in `specula-server/src/view.rs`.
 
 use std::collections::BTreeMap;
 use std::rc::Rc;
@@ -42,6 +43,17 @@ const CHANGED_VARIABLES: u64 = 32768;
 const CHANGED_HITPOINTS: u64 = 65536;
 const CHANGED_CAPTURE: u64 = 131072;
 const CHANGED_RANGES: u64 = 262144;
+const CHANGED_MIRAGE: u64 = 524288;
+const CHANGED_CHOSEN: u64 = 1048576;
+/// The oldest stored matches still read: before them templates had no
+/// supply types, gather rates, dropsite types and attack types.
+const OLDEST_WIRE: u8 = 19;
+/// From v22: two visibility bits per player, mirages, LOS, a seat's
+/// partial terrain, variant choices, projectiles' ages.
+const LOS_WIRE: u8 = 22;
+/// `LosVisibility` in a visibility mask's two bits.
+pub const HIDDEN: u32 = 0;
+pub const VISIBLE: u32 = 2;
 const MOTION_GROUNDED: u8 = 1;
 const MOTION_HITPOINTS: u8 = 2;
 const MOTION_CAPTURE: u8 = 4;
@@ -158,8 +170,18 @@ pub struct Dot {
     /// 1-based index into `Scene::strings`, or 0 for none: the sound group
     /// the animation plays at its sound or event point.
     pub sound_group: u32,
-    /// Bit p is set when player p sees the entity.
-    pub visibility: u16,
+    /// Two bits per player p below 16, from bit 2p: `GetLosVisibility`
+    /// (`HIDDEN`, 1 fogged, `VISIBLE`); see `visibility_of`.
+    pub visibility: u32,
+    /// The player a mirage is for, plus 1; 0 for an entity that is not
+    /// one. Only that player's view shows it.
+    pub mirage: u32,
+    /// The entity the mirage stands for, 0 for none or unknown.
+    pub parent: u32,
+    /// 1-based index into `Scene::choices`, the variants the engine picks
+    /// from the seed, which a seat's stream sends instead of it; 0 to pick
+    /// them from `seed`.
+    pub choices: u32,
     /// 0 without Health, else the hitpoints in 1/255 of the max, rounded
     /// up, at least 1.
     pub hitpoints: u8,
@@ -169,10 +191,35 @@ pub struct Dot {
     pub grounded: bool,
 }
 
+/// Player p's `LosVisibility` in a visibility mask.
+pub fn visibility_of(mask: u32, player: usize) -> u32 {
+    if player < 16 {
+        (mask >> (2 * player)) & 3
+    } else {
+        HIDDEN
+    }
+}
+
+/// A mask before v22 had a bit per player for VISIBLE.
+fn widen_visibility(bits: u32) -> u32 {
+    (0..16)
+        .filter(|player| bits & (1 << player) != 0)
+        .fold(0, |mask, player| mask | VISIBLE << (2 * player))
+}
+
+fn narrow_visibility(mask: u32) -> u32 {
+    (0..16)
+        .filter(|player| visibility_of(mask, *player) == VISIBLE)
+        .fold(0, |bits, player| bits | 1 << player)
+}
+
 /// The match's heightmap, which grounded entities take their height from.
+#[derive(Clone)]
 pub struct Ground {
     /// The terrain resource it is from.
     pub id: u64,
+    /// A seat's: how many reveals it holds (0: the terrain is whole).
+    pub revision: u32,
     /// Vertices per side.
     vertices: i64,
     /// In 1/92 m, row-major, x fastest.
@@ -187,15 +234,33 @@ impl Ground {
         }
         Ok(Ground {
             id,
+            revision: 0,
             vertices,
             heights,
         })
     }
 
-    /// From a `/terrain/<id>` resource, read up to its heights.
+    /// Adds a reveal's heights; a seat's entities only stand where it has
+    /// them.
+    fn apply_reveal(&mut self, revision: u32, reveal: &Reveal) {
+        for (vertex, height) in &reveal.heights {
+            if let Some(slot) = self.heights.get_mut(*vertex) {
+                *slot = *height;
+            }
+        }
+        self.revision = self.revision.max(revision);
+    }
+
+    /// From a `/terrain/<id>` resource, whole or a seat's.
     pub fn from_resource(id: u64, resource: &[u8]) -> Result<Self, &'static str> {
+        if resource.first() == Some(&TERRAIN_VERSION) {
+            let image = crate::terrain::build(resource)?;
+            let mut ground = Ground::new(id, image.size, image.heights)?;
+            ground.revision = image.seat.map_or(0, |seat| seat.revision);
+            return Ok(ground);
+        }
         let mut cursor = ByteReader(resource);
-        if cursor.u8()? != TERRAIN_VERSION {
+        if cursor.u8()? != 4 {
             return Err("unknown terrain version");
         }
         let tiles = cursor.u32()?;
@@ -284,7 +349,7 @@ pub enum SoundTarget {
         x: i32,
         z: i32,
         y: i32,
-        visibility: u16,
+        visibility: u32,
     },
     /// Heard regardless of LOS.
     Position { x: i32, z: i32, y: i32 },
@@ -303,6 +368,8 @@ pub struct Shot {
     pub actor: u32,
     pub seed: u32,
     pub variants: u32,
+    /// As a dot's, for the shooter's look as it shoots.
+    pub choices: u32,
     /// The simulation's launch point and the target, x, y, z in 1/16 m.
     pub launch: [i32; 3],
     pub target: [i32; 3],
@@ -461,6 +528,20 @@ pub struct Scene {
     pub map_size: u32,
     /// Names `/terrain/<id>`; 0 while the server has none.
     pub terrain_id: u64,
+    /// A seat's: the reveals its terrain must hold for the keyframe; 0 for
+    /// a whole terrain.
+    pub terrain_revision: u32,
+    /// The reveals deltas brought since the reader last took them, with
+    /// their revisions, for the terrain picture; the scene's ground has
+    /// them already.
+    pub reveals: Vec<(u32, Vec<u8>)>,
+    /// Whether to keep them: the page draws the terrain, the worker does
+    /// not.
+    pub keep_reveals: bool,
+    /// Each player's LOS that the stream carries; none before v22.
+    pub los: Los,
+    /// Goes up whenever `los` changes.
+    pub los_generation: u32,
     pub icons: Vec<Icon>,
     /// Index 0 is gaia.
     pub players: Vec<Player>,
@@ -482,6 +563,10 @@ pub struct Scene {
     pub variant_sets: Vec<VariantSet>,
     pub variable_sets: Vec<VariableSet>,
     pub range_sets: Vec<RangeSet>,
+    /// The engine's random variant picks a seat is sent: three sets of
+    /// indices into `strings`, which `CalculateVariationKey` looks up in
+    /// that order after the entity's own.
+    pub choices: Vec<[Vec<u32>; 3]>,
     pub dots: BTreeMap<u32, Dot>,
     /// Each player's share of an entity's max capture points, in 1/255, by
     /// id; an entity without Capturable has no entry.
@@ -503,6 +588,26 @@ pub struct Scene {
     /// The detail stream's state at `turn`, while the viewer has something
     /// selected; the visual messages leave it alone.
     pub details: Details,
+}
+
+/// `CLosQuerier` states by player index: bit `LOS_EXPLORED` and
+/// `LOS_VISIBLE` per vertex, row-major, x fastest, a vertex every 4 m.
+#[derive(Clone, Default, PartialEq, Eq)]
+pub struct Los {
+    /// Vertices per side; 0 for none.
+    pub side: u32,
+    pub players: BTreeMap<u32, Vec<u8>>,
+}
+
+pub const LOS_EXPLORED: u8 = 1;
+pub const LOS_VISIBLE: u8 = 2;
+
+/// A territory tile a seat has not been shown; no border runs along it.
+pub const TERRITORY_UNKNOWN: u8 = 0x80;
+
+/// What a reveal brings that the scene itself needs: the heights.
+struct Reveal {
+    heights: Vec<(usize, u16)>,
 }
 
 /// `ICmpTerritoryManager`'s grid, a tile per `territory::TILE_SIZE`.
@@ -549,9 +654,19 @@ pub enum Stance {
     Enemy,
     Ally,
     Neutral,
+    /// Between two other players, which a seat is not told.
+    Unknown,
 }
 
 impl Scene {
+    /// The page's scene, which keeps the reveals for the terrain picture.
+    pub fn for_page() -> Self {
+        Scene {
+            keep_reveals: true,
+            ..Scene::default()
+        }
+    }
+
     /// `progress` is how far the renderer has moved the dots towards the
     /// current turn, 0..=1.
     pub fn apply(&mut self, message: &[u8], progress: f32) -> Result<(), &'static str> {
@@ -573,9 +688,9 @@ impl Scene {
     fn apply_keyframe(&mut self, cursor: &mut ByteReader) -> Result<(), &'static str> {
         self.turn = cursor.varint_u32()?;
         self.wire_version = cursor.u8()?;
-        // Stored matches from before the template order sounds, and the
-        // garrison and turret classes, still play.
-        if !(WIRE_VERSION - 2..=WIRE_VERSION).contains(&self.wire_version) {
+        // Stored matches from before the template order sounds, the
+        // garrison and turret classes, and the LOS still play.
+        if !(OLDEST_WIRE..=WIRE_VERSION).contains(&self.wire_version) {
             return Err("unknown wire version, reload the page");
         }
         self.match_id = cursor.u64()?;
@@ -588,11 +703,16 @@ impl Scene {
         }
         self.map_size = cursor.varint_u32()?;
         self.terrain_id = cursor.u64()?;
+        self.terrain_revision = if self.wire_version >= LOS_WIRE {
+            cursor.varint_u32()?
+        } else {
+            0
+        };
+        let revision = self.terrain_revision;
         if self.terrain_id != 0
-            && self
-                .ground
-                .as_ref()
-                .is_none_or(|ground| ground.id != self.terrain_id)
+            && self.ground.as_ref().is_none_or(|ground| {
+                ground.id != self.terrain_id || (revision > 0 && ground.revision < revision)
+            })
         {
             return Err("keyframe before its terrain");
         }
@@ -600,12 +720,22 @@ impl Scene {
         self.read_icons(cursor)?;
         self.read_players(cursor)?;
         self.read_territory(cursor)?;
+        let los = if self.wire_version >= LOS_WIRE {
+            read_los(cursor)?
+        } else {
+            Los::default()
+        };
+        if los != self.los {
+            self.los = los;
+            self.los_generation = self.los_generation.wrapping_add(1);
+        }
         self.templates.clear();
         self.template_details.clear();
         self.strings.clear();
         self.variant_sets.clear();
         self.variable_sets.clear();
         self.range_sets.clear();
+        self.choices.clear();
         self.read_tables(cursor)?;
         let count = cursor.varint_u32()?;
         self.economy = (0..count)
@@ -618,7 +748,8 @@ impl Scene {
         let mut id = 0;
         for _ in 0..count {
             id += cursor.varint_u32()?;
-            let (dot, capture) = cursor.dot(id, self.turn, &self.template_details)?;
+            let (dot, capture) =
+                cursor.dot(id, self.turn, &self.template_details, self.wire_version)?;
             self.dots.insert(id, dot);
             if !capture.is_empty() {
                 self.captures.insert(id, capture);
@@ -629,7 +760,7 @@ impl Scene {
         let mut id = 0;
         for _ in 0..count {
             id += cursor.varint_u32()?;
-            let mut shot = cursor.shot(self.turn)?;
+            let mut shot = cursor.shot(self.turn, self.wire_version)?;
             shot.launch_turn = self
                 .turn
                 .checked_sub(cursor.varint_u32()?)
@@ -659,6 +790,26 @@ impl Scene {
         if cursor.u8()? != 0 {
             self.read_territory(cursor)?;
         }
+        if self.wire_version >= LOS_WIRE {
+            if cursor.u8()? != 0 {
+                read_los_change(cursor, &mut self.los)?;
+                self.los_generation = self.los_generation.wrapping_add(1);
+            }
+            // Before the entities move, which stand on the revealed ground.
+            if cursor.u8()? != 0 {
+                let revision = cursor.varint_u32()?;
+                let start = cursor.0;
+                let reveal = read_reveal(cursor)?;
+                let bytes = start[..start.len() - cursor.0.len()].to_vec();
+                if let Some(ground) = &mut self.ground {
+                    Rc::make_mut(ground).apply_reveal(revision, &reveal);
+                }
+                self.terrain_revision = self.terrain_revision.max(revision);
+                if self.keep_reveals {
+                    self.reveals.push((revision, bytes));
+                }
+            }
+        }
         self.read_tables(cursor)?;
         if cursor.u8()? != 0 {
             for _ in 0..cursor.varint_u32()? {
@@ -678,7 +829,10 @@ impl Scene {
         let mut arrived = Vec::new();
         for _ in 0..spawned {
             id += cursor.varint_u32()?;
-            arrived.push((id, cursor.dot(id, self.turn, &self.template_details)?));
+            arrived.push((
+                id,
+                cursor.dot(id, self.turn, &self.template_details, self.wire_version)?,
+            ));
         }
         let mut id = 0;
         let mut gone = BTreeMap::new();
@@ -694,7 +848,7 @@ impl Scene {
         for _ in 0..changed {
             id += cursor.varint_u32()?;
             let dot = self.dots.get(&id).ok_or("change to an unknown entity")?;
-            changes.insert(id, cursor.change(id, dot)?);
+            changes.insert(id, cursor.change(id, dot, self.wire_version)?);
         }
         let ground = self.ground.as_deref();
         for (id, dot) in &mut self.dots {
@@ -720,6 +874,7 @@ impl Scene {
             }
         }
         let known = |id: u32| self.dots.get(&id).or_else(|| gone.get(&id));
+        let version = self.wire_version;
         let count = cursor.varint_u32()?;
         for _ in 0..count {
             let group = cursor.varint_u32()?;
@@ -731,12 +886,22 @@ impl Scene {
                         .map_or((0, 0, 0, 0, 0), |dot| {
                             (dot.owner, dot.x, dot.z, dot.y, dot.visibility)
                         });
+                    let owner = owner + cursor.zigzag()?;
+                    let x = x + cursor.zigzag()?;
+                    let z = z + cursor.zigzag()?;
+                    let y = y + cursor.zigzag()?;
+                    let xor = cursor.varint_u32()?;
+                    let visibility = if version >= LOS_WIRE {
+                        visibility ^ xor
+                    } else {
+                        widen_visibility(narrow_visibility(visibility) ^ xor)
+                    };
                     SoundTarget::Entity {
-                        owner: owner + cursor.zigzag()?,
-                        x: x + cursor.zigzag()?,
-                        z: z + cursor.zigzag()?,
-                        y: y + cursor.zigzag()?,
-                        visibility: visibility ^ cursor.varint_u32()? as u16,
+                        owner,
+                        x,
+                        z,
+                        y,
+                        visibility,
                     }
                 }
                 SOUND_POSITION => SoundTarget::Position {
@@ -755,7 +920,7 @@ impl Scene {
         let mut launches = Vec::new();
         for _ in 0..count {
             id += cursor.varint_u32()?;
-            launches.push((id, cursor.launch(turn, known)?));
+            launches.push((id, cursor.launch(turn, known, version)?));
         }
         self.shots.retain(|_, shot| shot.last_turn() >= turn);
         self.shots.extend(launches);
@@ -824,6 +989,18 @@ impl Scene {
                 .collect::<Result<_, &'static str>>()?;
             self.range_sets.push(set);
         }
+        if self.wire_version >= LOS_WIRE {
+            let count = cursor.varint_u32()?;
+            for _ in 0..count {
+                let mut sets: [Vec<u32>; 3] = Default::default();
+                for set in &mut sets {
+                    *set = (0..cursor.varint_u32()?)
+                        .map(|_| cursor.varint_u32())
+                        .collect::<Result<_, _>>()?;
+                }
+                self.choices.push(sets);
+            }
+        }
         Ok(())
     }
 
@@ -863,6 +1040,7 @@ impl Scene {
                     0 => Ok(Stance::Enemy),
                     1 => Ok(Stance::Ally),
                     2 => Ok(Stance::Neutral),
+                    255 => Ok(Stance::Unknown),
                     _ => Err("unknown stance"),
                 })
                 .collect::<Result<_, _>>()?;
@@ -925,6 +1103,7 @@ impl Scene {
         out.varint(u64::from(self.segment_turns));
         out.varint(u64::from(self.map_size));
         out.u64(self.terrain_id);
+        out.varint(u64::from(self.terrain_revision));
         out.varint(self.icons.len() as u64);
         for icon in &self.icons {
             out.varint(icon.name.len() as u64);
@@ -947,6 +1126,7 @@ impl Scene {
                     Stance::Enemy => 0,
                     Stance::Ally => 1,
                     Stance::Neutral => 2,
+                    Stance::Unknown => 255,
                 });
             }
             out.varint(player.civ.len() as u64);
@@ -959,6 +1139,15 @@ impl Scene {
         for run in self.territory.tiles.chunk_by(|a, b| a == b) {
             out.varint(run.len() as u64);
             out.u8(run[0]);
+        }
+        out.varint(u64::from(self.los.side));
+        out.varint(self.los.players.len() as u64);
+        for (player, grid) in &self.los.players {
+            out.varint(u64::from(*player));
+            for run in grid.chunk_by(|a, b| a == b) {
+                out.varint(run.len() as u64);
+                out.u8(run[0]);
+            }
         }
         out.varint(self.templates.len() as u64);
         for (name, details) in self.templates.iter().zip(&self.template_details) {
@@ -1047,6 +1236,15 @@ impl Scene {
                 out.u32(circle.thickness.to_bits());
             }
         }
+        out.varint(self.choices.len() as u64);
+        for sets in &self.choices {
+            for set in sets {
+                out.varint(set.len() as u64);
+                for string in set {
+                    out.varint(u64::from(*string));
+                }
+            }
+        }
         out.varint(self.economy.len() as u64);
         for economy in &self.economy {
             out.zigzag(economy.population);
@@ -1082,6 +1280,7 @@ impl Scene {
             out.varint(u64::from(dot.template));
             out.varint(u64::from(dot.actor));
             out.zigzag_i64(i64::from(dot.seed) - i64::from(*id));
+            out.varint(u64::from(dot.choices));
             out.varint(u64::from(dot.variants));
             out.varint(u64::from(dot.variables));
             out.varint(u64::from(dot.ranges));
@@ -1095,6 +1294,10 @@ impl Scene {
             out.varint(u64::from(self.turn - dot.sync_turn));
             out.u8(dot.construction);
             out.varint(u64::from(dot.visibility));
+            out.varint(u64::from(dot.mirage));
+            if dot.mirage != 0 {
+                out.varint(u64::from(dot.parent));
+            }
             out.zigzag(dot.step[0]);
             out.zigzag(dot.step[1]);
             let capture = self.captures.get(id).map_or(&[][..], Vec::as_slice);
@@ -1124,6 +1327,7 @@ impl Scene {
             out.varint(u64::from(shot.actor));
             out.zigzag_i64(i64::from(shot.seed) - i64::from(shot.shooter));
             out.varint(u64::from(shot.variants));
+            out.varint(u64::from(shot.choices));
             for point in [shot.launch, shot.target] {
                 out.zigzag(point[0]);
                 out.zigzag(point[2]);
@@ -1229,6 +1433,13 @@ fn advance(dot: &mut Dot, change: Option<&Change>, ground: Option<&Ground>, turn
         if mask & CHANGED_HITPOINTS != 0 {
             dot.hitpoints = values.hitpoints;
         }
+        if mask & CHANGED_MIRAGE != 0 {
+            dot.mirage = values.mirage;
+            dot.parent = values.parent;
+        }
+        if mask & CHANGED_CHOSEN != 0 {
+            dot.choices = values.choices;
+        }
     }
     if mask & CHANGED_ANIMATION != 0 {
         dot.speed_turn = turn;
@@ -1279,21 +1490,114 @@ pub fn message_turn(message: &[u8]) -> Result<u32, &'static str> {
     ByteReader(body).varint_u32()
 }
 
-/// The terrain a keyframe names, 0 for none, without decoding the rest.
-pub fn keyframe_terrain(message: &[u8]) -> Result<u64, &'static str> {
+/// The terrain a keyframe names, 0 for none, and the reveals it needs (0
+/// for a whole terrain), without decoding the rest.
+pub fn keyframe_terrain(message: &[u8]) -> Result<(u64, u32), &'static str> {
     let (_, body) = message.split_first().ok_or("empty message")?;
     let mut cursor = ByteReader(body);
     // Turn, wire version, match id, game speed, delay, first turn, turns
     // per segment, map size.
     cursor.varint()?;
-    cursor.u8()?;
+    let version = cursor.u8()?;
     cursor.u64()?;
     cursor.u32()?;
     cursor.varint()?;
     cursor.varint()?;
     cursor.varint()?;
     cursor.varint()?;
-    cursor.u64()
+    let id = cursor.u64()?;
+    let revision = if version >= LOS_WIRE {
+        cursor.varint_u32()?
+    } else {
+        0
+    };
+    Ok((id, revision))
+}
+
+/// A keyframe's LOS.
+fn read_los(cursor: &mut ByteReader) -> Result<Los, &'static str> {
+    let side = cursor.varint_u32()?;
+    let vertices = side as usize * side as usize;
+    let mut los = Los {
+        side,
+        players: BTreeMap::new(),
+    };
+    for _ in 0..cursor.varint_u32()? {
+        let player = cursor.varint_u32()?;
+        let mut grid = Vec::with_capacity(vertices);
+        while grid.len() < vertices {
+            let run = cursor.varint()? as usize;
+            let state = cursor.u8()?;
+            if run == 0 || run > vertices - grid.len() {
+                return Err("LOS run out of bounds");
+            }
+            grid.resize(grid.len() + run, state);
+        }
+        los.players.insert(player, grid);
+    }
+    Ok(los)
+}
+
+/// A delta's LOS changes, applied to `los`.
+fn read_los_change(cursor: &mut ByteReader, los: &mut Los) -> Result<(), &'static str> {
+    let vertices = los.side as usize * los.side as usize;
+    for _ in 0..cursor.varint_u32()? {
+        let player = cursor.varint_u32()?;
+        let grid = los
+            .players
+            .entry(player)
+            .or_insert_with(|| vec![0; vertices]);
+        let mut at = 0usize;
+        for _ in 0..cursor.varint_u32()? {
+            at += cursor.varint()? as usize;
+            let count = cursor.varint()? as usize;
+            if at + count > grid.len() {
+                return Err("LOS change past the grid");
+            }
+            let packed = cursor.take(count.div_ceil(4))?;
+            for k in 0..count {
+                grid[at + k] = (packed[k / 4] >> (2 * (k % 4))) & 3;
+            }
+            at += count;
+        }
+    }
+    Ok(())
+}
+
+/// Reads past a reveal (`specula-server/src/terrain.rs`), keeping its
+/// heights.
+fn read_reveal(cursor: &mut ByteReader) -> Result<Reveal, &'static str> {
+    for _ in 0..cursor.varint_u32()? {
+        cursor.varint()?;
+        cursor.u32()?;
+        cursor.text()?;
+    }
+    let mut heights = Vec::new();
+    let mut at = 0usize;
+    for _ in 0..cursor.varint_u32()? {
+        at += cursor.varint()? as usize;
+        let count = cursor.varint()? as usize;
+        for vertex in at..at + count {
+            heights.push((vertex, cursor.u16()?));
+            cursor.f32()?;
+        }
+        at += count;
+    }
+    for _ in 0..cursor.varint_u32()? {
+        cursor.varint()?;
+        let count = cursor.varint()? as usize;
+        cursor.take(count.checked_mul(6).ok_or("reveal too long")?)?;
+    }
+    for _ in 0..cursor.varint_u32()? {
+        cursor.varint()?;
+        cursor.varint()?;
+        for _ in 0..cursor.varint_u32()? {
+            cursor.varint()?;
+            cursor
+                .take(specula_assets::shore::WAVE_ROWS * specula_assets::shore::WAVE_FLOATS * 4)?;
+        }
+    }
+    Ok(Reveal { heights })
 }
 
 pub fn is_keyframe(message: &[u8]) -> bool {
@@ -1491,17 +1795,21 @@ trait Records {
         id: u32,
         turn: u32,
         details: &[Option<TemplateDetails>],
+        version: u8,
     ) -> Result<(Dot, Vec<u8>), &'static str>;
     fn capture(&mut self) -> Result<Vec<u8>, &'static str>;
     fn economy(&mut self) -> Result<Economy, &'static str>;
-    fn change(&mut self, id: u32, dot: &Dot) -> Result<Change, &'static str>;
-    fn shot(&mut self, turn: u32) -> Result<Shot, &'static str>;
+    fn change(&mut self, id: u32, dot: &Dot, version: u8) -> Result<Change, &'static str>;
+    fn shot(&mut self, turn: u32, version: u8) -> Result<Shot, &'static str>;
     fn launch<'b>(
         &mut self,
         turn: u32,
         known: impl Fn(u32) -> Option<&'b Dot>,
+        version: u8,
     ) -> Result<Shot, &'static str>;
-    fn shot_origin(&mut self, shooter: u32, turn: u32) -> Result<Shot, &'static str>;
+    fn shot_origin(&mut self, shooter: u32, turn: u32, version: u8) -> Result<Shot, &'static str>;
+    fn visibility(&mut self, version: u8) -> Result<u32, &'static str>;
+    fn mirage(&mut self, version: u8) -> Result<(u32, u32), &'static str>;
     fn shot_flight(&mut self, shot: &mut Shot) -> Result<(), &'static str>;
     fn point(&mut self) -> Result<[i32; 3], &'static str>;
 }
@@ -1545,16 +1853,16 @@ impl Records for ByteReader<'_> {
             garrison_classes: 0,
             turret_classes: 0,
         };
-        if version >= WIRE_VERSION - 2 {
+        if version >= OLDEST_WIRE {
             details.supply_type = self.varint_u32()?;
             details.gather_rates = self.varint_u32()?;
             details.dropsite_types = self.varint_u32()?;
             details.attack_types = self.varint_u32()?;
         }
-        if version >= WIRE_VERSION - 1 {
+        if version >= 20 {
             details.order_sounds = self.varint_u32()?;
         }
-        if version == WIRE_VERSION {
+        if version >= 21 {
             details.garrison_classes = self.varint_u32()?;
             details.turret_classes = self.varint_u32()?;
         }
@@ -1574,6 +1882,7 @@ impl Records for ByteReader<'_> {
         id: u32,
         turn: u32,
         details: &[Option<TemplateDetails>],
+        version: u8,
     ) -> Result<(Dot, Vec<u8>), &'static str> {
         let back = |cursor: &mut Self| {
             turn.checked_sub(cursor.varint_u32()?)
@@ -1597,6 +1906,11 @@ impl Records for ByteReader<'_> {
             template: self.varint_u32()?,
             actor: self.varint_u32()?,
             seed: self.seed(id)?,
+            choices: if version >= LOS_WIRE {
+                self.varint_u32()?
+            } else {
+                0
+            },
             variants: self.varint_u32()?,
             variables: self.varint_u32()?,
             ranges: self.varint_u32()?,
@@ -1609,14 +1923,24 @@ impl Records for ByteReader<'_> {
             sync_offset: self.zigzag()?,
             sync_turn: back(self)?,
             construction: self.u8()?,
-            visibility: self.varint_u32()? as u16,
-            step: [self.zigzag()?, self.zigzag()?],
+            visibility: self.visibility(version)?,
+            mirage: 0,
+            parent: 0,
+            step: [0, 0],
             grounded: false,
             hitpoints: 0,
             from_x: x as f32,
             from_z: z as f32,
             speed_turn: 0,
             phase: 0.0,
+        };
+        let (mirage, parent) = self.mirage(version)?;
+        let step = [self.zigzag()?, self.zigzag()?];
+        let dot = Dot {
+            mirage,
+            parent,
+            step,
+            ..dot
         };
         let motion = self.u8()?;
         let hitpoints = if motion & MOTION_HITPOINTS != 0 {
@@ -1675,7 +1999,7 @@ impl Records for ByteReader<'_> {
     }
 
     /// A changed entry after its id, for `dot` as the scene has it.
-    fn change(&mut self, id: u32, dot: &Dot) -> Result<Change, &'static str> {
+    fn change(&mut self, id: u32, dot: &Dot, version: u8) -> Result<Change, &'static str> {
         let mask = self.varint()?;
         let mut change = Change {
             mask,
@@ -1730,7 +2054,7 @@ impl Records for ByteReader<'_> {
             values.construction = self.u8()?;
         }
         if mask & CHANGED_VISIBILITY != 0 {
-            values.visibility = self.varint_u32()? as u16;
+            values.visibility = self.visibility(version)?;
         }
         if mask & CHANGED_VARIABLES != 0 {
             values.variables = self.varint_u32()?;
@@ -1744,13 +2068,38 @@ impl Records for ByteReader<'_> {
         if mask & CHANGED_CAPTURE != 0 {
             change.capture = self.capture()?;
         }
+        let values = &mut change.values;
+        if mask & CHANGED_MIRAGE != 0 {
+            (values.mirage, values.parent) = self.mirage(version)?;
+        }
+        if mask & CHANGED_CHOSEN != 0 {
+            values.choices = self.varint_u32()?;
+        }
         Ok(change)
     }
 
+    fn visibility(&mut self, version: u8) -> Result<u32, &'static str> {
+        let raw = self.varint_u32()?;
+        Ok(if version >= LOS_WIRE {
+            raw
+        } else {
+            widen_visibility(raw)
+        })
+    }
+
+    fn mirage(&mut self, version: u8) -> Result<(u32, u32), &'static str> {
+        if version < LOS_WIRE {
+            return Ok((0, 0));
+        }
+        let mirage = self.varint_u32()?;
+        let parent = if mirage != 0 { self.varint_u32()? } else { 0 };
+        Ok((mirage, parent))
+    }
+
     /// A projectile launched on `turn`, as a keyframe has it.
-    fn shot(&mut self, turn: u32) -> Result<Shot, &'static str> {
+    fn shot(&mut self, turn: u32, version: u8) -> Result<Shot, &'static str> {
         let shooter = self.varint_u32()?;
-        let mut shot = self.shot_origin(shooter, turn)?;
+        let mut shot = self.shot_origin(shooter, turn, version)?;
         shot.launch = self.point()?;
         shot.target = self.point()?;
         self.shot_flight(&mut shot)?;
@@ -1763,7 +2112,15 @@ impl Records for ByteReader<'_> {
         &mut self,
         turn: u32,
         known: impl Fn(u32) -> Option<&'b Dot>,
+        version: u8,
     ) -> Result<Shot, &'static str> {
+        // A seat is sent a projectile when it comes into sight.
+        let turn = if version >= LOS_WIRE {
+            turn.checked_sub(self.varint_u32()?)
+                .ok_or("projectile launched before the first turn")?
+        } else {
+            turn
+        };
         let shooter_id = self.varint_u32()?;
         let shooter = known(shooter_id).filter(|_| shooter_id != 0);
         let (mut shot, origin) = match shooter {
@@ -1775,11 +2132,16 @@ impl Records for ByteReader<'_> {
                     actor: dot.actor,
                     seed: dot.seed,
                     variants: dot.variants,
+                    choices: if version >= LOS_WIRE {
+                        self.varint_u32()?
+                    } else {
+                        0
+                    },
                     ..Shot::default()
                 },
                 [dot.x, dot.y, dot.z],
             ),
-            None => (self.shot_origin(shooter_id, turn)?, [0; 3]),
+            None => (self.shot_origin(shooter_id, turn, version)?, [0; 3]),
         };
         let launch = self.point()?;
         let target = self.point()?;
@@ -1792,7 +2154,7 @@ impl Records for ByteReader<'_> {
     }
 
     /// The shooter's fields as sent, the rest left to fill in.
-    fn shot_origin(&mut self, shooter: u32, turn: u32) -> Result<Shot, &'static str> {
+    fn shot_origin(&mut self, shooter: u32, turn: u32, version: u8) -> Result<Shot, &'static str> {
         Ok(Shot {
             launch_turn: turn,
             shooter,
@@ -1800,6 +2162,11 @@ impl Records for ByteReader<'_> {
             actor: self.varint_u32()?,
             seed: self.seed(shooter)?,
             variants: self.varint_u32()?,
+            choices: if version >= LOS_WIRE {
+                self.varint_u32()?
+            } else {
+                0
+            },
             ..Shot::default()
         })
     }

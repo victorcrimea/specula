@@ -13,6 +13,7 @@ mod icons;
 mod impostor;
 mod lang;
 mod left;
+mod los;
 mod march;
 mod message_box;
 mod minimap;
@@ -132,6 +133,9 @@ type FrameCallback = Closure<dyn FnMut(f64)>;
 const TURN_MS: f64 = 200.0;
 const TURN_MS_MIN: f64 = 50.0;
 const TURN_MS_MAX: f64 = 1000.0;
+/// How often a seat's growing terrain rebuilds the view: the terrain mesh
+/// and blends are made for the whole map at once.
+const TERRAIN_REBUILD_MS: f64 = 1000.0;
 /// Low enough that network jitter does not make the pace wobble.
 const TURN_SMOOTHING: f64 = 0.1;
 /// Playback speeds in game time; the match's own speed is added if missing.
@@ -212,7 +216,7 @@ pub struct AnimationSound {
     /// Index into `Scene::strings`.
     pub group: u32,
     pub owner: i32,
-    pub visibility: u16,
+    pub visibility: u32,
     /// In metres.
     pub position: [f32; 3],
 }
@@ -450,6 +454,10 @@ impl View for Renderer {
     fn set_icon_atlas(&mut self, atlas: IconAtlas) {
         Renderer::set_icon_atlas(self, atlas);
     }
+
+    fn set_perspective(&mut self, perspective: Perspective, _controls: bool) {
+        Renderer::set_perspective(self, perspective);
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -523,8 +531,13 @@ struct App {
     dirty: bool,
     /// The terrain shown; 0 for none.
     terrain_id: u64,
-    /// The terrain the worker handed over, until a keyframe shows it.
+    /// The terrain the worker handed over: until a keyframe shows it, then
+    /// for a seat's, to add the reveals to.
     terrain_image: Option<(u64, TerrainImage)>,
+    /// A seat's terrain has reveals the view has not been rebuilt with,
+    /// and when it last was, by the frame clock.
+    terrain_revealed: bool,
+    terrain_rebuilt_at: f64,
     diplomacy_colors: bool,
     perspective: Perspective,
     /// The status bars setting, which follows the perspective.
@@ -805,6 +818,24 @@ impl App {
             }
             self.turn_start = now;
         }
+        // A seat's terrain grows a little most turns; the view is rebuilt
+        // with it at most once a second (CONTROL-IMPL V48).
+        if self.terrain_revealed
+            && now - self.terrain_rebuilt_at >= TERRAIN_REBUILD_MS
+            && let Some((id, image)) = &self.terrain_image
+            && *id == self.terrain_id
+        {
+            self.terrain_revealed = false;
+            self.terrain_rebuilt_at = now;
+            self.renderer.set_terrain(Some(image));
+            if let Some(minimap) = &mut self.minimap {
+                minimap.set_terrain(Some(image));
+            }
+            if let Some(warmup) = &mut self.warmup {
+                warmup.set_terrains(image.names.clone());
+            }
+            self.dirty = true;
+        }
         if self.scene_changed {
             self.scene_changed = false;
             self.renderer.set_renames(&self.renames);
@@ -889,6 +920,21 @@ impl App {
             self.update_palette();
             // The panels' buttons work for the seat's own from now on.
             self.details_dirty = true;
+        }
+        // A player watches as its player until it has won or lost, when
+        // vanilla makes it an observer (`isPlayerObserver`); its stream
+        // carries no more than that.
+        let playing = usize::try_from(seat)
+            .ok()
+            .and_then(|seat| self.scene.players.get(seat))
+            .is_some_and(|player| player.state == PlayerState::Active);
+        if self.perspective_select.disabled() != playing {
+            self.perspective_select.set_disabled(playing);
+        }
+        if playing && self.perspective != Perspective::Player(seat as usize) {
+            self.perspective = Perspective::Player(seat as usize);
+            self.perspective_select.set_value(&seat.to_string());
+            self.update_palette();
         }
         let formation = self
             .details
@@ -1325,6 +1371,9 @@ impl App {
             .set_all_status_bars(self.all_status_bars.then_some(self.perspective));
         self.renderer
             .set_perspective(self.perspective, self.uplink.is_some());
+        if let Some(minimap) = &mut self.minimap {
+            minimap.set_perspective(self.perspective);
+        }
         self.scene_changed = true;
     }
 }
@@ -1536,7 +1585,7 @@ async fn run(
         renderer,
         minimap,
         loading,
-        scene: Scene::default(),
+        scene: Scene::for_page(),
         progress: 1.0,
         turn_start: 0.0,
         turn_interval: TURN_MS,
@@ -1547,6 +1596,8 @@ async fn run(
         dirty: true,
         terrain_id: 0,
         terrain_image: None,
+        terrain_revealed: false,
+        terrain_rebuilt_at: 0.0,
         diplomacy_colors: false,
         perspective: Perspective::Observer,
         all_status_bars: false,
@@ -2947,11 +2998,11 @@ fn save_sound_settings(settings: Settings) {
 /// `CCmpSoundManager::PlaySoundGroup`'s test for the displayed player:
 /// `Some(owned)` when it hears the entity's sound. An observer sees all and
 /// owns nothing.
-fn hears(perspective: Perspective, owner: i32, visibility: u16) -> Option<bool> {
+fn hears(perspective: Perspective, owner: i32, visibility: u32) -> Option<bool> {
     match perspective {
         Perspective::Observer => Some(false),
         Perspective::Player(player) => perspective
-            .sees(visibility)
+            .hears(visibility)
             .then_some(usize::try_from(owner) == Ok(player)),
     }
 }
@@ -3297,6 +3348,19 @@ fn receive(app_rc: &Rc<RefCell<App>>, turn_ms: f64, message: &[u8]) {
             app.turn_arrived = true;
             app.scene_changed = true;
             app.renames.extend_from_slice(&app.scene.renames);
+            for (revision, reveal) in std::mem::take(&mut app.scene.reveals) {
+                if let Some((id, image)) = &mut app.terrain_image
+                    && *id == app.scene.terrain_id
+                    && image.seat.is_some()
+                {
+                    match image.apply_reveal(revision, &reveal) {
+                        Ok(()) => app.terrain_revealed = true,
+                        Err(error) => {
+                            web_sys::console::error_1(&format!("bad reveal: {error}").into())
+                        }
+                    }
+                }
+            }
             if turn_ms > 0.0 {
                 app.turn_interval = turn_ms;
                 app.measure_turns = false;
@@ -3324,11 +3388,11 @@ fn receive(app_rc: &Rc<RefCell<App>>, turn_ms: f64, message: &[u8]) {
                 if let Some(warmup) = &mut app.warmup {
                     warmup.set_terrains(Vec::new());
                 }
-                match app.terrain_image.take() {
-                    Some((id, image)) if id == terrain_id => {
-                        app.renderer.set_terrain(Some(&image));
+                match &app.terrain_image {
+                    Some((id, image)) if *id == terrain_id => {
+                        app.renderer.set_terrain(Some(image));
                         if let Some(minimap) = &mut app.minimap {
-                            minimap.set_terrain(Some(&image));
+                            minimap.set_terrain(Some(image));
                         }
                         if let Some(warmup) = &mut app.warmup {
                             warmup.set_terrains(image.names.clone());
@@ -3357,13 +3421,31 @@ fn receive(app_rc: &Rc<RefCell<App>>, turn_ms: f64, message: &[u8]) {
 fn receive_terrain(app_rc: &Rc<RefCell<App>>, id: u64, resource: &[u8]) {
     let app = &mut *app_rc.borrow_mut();
     let built = terrain::build(resource).and_then(|image| {
-        let ground = Ground::new(id, image.size, image.heights.clone())?;
+        let mut ground = Ground::new(id, image.size, image.heights.clone())?;
+        ground.revision = image.seat.as_ref().map_or(0, |seat| seat.revision);
         Ok((image, ground))
     });
     match built {
         Ok((image, ground)) => {
+            // A seat's terrain only grows; one the deltas took further is
+            // kept.
+            let held = |revision: Option<u32>| match (&app.terrain_image, revision) {
+                (Some((held, image)), Some(revision)) if *held == id => image
+                    .seat
+                    .as_ref()
+                    .is_some_and(|seat| seat.revision >= revision),
+                _ => false,
+            };
+            if held(image.seat.as_ref().map(|seat| seat.revision)) {
+                return;
+            }
             app.scene.ground = Some(Rc::new(ground));
+            let shown = app.terrain_id == id;
             app.terrain_image = Some((id, image));
+            if shown {
+                app.terrain_revealed = true;
+                app.terrain_rebuilt_at = f64::NEG_INFINITY;
+            }
         }
         // The keyframe fails without it, and that stops the stream.
         Err(error) => {

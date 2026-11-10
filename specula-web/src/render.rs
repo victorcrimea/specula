@@ -6,9 +6,11 @@ use std::collections::HashMap;
 
 use web_sys::HtmlCanvasElement;
 
+use crate::diplomacy::Perspective;
 use crate::gpu;
 use crate::gpu::Gpu;
 use crate::icons::IconAtlas;
+use crate::los;
 use crate::stream::Dot;
 use crate::stream::Scene;
 use crate::stream::Territory;
@@ -56,6 +58,14 @@ pub struct Renderer {
     territory: Option<wgpu::BindGroup>,
     /// The territory generation and palette `territory` was made from.
     territory_made_from: Option<(u32, Vec<u32>)>,
+    /// `RenderFinalTexture`'s LOS pass over the terrain and territory,
+    /// before the entities: black where the shown player's LOS texture is
+    /// (`minimap_los` keeps its value as the alpha the minimap is drawn
+    /// with). None without LOS.
+    los: Option<wgpu::BindGroup>,
+    /// The LOS generation and perspective `los` was made for.
+    los_made_from: Option<(u32, Perspective)>,
+    perspective: Perspective,
     icon_pipeline: wgpu::RenderPipeline,
     icon_sampler: wgpu::Sampler,
     atlas: Option<wgpu::BindGroup>,
@@ -339,6 +349,9 @@ impl Renderer {
             terrain: None,
             territory_pipeline,
             territory: None,
+            los: None,
+            los_made_from: None,
+            perspective: Perspective::Observer,
             territory_made_from: None,
             icon_pipeline,
             icon_sampler,
@@ -415,10 +428,10 @@ impl Renderer {
                 pass.set_bind_group(1, terrain, &[]);
                 pass.draw(0..4, 0..1);
             }
-            if let Some(territory) = &self.territory {
+            for picture in [&self.territory, &self.los].into_iter().flatten() {
                 pass.set_pipeline(&self.territory_pipeline);
                 pass.set_bind_group(0, &self.bind_group, &[]);
-                pass.set_bind_group(1, territory, &[]);
+                pass.set_bind_group(1, picture, &[]);
                 pass.draw(0..4, 0..1);
             }
             if self.count > 0 {
@@ -586,9 +599,44 @@ impl Renderer {
 
     /// Uploads the dots once per turn; frames in between only move them
     /// with the progress uniform. `palette` is the colour of each player id.
+    /// The perspective whose LOS and entities it shows.
+    pub fn set_perspective(&mut self, perspective: Perspective) {
+        self.perspective = perspective;
+    }
+
+    /// The minimap's LOS mask, made again when the LOS or the perspective
+    /// changed.
+    fn set_los(&mut self, scene: &Scene) {
+        let made_from = (scene.los_generation, self.perspective);
+        if self.los_made_from == Some(made_from) {
+            return;
+        }
+        self.los_made_from = Some(made_from);
+        let side = scene.los.side;
+        let grid = match self.perspective {
+            Perspective::Player(player) => scene.los.players.get(&(player as u32)),
+            Perspective::Observer => None,
+        };
+        self.los = grid
+            .filter(|grid| side > 0 && grid.len() == side as usize * side as usize)
+            .map(|grid| {
+                let pixels: Vec<u8> = los::blur(grid, side as usize)
+                    .into_iter()
+                    .flat_map(|texel| [0, 0, 0, 255 - texel])
+                    .collect();
+                self.picture("los", side, side, &pixels)
+            });
+    }
+
     pub fn set_scene(&mut self, scene: &Scene, palette: &[u32]) {
         self.map_size = scene.map_size as f32;
         self.set_territory(&scene.territory, scene.territory_generation, palette);
+        self.set_los(scene);
+        let perspective = self.perspective;
+        let filtered = matches!(perspective, Perspective::Player(player)
+            if scene.los.players.contains_key(&(player as u32)));
+        // `CMiniMapTexture` draws what is not HIDDEN to the shown player.
+        let shown = |dot: &&Dot| perspective.shows(dot, filtered);
         // Nothing to place dots on before the first keyframe.
         if scene.map_size == 0 {
             self.count = 0;
@@ -596,7 +644,9 @@ impl Renderer {
             return;
         }
         self.instance_bytes.clear();
-        for dot in scene.dots.values() {
+        let mut count = 0;
+        for dot in scene.dots.values().filter(shown) {
+            count += 1;
             let [b, g, r, a] = dot_color(dot, palette).to_le_bytes();
             let position = [dot.from_x, dot.from_z, dot.x as f32, dot.z as f32];
             for value in position {
@@ -612,11 +662,11 @@ impl Renderer {
         }
         self.queue
             .write_buffer(&self.instances, 0, &self.instance_bytes);
-        self.count = scene.dots.len() as u32;
+        self.count = count;
 
         self.instance_bytes.clear();
         let mut icon_count = 0;
-        for dot in scene.dots.values() {
+        for dot in scene.dots.values().filter(shown) {
             let Some(icon) = (dot.icon as usize)
                 .checked_sub(1)
                 .and_then(|index| scene.icons.get(index))

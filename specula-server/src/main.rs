@@ -1,3 +1,4 @@
+mod actors;
 mod classify;
 mod delta;
 mod detail;
@@ -44,10 +45,10 @@ use crate::feed::Record;
 use crate::history::History;
 use crate::play::Play;
 use crate::play::Setup;
-use crate::terrain::Ground;
 use crate::usage::Usage;
 use crate::view::Hub;
 use crate::view::Message;
+use crate::view::View;
 
 const DEFAULT_SOCKET: &str = "/tmp/specula-feed.sock";
 /// As AoE2 DE's ranked spectating: long enough that a player cannot scout
@@ -130,7 +131,7 @@ async fn main() {
         }
     };
 
-    let hub = Arc::new(Hub::new(delay, history, play_port.is_some()));
+    let hub = Arc::new(Hub::new(delay, history));
     let publisher_hub = Arc::clone(&hub);
     std::thread::spawn(move || publisher_hub.run_publisher());
     let play = play_port.map(|port| {
@@ -170,6 +171,8 @@ async fn main() {
                 play_detail_viewer,
                 play_segment_file,
                 play_detail_segment_file,
+                play_terrain,
+                play_data,
                 play_command,
                 web::terrain,
                 web::data,
@@ -248,7 +251,7 @@ fn viewer(
 ) -> Channel<'static> {
     let hub = Arc::clone(hub);
     let watch = usage.watch(cookies);
-    relay(socket, watch, move || hub.subscribe(false))
+    relay(socket, watch, move || hub.subscribe(View::Observer))
 }
 
 /// The detail stream, which viewers hold open only while they have
@@ -256,7 +259,7 @@ fn viewer(
 #[rocket::get("/detail")]
 fn detail_viewer(socket: WebSocket, hub: &State<Arc<Hub>>) -> Channel<'static> {
     let hub = Arc::clone(hub);
-    relay(socket, (), move || hub.subscribe_detail(false))
+    relay(socket, (), move || hub.subscribe_detail(View::Observer))
 }
 
 /// In play mode: the player's page, the 3D page on the live stream, for
@@ -322,27 +325,93 @@ fn play_new(
     play.start(&visitor, &setup).map_err(refuse)
 }
 
-/// `/ws` without the delay, for `/play`.
+/// The stream of the visitor's seat: undelayed, and only what its player
+/// sees. A visitor without a seat gets none.
+fn seat_view(play: &State<Option<Arc<Play>>>, cookies: &CookieJar<'_>) -> Option<View> {
+    let seat = play.as_ref()?.seat(usage::visitor(cookies).as_deref())?;
+    Some(View::Seat(u32::from(seat)))
+}
+
 #[rocket::get("/play/ws")]
-fn play_viewer(socket: WebSocket, hub: &State<Arc<Hub>>) -> Channel<'static> {
+fn play_viewer(
+    socket: WebSocket,
+    hub: &State<Arc<Hub>>,
+    play: &State<Option<Arc<Play>>>,
+    cookies: &CookieJar<'_>,
+) -> Option<Channel<'static>> {
     let hub = Arc::clone(hub);
-    relay(socket, (), move || hub.subscribe(true))
+    let view = seat_view(play, cookies)?;
+    Some(relay(socket, (), move || hub.subscribe(view)))
 }
 
 #[rocket::get("/play/detail")]
-fn play_detail_viewer(socket: WebSocket, hub: &State<Arc<Hub>>) -> Channel<'static> {
+fn play_detail_viewer(
+    socket: WebSocket,
+    hub: &State<Arc<Hub>>,
+    play: &State<Option<Arc<Play>>>,
+    cookies: &CookieJar<'_>,
+) -> Option<Channel<'static>> {
     let hub = Arc::clone(hub);
-    relay(socket, (), move || hub.subscribe_detail(true))
+    let view = seat_view(play, cookies)?;
+    Some(relay(socket, (), move || hub.subscribe_detail(view)))
 }
 
 #[rocket::get("/play/match/<id>/seg/<index>")]
-fn play_segment_file(id: &str, index: usize, hub: &State<Arc<Hub>>) -> Option<SegmentBytes> {
-    segment_bytes(hub.segment(u64::from_str_radix(id, 16).ok()?, index, true)?)
+fn play_segment_file(
+    id: &str,
+    index: usize,
+    hub: &State<Arc<Hub>>,
+    play: &State<Option<Arc<Play>>>,
+    cookies: &CookieJar<'_>,
+) -> Option<SegmentBytes> {
+    let view = seat_view(play, cookies)?;
+    segment_bytes(hub.segment(u64::from_str_radix(id, 16).ok()?, index, view)?)
 }
 
 #[rocket::get("/play/match/<id>/detail/<index>")]
-fn play_detail_segment_file(id: &str, index: usize, hub: &State<Arc<Hub>>) -> Option<SegmentBytes> {
-    segment_bytes(hub.detail_segment(u64::from_str_radix(id, 16).ok()?, index, true)?)
+fn play_detail_segment_file(
+    id: &str,
+    index: usize,
+    hub: &State<Arc<Hub>>,
+    play: &State<Option<Arc<Play>>>,
+    cookies: &CookieJar<'_>,
+) -> Option<SegmentBytes> {
+    let view = seat_view(play, cookies)?;
+    segment_bytes(hub.detail_segment(u64::from_str_radix(id, 16).ok()?, index, view)?)
+}
+
+/// The seat's terrain as revealed so far (`terrain.rs`, kind 1); a later
+/// revision than the keyframe names is as good, since reveals only add.
+#[rocket::get("/play/terrain/<_id>")]
+fn play_terrain(
+    _id: &str,
+    hub: &State<Arc<Hub>>,
+    play: &State<Option<Arc<Play>>>,
+    cookies: &CookieJar<'_>,
+) -> Option<SegmentBytes> {
+    let View::Seat(player) = seat_view(play, cookies)? else {
+        return None;
+    };
+    Some(SegmentBytes(
+        hub.seat_terrain(player)?,
+        Header::new("Cache-Control", "no-store"),
+    ))
+}
+
+/// A `/data` file the seat's stream named.
+#[rocket::get("/play/data/<hash>")]
+fn play_data(
+    hash: &str,
+    hub: &State<Arc<Hub>>,
+    play: &State<Option<Arc<Play>>>,
+    cookies: &CookieJar<'_>,
+) -> Option<Json> {
+    let view = seat_view(play, cookies)?;
+    let json = hub.data(u64::from_str_radix(hash, 16).ok()?, view)?;
+    Some(Json(
+        String::from_utf8(json.to_vec()).ok()?,
+        Header::new("Cache-Control", "no-store"),
+    ))
 }
 
 /// The player's orders (`specula_assets::command`). The server first sends
@@ -353,9 +422,11 @@ fn play_detail_segment_file(id: &str, index: usize, hub: &State<Arc<Hub>>) -> Op
 fn play_command(
     socket: WebSocket,
     play: &State<Option<Arc<Play>>>,
+    hub: &State<Arc<Hub>>,
     cookies: &CookieJar<'_>,
 ) -> Option<Channel<'static>> {
     let play = Arc::clone(play.as_ref()?);
+    let hub = Arc::clone(hub);
     let visitor = usage::visitor(cookies);
     Some(socket.channel(move |mut stream| {
         Box::pin(async move {
@@ -370,7 +441,10 @@ fn play_command(
                         Ok(reply) => {
                             // Every page of the seat asks with its own ids;
                             // a reply to another's is ignored there.
-                            if play.seat(visitor.as_deref()).is_some() {
+                            if let Some(seat) = play.seat(visitor.as_deref()) {
+                                let reply = play::map_reply_ids(&reply, |id| {
+                                    hub.seat_handle(u32::from(seat), id)
+                                });
                                 stream.send(rocket_ws::Message::text(reply)).await?;
                             }
                             continue;
@@ -390,15 +464,36 @@ fn play_command(
                 let Some(seat) = play.seat(visitor.as_deref()) else {
                     continue;
                 };
+                // The page names entities by the seat's handles; one the
+                // seat does not hold now drops the order, as the seat
+                // cannot have been shown it.
+                let to_feed = |ids: Vec<&mut u32>| {
+                    ids.into_iter()
+                        .all(|id| match hub.seat_entity(u32::from(seat), *id) {
+                            Some(feed) => {
+                                *id = feed;
+                                true
+                            }
+                            None => false,
+                        })
+                };
                 if bytes.first() == Some(&QUERY_TAG) {
                     match Query::decode(&bytes) {
-                        Ok(query) => play.query(seat, &query),
+                        Ok(mut query) => {
+                            if to_feed(query.entity_ids_mut()) {
+                                play.query(seat, &query);
+                            }
+                        }
                         Err(error) => eprintln!("bad query from the player: {error}"),
                     }
                     continue;
                 }
                 match Order::decode(&bytes) {
-                    Ok(order) => play.send(seat, &order),
+                    Ok(mut order) => {
+                        if to_feed(order.entity_ids_mut()) {
+                            play.send(seat, &order);
+                        }
+                    }
                     Err(error) => eprintln!("bad command from the player: {error}"),
                 }
             }
@@ -453,12 +548,12 @@ struct SegmentBytes(Vec<u8>, Header<'static>);
 
 #[rocket::get("/match/<id>/seg/<index>")]
 fn segment_file(id: &str, index: usize, hub: &State<Arc<Hub>>) -> Option<SegmentBytes> {
-    segment_bytes(hub.segment(u64::from_str_radix(id, 16).ok()?, index, false)?)
+    segment_bytes(hub.segment(u64::from_str_radix(id, 16).ok()?, index, View::Observer)?)
 }
 
 #[rocket::get("/match/<id>/detail/<index>")]
 fn detail_segment_file(id: &str, index: usize, hub: &State<Arc<Hub>>) -> Option<SegmentBytes> {
-    segment_bytes(hub.detail_segment(u64::from_str_radix(id, 16).ok()?, index, false)?)
+    segment_bytes(hub.detail_segment(u64::from_str_radix(id, 16).ok()?, index, View::Observer)?)
 }
 
 /// "<segments> <live 0|1>", as `view.rs` describes.
@@ -608,12 +703,12 @@ fn remove_stale_socket(path: &str) -> io::Result<()> {
 
 fn serve(stream: UnixStream, hub: &Hub, play: Option<&Play>) -> io::Result<()> {
     let mut reader = BufReader::new(stream);
-    feed::read_header(&mut reader)?;
+    let version = feed::read_header(&mut reader)?;
     let mut templates = HashMap::new();
     let mut details = feed::Details::default();
     let mut classifier = Classifier::default();
     let mut meter = DeltaMeter::new();
-    while let Some(record) = feed::read_record(&mut reader)? {
+    while let Some(record) = feed::read_record(&mut reader, version)? {
         match record {
             Record::Template {
                 index,
@@ -648,6 +743,7 @@ fn serve(stream: UnixStream, hub: &Hub, play: Option<&Play>) -> io::Result<()> {
             Record::Data { key, json } => details.set_data(key, hub.add_data(json)),
             Record::Stats { index, json } => details.set_stats(index, hub.add_data(json)),
             Record::PlayerGui(player_gui) => details.set_player_gui(player_gui),
+            Record::Los { side, players } => hub.set_los(side, players),
             Record::QueryReply { id, json } => {
                 if let Some(play) = play {
                     play.reply(id, &json);
@@ -667,7 +763,7 @@ fn serve(stream: UnixStream, hub: &Hub, play: Option<&Play>) -> io::Result<()> {
                     resource.unknown,
                     resource.bytes.len()
                 );
-                hub.set_terrain(resource.id, resource.bytes, Ground::new(&terrain));
+                hub.set_terrain(resource.id, resource.bytes, Arc::from(terrain));
             }
             Record::Turn { turn, entities } => {
                 hub.publish(turn, &entities, &details)?;

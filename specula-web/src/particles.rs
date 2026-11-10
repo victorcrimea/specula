@@ -447,6 +447,7 @@ impl Pipelines {
             source: wgpu::ShaderSource::Wgsl(
                 concat!(
                     include_str!("particles.wgsl"),
+                    include_str!("shared/los.wgsl"),
                     include_str!("shared/pass_fog.wgsl"),
                 )
                 .into(),

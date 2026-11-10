@@ -1,22 +1,27 @@
-//! The viewer stream, wire format v18: messages for each keyframe, turn or
+//! The viewer stream, wire format v22: messages for each keyframe, turn or
 //! match end, varints and zigzag as in `wire.rs`, positions and heights in
 //! 1/16 m, carried brotli-compressed as below.
 //!
-//! - kind 1 keyframe: varint turn, u8 wire version (18; a viewer stops
+//! - kind 1 keyframe: varint turn, u8 wire version (22; a viewer stops
 //!   at any other, since nothing after it would read right), u64 match id, f32 game speed (the
 //!   match's sim rate), varint delay in ms (how long after the game the
 //!   server shows it), varint first turn of the match's history, varint
 //!   turns per segment, varint map size in metres, u64 terrain id (0: none
-//!   yet, else fetch `/terrain/<id as 16 hex digits>`), icon table, player
-//!   table, territory, template table, string table, variant set table,
-//!   variable set table, range set table, varint n, n x economy (every player's, by index),
+//!   yet, else fetch `/terrain/<id as 16 hex digits>`), varint terrain
+//!   revision (0: that terrain is whole; else a seat's, revealed in parts:
+//!   fetch `/play/terrain/<id>`, which holds at least this many reveals),
+//!   icon table, player table, territory, LOS, template table, string
+//!   table, variant set table, variable set table, range set table, choice
+//!   table, varint n, n x economy (every player's, by index),
 //!   varint count, then count x {varint id delta, entity}, then the
 //!   projectiles in flight or lying on the ground: varint count, count x
 //!   {varint id delta, projectile, varint turns since the launch}.
 //! - kind 2 delta: varint turn, icons added to the table, u8 1 if a new
 //!   player table follows (it replaces the old one) else 0, u8 1 if a new
-//!   territory follows (likewise) else 0, templates,
-//!   strings, variant sets, variable sets and range sets added to their tables, u8 1
+//!   territory follows (likewise) else 0, u8 1 if LOS changes follow
+//!   (below) else 0, u8 1 if a reveal follows else 0, then varint the
+//!   terrain revision it brings and the reveal (`terrain.rs`), templates,
+//!   strings, variant sets, variable sets, range sets and choices added to their tables, u8 1
 //!   if economies follow else 0, then varint count, count x {varint player
 //!   index, economy} of the players whose economy changed, varint spawned,
 //!   destroyed and changed counts. Spawned entries are keyframe entries,
@@ -28,10 +33,12 @@
 //!   repeat, zigzag sync offset; 256 zigzag owner; 512 varint template,
 //!   varint actor, zigzag seed - id; 1024 varint variant set; 2048 u8
 //!   construction; 4096 varint visibility; 8192 nothing; 32768 varint
-//!   variable set; 65536 u8 hitpoints; 131072 capture; 262144 varint range set}, then the sounds
+//!   variable set; 65536 u8 hitpoints; 131072 capture; 262144 varint range
+//!   set; 524288 mirage; 1048576 varint choices}, then the sounds
 //!   of the turn: varint count, count x sound, in the order the simulation
-//!   played them, then the projectiles launched in the turn: varint count,
-//!   count x {varint id delta, launch}, then the ids of the projectiles
+//!   played them, then the projectiles launched in the turn (for a seat,
+//!   those that came into its sight): varint count, count x {varint id
+//!   delta, launch}, then the ids of the projectiles
 //!   that hit something and are gone: varint count, count x id delta,
 //!   then the entities the turn renamed: varint count, count x {varint old
 //!   id delta, zigzag new id - old id}. An
@@ -65,11 +72,11 @@
 //!
 //! An entity is {zigzag x, zigzag z, zigzag y, u8 angle, u32 colour, varint
 //! icon, varint player, zigzag owner, varint template, varint actor, zigzag
-//! seed - id, varint variant set, varint variable set, varint range set, varint animation,
+//! seed - id, varint choices, varint variant set, varint variable set, varint range set, varint animation,
 //! u8 animation flags,
 //! varint sound group, varint animation speed, varint turns since the
 //! animation started, varint sync repeat, zigzag sync offset, varint turns
-//! since the sync was set, u8 construction, varint visibility, zigzag step
+//! since the sync was set, u8 construction, varint visibility, mirage, zigzag step
 //! x, zigzag step z, u8 motion flags, then u8 hitpoints if motion flag 2,
 //! then capture if motion flag 4}:
 //! - y is the absolute height, not the height above the ground;
@@ -97,8 +104,17 @@
 //!   `SetAnimationSyncRepeat`/`SetAnimationSyncOffset` (0: not synced);
 //! - construction is how far the model has risen out of the ground in
 //!   1/255, 0 when it is not offset at all;
-//! - visibility has bit p set when player p sees the entity (LOS visible),
-//!   for p below 16;
+//! - visibility holds two bits per player p below 16, from bit 2p:
+//!   `GetLosVisibility` for p, 0 hidden, 1 fogged, 2 visible; a seat's has
+//!   only its player's;
+//! - mirage is varint player + 1, 0 for an entity that is not a mirage,
+//!   then, if it is one, varint the id of the entity it stands for (0:
+//!   gone, or a seat's, which follows its handle instead). A mirage is
+//!   what that player last saw of a building or resource in the fog; only
+//!   that player's view shows it;
+//! - choices are a 1-based index into the choice table, 0 for none: a
+//!   seat is never sent an actor's seed (by default the entity id; it is
+//!   0 then), but the variants the engine picks from it;
 //! - step is how far it moves each turn until a delta changes it, in 1/16
 //!   m;
 //! - motion flags: 1 follows the ground, 2 hitpoints follow, 4 capture
@@ -135,7 +151,8 @@
 //! no sounds.
 //!
 //! A projectile is {varint shooter id (0: none), zigzag owner, varint
-//! actor, zigzag seed - shooter id, varint variant set, zigzag x, zigzag z,
+//! actor, zigzag seed - shooter id, varint variant set, varint choices
+//! (as an entity's, of the shooter's look as it shoots), zigzag x, zigzag z,
 //! zigzag y launch point, zigzag x, zigzag z, zigzag y target, varint
 //! speed, zigzag gravity, varint projectile actor, varint impact actor,
 //! varint impact lifetime}, as `CCmpProjectileManager::LaunchProjectile`
@@ -152,9 +169,11 @@
 //! - impact lifetime is in ms.
 //!
 //! A launch, in a delta, is a projectile sent relative to its shooter as
-//! sounds are: {varint shooter id, then only when the viewer does not know
-//! the shooter (or it is 0): zigzag owner, varint actor, zigzag seed -
-//! shooter id, varint variant set; then the launch point minus the
+//! sounds are: {varint turns since its launch (0 but for a seat, which is
+//! sent it once it comes into sight), varint shooter id, then with a known
+//! shooter varint choices, else (or with 0) zigzag owner, varint actor,
+//! zigzag seed - shooter id, varint variant set, varint choices; then the
+//! launch point minus the
 //! shooter's position (nothing subtracted without a known shooter), the
 //! target minus the launch point, and the rest as in a projectile}; with a
 //! known shooter, owner, actor, seed and variant set are the shooter's.
@@ -168,14 +187,27 @@
 //! A player table is varint count n, then n x {varint name length, UTF-8
 //! name, u32 colour, zigzag team (-1: none), u8 state (0 active, 1
 //! defeated, 2 won), n x u8 stance towards player j (0 enemy, 1 ally, 2
-//! neutral), varint civ length, UTF-8 civ code (as in
+//! neutral, 255 unknown: a seat is told only its own stances and the
+//! others' towards it), varint civ length, UTF-8 civ code (as in
 //! simulation/data/civs/), u8 battle (1 when `BattleDetection` reports
 //! one)}, then varint ceasefire end in simulation ms (0: none); index 0 is
 //! gaia.
 //! A territory is varint width, varint height (both 0: none yet), then
 //! runs of {varint length, u8 tile} covering width * height tiles,
 //! row-major, x fastest. A tile is 8 m square, as `ICmpTerritoryManager`'s
-//! grid: owner in 0x1F, connected 0x20, blinking 0x40.
+//! grid: owner in 0x1F, connected 0x20, blinking 0x40; 0x80 alone is a
+//! tile a seat has not been shown, which no border is traced along.
+//! LOS is varint vertices per side v (0: none yet), varint n, n x {varint
+//! player, runs of {varint length, u8 state} covering v * v vertices,
+//! row-major, x fastest}: each player's `CLosQuerier` state, bit 1
+//! explored and bit 2 visible, one vertex every 4 m (the observers' stream
+//! has every player's, a seat's its own). LOS changes are varint n, n x
+//! {varint player, varint runs, runs x {varint vertices skipped since the
+//! last run (from 0), varint count, ceil(count / 4) bytes of states, four
+//! to a byte from the low bits}}.
+//! A choice table is varint count, count x 3 x {varint n, n x varint
+//! string}: the variant names the engine picks at random for an actor
+//! (`specula_assets::variation::chosen`), 0-based string indices.
 //! A template table is varint count, count x {varint length, UTF-8 name,
 //! u8 1 if details follow else 0, then the details: varint flags, varint
 //! overlay texture, varint overlay mask, f32 overlay line thickness, f32
@@ -287,16 +319,19 @@ use std::time::UNIX_EPOCH;
 use rocket::tokio::sync::broadcast;
 use specula_assets::wire::WIRE_VERSION;
 
+use crate::actors::Actors;
 use crate::detail::DetailEncoder;
 use crate::feed::Details;
 use crate::feed::Economy;
 use crate::feed::Entity;
 use crate::feed::Icon;
 use crate::feed::Launch;
+use crate::feed::LosRun;
 use crate::feed::Players;
 use crate::feed::Sound;
 use crate::feed::SoundTarget;
 use crate::feed::TemplateDetails;
+use crate::feed::Terrain;
 use crate::feed::Territory;
 use crate::history::History;
 use crate::terrain::Ground;
@@ -304,6 +339,12 @@ use crate::web;
 use crate::wire::Writer;
 use crate::wire::quantize_angle;
 use crate::wire::quantize_position;
+
+mod seat;
+
+use seat::Seat;
+use seat::SeatInput;
+use seat::SeatWater;
 
 const MESSAGE_KEYFRAME: u8 = 1;
 const MESSAGE_DELTA: u8 = 2;
@@ -327,6 +368,8 @@ const CHANGED_VARIABLES: u64 = 32768;
 const CHANGED_HITPOINTS: u64 = 65536;
 const CHANGED_CAPTURE: u64 = 131072;
 const CHANGED_RANGES: u64 = 262144;
+const CHANGED_MIRAGE: u64 = 524288;
+const CHANGED_CHOSEN: u64 = 1048576;
 const MOTION_GROUNDED: u8 = 1;
 const MOTION_HITPOINTS: u8 = 2;
 const MOTION_CAPTURE: u8 = 4;
@@ -414,7 +457,16 @@ struct Dot {
     sync_turn: u32,
     construction: u8,
     sound_group: u32,
-    visibility: u16,
+    /// Two bits per player, `feed::visibility_of`.
+    visibility: u32,
+    /// The player a mirage is for, plus 1; 0 for an entity that is not
+    /// one.
+    mirage: u32,
+    /// The mirage's parent, 0 for none.
+    parent: u32,
+    /// A seat's: 1-based index into the choice table, the variants the
+    /// engine picks from the seed, which a seat is not sent; 0 otherwise.
+    chosen: u32,
     /// 0 without Health, else the hitpoints in 1/255 of the max, rounded
     /// up and at least 1, so that a scratch shows and a living entity
     /// never reads as having none.
@@ -469,6 +521,9 @@ impl Dot {
             construction: quantize_construction(entity.construction),
             sound_group: one_based(visual.and_then(|visual| visual.sound_group)),
             visibility: entity.visibility,
+            mirage: entity.mirage.map_or(0, |mirage| mirage.player as u32 + 1),
+            parent: entity.mirage.and_then(|mirage| mirage.parent).unwrap_or(0),
+            chosen: 0,
             hitpoints,
             step: [0, 0],
             grounded: false,
@@ -487,6 +542,8 @@ struct Shot {
     actor: u32,
     seed: u32,
     variants: u32,
+    /// As a dot's, for the shooter's actor as it shoots.
+    chosen: u32,
     launch: [i32; 3],
     target: [i32; 3],
     speed: u32,
@@ -496,8 +553,26 @@ struct Shot {
     impact_lifetime: u32,
 }
 
+/// What a seat adds to a launch: how many turns ago it was launched (a
+/// seat is sent a projectile only once it comes into sight), the shooter's
+/// actor when the seat may not know the shooter, and its choices.
+#[derive(Clone, Copy, Default)]
+struct LaunchExtra {
+    age: u32,
+    origin: Option<ShotOrigin>,
+    chosen: u32,
+}
+
+/// A shooter's owner and look, without its id.
+#[derive(Clone, Copy)]
+struct ShotOrigin {
+    owner: i32,
+    actor: u32,
+    variants: u32,
+}
+
 impl Shot {
-    fn new(launch: &Launch, turn: u32, shooter: Option<&Dot>) -> Self {
+    fn new(launch: &Launch, turn: u32, shooter: Option<&Dot>, extra: LaunchExtra) -> Self {
         let one_based = |index: Option<u32>| index.map_or(0, |index| index + 1);
         let metres = |raw: i32| f64::from(raw) / 65536.0;
         let flight_secs = {
@@ -513,14 +588,26 @@ impl Shot {
         let impact_secs = metres(launch.impact_lifetime).max(0.0);
         let keep_turns =
             ((flight_secs + PROJECTILE_KEEP_SECS + impact_secs) / TURN_SECS).ceil() as u32;
+        let launch_turn = turn.saturating_sub(extra.age);
+        let (owner, actor, variants) = match (shooter, extra.origin) {
+            (Some(dot), _) => (dot.owner, dot.actor, dot.variants),
+            (None, Some(origin)) => (origin.owner, origin.actor, origin.variants),
+            (None, None) => (-1, 0, 0),
+        };
         Shot {
-            launch_turn: turn,
-            last_turn: turn.saturating_add(keep_turns),
+            launch_turn,
+            last_turn: launch_turn.saturating_add(keep_turns),
             shooter: if shooter.is_some() { launch.shooter } else { 0 },
-            owner: shooter.map_or(-1, |dot| dot.owner),
-            actor: shooter.map_or(0, |dot| dot.actor),
-            seed: shooter.map_or(0, |dot| dot.seed),
-            variants: shooter.map_or(0, |dot| dot.variants),
+            owner,
+            actor,
+            // A seat gets the choices instead.
+            seed: if extra.chosen != 0 {
+                0
+            } else {
+                shooter.map_or(0, |dot| dot.seed)
+            },
+            variants,
+            chosen: extra.chosen,
             launch: launch.launch.map(quantize_position),
             target: launch.target.map(quantize_position),
             speed: quantize_speed(launch.speed),
@@ -559,7 +646,7 @@ fn quantize_capture(details: &Details, id: u32) -> Vec<u8> {
 }
 
 /// A player's top panel numbers as viewers are sent them.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, Default, PartialEq, Eq)]
 struct Funds {
     population: i32,
     population_limit: i32,
@@ -668,6 +755,7 @@ struct Tables<'a> {
     variant_sets: &'a [VariantSet],
     variable_sets: &'a [VariableSet],
     range_sets: &'a [RangeSet],
+    choices: &'a [[Vec<u32>; 3]],
 }
 
 pub struct Hub {
@@ -989,32 +1077,24 @@ impl Shown {
     }
 }
 
-struct State {
-    turn: u32,
-    map_size: u32,
-    /// The sim rate the match was set up with.
-    game_speed: f32,
-    /// The match being encoded, which viewers may not see yet.
+/// What every stream of the match is encoded with besides its own state.
+struct Common {
     match_id: u64,
-    /// The turn segment 0 starts at.
-    first_turn: u32,
-    /// How far behind the game viewers are held, so that the stream cannot
-    /// be used to scout the opponent.
+    game_speed: f32,
+    /// How long after the game the stream is shown.
     delay: Duration,
+    first_turn: u32,
+    map_size: u32,
+    terrain_id: u64,
+}
+
+/// One encoding of the match: the observers', from the feed as it is, or a
+/// seat's, from what its player may see (`filter.rs`). Its tables are its
+/// own, so a seat's indices say nothing of what it was not sent.
+struct Stream {
     visual: Compressor,
     detail: Compressor,
-    /// Oldest first, each with when it is due.
-    pending: VecDeque<(Instant, Release)>,
-    shown: Shown,
-    /// In play mode, the stream as the player sees it: every release at
-    /// once, never stored, while `shown` keeps the delay for observers.
-    live: Option<Shown>,
     detail_encoder: DetailEncoder,
-    terrain: Option<(u64, TerrainFile)>,
-    /// The kind 18 and 19 JSON of the match, by the hash the detail
-    /// stream names it by.
-    data_files: DataFiles,
-    ground: Option<Ground>,
     /// What viewers hold after the last turn, which the next delta builds
     /// on; near the simulation's state, not equal to it.
     dots: BTreeMap<u32, Dot>,
@@ -1049,18 +1129,69 @@ struct State {
     removals: Vec<u32>,
     /// By id: launched and neither hit nor long on the ground.
     shots: BTreeMap<u32, Shot>,
-    has_turn: bool,
-    /// Set when a new observer connects: its entity ids belong to another
-    /// match, so its first turn must replace, not patch, what viewers have.
-    new_feed: bool,
-    /// Set from the end of a match until the next one's first turn.
-    ended: bool,
-    /// When the feed last connected or sent a turn, for the observer
-    /// watchdog.
-    feed_activity: Option<Instant>,
+    /// The LOS grids the stream carries, by player index, and what viewers
+    /// hold of them.
+    los: Los,
+    los_shown: Los,
+    /// A seat's terrain: how many reveals it has had (0: the terrain
+    /// resource is whole), and the next delta's reveal, if any.
+    terrain_revision: u32,
+    reveal: Option<Vec<u8>>,
+    /// A seat's: the variant choices, each three sets of 0-based string
+    /// indices, and by id this turn the entities' 1-based ones.
+    choices: Table<[Vec<u32>; 3]>,
+    choice_ids: HashMap<[Vec<u32>; 3], u32>,
+    dot_choices: HashMap<u32, u32>,
+    /// A seat's additions to this turn's launches, by projectile id.
+    launch_extras: HashMap<u32, LaunchExtra>,
 }
 
-impl State {
+/// LOS vertex states (`feed::LOS_EXPLORED`, `feed::LOS_VISIBLE`) by player
+/// index, row-major, x fastest.
+#[derive(Clone, Default, PartialEq, Eq)]
+struct Los {
+    side: u32,
+    players: BTreeMap<u32, Vec<u8>>,
+}
+
+impl Stream {
+    fn new() -> Self {
+        Stream {
+            visual: Compressor::new(),
+            detail: Compressor::new(),
+            detail_encoder: DetailEncoder::new(),
+            dots: BTreeMap::new(),
+            captures: BTreeMap::new(),
+            economy: Vec::new(),
+            economy_shown: Vec::new(),
+            icons: Table::new(),
+            templates: Table::new(),
+            strings: Table::new(),
+            variant_sets: Table::new(),
+            variable_sets: Table::new(),
+            range_sets: Table::new(),
+            range_set_ids: HashMap::new(),
+            template_icons: HashMap::new(),
+            player_color_templates: HashSet::new(),
+            players: Players::default(),
+            players_changed: false,
+            territory: None,
+            territory_changed: false,
+            sounds: Vec::new(),
+            launches: Vec::new(),
+            removals: Vec::new(),
+            shots: BTreeMap::new(),
+            los: Los::default(),
+            los_shown: Los::default(),
+            terrain_revision: 0,
+            reveal: None,
+            choices: Table::new(),
+            choice_ids: HashMap::new(),
+            dot_choices: HashMap::new(),
+            launch_extras: HashMap::new(),
+        }
+    }
+
     /// A subscriber must not get the unsent entries, which the next delta
     /// will add again; a keyframe of the turn being published must.
     fn tables(&self, with_unsent: bool) -> Tables<'_> {
@@ -1078,6 +1209,347 @@ impl State {
             variant_sets: sent(&self.variant_sets, with_unsent),
             variable_sets: sent(&self.variable_sets, with_unsent),
             range_sets: sent(&self.range_sets, with_unsent),
+            choices: sent(&self.choices, with_unsent),
+        }
+    }
+
+    fn set_players(&mut self, players: Players) {
+        if self.players != players {
+            self.players = players;
+            self.players_changed = true;
+        }
+    }
+
+    fn set_territory(&mut self, territory: Territory) {
+        if self.territory.as_ref() != Some(&territory) {
+            self.territory = Some(territory);
+            self.territory_changed = true;
+        }
+    }
+
+    /// The 1-based icon index of an icon, added to the table if new.
+    fn intern_icon(&mut self, icon: Icon) -> u32 {
+        let icons = &mut self.icons.items;
+        let index = match icons
+            .iter()
+            .position(|known| known.name == icon.name && known.size == icon.size)
+        {
+            Some(index) => index,
+            None => {
+                icons.push(icon);
+                icons.len() - 1
+            }
+        };
+        index as u32 + 1
+    }
+
+    /// Encodes a turn of `entities`, whose indices are this stream's, and
+    /// `details`, likewise; `start` for the first turn of a match.
+    /// Returns the visual and detail stream operations.
+    fn encode_turn(
+        &mut self,
+        common: &Common,
+        turn: u32,
+        entities: &[Entity],
+        details: &Details,
+        ground: Option<&Ground>,
+        start: bool,
+    ) -> io::Result<(TrackOp, TrackOp)> {
+        let ranges: HashMap<u32, u32> = entities
+            .iter()
+            .filter_map(|entity| {
+                let overlays = details.entities.get(&entity.id)?.ranges.as_ref()?;
+                if overlays.is_empty() {
+                    return None;
+                }
+                let one_based = |index: Option<u32>| index.map_or(0, |index| index + 1);
+                let set: RangeSet = overlays
+                    .iter()
+                    .map(|overlay| RangeCircle {
+                        kind: overlay.kind,
+                        radius: overlay.radius.to_bits(),
+                        texture: one_based(overlay.texture),
+                        mask: one_based(overlay.mask),
+                        thickness: overlay.thickness.to_bits(),
+                    })
+                    .collect();
+                let next = self.range_sets.items.len() as u32 + 1;
+                let index = *self.range_set_ids.entry(set.clone()).or_insert(next);
+                if index == next {
+                    self.range_sets.items.push(set);
+                }
+                Some((entity.id, index))
+            })
+            .collect();
+        let dots: BTreeMap<u32, Dot> = entities
+            .iter()
+            .map(|entity| {
+                let icon = self
+                    .template_icons
+                    .get(&entity.template)
+                    .copied()
+                    .unwrap_or(0);
+                let player_color = self.player_color_templates.contains(&entity.template);
+                let health = details
+                    .entities
+                    .get(&entity.id)
+                    .and_then(|groups| groups.health);
+                let ranges = ranges.get(&entity.id).copied().unwrap_or(0);
+                let mut dot = Dot::new(
+                    entity,
+                    icon,
+                    player_color,
+                    turn,
+                    quantize_hitpoints(health),
+                    ranges,
+                );
+                if let Some(chosen) = self.dot_choices.get(&entity.id) {
+                    dot.chosen = *chosen;
+                    dot.seed = 0;
+                }
+                // The hook only sees the state after each turn, so an
+                // animation counts as started on the turn it first shows.
+                // The old match's ids are unrelated to the new one's.
+                if let Some(before) = self.dots.get(&entity.id).filter(|_| !start) {
+                    if before.animation == dot.animation && before.once == dot.once {
+                        dot.animation_turn = before.animation_turn;
+                    }
+                    if before.sync_repeat == dot.sync_repeat
+                        && before.sync_offset == dot.sync_offset
+                    {
+                        dot.sync_turn = before.sync_turn;
+                    }
+                }
+                (entity.id, dot)
+            })
+            .collect();
+        let captures: BTreeMap<u32, Vec<u8>> = entities
+            .iter()
+            .map(|entity| (entity.id, quantize_capture(details, entity.id)))
+            .filter(|(_, shares)| !shares.is_empty())
+            .collect();
+        // The old match's projectile ids are unrelated to the new one's.
+        let mut shots = if start {
+            BTreeMap::new()
+        } else {
+            self.shots.clone()
+        };
+        shots.retain(|_, shot| shot.last_turn >= turn);
+        let mut removals: Vec<u32> = self
+            .removals
+            .iter()
+            .copied()
+            .filter(|id| shots.remove(id).is_some())
+            .collect();
+        removals.sort_unstable();
+        let mut launches = Vec::with_capacity(self.launches.len());
+        for launch in &self.launches {
+            // Taken out in the turn that shot it: nothing to draw.
+            if self.removals.contains(&launch.id) {
+                continue;
+            }
+            let shooter = dots
+                .get(&launch.shooter)
+                .or_else(|| self.dots.get(&launch.shooter))
+                .filter(|_| launch.shooter != 0);
+            let extra = self
+                .launch_extras
+                .get(&launch.id)
+                .copied()
+                .unwrap_or_default();
+            let shot = Shot::new(launch, turn, shooter, extra);
+            shots.insert(launch.id, shot);
+            launches.push((launch.id, shot));
+        }
+        launches.sort_unstable_by_key(|(id, _)| *id);
+        let (ops, shown) = if start {
+            let shown: BTreeMap<u32, Dot> = dots
+                .iter()
+                .map(|(id, dot)| (*id, arrive(ground, dot)))
+                .collect();
+            self.captures = captures;
+            // A keyframe holds the whole revealed terrain, as a reveal
+            // would bring it.
+            self.reveal = None;
+            let keyframe = encode_keyframe(common, self, turn, &self.tables(true), &shown, &shots);
+            let visual = self.visual.restart(&keyframe);
+            // The keyframe holds what the turn's delta would bring.
+            self.detail_encoder.reset();
+            self.detail_encoder
+                .delta(turn, details, |id| shown.contains_key(&id));
+            let detail_keyframe = self.detail_encoder.keyframe(turn, common.match_id, |id| {
+                shown.get(&id).map(|dot| dot.template)
+            });
+            let detail = self.detail.restart(&detail_keyframe);
+            ((visual, detail), shown)
+        } else {
+            let (delta, shown) = encode_delta(
+                turn,
+                &Tables {
+                    icons: self.icons.unsent(),
+                    templates: self.templates.unsent(),
+                    strings: self.strings.unsent(),
+                    variant_sets: self.variant_sets.unsent(),
+                    variable_sets: self.variable_sets.unsent(),
+                    range_sets: self.range_sets.unsent(),
+                    choices: self.choices.unsent(),
+                },
+                self.players_changed.then_some(&self.players),
+                self.territory_changed
+                    .then_some(self.territory.as_ref())
+                    .flatten(),
+                (self.los != self.los_shown).then_some((&self.los_shown, &self.los)),
+                self.reveal
+                    .as_deref()
+                    .map(|reveal| (self.terrain_revision, reveal)),
+                ground,
+                &self.dots,
+                &dots,
+                &self.sounds,
+                &launches,
+                &removals,
+                &Status {
+                    templates: &self.templates.items,
+                    previous_captures: &self.captures,
+                    captures: &captures,
+                    economy: &self.economy,
+                    economy_shown: &self.economy_shown,
+                    renames: &details.renames,
+                },
+            );
+            self.captures = captures;
+            let detail_delta = self
+                .detail_encoder
+                .delta(turn, details, |id| dots.contains_key(&id));
+            let next_start = common.first_turn + SEGMENT_TURNS * (self.visual.closed + 1);
+            self.reveal = None;
+            let (keyframe, detail_keyframe) = if turn >= next_start {
+                (
+                    Some(encode_keyframe(
+                        common,
+                        self,
+                        turn,
+                        &self.tables(true),
+                        &shown,
+                        &shots,
+                    )),
+                    Some(self.detail_encoder.keyframe(turn, common.match_id, |id| {
+                        shown.get(&id).map(|dot| dot.template)
+                    })),
+                )
+            } else {
+                (None, None)
+            };
+            let visual = self.visual.push(&delta, keyframe.as_deref())?;
+            let detail = self
+                .detail
+                .push(&detail_delta, detail_keyframe.as_deref())?;
+            ((visual, detail), shown)
+        };
+        self.icons.sent = self.icons.items.len();
+        self.templates.sent = self.templates.items.len();
+        self.strings.sent = self.strings.items.len();
+        self.variant_sets.sent = self.variant_sets.items.len();
+        self.variable_sets.sent = self.variable_sets.items.len();
+        self.range_sets.sent = self.range_sets.items.len();
+        self.choices.sent = self.choices.items.len();
+        self.players_changed = false;
+        self.territory_changed = false;
+        self.economy_shown = self.economy.clone();
+        self.los_shown = self.los.clone();
+        // A keyframe carries no sounds, so a new match's first turn drops
+        // its own.
+        self.sounds.clear();
+        self.launches.clear();
+        self.removals.clear();
+        self.launch_extras.clear();
+        self.shots = shots;
+        self.dots = shown;
+        Ok(ops)
+    }
+
+    /// The final keyframes of an ending match, and the tails of its frames.
+    fn finish(&mut self, common: &Common, turn: u32) -> (Ended, Vec<u8>, Vec<u8>) {
+        let keyframe: Message = compress(&encode_keyframe(
+            common,
+            self,
+            turn,
+            &self.tables(true),
+            &self.dots,
+            &self.shots,
+        ))
+        .into();
+        let detail_keyframe: Message =
+            compress(&self.detail_encoder.keyframe(turn, common.match_id, |id| {
+                self.dots.get(&id).map(|dot| dot.template)
+            }))
+            .into();
+        let ended = Ended {
+            at: Instant::now(),
+            keyframe,
+            detail_keyframe,
+        };
+        (ended, self.visual.finish(), self.detail.finish())
+    }
+}
+
+struct State {
+    turn: u32,
+    map_size: u32,
+    /// The sim rate the match was set up with.
+    game_speed: f32,
+    /// The match being encoded, which viewers may not see yet.
+    match_id: u64,
+    /// The turn segment 0 starts at.
+    first_turn: u32,
+    /// How far behind the game viewers are held, so that the stream cannot
+    /// be used to scout the opponent.
+    delay: Duration,
+    /// The observers' encoding, whose tables are the feed's.
+    observer: Stream,
+    /// In play mode, a stream for each player a web visitor plays, filtered
+    /// to what that player sees, shown at once and never stored, while
+    /// `shown` keeps the delay for observers.
+    seats: Vec<Seat>,
+    /// The players `--play` hosts seats for, set before the feed starts.
+    seat_players: Vec<u32>,
+    /// What the seats' water derives from the whole heightmap, once the
+    /// terrain is known.
+    seat_water: Option<Arc<SeatWater>>,
+    /// The baked actors, for the variant choices the seats are sent.
+    actors: Actors,
+    /// Oldest first, each with when it is due.
+    pending: VecDeque<(Instant, Release)>,
+    shown: Shown,
+    terrain: Option<(u64, TerrainFile)>,
+    /// The feed's terrain, for the seats' revealed parts.
+    terrain_source: Option<Arc<Terrain>>,
+    /// The kind 18 and 19 JSON of the match, by the hash the detail
+    /// stream names it by.
+    data_files: DataFiles,
+    ground: Option<Ground>,
+    /// Every player's LOS, as the feed has it.
+    los: Los,
+    has_turn: bool,
+    /// Set when a new observer connects: its entity ids belong to another
+    /// match, so its first turn must replace, not patch, what viewers have.
+    new_feed: bool,
+    /// Set from the end of a match until the next one's first turn.
+    ended: bool,
+    /// When the feed last connected or sent a turn, for the observer
+    /// watchdog.
+    feed_activity: Option<Instant>,
+}
+
+impl State {
+    fn common(&self) -> Common {
+        Common {
+            match_id: self.match_id,
+            game_speed: self.game_speed,
+            delay: self.delay,
+            first_turn: self.first_turn,
+            map_size: self.map_size,
+            terrain_id: self.terrain.as_ref().map_or(0, |(id, _)| *id),
         }
     }
 }
@@ -1095,9 +1567,17 @@ impl Shown {
     }
 }
 
+/// Which stream a request reads.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum View {
+    /// `/`, delayed and stored.
+    Observer,
+    /// `/play`, the seat of this player.
+    Seat(u32),
+}
+
 impl Hub {
-    /// `live`: also keep the undelayed stream `/play` reads.
-    pub fn new(delay: Duration, history: Option<History>, live: bool) -> Self {
+    pub fn new(delay: Duration, history: Option<History>) -> Self {
         Hub {
             queued: Condvar::new(),
             history: history.map(|history| Arc::new(Mutex::new(history))),
@@ -1108,36 +1588,18 @@ impl Hub {
                 match_id: 0,
                 first_turn: 0,
                 delay,
-                visual: Compressor::new(),
-                detail: Compressor::new(),
+                observer: Stream::new(),
+                seats: Vec::new(),
+                seat_players: Vec::new(),
+                seat_water: None,
+                actors: Actors::new(),
                 pending: VecDeque::new(),
                 shown: Shown::new(),
-                live: live.then(Shown::new),
-                detail_encoder: DetailEncoder::new(),
                 terrain: None,
+                terrain_source: None,
                 data_files: HashMap::new(),
                 ground: None,
-                dots: BTreeMap::new(),
-                captures: BTreeMap::new(),
-                economy: Vec::new(),
-                economy_shown: Vec::new(),
-                icons: Table::new(),
-                templates: Table::new(),
-                strings: Table::new(),
-                variant_sets: Table::new(),
-                variable_sets: Table::new(),
-                range_sets: Table::new(),
-                range_set_ids: HashMap::new(),
-                template_icons: HashMap::new(),
-                player_color_templates: HashSet::new(),
-                players: Players::default(),
-                players_changed: false,
-                territory: None,
-                territory_changed: false,
-                sounds: Vec::new(),
-                launches: Vec::new(),
-                removals: Vec::new(),
-                shots: BTreeMap::new(),
+                los: Los::default(),
                 has_turn: false,
                 new_feed: true,
                 ended: false,
@@ -1146,31 +1608,52 @@ impl Hub {
         }
     }
 
+    /// The players of the next feed that web visitors play. Their streams
+    /// exist from now, so a page can wait on one for the first turn.
+    pub fn set_seats(&self, players: Vec<u32>) {
+        let state = &mut *self.state.lock().unwrap();
+        state.seats.retain(|seat| players.contains(&seat.player));
+        for player in &players {
+            if !state.seats.iter().any(|seat| seat.player == *player) {
+                state.seats.push(Seat::new(*player));
+            }
+        }
+        state.seat_players = players;
+    }
+
     pub fn start_feed(&self) {
         let mut state = self.state.lock().unwrap();
         state.new_feed = true;
         state.feed_activity = Some(Instant::now());
         state.terrain = None;
+        state.terrain_source = None;
+        state.seat_water = None;
         state.ground = None;
-        state.icons.clear();
-        state.templates.clear();
-        state.strings.clear();
-        state.variant_sets.clear();
-        state.variable_sets.clear();
-        state.range_sets.clear();
-        state.range_set_ids.clear();
-        state.template_icons.clear();
-        state.player_color_templates.clear();
-        state.players = Players::default();
-        state.territory = None;
-        state.economy.clear();
-        state.sounds.clear();
-        state.launches.clear();
-        state.removals.clear();
+        state.los = Los::default();
+        // A rebake may have come in between matches.
+        state.actors = Actors::new();
+        let observer = &mut state.observer;
+        observer.icons.clear();
+        observer.templates.clear();
+        observer.strings.clear();
+        observer.variant_sets.clear();
+        observer.variable_sets.clear();
+        observer.range_sets.clear();
+        observer.range_set_ids.clear();
+        observer.template_icons.clear();
+        observer.player_color_templates.clear();
+        observer.players = Players::default();
+        observer.territory = None;
+        observer.economy.clear();
+        observer.sounds.clear();
+        observer.launches.clear();
+        observer.removals.clear();
+        observer.los = Los::default();
+        observer.los_shown = Los::default();
     }
 
     pub fn add_template(&self, index: u32, name: String) -> io::Result<()> {
-        self.state.lock().unwrap().templates.insert(
+        self.state.lock().unwrap().observer.templates.insert(
             index,
             Template {
                 name,
@@ -1183,12 +1666,12 @@ impl Hub {
     /// The hook sends them right after the template, before any turn uses
     /// it, so the entry is still unsent.
     pub fn set_template_details(&self, index: u32, details: TemplateDetails) -> io::Result<()> {
-        let state = &mut *self.state.lock().unwrap();
-        let template = state
+        let observer = &mut self.state.lock().unwrap().observer;
+        let template = observer
             .templates
             .items
             .get_mut(index as usize)
-            .filter(|_| index as usize >= state.templates.sent)
+            .filter(|_| index as usize >= observer.templates.sent)
             .ok_or_else(|| {
                 io::Error::new(
                     ErrorKind::InvalidData,
@@ -1203,6 +1686,7 @@ impl Hub {
         self.state
             .lock()
             .unwrap()
+            .observer
             .strings
             .insert(index, text, "string")
     }
@@ -1211,6 +1695,7 @@ impl Hub {
         self.state
             .lock()
             .unwrap()
+            .observer
             .variant_sets
             .insert(index, pairs, "variant set")
     }
@@ -1219,6 +1704,7 @@ impl Hub {
         self.state
             .lock()
             .unwrap()
+            .observer
             .variable_sets
             .insert(index, pairs, "variable set")
     }
@@ -1227,57 +1713,65 @@ impl Hub {
         self.state
             .lock()
             .unwrap()
+            .observer
             .player_color_templates
             .insert(template);
     }
 
     pub fn set_players(&self, players: Players) {
-        let mut state = self.state.lock().unwrap();
-        if state.players != players {
-            state.players = players;
-            state.players_changed = true;
-        }
+        self.state.lock().unwrap().observer.set_players(players);
     }
 
     pub fn set_economy(&self, economy: &[Economy]) {
-        self.state.lock().unwrap().economy = economy.iter().map(Funds::new).collect();
+        self.state.lock().unwrap().observer.economy = economy.iter().map(Funds::new).collect();
     }
 
     pub fn set_territory(&self, territory: Territory) {
-        let mut state = self.state.lock().unwrap();
-        if state.territory.as_ref() != Some(&territory) {
-            state.territory = Some(territory);
-            state.territory_changed = true;
-        }
+        self.state.lock().unwrap().observer.set_territory(territory);
     }
 
     pub fn set_sounds(&self, sounds: Vec<Sound>) {
-        self.state.lock().unwrap().sounds = sounds;
+        self.state.lock().unwrap().observer.sounds = sounds;
     }
 
     pub fn set_projectiles(&self, launches: Vec<Launch>, removals: Vec<u32>) {
+        let observer = &mut self.state.lock().unwrap().observer;
+        observer.launches = launches;
+        observer.removals = removals;
+    }
+
+    /// Applies a kind 24 record's runs to every player's grid, which the
+    /// observers' stream carries whole.
+    pub fn set_los(&self, side: u32, players: Vec<Vec<LosRun>>) {
         let state = &mut *self.state.lock().unwrap();
-        state.launches = launches;
-        state.removals = removals;
+        if state.los.side != side {
+            state.los = Los {
+                side,
+                players: BTreeMap::new(),
+            };
+        }
+        let vertices = side as usize * side as usize;
+        for (index, runs) in players.into_iter().enumerate() {
+            let grid = state
+                .los
+                .players
+                .entry(index as u32 + 1)
+                .or_insert_with(|| vec![0; vertices]);
+            for run in runs {
+                let start = run.start as usize;
+                grid[start..start + run.states.len()].copy_from_slice(&run.states);
+            }
+        }
+        state.observer.los = state.los.clone();
     }
 
     pub fn set_template_icon(&self, template: u32, icon: Icon) {
-        let state = &mut *self.state.lock().unwrap();
-        let icons = &mut state.icons.items;
-        let index = match icons
-            .iter()
-            .position(|known| known.name == icon.name && known.size == icon.size)
-        {
-            Some(index) => index,
-            None => {
-                icons.push(icon);
-                icons.len() - 1
-            }
-        };
-        state.template_icons.insert(template, index as u32 + 1);
+        let observer = &mut self.state.lock().unwrap().observer;
+        let index = observer.intern_icon(icon);
+        observer.template_icons.insert(template, index);
     }
 
-    pub fn set_terrain(&self, id: u64, bytes: Vec<u8>, ground: Ground) {
+    pub fn set_terrain(&self, id: u64, bytes: Vec<u8>, terrain: Arc<Terrain>) {
         let mut state = self.state.lock().unwrap();
         // Viewers hold heights reckoned from the match's first terrain.
         if state.has_turn && !state.new_feed {
@@ -1295,7 +1789,8 @@ impl Hub {
             let _ = brotli.set(web::compress(&raw).into());
         });
         state.terrain = Some((id, file));
-        state.ground = Some(ground);
+        state.ground = Some(Ground::new(&terrain));
+        state.terrain_source = Some(terrain);
     }
 
     /// Keeps a kind 18 or 19 JSON for `/data/<hash>`, and returns that hash.
@@ -1321,10 +1816,18 @@ impl Hub {
 
     /// The current and the previous match's files and those of a match
     /// whose end viewers have not reached are in memory; older ones are
-    /// read from the history, while it keeps them.
-    pub fn data(&self, hash: u64) -> Option<Arc<[u8]>> {
+    /// read from the history, while it keeps them. A seat gets only the
+    /// files its stream named.
+    pub fn data(&self, hash: u64, view: View) -> Option<Arc<[u8]>> {
         {
             let state = self.state.lock().unwrap();
+            if let View::Seat(player) = view {
+                let seat = state.seats.iter().find(|seat| seat.player == player)?;
+                if !seat.named_data(hash) {
+                    return None;
+                }
+                return state.data_files.get(&hash).map(Arc::clone);
+            }
             let archived = state
                 .shown
                 .previous
@@ -1339,6 +1842,35 @@ impl Hub {
         }
         let path = self.history.as_ref()?.lock().unwrap().data_path(hash)?;
         Some(std::fs::read(path).ok()?.into())
+    }
+
+    /// A seat's terrain as revealed so far.
+    pub fn seat_terrain(&self, player: u32) -> Option<Vec<u8>> {
+        let state = self.state.lock().unwrap();
+        let seat = state.seats.iter().find(|seat| seat.player == player)?;
+        let source = state.terrain_source.as_deref()?;
+        let water = state.seat_water.as_deref()?;
+        Some(seat.terrain_resource(source, water))
+    }
+
+    /// The feed's id of a seat's handle, while the seat holds it.
+    pub fn seat_entity(&self, player: u32, handle: u32) -> Option<u32> {
+        let state = self.state.lock().unwrap();
+        state
+            .seats
+            .iter()
+            .find(|seat| seat.player == player)?
+            .entity(handle)
+    }
+
+    /// The seat's handle of the feed's id, while the seat holds it.
+    pub fn seat_handle(&self, player: u32, id: u32) -> Option<u32> {
+        let state = self.state.lock().unwrap();
+        state
+            .seats
+            .iter()
+            .find(|seat| seat.player == player)?
+            .handle(id)
     }
 
     /// As `data`, for terrain.
@@ -1437,32 +1969,19 @@ impl Hub {
         if !state.has_turn || state.ended {
             return;
         }
-        let keyframe: Message = compress(&encode_keyframe(
-            state,
-            state.turn,
-            &state.tables(true),
-            &state.dots,
-            &state.shots,
-        ))
-        .into();
-        let detail_keyframe: Message = compress(&state.detail_encoder.keyframe(
-            state.turn,
-            state.match_id,
-            |id| state.dots.get(&id).map(|dot| dot.template),
-        ))
-        .into();
+        let common = state.common();
+        let (ended, visual_tail, detail_tail) = state.observer.finish(&common, state.turn);
         let release = Release::End {
             match_id: state.match_id,
-            visual_tail: state.visual.finish(),
-            detail_tail: state.detail.finish(),
-            ended: Ended {
-                at: Instant::now(),
-                keyframe,
-                detail_keyframe,
-            },
+            visual_tail,
+            detail_tail,
+            ended,
             terrain: state.terrain.clone(),
             data_files: std::mem::take(&mut state.data_files),
         };
+        for seat in &mut state.seats {
+            seat.end(&common, state.turn);
+        }
         state.ended = true;
         println!("match {:016x} ended at turn {}", state.match_id, state.turn);
         self.queue(state, release);
@@ -1474,10 +1993,6 @@ impl Hub {
             && first_turn_due(&state.pending).is_none()
         {
             let _ = state.shown.visual.sender.send(envelope_starts(state.delay));
-        }
-        let encoding = state.match_id;
-        if let Some(live) = &mut state.live {
-            live.apply(release.clone(), None, encoding);
         }
         state
             .pending
@@ -1518,212 +2033,58 @@ impl Hub {
     /// `details` is the feed's state as of this turn.
     pub fn publish(&self, turn: u32, entities: &[Entity], details: &Details) -> io::Result<()> {
         let state = &mut *self.state.lock().unwrap();
-        let ranges: HashMap<u32, u32> = entities
-            .iter()
-            .filter_map(|entity| {
-                let overlays = details.entities.get(&entity.id)?.ranges.as_ref()?;
-                if overlays.is_empty() {
-                    return None;
-                }
-                let one_based = |index: Option<u32>| index.map_or(0, |index| index + 1);
-                let set: RangeSet = overlays
-                    .iter()
-                    .map(|overlay| RangeCircle {
-                        kind: overlay.kind,
-                        radius: overlay.radius.to_bits(),
-                        texture: one_based(overlay.texture),
-                        mask: one_based(overlay.mask),
-                        thickness: overlay.thickness.to_bits(),
-                    })
-                    .collect();
-                let next = state.range_sets.items.len() as u32 + 1;
-                let index = *state.range_set_ids.entry(set.clone()).or_insert(next);
-                if index == next {
-                    state.range_sets.items.push(set);
-                }
-                Some((entity.id, index))
-            })
-            .collect();
-        let dots: BTreeMap<u32, Dot> = entities
-            .iter()
-            .map(|entity| {
-                let icon = state
-                    .template_icons
-                    .get(&entity.template)
-                    .copied()
-                    .unwrap_or(0);
-                let player_color = state.player_color_templates.contains(&entity.template);
-                let health = details
-                    .entities
-                    .get(&entity.id)
-                    .and_then(|groups| groups.health);
-                let ranges = ranges.get(&entity.id).copied().unwrap_or(0);
-                let mut dot = Dot::new(
-                    entity,
-                    icon,
-                    player_color,
-                    turn,
-                    quantize_hitpoints(health),
-                    ranges,
-                );
-                // The hook only sees the state after each turn, so an
-                // animation counts as started on the turn it first shows.
-                // The old match's ids are unrelated to the new one's.
-                if let Some(before) = state.dots.get(&entity.id).filter(|_| !state.new_feed) {
-                    if before.animation == dot.animation && before.once == dot.once {
-                        dot.animation_turn = before.animation_turn;
-                    }
-                    if before.sync_repeat == dot.sync_repeat
-                        && before.sync_offset == dot.sync_offset
-                    {
-                        dot.sync_turn = before.sync_turn;
-                    }
-                }
-                (entity.id, dot)
-            })
-            .collect();
-        let captures: BTreeMap<u32, Vec<u8>> = entities
-            .iter()
-            .map(|entity| (entity.id, quantize_capture(details, entity.id)))
-            .filter(|(_, shares)| !shares.is_empty())
-            .collect();
-        // The old match's projectile ids are unrelated to the new one's.
-        let mut shots = if state.new_feed {
-            BTreeMap::new()
-        } else {
-            state.shots.clone()
-        };
-        shots.retain(|_, shot| shot.last_turn >= turn);
-        let mut removals: Vec<u32> = state
-            .removals
-            .iter()
-            .copied()
-            .filter(|id| shots.remove(id).is_some())
-            .collect();
-        removals.sort_unstable();
-        let mut launches = Vec::with_capacity(state.launches.len());
-        for launch in &state.launches {
-            // Taken out in the turn that shot it: nothing to draw.
-            if state.removals.contains(&launch.id) {
-                continue;
-            }
-            let shooter = dots
-                .get(&launch.shooter)
-                .or_else(|| state.dots.get(&launch.shooter))
-                .filter(|_| launch.shooter != 0);
-            let shot = Shot::new(launch, turn, shooter);
-            shots.insert(launch.id, shot);
-            launches.push((launch.id, shot));
-        }
-        launches.sort_unstable_by_key(|(id, _)| *id);
-        let (release, shown): (Release, BTreeMap<u32, Dot>) = if state.new_feed {
+        let start = state.new_feed;
+        if start {
             state.match_id = new_match_id(state.match_id);
             state.ended = false;
             state.first_turn = turn;
-            let ground = state.ground.as_ref();
-            let shown: BTreeMap<u32, Dot> = dots
-                .iter()
-                .map(|(id, dot)| (*id, arrive(ground, dot)))
-                .collect();
-            state.captures = captures;
-            let keyframe = encode_keyframe(state, turn, &state.tables(true), &shown, &shots);
-            let visual = state.visual.restart(&keyframe);
-            // The keyframe holds what the turn's delta would bring.
-            state.detail_encoder.reset();
-            state
-                .detail_encoder
-                .delta(turn, details, |id| shown.contains_key(&id));
-            let detail_keyframe = state.detail_encoder.keyframe(turn, state.match_id, |id| {
-                shown.get(&id).map(|dot| dot.template)
-            });
-            let detail = state.detail.restart(&detail_keyframe);
-            self.store_match_files(state);
-            let release = Release::Turn {
-                start: Some(state.match_id),
-                visual,
-                detail,
-            };
-            (release, shown)
-        } else {
-            let (delta, shown) = encode_delta(
+            let players = state.seat_players.clone();
+            state.seats.retain(|seat| players.contains(&seat.player));
+            for seat in &mut state.seats {
+                seat.reset();
+            }
+        }
+        let common = state.common();
+        if !state.seats.is_empty()
+            && state.seat_water.is_none()
+            && let Some(terrain) = &state.terrain_source
+        {
+            state.seat_water = Some(Arc::new(SeatWater::new(terrain)));
+        }
+        // The seats read the turn as the feed has it, before the
+        // observers' encoding clears its sounds and projectiles.
+        {
+            let input = SeatInput {
                 turn,
-                &Tables {
-                    icons: state.icons.unsent(),
-                    templates: state.templates.unsent(),
-                    strings: state.strings.unsent(),
-                    variant_sets: state.variant_sets.unsent(),
-                    variable_sets: state.variable_sets.unsent(),
-                    range_sets: state.range_sets.unsent(),
-                },
-                state.players_changed.then_some(&state.players),
-                state
-                    .territory_changed
-                    .then_some(state.territory.as_ref())
-                    .flatten(),
-                state.ground.as_ref(),
-                &state.dots,
-                &dots,
-                &state.sounds,
-                &launches,
-                &removals,
-                &Status {
-                    templates: &state.templates.items,
-                    previous_captures: &state.captures,
-                    captures: &captures,
-                    economy: &state.economy,
-                    economy_shown: &state.economy_shown,
-                    renames: &details.renames,
-                },
-            );
-            state.captures = captures;
-            let detail_delta = state
-                .detail_encoder
-                .delta(turn, details, |id| dots.contains_key(&id));
-            let next_start = state.first_turn + SEGMENT_TURNS * (state.visual.closed + 1);
-            let (keyframe, detail_keyframe) = if turn >= next_start {
-                (
-                    Some(encode_keyframe(
-                        state,
-                        turn,
-                        &state.tables(true),
-                        &shown,
-                        &shots,
-                    )),
-                    Some(state.detail_encoder.keyframe(turn, state.match_id, |id| {
-                        shown.get(&id).map(|dot| dot.template)
-                    })),
-                )
-            } else {
-                (None, None)
+                entities,
+                details,
+                feed: &state.observer,
+                los: &state.los,
+                terrain: state.terrain_source.as_deref(),
+                water: state.seat_water.as_deref(),
+                ground: state.ground.as_ref(),
             };
-            let visual = state.visual.push(&delta, keyframe.as_deref())?;
-            let detail = state
-                .detail
-                .push(&detail_delta, detail_keyframe.as_deref())?;
-            let release = Release::Turn {
-                start: None,
-                visual,
-                detail,
-            };
-            (release, shown)
+            for seat in &mut state.seats {
+                seat.publish(&common, &input, &mut state.actors, start)?;
+            }
+        }
+        let (visual, detail) = state.observer.encode_turn(
+            &common,
+            turn,
+            entities,
+            details,
+            state.ground.as_ref(),
+            start,
+        )?;
+        if start {
+            self.store_match_files(state);
+        }
+        let release = Release::Turn {
+            start: start.then_some(state.match_id),
+            visual,
+            detail,
         };
-        state.icons.sent = state.icons.items.len();
-        state.templates.sent = state.templates.items.len();
-        state.strings.sent = state.strings.items.len();
-        state.variant_sets.sent = state.variant_sets.items.len();
-        state.variable_sets.sent = state.variable_sets.items.len();
-        state.range_sets.sent = state.range_sets.items.len();
-        state.players_changed = false;
-        state.territory_changed = false;
-        state.economy_shown = state.economy.clone();
-        // A keyframe carries no sounds, so a new match's first turn drops
-        // its own.
-        state.sounds.clear();
-        state.launches.clear();
-        state.removals.clear();
-        state.shots = shots;
         state.turn = turn;
-        state.dots = shown;
         state.has_turn = true;
         state.new_feed = false;
         state.feed_activity = Some(Instant::now());
@@ -1733,9 +2094,9 @@ impl Hub {
 
     /// A segment of the current or the previous match, and whether it is
     /// closed.
-    /// `live`: as `/play` sees the stream, else as `/` does.
-    pub fn segment(&self, match_id: u64, index: usize, live: bool) -> Option<(Message, bool)> {
-        self.track_segment(match_id, index, false, live)
+    /// `view`: which stream; a seat's is never stored.
+    pub fn segment(&self, match_id: u64, index: usize, view: View) -> Option<(Message, bool)> {
+        self.track_segment(match_id, index, false, view)
     }
 
     /// A detail stream segment, as `segment`.
@@ -1743,9 +2104,9 @@ impl Hub {
         &self,
         match_id: u64,
         index: usize,
-        live: bool,
+        view: View,
     ) -> Option<(Message, bool)> {
-        self.track_segment(match_id, index, true, live)
+        self.track_segment(match_id, index, true, view)
     }
 
     fn track_segment(
@@ -1753,10 +2114,11 @@ impl Hub {
         match_id: u64,
         index: usize,
         detail: bool,
-        live: bool,
+        view: View,
     ) -> Option<(Message, bool)> {
-        match self.memory_segment(match_id, index, detail, live) {
+        match self.memory_segment(match_id, index, detail, view) {
             Lookup::Found(bytes, closed) => return Some((bytes, closed)),
+            Lookup::OnDisk if view != View::Observer => return None,
             Lookup::OnDisk => {}
             Lookup::Missing => return None,
         }
@@ -1772,9 +2134,9 @@ impl Hub {
         Some((bytes.into(), true))
     }
 
-    fn memory_segment(&self, match_id: u64, index: usize, detail: bool, live: bool) -> Lookup {
+    fn memory_segment(&self, match_id: u64, index: usize, detail: bool, view: View) -> Lookup {
         let locked = self.state.lock().unwrap();
-        let Some(state) = locked.view(live) else {
+        let Some(state) = locked.view(view) else {
             return Lookup::Missing;
         };
         // An ended match is archived but keeps its id until the next one
@@ -1835,10 +2197,10 @@ impl Hub {
     /// What a new viewer is sent first (nothing before the first turn) and
     /// the receiver are taken under one lock, so the first bytes a viewer
     /// receives continue exactly the frame it was sent.
-    /// `live` as for `segment`; None when there is no live stream.
-    pub fn subscribe(&self, live: bool) -> Option<(Vec<Message>, broadcast::Receiver<Message>)> {
+    /// `view` as for `segment`; None when there is no such seat.
+    pub fn subscribe(&self, view: View) -> Option<(Vec<Message>, broadcast::Receiver<Message>)> {
         let locked = self.state.lock().unwrap();
-        let state = locked.view(live)?;
+        let state = locked.view(view)?;
         let first = if let Some(ended) = &state.ended {
             let since = ended.at.elapsed().as_millis() as u64;
             vec![
@@ -1847,7 +2209,8 @@ impl Hub {
             ]
         } else if state.has_turn {
             vec![state.visual.join()]
-        } else if let Some(due) = first_turn_due(&locked.pending).filter(|_| !live) {
+        } else if let Some(due) = first_turn_due(&locked.pending).filter(|_| view == View::Observer)
+        {
             vec![envelope_starts(
                 due.saturating_duration_since(Instant::now()),
             )]
@@ -1861,10 +2224,10 @@ impl Hub {
     /// its final state.
     pub fn subscribe_detail(
         &self,
-        live: bool,
+        view: View,
     ) -> Option<(Vec<Message>, broadcast::Receiver<Message>)> {
         let locked = self.state.lock().unwrap();
-        let state = locked.view(live)?;
+        let state = locked.view(view)?;
         let first = if let Some(ended) = &state.ended {
             vec![envelope_join(&ended.detail_keyframe, &[]).into()]
         } else if state.has_turn {
@@ -1877,12 +2240,15 @@ impl Hub {
 }
 
 impl State {
-    /// The stream `/play` (`live`) or `/` sees.
-    fn view(&self, live: bool) -> Option<&Shown> {
-        if live {
-            self.live.as_ref()
-        } else {
-            Some(&self.shown)
+    /// The stream a seat or `/` sees.
+    fn view(&self, view: View) -> Option<&Shown> {
+        match view {
+            View::Observer => Some(&self.shown),
+            View::Seat(player) => self
+                .seats
+                .iter()
+                .find(|seat| seat.player == player)
+                .map(|seat| &seat.shown),
         }
     }
 }
@@ -1907,10 +2273,6 @@ fn ending(
         } => Some((terrain.as_ref(), data_files)),
         Release::Turn { .. } => None,
     })
-}
-
-fn terrain_id(state: &State) -> u64 {
-    state.terrain.as_ref().map_or(0, |(id, _)| *id)
 }
 
 /// Distinct from the previous id even if the clock did not move.
@@ -1966,7 +2328,8 @@ fn append_framed(segment: &mut Vec<u8>, message: &[u8]) {
 }
 
 fn encode_keyframe(
-    state: &State,
+    common: &Common,
+    stream: &Stream,
     turn: u32,
     tables: &Tables,
     dots: &BTreeMap<u32, Dot>,
@@ -1976,23 +2339,26 @@ fn encode_keyframe(
     out.u8(MESSAGE_KEYFRAME);
     out.varint(u64::from(turn));
     out.u8(WIRE_VERSION);
-    out.u64(state.match_id);
-    out.f32(state.game_speed);
-    out.varint(state.delay.as_millis() as u64);
-    out.varint(u64::from(state.first_turn));
+    out.u64(common.match_id);
+    out.f32(common.game_speed);
+    out.varint(common.delay.as_millis() as u64);
+    out.varint(u64::from(common.first_turn));
     out.varint(u64::from(SEGMENT_TURNS));
-    out.varint(u64::from(state.map_size));
-    out.u64(terrain_id(state));
+    out.varint(u64::from(common.map_size));
+    out.u64(common.terrain_id);
+    out.varint(u64::from(stream.terrain_revision));
     write_icons(&mut out, tables.icons);
-    write_players(&mut out, &state.players);
-    write_territory(&mut out, state.territory.as_ref());
+    write_players(&mut out, &stream.players);
+    write_territory(&mut out, stream.territory.as_ref());
+    write_los(&mut out, &stream.los);
     write_templates(&mut out, tables.templates);
     write_strings(&mut out, tables.strings);
     write_variant_sets(&mut out, tables.variant_sets);
     write_variable_sets(&mut out, tables.variable_sets);
     write_range_sets(&mut out, tables.range_sets);
-    out.varint(state.economy.len() as u64);
-    for funds in &state.economy {
+    write_choices(&mut out, tables.choices);
+    out.varint(stream.economy.len() as u64);
+    for funds in &stream.economy {
         write_funds(&mut out, funds);
     }
     out.varint(dots.len() as u64);
@@ -2000,8 +2366,8 @@ fn encode_keyframe(
     for (id, dot) in dots {
         out.varint(u64::from(id - last_id));
         last_id = *id;
-        let hitpoints = default_hitpoints(&state.templates.items, dot.template);
-        let capture = capture_of(&state.captures, *id);
+        let hitpoints = default_hitpoints(&stream.templates.items, dot.template);
+        let capture = capture_of(&stream.captures, *id);
         write_dot(&mut out, *id, turn, dot, hitpoints, capture);
     }
     out.varint(shots.len() as u64);
@@ -2021,6 +2387,8 @@ fn encode_delta(
     new_tables: &Tables,
     new_players: Option<&Players>,
     new_territory: Option<&Territory>,
+    new_los: Option<(&Los, &Los)>,
+    reveal: Option<(u32, &[u8])>,
     ground: Option<&Ground>,
     previous: &BTreeMap<u32, Dot>,
     current: &BTreeMap<u32, Dot>,
@@ -2075,11 +2443,27 @@ fn encode_delta(
         }
         None => out.u8(0),
     }
+    match new_los {
+        Some((before, now)) => {
+            out.u8(1);
+            write_los_change(&mut out, before, now);
+        }
+        None => out.u8(0),
+    }
+    match reveal {
+        Some((revision, reveal)) => {
+            out.u8(1);
+            out.varint(u64::from(revision));
+            out.0.extend_from_slice(reveal);
+        }
+        None => out.u8(0),
+    }
     write_templates(&mut out, new_tables.templates);
     write_strings(&mut out, new_tables.strings);
     write_variant_sets(&mut out, new_tables.variant_sets);
     write_variable_sets(&mut out, new_tables.variable_sets);
     write_range_sets(&mut out, new_tables.range_sets);
+    write_choices(&mut out, new_tables.choices);
     let funds: Vec<(usize, &Funds)> = status
         .economy
         .iter()
@@ -2132,7 +2516,7 @@ fn encode_delta(
         out.varint(u64::from(id - last_id));
         last_id = *id;
         let shooter = known(shot.shooter).filter(|_| shot.shooter != 0);
-        write_launch(&mut out, shot, shooter);
+        write_launch(&mut out, shot, shooter, turn);
     }
     out.varint(removals.len() as u64);
     let mut last_id = 0;
@@ -2366,6 +2750,11 @@ fn exact_changes(before: &Dot, now: &Dot) -> u64 {
             before.construction != now.construction,
         ),
         (CHANGED_VISIBILITY, before.visibility != now.visibility),
+        (
+            CHANGED_MIRAGE,
+            before.mirage != now.mirage || before.parent != now.parent,
+        ),
+        (CHANGED_CHOSEN, before.chosen != now.chosen),
         (CHANGED_VARIABLES, before.variables != now.variables),
         (CHANGED_RANGES, before.ranges != now.ranges),
         (CHANGED_HITPOINTS, before.hitpoints != now.hitpoints),
@@ -2392,6 +2781,7 @@ fn write_shot_origin(out: &mut Writer, shot: &Shot) {
     out.varint(u64::from(shot.actor));
     out.zigzag(i64::from(shot.seed) - i64::from(shot.shooter));
     out.varint(u64::from(shot.variants));
+    out.varint(u64::from(shot.chosen));
 }
 
 fn write_shot_flight(out: &mut Writer, shot: &Shot) {
@@ -2402,11 +2792,16 @@ fn write_shot_flight(out: &mut Writer, shot: &Shot) {
     out.varint(u64::from(shot.impact_lifetime));
 }
 
-/// `shooter` is the shooter as viewers know it, if they do.
-fn write_launch(out: &mut Writer, shot: &Shot, shooter: Option<&Dot>) {
+/// `shooter` is the shooter as viewers know it, if they do; `turn` is the
+/// delta's.
+fn write_launch(out: &mut Writer, shot: &Shot, shooter: Option<&Dot>, turn: u32) {
+    out.varint(u64::from(turn - shot.launch_turn));
     out.varint(u64::from(shot.shooter));
     let origin = match shooter {
-        Some(dot) => [dot.x, dot.y, dot.z],
+        Some(dot) => {
+            out.varint(u64::from(shot.chosen));
+            [dot.x, dot.y, dot.z]
+        }
         None => {
             write_shot_origin(out, shot);
             [0; 3]
@@ -2514,6 +2909,19 @@ fn write_change(out: &mut Writer, id: u32, change: &Change, now: &Dot, capture: 
     if mask & CHANGED_CAPTURE != 0 {
         write_capture(out, capture);
     }
+    if mask & CHANGED_MIRAGE != 0 {
+        write_mirage(out, now);
+    }
+    if mask & CHANGED_CHOSEN != 0 {
+        out.varint(u64::from(now.chosen));
+    }
+}
+
+fn write_mirage(out: &mut Writer, dot: &Dot) {
+    out.varint(u64::from(dot.mirage));
+    if dot.mirage != 0 {
+        out.varint(u64::from(dot.parent));
+    }
 }
 
 fn write_capture(out: &mut Writer, capture: &[u8]) {
@@ -2562,6 +2970,65 @@ fn write_territory(out: &mut Writer, territory: Option<&Territory>) {
     for run in territory.tiles.chunk_by(|a, b| a == b) {
         out.varint(run.len() as u64);
         out.u8(run[0]);
+    }
+}
+
+/// Each grid run-length coded, as a keyframe holds it: explored land is
+/// a few large areas of one state.
+fn write_los(out: &mut Writer, los: &Los) {
+    out.varint(u64::from(los.side));
+    out.varint(los.players.len() as u64);
+    for (player, grid) in &los.players {
+        out.varint(u64::from(*player));
+        for run in grid.chunk_by(|a, b| a == b) {
+            out.varint(run.len() as u64);
+            out.u8(run[0]);
+        }
+    }
+}
+
+/// The runs of vertices that changed since `before`, as the hook sends
+/// them: changes this close together go into one run.
+fn write_los_change(out: &mut Writer, before: &Los, now: &Los) {
+    const GAP: usize = 8;
+    let players: Vec<(&u32, &Vec<u8>)> = now
+        .players
+        .iter()
+        .filter(|(player, grid)| before.players.get(player) != Some(grid))
+        .collect();
+    out.varint(players.len() as u64);
+    for (player, grid) in players {
+        out.varint(u64::from(*player));
+        let mut runs: Vec<(usize, usize)> = Vec::new();
+        match before
+            .players
+            .get(player)
+            .filter(|old| old.len() == grid.len())
+        {
+            None => runs.push((0, grid.len())),
+            Some(old) => {
+                for k in (0..grid.len()).filter(|k| old[*k] != grid[*k]) {
+                    match runs.last_mut() {
+                        Some(run) if k - run.1 <= GAP => run.1 = k + 1,
+                        _ => runs.push((k, k + 1)),
+                    }
+                }
+            }
+        }
+        out.varint(runs.len() as u64);
+        let mut end = 0;
+        for (start, stop) in runs {
+            out.varint((start - end) as u64);
+            out.varint((stop - start) as u64);
+            for chunk in grid[start..stop].chunks(4) {
+                let packed = chunk
+                    .iter()
+                    .enumerate()
+                    .fold(0u8, |byte, (m, state)| byte | state << (2 * m));
+                out.u8(packed);
+            }
+            end = stop;
+        }
     }
 }
 
@@ -2659,6 +3126,18 @@ fn write_range_sets(out: &mut Writer, sets: &[RangeSet]) {
     }
 }
 
+fn write_choices(out: &mut Writer, choices: &[[Vec<u32>; 3]]) {
+    out.varint(choices.len() as u64);
+    for sets in choices {
+        for set in sets {
+            out.varint(set.len() as u64);
+            for string in set {
+                out.varint(u64::from(*string));
+            }
+        }
+    }
+}
+
 fn write_variable_sets(out: &mut Writer, sets: &[VariableSet]) {
     out.varint(sets.len() as u64);
     for set in sets {
@@ -2685,6 +3164,7 @@ fn write_dot(out: &mut Writer, id: u32, turn: u32, dot: &Dot, hitpoints: u8, cap
     out.varint(u64::from(dot.template));
     out.varint(u64::from(dot.actor));
     out.zigzag(i64::from(dot.seed) - i64::from(id));
+    out.varint(u64::from(dot.chosen));
     out.varint(u64::from(dot.variants));
     out.varint(u64::from(dot.variables));
     out.varint(u64::from(dot.ranges));
@@ -2698,6 +3178,7 @@ fn write_dot(out: &mut Writer, id: u32, turn: u32, dot: &Dot, hitpoints: u8, cap
     out.varint(u64::from(turn - dot.sync_turn));
     out.u8(dot.construction);
     out.varint(u64::from(dot.visibility));
+    write_mirage(out, dot);
     out.zigzag(i64::from(dot.step[0]));
     out.zigzag(i64::from(dot.step[1]));
     let mut motion = if dot.grounded { MOTION_GROUNDED } else { 0 };

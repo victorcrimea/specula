@@ -69,6 +69,9 @@ struct Water {
 @group(3) @binding(0) var<uniform> light: Light;
 @group(3) @binding(1) var shadow_map: texture_depth_2d;
 @group(3) @binding(2) var shadow_sampler: sampler_comparison;
+@group(3) @binding(3) var los_now: texture_2d<f32>;
+@group(3) @binding(4) var los_before: texture_2d<f32>;
+@group(3) @binding(5) var los_sampler: sampler;
 
 // waterrefraction: the refraction texture rather than the water's colour
 // under the surface.
@@ -314,6 +317,7 @@ fn reflected(in: Varyings, normal: vec3<f32>, eye: vec3<f32>) -> vec4<f32> {
 
 @fragment
 fn fs_water(in: Varyings) -> @location(0) vec4<f32> {
+    let los = los_at(in.world);
     // Sampled before the discard: WGSL wants textureSample in uniform
     // control flow.
     let samples = sample_normals(in);
@@ -352,5 +356,11 @@ fn fs_water(in: Varyings) -> @location(0) vec4<f32> {
         out = mix(out, foamed.rgb, foamed.a);
     }
     out = clamp(out, vec3<f32>(0.0), vec3<f32>(1.0));
-    return vec4<f32>(apply_fog(out, in.world), refraction.a);
+    // water_high.fs draws no water where the LOS is black, but opaque
+    // black; returned only now, as WGSL wants every textureSample above in
+    // uniform control flow.
+    if los < 0.001 {
+        return vec4<f32>(0.0, 0.0, 0.0, 1.0);
+    }
+    return vec4<f32>(apply_fog(out, in.world) * los, refraction.a);
 }
