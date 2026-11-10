@@ -48,6 +48,7 @@
   "You don't need to wait for any of it. The match starts right away, and each model is fetched the first time it comes on screen. It shows first as a small rough version of a few KB, and full detail follows. A lower texture quality in the settings stores less.": "您不需要等待其中任何一項。比賽會立即開始，每個模型在首次出現於畫面上時才會取得。它先顯示為只有幾 KB 的小而粗糙的版本，接著是完整細節。在設定中降低紋理品質可減少儲存量。",
   "To load fast on any device, the graphics start at their minimum. You can change the graphics settings at any time in the settings.": "為了在任何裝置上都能快速載入，圖形預設使用最低設定。您可以隨時在設定中變更圖形設定。",
   "<b>Warm up</b> downloads, in the background, everything this match can need: the buildings and units of every civilisation in it, the map's terrain, and the trees, animals and rocks on it. Then nothing has to load when it first appears. This helps on a slow connection, or before the armies meet. It also asks your browser to keep these files rather than clear them when space runs low, and some browsers will ask your permission first.": "<b>預先載入</b>會在背景下載這場比賽可能需要的一切：其中每個文明的建築與單位、地圖的地形，以及地圖上的樹木、動物與岩石。這樣它們首次出現時就不必再載入。這在網路較慢時或軍隊交戰之前很有幫助。它也會請求瀏覽器保留這些檔案，而不是在空間不足時清除，部分瀏覽器會先徵求您的許可。",
+  "Press <b>F4</b>, or tap with four fingers, to cycle through the debug information: network, profiling and storage statistics.": "按 <b>F4</b> 或用四指輕點，可輪流顯示除錯資訊：網路、效能分析與儲存統計。",
   "You can delete the stored files at any time in your browser's site data settings.": "您可以隨時在瀏覽器的網站資料設定中刪除已儲存的檔案。",
   "Warm up now": "立即預先載入",
   "Got it": "知道了",

@@ -771,7 +771,7 @@ struct SoundClock {
 }
 
 /// What the `#fps` box shows, as on the unit page, and the debug panes
-/// under it, which the I key cycles through.
+/// under it, which the F4 key cycles through.
 struct Stats {
     element: HtmlElement,
     network: HtmlElement,

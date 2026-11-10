@@ -1137,6 +1137,8 @@ when it first appears. This helps on a slow connection, or before the
 armies meet. It also asks your browser to keep these files rather than
 clear them when space runs low, and some browsers will ask your permission
 first.</p>
+<p data-i18n-html>Press <b>F4</b>, or tap with four fingers, to cycle through the debug
+information: network, profiling and storage statistics.</p>
 <p data-i18n-html>You can delete the stored files at any time in your browser's site data
 settings.</p>
 <div id="storage-notice-buttons">
@@ -1161,7 +1163,7 @@ settings.</p>
 </script>
 <script>
 // Debug info is for whoever works on the page, not for viewers. Phones
-// have no keyboard, so a four-finger tap stands in for I.
+// have no keyboard, so a four-finger tap stands in for F4.
 (() => {
   const panes = ["", "network", "profiling", "storage"];
   let pane = 0;
@@ -1171,7 +1173,7 @@ settings.</p>
     document.body.classList.toggle("debug", pane !== 0);
   };
   window.addEventListener("keydown", (event) => {
-    if (event.code !== "KeyI" || event.repeat
+    if (event.code !== "F4" || event.repeat
         || event.ctrlKey || event.metaKey || event.altKey) return;
     if (["INPUT", "SELECT", "TEXTAREA"].includes(event.target.tagName)) return;
     toggle();
