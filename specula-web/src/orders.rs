@@ -720,6 +720,7 @@ fn rally(
     target_dot: Option<(u32, &Dot)>,
     flags: u8,
 ) -> Option<Action> {
+    let mut resource = (String::new(), String::new());
     let (cursor, order, rally_target, point) = match target_dot {
         Some((id, _)) if own.contains(&id) => return None,
         Some((id, dot)) => {
@@ -728,10 +729,12 @@ fn rally(
             let relation = relation(scene, player, dot.owner);
             let friendly = matches!(relation, Relation::Own | Relation::Ally);
             let (cursor, order, rally_target) = if bits & COMPONENT_RESOURCE_SUPPLY != 0 {
-                let specific = details
+                let kind = details
                     .and_then(|details| string(scene, details.supply_type))
-                    .and_then(|kind| kind.split_once('.'))
-                    .map_or("", |(_, specific)| specific);
+                    .unwrap_or_default();
+                let specific = kind.split_once('.').map_or("", |(_, specific)| specific);
+                let template = scene.templates.get(dot.template as usize);
+                resource = (kind.to_string(), template.cloned().unwrap_or_default());
                 let cursor = if specific.is_empty() {
                     String::new()
                 } else {
@@ -767,6 +770,8 @@ fn rally(
             z,
             order: order.to_string(),
             target: rally_target,
+            resource_type: resource.0,
+            resource_template: resource.1,
         }),
         // unit_actions.js plays nothing on setting a rally point.
         sound: None,

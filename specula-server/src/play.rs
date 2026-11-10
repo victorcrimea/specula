@@ -518,6 +518,8 @@ fn order_json(order: &Order) -> String {
             z,
             order,
             target,
+            resource_type,
+            resource_template,
         } => {
             out.text("type", "set-rallypoint");
             out.entities("entities", entities);
@@ -527,6 +529,16 @@ fn order_json(order: &Order) -> String {
             data.text("command", order);
             if *target != 0 {
                 data.raw("target", &target.to_string());
+            }
+            // Without them, a unit sent to the rally point after its
+            // resource ran out throws in `GatherNearPosition`, which aborts
+            // the unload or the batch that sent it.
+            if let Some((generic, specific)) = resource_type.split_once('.') {
+                let mut kind = Json::new();
+                kind.text("generic", generic);
+                kind.text("specific", specific);
+                data.raw("resourceType", &kind.finish());
+                data.text("resourceTemplate", resource_template);
             }
             out.raw("data", &data.finish());
             out.boolean("queued", flags & QUEUED != 0);

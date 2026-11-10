@@ -16,7 +16,7 @@ use crate::bytes::ByteReader;
 
 /// The version of this format, which the server sends as the first byte of
 /// its seat message; a page on another version must reload.
-pub const COMMAND_VERSION: u8 = 2;
+pub const COMMAND_VERSION: u8 = 3;
 
 pub const QUEUED: u8 = 1;
 pub const PUSH_FRONT: u8 = 2;
@@ -132,7 +132,10 @@ pub enum Command {
         entities: Vec<u32>,
     },
     /// `order` is the rally point's command ("walk", "gather", ...), with
-    /// its target entity, 0 for none.
+    /// its target entity, 0 for none. On a resource, `resource_type`
+    /// ("food.fruit") and `resource_template` are the target's, empty
+    /// otherwise: once the target is gone, `GetRallyPointCommands` gathers
+    /// near the point by them.
     Rally {
         flags: u8,
         entities: Vec<u32>,
@@ -140,6 +143,8 @@ pub enum Command {
         z: f32,
         order: String,
         target: u32,
+        resource_type: String,
+        resource_template: String,
     },
     Stance {
         entities: Vec<u32>,
@@ -566,11 +571,15 @@ impl Command {
                 z,
                 order,
                 target,
+                resource_type,
+                resource_template,
             } => {
                 out.head(RALLY, *flags, entities);
                 out.point(*x, *z);
                 out.text(order);
                 out.varint(u64::from(*target));
+                out.text(resource_type);
+                out.text(resource_template);
             }
             Command::Stance { entities, name } => {
                 out.0.push(STANCE);
@@ -792,6 +801,8 @@ impl Command {
                     z,
                     order: input.text()?,
                     target: input.varint_u32()?,
+                    resource_type: input.text()?,
+                    resource_template: input.text()?,
                 }
             }
             STANCE => Command::Stance {
