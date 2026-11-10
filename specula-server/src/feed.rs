@@ -259,6 +259,8 @@ pub struct TemplateDetails {
     pub gather_rates: Option<u32>,
     pub dropsite_types: Option<u32>,
     pub attack_types: Option<u32>,
+    /// The groups gui/session plays on an order, as `name=path` tokens.
+    pub order_sounds: Option<u32>,
 }
 
 /// One item of a trainable or researchable list, read for the producer's
@@ -1200,6 +1202,7 @@ fn decode_template_details(payload: &[u8]) -> io::Result<Record> {
         gather_rates: None,
         dropsite_types: None,
         attack_types: None,
+        order_sounds: None,
     };
     // A hook from before lang and phenotypes ends here; the feed version
     // stayed, so both lengths are read.
@@ -1221,6 +1224,10 @@ fn decode_template_details(payload: &[u8]) -> io::Result<Record> {
         details.gather_rates = optional(cursor.u32()?);
         details.dropsite_types = optional(cursor.u32()?);
         details.attack_types = optional(cursor.u32()?);
+    }
+    // And for one from before the order sounds.
+    if !cursor.0.is_empty() {
+        details.order_sounds = optional(cursor.u32()?);
     }
     if !cursor.0.is_empty() {
         return Err(invalid("template details record longer than its contents"));

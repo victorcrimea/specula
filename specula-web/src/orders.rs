@@ -41,15 +41,13 @@ pub struct Target {
 
 /// What a right click would do: the cursor the engine shows for it, the
 /// name of a file in `art/textures/cursors/` or empty for the default
-/// arrow, and the order, none when the click does nothing.
+/// arrow, the order, none when the click does nothing, and the sound group
+/// the order plays with the entity it plays from, the action's
+/// `firstAbleEntity`.
 pub struct Action {
     pub cursor: String,
     pub command: Option<Command>,
-}
-
-/// The order for `player`'s entities among `selected`, or none.
-pub fn order(scene: &Scene, selected: &[u32], player: i32, target: &Target) -> Option<Command> {
-    action(scene, selected, player, target)?.command
+    pub sound: Option<(&'static str, u32)>,
 }
 
 /// The action for `player`'s entities among `selected`, none when the
@@ -83,6 +81,7 @@ pub fn action(scene: &Scene, selected: &[u32], player: i32, target: &Target) -> 
         return Some(Action {
             cursor: "cursor-no".to_string(),
             command: None,
+            sound: None,
         });
     }
     let flags = if target.queued { QUEUED } else { 0 };
@@ -100,13 +99,14 @@ pub fn action(scene: &Scene, selected: &[u32], player: i32, target: &Target) -> 
 
         // "gather"
         if bits & COMPONENT_RESOURCE_SUPPLY != 0
-            && let Some(resource) = able.iter().find_map(|&unit| {
-                gathered(
+            && let Some((gatherer, resource)) = able.iter().find_map(|&unit| {
+                let resource = gathered(
                     scene,
                     details(unit)?,
                     target_details?,
                     has(unit, COMPONENT_RESOURCE_GATHERER),
-                )
+                )?;
+                Some((unit, resource))
             })
         {
             return Some(Action {
@@ -120,18 +120,19 @@ pub fn action(scene: &Scene, selected: &[u32], player: i32, target: &Target) -> 
                     entities: entities(),
                     target: id,
                 }),
+                sound: Some(("order_gather", gatherer)),
             });
         }
         // "returnresource"; shared dropsites are not considered.
         if relation == Relation::Own
             && bits & COMPONENT_RESOURCE_DROPSITE != 0
-            && let Some(carried) = able.iter().find_map(|&unit| {
+            && let Some((carrier, carried)) = able.iter().find_map(|&unit| {
                 let carried = carried(scene, unit)?;
                 let types = target_details?.dropsite_types;
                 (types == 0
                     || string(scene, types)
                         .is_some_and(|types| types.split_whitespace().any(|kind| kind == carried)))
-                .then_some(carried)
+                .then_some((unit, carried))
             })
         {
             return Some(Action {
@@ -141,6 +142,7 @@ pub fn action(scene: &Scene, selected: &[u32], player: i32, target: &Target) -> 
                     entities: entities(),
                     target: id,
                 }),
+                sound: Some(("order_gather", carrier)),
             });
         }
     }
@@ -162,12 +164,13 @@ pub fn action(scene: &Scene, selected: &[u32], player: i32, target: &Target) -> 
         let attackers = || {
             able.iter()
                 .filter(|&&unit| has(unit, COMPONENT_ATTACK))
-                .filter_map(|&unit| details(unit))
+                .filter_map(|&unit| Some((unit, details(unit)?)))
         };
 
         // "attack", without capturing.
         if dot.hitpoints > 0
-            && attackers().any(|attacker| can_attack(scene, attacker, relation, &classes))
+            && let Some((attacker, _)) =
+                attackers().find(|&(_, attacker)| can_attack(scene, attacker, relation, &classes))
         {
             return Some(Action {
                 cursor: "action-attack".to_string(),
@@ -176,11 +179,13 @@ pub fn action(scene: &Scene, selected: &[u32], player: i32, target: &Target) -> 
                     entities: entities(),
                     target: id,
                 }),
+                sound: Some(("order_attack", attacker)),
             });
         }
         // "capture"
         if bits & COMPONENT_CAPTURABLE != 0
-            && attackers().any(|attacker| can_capture(scene, attacker, relation, &classes))
+            && let Some((attacker, _)) =
+                attackers().find(|&(_, attacker)| can_capture(scene, attacker, relation, &classes))
         {
             return Some(Action {
                 cursor: "action-capture".to_string(),
@@ -189,11 +194,12 @@ pub fn action(scene: &Scene, selected: &[u32], player: i32, target: &Target) -> 
                     entities: entities(),
                     target: id,
                 }),
+                sound: Some(("order_attack", attacker)),
             });
         }
         // "repair": builders on a friendly foundation or damaged building.
         if matches!(relation, Relation::Own | Relation::Ally)
-            && able.iter().any(|&unit| has(unit, COMPONENT_BUILDER))
+            && let Some(&builder) = able.iter().find(|&&unit| has(unit, COMPONENT_BUILDER))
             && (bits & COMPONENT_FOUNDATION != 0
                 || (bits & COMPONENT_REPAIRABLE != 0 && dot.hitpoints < 255))
         {
@@ -204,14 +210,20 @@ pub fn action(scene: &Scene, selected: &[u32], player: i32, target: &Target) -> 
                     entities: entities(),
                     target: id,
                 }),
+                sound: Some((
+                    if bits & COMPONENT_FOUNDATION != 0 {
+                        "order_build"
+                    } else {
+                        "order_repair"
+                    },
+                    builder,
+                )),
             });
         }
     }
 
     // "move", which has no cursor of its own.
-    if !unit_ai {
-        return None;
-    }
+    let &walker = able.iter().find(|&&id| has(id, COMPONENT_UNIT_AI))?;
     let point = target
         .point
         .or_else(|| target_dot.map(|(_, dot)| position(dot)));
@@ -223,6 +235,7 @@ pub fn action(scene: &Scene, selected: &[u32], player: i32, target: &Target) -> 
             x,
             z,
         }),
+        sound: Some(("order_walk", walker)),
     })
 }
 
@@ -436,5 +449,7 @@ fn rally(
             order: order.to_string(),
             target: rally_target,
         }),
+        // unit_actions.js plays nothing on setting a rally point.
+        sound: None,
     })
 }

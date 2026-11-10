@@ -51,8 +51,8 @@ use web_sys::MouseEvent;
 use web_sys::WheelEvent;
 
 use crate::AnimationSound;
+use crate::EntitySound;
 use crate::Listener;
-use crate::SelectSound;
 use crate::StreamBytes;
 use crate::TURN_MS;
 use crate::View;
@@ -742,8 +742,9 @@ pub struct Field {
     last_fade: f64,
     /// The animation time each entity's sound was last checked at.
     sound_clocks: HashMap<u32, SoundClock>,
-    /// The select sounds of the selections made since the last call.
-    select_sounds: Vec<SelectSound>,
+    /// The select sounds of the selections made since the last call, and
+    /// the order sounds queued.
+    entity_sounds: Vec<EntitySound>,
     /// Where the right clicks since the last call landed.
     order_targets: Vec<orders::Target>,
     /// What the mouse is over, as `View::hovered` gives it.
@@ -1463,7 +1464,7 @@ impl Field {
                 .and_then(|element| element.dyn_into::<HtmlElement>().ok()),
             last_fade: now(),
             sound_clocks: HashMap::new(),
-            select_sounds: Vec::new(),
+            entity_sounds: Vec::new(),
             order_targets: Vec::new(),
             hovered: None,
             place_inputs: Vec::new(),
@@ -1940,8 +1941,10 @@ impl Field {
                 self.selection.reset(look);
                 self.selection.add_list(&ids, look)
             };
-            if let Some(sound) = first.and_then(|id| select_sound(entities, &self.pickables, id)) {
-                self.select_sounds.push(sound);
+            if let Some(sound) =
+                first.and_then(|id| entity_sound(entities, &self.pickables, id, "select"))
+            {
+                self.entity_sounds.push(sound);
             }
         }
         let (place_inputs, placing, client, ctrl, shift) = {
@@ -4370,8 +4373,14 @@ impl View for Field {
         self.animation_sounds(progress)
     }
 
-    fn take_select_sounds(&mut self) -> Vec<SelectSound> {
-        std::mem::take(&mut self.select_sounds)
+    fn take_entity_sounds(&mut self) -> Vec<EntitySound> {
+        std::mem::take(&mut self.entity_sounds)
+    }
+
+    fn queue_sound(&mut self, id: u32, name: &str) {
+        if let Some(sound) = entity_sound(&self.entities, &self.pickables, id, name) {
+            self.entity_sounds.push(sound);
+        }
     }
 
     fn take_order_targets(&mut self) -> Vec<orders::Target> {
@@ -6489,10 +6498,15 @@ fn selectee(entities: &Entities, id: u32) -> Option<Selectee> {
     })
 }
 
-/// The select sound of entity `id` where it is drawn, its group filled as
+/// Entity `id`'s sound group `name` where it is drawn, filled as
 /// `Sound.js` fills it: `{lang}` with the template's Lang, `{phenotype}`
 /// with the one `Identity.Init` picks by the entity id.
-fn select_sound(entities: &Entities, pickables: &[Pickable], id: u32) -> Option<SelectSound> {
+fn entity_sound(
+    entities: &Entities,
+    pickables: &[Pickable],
+    id: u32,
+    name: &str,
+) -> Option<EntitySound> {
     let dot = entity_dot(entities, id)?;
     let details = entities
         .template_details
@@ -6504,7 +6518,13 @@ fn select_sound(entities: &Entities, pickables: &[Pickable], id: u32) -> Option<
             .and_then(|index| entities.strings.get(index))
             .map(String::as_str)
     };
-    let group = string(details.select_sound)?;
+    let group = if name == "select" {
+        string(details.select_sound)?
+    } else {
+        string(details.order_sounds)?
+            .split_whitespace()
+            .find_map(|token| token.strip_prefix(name)?.strip_prefix('='))?
+    };
     let lang = string(details.lang).unwrap_or("greek");
     let phenotypes: Vec<&str> = string(details.phenotypes)
         .map(|tokens| tokens.split_whitespace().collect())
@@ -6518,7 +6538,7 @@ fn select_sound(entities: &Entities, pickables: &[Pickable], id: u32) -> Option<
         .iter()
         .find(|pickable| pickable.id == id)?
         .position;
-    Some(SelectSound {
+    Some(EntitySound {
         group: group
             .replace("{lang}", lang)
             .replace("{phenotype}", phenotype),

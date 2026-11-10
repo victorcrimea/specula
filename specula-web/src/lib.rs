@@ -215,8 +215,8 @@ pub struct AnimationSound {
     pub position: [f32; 3],
 }
 
-/// The select sound of an entity a selection just added.
-pub struct SelectSound {
+/// The select sound of an entity a selection just added, or an order's.
+pub struct EntitySound {
     /// The sound group, relative to audio/.
     pub group: String,
     pub owner: i32,
@@ -345,10 +345,14 @@ trait View {
     fn selected(&self) -> &[u32] {
         &[]
     }
-    /// The select sounds of the selections made since the last call.
-    fn take_select_sounds(&mut self) -> Vec<SelectSound> {
+    /// The select sounds of the selections made since the last call, and
+    /// the sounds `queue_sound` queued.
+    fn take_entity_sounds(&mut self) -> Vec<EntitySound> {
         Vec::new()
     }
+    /// Plays entity `id`'s sound group `name` (e.g. `order_walk`), as the
+    /// session GUI's `PlaySound` does.
+    fn queue_sound(&mut self, _id: u32, _name: &str) {}
     /// Where the right clicks since the last call landed, where it takes
     /// orders.
     fn take_order_targets(&mut self) -> Vec<orders::Target> {
@@ -868,13 +872,20 @@ impl App {
             self.details_dirty = true;
         }
         let selected = self.renderer.selected();
+        let mut sounds = Vec::new();
         for target in targets {
-            if let Some(order) = orders::order(&self.scene, selected, seat, &target)
+            if let Some(action) = orders::action(&self.scene, selected, seat, &target)
+                && let Some(order) = action.command
                 && let Some(uplink) = &self.uplink
             {
                 uplink.send(&order);
+                sounds.extend(action.sound);
             }
         }
+        for (name, id) in sounds {
+            self.renderer.queue_sound(id, name);
+        }
+        let selected = self.renderer.selected();
         // As `updateCursorAndTooltip`: the right click's cursor, else the
         // default arrow.
         let cursor = self
@@ -1031,7 +1042,7 @@ impl App {
 
     fn play_sounds(&mut self, now: f64, progress: f32) {
         // Taken even when nothing plays them, so they do not pile up.
-        let selects = self.renderer.take_select_sounds();
+        let entity_sounds = self.renderer.take_entity_sounds();
         let Some(sound) = &mut self.sound else {
             return;
         };
@@ -1049,12 +1060,13 @@ impl App {
             }
         }
         // `CCmpSoundManager::PlaySoundGroup` with no LOS test: selection
-        // under a player perspective works as under Observer.
-        for select in selects {
-            let owned = matches!(self.perspective, Perspective::Player(shown) if usize::try_from(select.owner) == Ok(shown));
+        // under a player perspective works as under Observer, and an order
+        // goes to the player's own, which it always sees.
+        for entity_sound in entity_sounds {
+            let owned = matches!(self.perspective, Perspective::Player(shown) if usize::try_from(entity_sound.owner) == Ok(shown));
             sound
                 .audio
-                .play_group(&select.group, select.position, owned, now);
+                .play_group(&entity_sound.group, entity_sound.position, owned, now);
         }
         let (civ, kind) = music_for(&self.scene, self.perspective);
         sound.audio.set_music(civ, kind);

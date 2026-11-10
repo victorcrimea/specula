@@ -409,6 +409,9 @@ pub struct TemplateDetails {
     pub gather_rates: u32,
     pub dropsite_types: u32,
     pub attack_types: u32,
+    /// The groups gui/session plays on an order, a 1-based string of
+    /// `name=path` tokens, 0 from a hook or a stored match without them.
+    pub order_sounds: u32,
 }
 
 /// A player's top panel numbers.
@@ -564,8 +567,7 @@ impl Scene {
     fn apply_keyframe(&mut self, cursor: &mut ByteReader) -> Result<(), &'static str> {
         self.turn = cursor.varint_u32()?;
         self.wire_version = cursor.u8()?;
-        // Stored matches from before the template action strings still
-        // play.
+        // Stored matches from before the template order sounds still play.
         if self.wire_version != WIRE_VERSION && self.wire_version != WIRE_VERSION - 1 {
             return Err("unknown wire version, reload the page");
         }
@@ -1003,6 +1005,7 @@ impl Scene {
             ] {
                 out.varint(u64::from(string));
             }
+            out.varint(u64::from(details.order_sounds));
         }
         out.varint(self.strings.len() as u64);
         for text in &self.strings {
@@ -1529,12 +1532,16 @@ impl Records for ByteReader<'_> {
             gather_rates: 0,
             dropsite_types: 0,
             attack_types: 0,
+            order_sounds: 0,
         };
-        if version == WIRE_VERSION {
+        if version >= WIRE_VERSION - 1 {
             details.supply_type = self.varint_u32()?;
             details.gather_rates = self.varint_u32()?;
             details.dropsite_types = self.varint_u32()?;
             details.attack_types = self.varint_u32()?;
+        }
+        if version == WIRE_VERSION {
+            details.order_sounds = self.varint_u32()?;
         }
         Ok(details)
     }

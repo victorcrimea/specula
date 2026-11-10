@@ -238,7 +238,7 @@ impl Placement {
             Some(Active::Wall(wall)) => wall.follow(pointer),
             None => {}
         }
-        self.place(uplink);
+        self.place(view, uplink);
         if self.pending.is_none() {
             self.ask(uplink, scene, seat);
         }
@@ -298,8 +298,11 @@ impl Placement {
     }
 
     /// `tryPlaceBuilding` and `tryPlaceWall`, once the engine has judged
-    /// the spot or laid the wall the press was for.
-    fn place(&mut self, uplink: &Uplink) {
+    /// the spot or laid the wall the press was for. Their sounds play from
+    /// the first selected entity, as theirs do.
+    fn place(&mut self, view: &mut dyn View, uplink: &Uplink) {
+        let first = view.selected().first().copied();
+        let mut sound = None;
         let mut done = false;
         match &mut self.active {
             Some(Active::Building(building)) => {
@@ -315,6 +318,9 @@ impl Placement {
                 building.placing = None;
                 if !*valid {
                     building.stage = Stage::Hover;
+                    if let Some(first) = first {
+                        view.queue_sound(first, "invalid_building_placement");
+                    }
                     return;
                 }
                 uplink.send(&Command::Construct {
@@ -326,6 +332,7 @@ impl Placement {
                     angle: spot.angle,
                     seed: building.seed,
                 });
+                sound = Some("order_build");
                 if queued && !building.place.builders.is_empty() {
                     building.seed = random_seed();
                     building.stage = Stage::Hover;
@@ -367,6 +374,7 @@ impl Placement {
                     start_snapped: layout.start_snapped,
                     end_snapped: layout.end_snapped,
                 });
+                sound = Some("order_build");
                 if queued {
                     wall.start = wall.end;
                     wall.end = None;
@@ -376,6 +384,11 @@ impl Placement {
                 }
             }
             None => {}
+        }
+        if let Some(name) = sound
+            && let Some(first) = first
+        {
+            view.queue_sound(first, name);
         }
         if done {
             self.stop(uplink);
