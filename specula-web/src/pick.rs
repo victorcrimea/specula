@@ -27,6 +27,9 @@ pub const FLAG_INFINITE_SUPPLY: u32 = 1024;
 /// An entity drawn this frame, in world space.
 pub struct Pickable {
     pub id: u32,
+    /// Visible to the shown perspective; the picks skip it otherwise, as
+    /// the engine's skip what is LOS-hidden from the viewed player.
+    pub seen: bool,
     /// `ICmpVisual::GetPosition`: the model's translation.
     pub position: [f32; 3],
     /// The engine's `unitX` for the interpolated heading, unit length: the
@@ -203,7 +206,7 @@ pub fn ground_hit(ray: &Ray, ground: impl Fn(f32, f32) -> f32, map_size: f32) ->
 pub fn pick_at_point(pickables: &[Pickable], ray: &Ray) -> Option<u32> {
     pickables
         .iter()
-        .filter(|pickable| pickable.bounds.ray_intersect(ray))
+        .filter(|pickable| pickable.seen && pickable.bounds.ray_intersect(ray))
         .map(|pickable| {
             let centre = pickable.bounds.centre;
             let along = dot(sub(centre, ray.origin), ray.dir);
@@ -241,8 +244,9 @@ pub fn pick_in_rect(
     pickables
         .iter()
         .filter(|pickable| {
-            screen_point(view_proj, pickable.position)
-                .is_some_and(|[x, y]| (x0..=x1).contains(&x) && (y0..=y1).contains(&y))
+            pickable.seen
+                && screen_point(view_proj, pickable.position)
+                    .is_some_and(|[x, y]| (x0..=x1).contains(&x) && (y0..=y1).contains(&y))
         })
         .map(|pickable| pickable.id)
         .collect()
@@ -256,7 +260,7 @@ pub fn pick_similar(
 ) -> Vec<u32> {
     pickables
         .iter()
-        .filter(|pickable| screen_point(view_proj, pickable.position).is_some())
+        .filter(|pickable| pickable.seen && screen_point(view_proj, pickable.position).is_some())
         .filter(|pickable| similar(pickable.id))
         .map(|pickable| pickable.id)
         .collect()

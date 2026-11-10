@@ -802,6 +802,8 @@ pub struct Field {
     /// selected and highlighted ones, as `g_ShowAllStatusBars`; `None`
     /// while it is off.
     all_status_bars: Option<Perspective>,
+    /// What picking, the status bars and the selection see.
+    perspective: Perspective,
     device_pixel_ratio: f32,
     stats: Stats,
     timer: Timer,
@@ -1514,6 +1516,7 @@ impl Field {
             impact_models: HashMap::new(),
             projectiles: true,
             all_status_bars: None,
+            perspective: Perspective::Observer,
             device_pixel_ratio: 1.0,
             stats,
             timer,
@@ -1897,6 +1900,7 @@ impl Field {
         // unitX comes from rotY alone, so it is the model's -x.
         self.pickables.push(Pickable {
             id,
+            seen: self.perspective.sees(dot.visibility),
             position: [transform.m[0][3], transform.m[1][3], transform.m[2][3]],
             facing: if length > 0.0 {
                 [-x / length, -z / length]
@@ -1925,7 +1929,8 @@ impl Field {
         let tan_half = (FIELD_OF_VIEW / 2.0).tan();
         let ray = |at| pick::camera_ray(eye, right, up, cross(right, up), tan_half, aspect, at);
         let entities = &self.entities;
-        let look: Lookup = &|id| selectee(entities, id);
+        let perspective = self.perspective;
+        let look: Lookup = &|id| selectee(entities, perspective, id);
         for input in picks {
             let (ids, add, remove) = match input {
                 PickInput::Click {
@@ -2069,7 +2074,11 @@ impl Field {
     /// `PickEntitiesInRect` then `getPreferredEntities`, corners 0..1
     /// across the canvas.
     fn in_band(&self, view_proj: &[[f32; 4]; 4], from: [f32; 2], to: [f32; 2]) -> Vec<u32> {
-        let ids = pick::pick_in_rect(&self.pickables, view_proj, from, to);
+        let mut ids = pick::pick_in_rect(&self.pickables, view_proj, from, to);
+        // `PickPlayerEntitiesInRect` of the viewed player's own.
+        if let Some(player) = self.perspective.player() {
+            ids.retain(|id| self.entity_dot(*id).is_some_and(|dot| dot.owner == player));
+        }
         pick::preferred(ids, |id, class| {
             self.dot_details(id)
                 .is_some_and(|(_, details)| pick::has_class(details, &self.entities.strings, class))
@@ -2201,12 +2210,17 @@ impl Field {
         let Some(id) = self.camera.borrow().follow else {
             return;
         };
-        let position = self
-            .entity_dot(id)
-            .map(|dot| self.entity_position(dot, progress));
+        let position = self.entity_dot(id).map(|dot| {
+            self.perspective
+                .sees(dot.visibility)
+                .then(|| self.entity_position(dot, progress))
+        });
         let camera = &mut *self.camera.borrow_mut();
         match position {
-            Some([x, _, z]) => camera.target = [x, z],
+            Some(Some([x, _, z])) => camera.target = [x, z],
+            // `CCameraController::Update` holds still, still following,
+            // while the viewed player does not see it.
+            Some(None) => {}
             None => camera.follow = None,
         }
     }
@@ -4107,6 +4121,18 @@ impl View for Field {
         self.all_status_bars = shown;
     }
 
+    fn set_perspective(&mut self, perspective: Perspective, controls: bool) {
+        self.selection.set_viewer(perspective.player(), controls);
+        if perspective != self.perspective {
+            // `PlayerViewControl.onSelectionChange` clears the selection
+            // when the viewed player changes.
+            let entities = &self.entities;
+            self.selection
+                .reset(&|id| selectee(entities, perspective, id));
+            self.perspective = perspective;
+        }
+    }
+
     fn set_ranges(&mut self, ranges: [bool; 3]) {
         self.camera.borrow_mut().ranges = ranges;
     }
@@ -4345,8 +4371,9 @@ impl View for Field {
         }
         let renames = std::mem::take(&mut self.renames);
         let entities = &self.entities;
+        let perspective = self.perspective;
         self.selection
-            .update(&renames, &|id| selectee(entities, id));
+            .update(&renames, &|id| selectee(entities, perspective, id));
         self.palette = palette.to_vec();
         self.borders
             .set_territory(&scene.territory, scene.territory_generation, palette);
@@ -6476,7 +6503,7 @@ fn status_bar_sprites<'a>(
             Some(Perspective::Observer) => dot.owner > 0,
             Some(Perspective::Player(player)) => usize::try_from(dot.owner) == Ok(player),
         };
-        if !shown_by_all && !selection.shows_ranges(pickable.id) {
+        if !pickable.seen || !shown_by_all && !selection.shows_ranges(pickable.id) {
             continue;
         }
         let Some(details) = entities
@@ -6611,7 +6638,7 @@ fn overlay_shape(details: &TemplateDetails) -> Option<OverlayShape> {
 }
 
 /// What the selection needs of entity `id`, `None` when it does not exist.
-fn selectee(entities: &Entities, id: u32) -> Option<Selectee> {
+fn selectee(entities: &Entities, perspective: Perspective, id: u32) -> Option<Selectee> {
     let dot = entity_dot(entities, id)?;
     let flags = entities
         .template_details
@@ -6621,6 +6648,7 @@ fn selectee(entities: &Entities, id: u32) -> Option<Selectee> {
     Some(Selectee {
         owner: dot.owner,
         always_visible: flags & pick::FLAG_ALWAYS_VISIBLE != 0,
+        seen: perspective.sees(dot.visibility),
     })
 }
 

@@ -251,6 +251,10 @@ trait View {
     /// Whose on-screen entities show their status bars too, where it draws
     /// any; `None` for only the selected and highlighted ones.
     fn set_all_status_bars(&mut self, _shown: Option<Perspective>) {}
+    /// The shown perspective, which picking, the status bars and the
+    /// selection follow, where it picks any; `controls` on `/play`, whose
+    /// player is not an observer.
+    fn set_perspective(&mut self, _perspective: Perspective, _controls: bool) {}
     /// Whether the attack, aura and heal range overlays are drawn, where it
     /// draws any. Its own keys toggle them too, hence the getter.
     fn set_ranges(&mut self, _ranges: [bool; 3]) {}
@@ -1316,6 +1320,8 @@ impl App {
             diplomacy::palette(&self.scene.players, self.diplomacy_colors, self.perspective);
         self.renderer
             .set_all_status_bars(self.all_status_bars.then_some(self.perspective));
+        self.renderer
+            .set_perspective(self.perspective, self.uplink.is_some());
         self.scene_changed = true;
     }
 }
@@ -2921,10 +2927,9 @@ fn save_sound_settings(settings: Settings) {
 fn hears(perspective: Perspective, owner: i32, visibility: u16) -> Option<bool> {
     match perspective {
         Perspective::Observer => Some(false),
-        Perspective::Player(player) => {
-            let sees = player < 16 && visibility & (1 << player) != 0;
-            sees.then_some(usize::try_from(owner) == Ok(player))
-        }
+        Perspective::Player(player) => perspective
+            .sees(visibility)
+            .then_some(usize::try_from(owner) == Ok(player)),
     }
 }
 

@@ -21,6 +21,25 @@ pub enum Perspective {
     Player(usize),
 }
 
+impl Perspective {
+    /// Whether an entity with `Dot::visibility` is visible to it. An
+    /// observer sees all, as a 0 A.D. observer does.
+    pub fn sees(self, visibility: u16) -> bool {
+        match self {
+            Perspective::Observer => true,
+            Perspective::Player(player) => player < 16 && visibility & (1 << player) != 0,
+        }
+    }
+
+    /// The player whose entities it views, `None` for an observer.
+    pub fn player(self) -> Option<i32> {
+        match self {
+            Perspective::Observer => None,
+            Perspective::Player(player) => i32::try_from(player).ok(),
+        }
+    }
+}
+
 /// The colour to draw each player id in, 0xFFRRGGBB.
 pub fn palette(players: &[Player], enabled: bool, perspective: Perspective) -> Vec<u32> {
     let mut colors: Vec<u32> = players.iter().map(|player| player.color).collect();
