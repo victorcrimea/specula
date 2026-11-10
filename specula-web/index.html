@@ -181,15 +181,15 @@ body { cursor: var(--gui-cursor-default, default); }
   var(--gui-panel-shader-top-edge) 0 0 / 100% 1px no-repeat; }
 /* The engine's `-stroke` fonts: a 1 px black outline. The top panel
    shares the text and bar styles. */
-:is(#details, #top-panel, #diplomacy-window) .text { position: absolute; display: flex; align-items: center;
+:is(#details, #top-panel, #diplomacy-window, #message-box) .text { position: absolute; display: flex; align-items: center;
   white-space: pre; overflow: hidden; line-height: 1.1;
   -webkit-text-stroke: 2px black; paint-order: stroke fill; }
-:is(#details, #top-panel, #diplomacy-window) .center { justify-content: center; text-align: center; }
+:is(#details, #top-panel, #diplomacy-window, #message-box) .center { justify-content: center; text-align: center; }
 :is(#details, #top-panel) .right { justify-content: flex-end; text-align: right; }
 :is(#details, #top-panel) .sans-stroke-12 { font-size: 12px; font-weight: 400; }
 :is(#details, #top-panel) .sans-stroke-14 { font-size: 14px; font-weight: 400; }
 :is(#details, #top-panel) .sans-bold-stroke-13 { font-size: 13px; font-weight: 700; }
-:is(#details, #top-panel, #diplomacy-window) .sans-bold-stroke-14 { font-size: 14px; font-weight: 700; }
+:is(#details, #top-panel, #diplomacy-window, #message-box) .sans-bold-stroke-14 { font-size: 14px; font-weight: 700; }
 :is(#details, #top-panel) .gold { color: var(--gui-gold); }
 /* A bar: barBorder around it, the background, the foreground and
    statsBarShaderHorizontal or ...Vertical over them. */
@@ -669,32 +669,32 @@ body:not([data-debug="storage"]) #stats-storage { display: none; }
   font-family: "0ad sans", "0ad sans fallback", sans-serif; color: white;
   user-select: none; -webkit-user-select: none; }
 #diplomacy-window[hidden], #diplomacy-window [hidden] { display: none; }
-#diplomacy-window > .frame { position: absolute; pointer-events: none; background-repeat: no-repeat; }
-#diplomacy-window > .background { left: 4px; top: 0; right: 4px; bottom: 4px;
+:is(#diplomacy-window, #message-box-dialog) > .frame { position: absolute; pointer-events: none; background-repeat: no-repeat; }
+:is(#diplomacy-window, #message-box-dialog) > .background { left: 4px; top: 0; right: 4px; bottom: 4px;
   background: var(--gui-dialog-background) 0 0 / 512px 512px repeat; }
-#diplomacy-window > .shade { left: 4px; right: 4px; height: 128px;
+:is(#diplomacy-window, #message-box-dialog) > .shade { left: 4px; right: 4px; height: 128px;
   background-image: var(--gui-dialog-shadow); background-size: 100% 100%; }
-#diplomacy-window > .shade.top { top: 0; scale: -1 -1; }
-#diplomacy-window > .shade.bottom { bottom: 4px; }
-#diplomacy-window > .edge { left: 4px; right: 4px; height: 8px;
+:is(#diplomacy-window, #message-box-dialog) > .shade.top { top: 0; scale: -1 -1; }
+:is(#diplomacy-window, #message-box-dialog) > .shade.bottom { bottom: 4px; }
+:is(#diplomacy-window, #message-box-dialog) > .edge { left: 4px; right: 4px; height: 8px;
   background: var(--gui-dialog-border) 0 0 / 2048px 8px repeat-x; }
-#diplomacy-window > .edge.top { top: -4px; }
-#diplomacy-window > .edge.bottom { bottom: 0; }
-#diplomacy-window > .deco { width: 64px; height: 32px; background-size: 100% 100%; }
-#diplomacy-window > .deco.top-left { left: -14px; top: -21px;
+:is(#diplomacy-window, #message-box-dialog) > .edge.top { top: -4px; }
+:is(#diplomacy-window, #message-box-dialog) > .edge.bottom { bottom: 0; }
+:is(#diplomacy-window, #message-box-dialog) > .deco { width: 64px; height: 32px; background-size: 100% 100%; }
+:is(#diplomacy-window, #message-box-dialog) > .deco.top-left { left: -14px; top: -21px;
   background-image: var(--gui-dialog-deco-top); scale: -1 1; }
-#diplomacy-window > .deco.top-right { right: -14px; top: -21px;
+:is(#diplomacy-window, #message-box-dialog) > .deco.top-right { right: -14px; top: -21px;
   background-image: var(--gui-dialog-deco-top); }
-#diplomacy-window > .deco.bottom-left { left: -31px; bottom: -10px;
+:is(#diplomacy-window, #message-box-dialog) > .deco.bottom-left { left: -31px; bottom: -10px;
   background-image: var(--gui-dialog-deco-bottom); scale: -1 1; }
-#diplomacy-window > .deco.bottom-right { right: -31px; bottom: -10px;
+:is(#diplomacy-window, #message-box-dialog) > .deco.bottom-right { right: -31px; bottom: -10px;
   background-image: var(--gui-dialog-deco-bottom); }
-#diplomacy-window > .titlebar { top: -18px; height: 33px; background-size: 100% 100%; }
-#diplomacy-window > .titlebar.middle { left: calc(50% - 108px); width: 216px;
+:is(#diplomacy-window, #message-box-dialog) > .titlebar { top: -18px; height: 33px; background-size: 100% 100%; }
+:is(#diplomacy-window, #message-box-dialog) > .titlebar.middle { left: calc(50% - 108px); width: 216px;
   background: var(--gui-dialog-titlebar-middle) 0 0 / 128px 100% repeat-x; }
-#diplomacy-window > .titlebar.left { left: calc(50% - 134px); width: 32px;
+:is(#diplomacy-window, #message-box-dialog) > .titlebar.left { left: calc(50% - 134px); width: 32px;
   background-image: var(--gui-dialog-titlebar-left); }
-#diplomacy-window > .titlebar.right { left: calc(50% + 102px); width: 32px;
+:is(#diplomacy-window, #message-box-dialog) > .titlebar.right { left: calc(50% + 102px); width: 32px;
   background-image: var(--gui-dialog-titlebar-left); scale: -1 -1; }
 #diplomacy-title { left: calc(50% - 96px); top: -16px; width: 192px; height: 32px; }
 #diplomacy-table { position: absolute; left: 32px; right: 32px; top: 32px;
@@ -716,6 +716,45 @@ body:not([data-debug="storage"]) #stats-storage { display: none; }
 #diplomacy-close { left: calc(50% + 100px); bottom: 22px; width: 128px; height: 28px;
   padding: 0; border: 0; color: white; font-family: inherit; }
 #diplomacy-close:hover { background-image: var(--gui-stone-button-over); }
+/* mod/gui/msgbox in the ModernDialog frame above, over ModernFade (black
+   at 85/255); SessionMessageBox's 400x200. ModernButtonRed is nine
+   textures: 8 px corners and edges, the centre tiled at 128x16. */
+#message-box { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.333);
+  font-family: "0ad sans", "0ad sans fallback", sans-serif; color: white;
+  user-select: none; -webkit-user-select: none; }
+#message-box[hidden] { display: none; }
+#message-box-dialog { position: absolute; left: 50%; top: 50%; translate: -50% -50%;
+  width: 400px; height: 200px; max-width: calc(100vw - 32px); }
+#message-box-title { left: calc(50% - 128px); top: -18px; width: 256px; height: 32px; }
+#message-box-caption { left: 18px; top: 18px; right: 18px; bottom: 64px; }
+#message-box .red { position: absolute; top: calc(100% - 46px); height: 28px; padding: 0;
+  border: 0; background: none; color: white; font-family: inherit; }
+#message-box .red > .slice { position: absolute; pointer-events: none; }
+#message-box .red > .label { inset: 0; }
+#message-box .red > .lt { left: 0; top: 0; width: 8px; height: 8px;
+  background: var(--gui-red-button-left-top) 0 0 / 100% 100%; }
+#message-box .red > .lc { left: 0; top: 8px; bottom: 8px; width: 8px;
+  background: var(--gui-red-button-left-center) 0 0 / 8px 16px repeat-y; }
+#message-box .red > .lb { left: 0; bottom: 0; width: 8px; height: 8px;
+  background: var(--gui-red-button-left-bottom) 0 0 / 100% 100%; }
+#message-box .red > .ct { left: 8px; right: 8px; top: 0; height: 8px;
+  background: var(--gui-red-button-center-top) 0 0 / 128px 8px repeat-x; }
+#message-box .red > .cc { left: 8px; right: 8px; top: 8px; bottom: 8px;
+  background: var(--gui-red-button-center-center) 0 0 / 128px 16px repeat; }
+#message-box .red > .cb { left: 8px; right: 8px; bottom: 0; height: 8px;
+  background: var(--gui-red-button-center-bottom) 0 0 / 128px 8px repeat-x; }
+#message-box .red > .rt { right: 0; top: 0; width: 8px; height: 8px;
+  background: var(--gui-red-button-right-top) 0 0 / 100% 100%; }
+#message-box .red > .rc { right: 0; top: 8px; bottom: 8px; width: 8px;
+  background: var(--gui-red-button-right-center) 0 0 / 8px 16px repeat-y; }
+#message-box .red > .rb { right: 0; bottom: 0; width: 8px; height: 8px;
+  background: var(--gui-red-button-right-bottom) 0 0 / 100% 100%; }
+/* ModernButtonRedOver adds 60 42 42; the edges are mostly transparent
+   shadow, so only the opaque centre takes it. */
+#message-box .red:hover > .cc::after { content: ""; position: absolute; inset: 0;
+  background: rgb(60, 42, 42); mix-blend-mode: plus-lighter; }
+#message-box-no { left: 18px; right: calc(50% + 5px); }
+#message-box-yes { left: calc(50% + 5px); right: 18px; }
 #match-over button { font: inherit; color: #e6e9eb; background: rgba(15, 18, 20, 0.85);
   border: 1px solid #3a4248; border-radius: 4px; padding: 4px 8px; }
 #match-over :disabled { opacity: 0.5; }
@@ -959,6 +998,19 @@ body:not([data-debug="storage"]) #stats-storage { display: none; }
 </div>
 <div id="diplomacy-ceasefire" class="text sans-bold-stroke-14" hidden></div>
 <button id="diplomacy-close" type="button" class="text center sans-bold-stroke-14 stone"></button>
+</div>
+<div id="message-box" role="alertdialog" aria-modal="true" aria-labelledby="message-box-title" aria-describedby="message-box-caption" hidden>
+<div id="message-box-dialog">
+<span class="frame background"></span><span class="frame shade top"></span><span class="frame shade bottom"></span>
+<span class="frame edge top"></span><span class="frame edge bottom"></span>
+<span class="frame deco top-left"></span><span class="frame deco top-right"></span>
+<span class="frame deco bottom-left"></span><span class="frame deco bottom-right"></span>
+<span class="frame titlebar middle"></span><span class="frame titlebar left"></span><span class="frame titlebar right"></span>
+<div id="message-box-title" class="text center sans-bold-stroke-14"></div>
+<div id="message-box-caption" class="text center sans-bold-stroke-14"></div>
+<button id="message-box-no" type="button" class="red"><span class="slice lt"></span><span class="slice lc"></span><span class="slice lb"></span><span class="slice ct"></span><span class="slice cc"></span><span class="slice cb"></span><span class="slice rt"></span><span class="slice rc"></span><span class="slice rb"></span><span id="message-box-no-label" class="label text center sans-bold-stroke-14"></span></button>
+<button id="message-box-yes" type="button" class="red"><span class="slice lt"></span><span class="slice lc"></span><span class="slice lb"></span><span class="slice ct"></span><span class="slice cc"></span><span class="slice cb"></span><span class="slice rt"></span><span class="slice rc"></span><span class="slice rb"></span><span id="message-box-yes-label" class="label text center sans-bold-stroke-14"></span></button>
+</div>
 </div>
 <div id="settings" role="dialog" aria-labelledby="settings-title" inert>
 <div id="settings-head">

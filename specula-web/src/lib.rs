@@ -14,6 +14,7 @@ mod impostor;
 mod lang;
 mod left;
 mod march;
+mod message_box;
 mod minimap;
 mod opfs;
 mod orders;
@@ -50,6 +51,7 @@ use std::cell::RefCell;
 use std::collections::BTreeSet;
 use std::rc::Rc;
 
+use specula_assets::command::Command;
 use specula_assets::files::MusicKind;
 use specula_assets::files::TEXTURE_TIER_SIDES;
 use wasm_bindgen::JsCast;
@@ -84,6 +86,7 @@ use crate::diplomacy::Perspective;
 use crate::diplomacy_window::DiplomacyWindow;
 use crate::field::Field;
 use crate::icons::IconAtlas;
+use crate::message_box::MessageBox;
 use crate::minimap::Minimap;
 use crate::panel::DetailsPanel;
 use crate::panel::Request;
@@ -548,6 +551,8 @@ struct App {
     top: Option<TopPanel>,
     /// Only the 3D page has the diplomacy window.
     diplomacy_window: Option<DiplomacyWindow>,
+    /// Only `/play` asks before deleting.
+    message_box: Option<MessageBox>,
     /// A turn, the palette or the perspective changed since it was filled;
     /// the portrait index is compared.
     top_dirty: bool,
@@ -911,6 +916,15 @@ impl App {
                 Request::Place(place) => {
                     if let Some(uplink) = &self.uplink {
                         self.placement.start(place, uplink);
+                    }
+                }
+                Request::ConfirmDelete(entities) => {
+                    if let Some(message_box) = &mut self.message_box {
+                        // `closeOpenDialogs`.
+                        if let Some(diplomacy_window) = &mut self.diplomacy_window {
+                            diplomacy_window.set_open(false);
+                        }
+                        message_box.confirm_delete(entities);
                     }
                 }
                 request => apply_request(&mut *self.renderer, request, &self.scene),
@@ -1359,6 +1373,15 @@ async fn run(
     // `/play` is the 3D page for the player of a game the server hosts: the
     // live stream, and orders.
     let play = page == Page::Observer && window.location().pathname().as_deref() == Ok("/play");
+    // An older page has no message box; Delete then does nothing without
+    // Shift.
+    let message_box = if play {
+        MessageBox::new(&document)
+            .inspect_err(|error| web_sys::console::error_1(&format!("message box: {error}").into()))
+            .ok()
+    } else {
+        None
+    };
     let live_delay = match page {
         Page::Map => None,
         // The player's stream has no delay, whatever the observers' is.
@@ -1462,6 +1485,7 @@ async fn run(
         details_index: false,
         top,
         diplomacy_window,
+        message_box,
         top_dirty: true,
         top_index: false,
         ranges: None,
@@ -1477,6 +1501,7 @@ async fn run(
     wire_details(&app);
     wire_top(&app);
     wire_diplomacy_window(&app, &window);
+    wire_message_box(&app, &window);
     if page == Page::Observer {
         let shadows: HtmlSelectElement = element(&document, "shadows")?;
         wire_shadows(&app, shadows.clone());
@@ -1674,9 +1699,9 @@ fn wire_details(app: &Rc<RefCell<App>>) {
     // nothing, as in the game.
     for (command, button) in commands {
         let target = Rc::clone(app);
-        let on_click = Closure::<dyn FnMut()>::new(move || {
+        let on_click = Closure::<dyn FnMut(MouseEvent)>::new(move |event: MouseEvent| {
             if let Some(details) = &target.borrow().details {
-                details.command_clicked(command);
+                details.command_clicked(command, event.shift_key());
             }
         });
         button.set_onclick(Some(on_click.as_ref().unchecked_ref()));
@@ -1736,7 +1761,7 @@ fn apply_request(renderer: &mut dyn View, request: Request, scene: &Scene) {
             }
         }
         // The caller sends it, as it holds the uplink.
-        Request::Order(_) | Request::Place(_) => {}
+        Request::Order(_) | Request::Place(_) | Request::ConfirmDelete(_) => {}
     }
 }
 
@@ -1808,6 +1833,50 @@ fn wire_diplomacy_window(app: &Rc<RefCell<App>>, window: &web_sys::Window) {
     });
     let _ = window.add_event_listener_with_callback("keydown", on_key.as_ref().unchecked_ref());
     // The window lives as long as the page, so its handler does too.
+    on_key.forget();
+}
+
+/// The message box's No and Yes, and Escape, its cancel hotkey.
+fn wire_message_box(app: &Rc<RefCell<App>>, window: &web_sys::Window) {
+    let Some((no, yes)) = app.borrow().message_box.as_ref().map(|message_box| {
+        let (no, yes) = message_box.buttons();
+        (no.clone(), yes.clone())
+    }) else {
+        return;
+    };
+    let target = Rc::clone(app);
+    on_click(&no, move || {
+        if let Some(message_box) = &mut target.borrow_mut().message_box {
+            message_box.cancel();
+        }
+    });
+    let target = Rc::clone(app);
+    on_click(&yes, move || {
+        let mut app = target.borrow_mut();
+        let entities = app.message_box.as_mut().and_then(MessageBox::accept);
+        if let Some(entities) = entities
+            && let Some(uplink) = &app.uplink
+        {
+            uplink.send(&Command::Delete { entities });
+        }
+    });
+    let target = Rc::clone(app);
+    let on_key = Closure::<dyn FnMut(web_sys::Event)>::new(move |event: web_sys::Event| {
+        let code = js_sys::Reflect::get(&event, &"code".into())
+            .ok()
+            .and_then(|value| value.as_string());
+        if code.as_deref() != Some("Escape") {
+            return;
+        }
+        if let Ok(mut app) = target.try_borrow_mut()
+            && let Some(message_box) = &mut app.message_box
+            && message_box.is_open()
+        {
+            message_box.cancel();
+        }
+    });
+    let _ = window.add_event_listener_with_callback("keydown", on_key.as_ref().unchecked_ref());
+    // The box lives as long as the page, so its handler does too.
     on_key.forget();
 }
 

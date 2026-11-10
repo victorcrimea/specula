@@ -508,6 +508,15 @@ fn order_json(order: &Order) -> String {
             out.raw("data", &data.finish());
             out.boolean("queued", flags & QUEUED != 0);
         }
+        Order::StopProduction { entity, id } => {
+            out.text("type", "stop-production");
+            out.raw("entity", &entity.to_string());
+            out.raw("id", &id.to_string());
+        }
+        Order::Autoqueue { on, entities } => {
+            out.text("type", if *on { "autoqueue-on" } else { "autoqueue-off" });
+            out.entities("entities", entities);
+        }
         Order::Stance { entities, name } => {
             out.text("type", "stance");
             out.entities("entities", entities);

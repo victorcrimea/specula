@@ -38,6 +38,8 @@ const RALLY: u8 = 13;
 const STANCE: u8 = 14;
 const RETURN_RESOURCE: u8 = 15;
 const CONSTRUCT_WALL: u8 = 16;
+const STOP_PRODUCTION: u8 = 17;
+const AUTOQUEUE: u8 = 18;
 
 /// Above every command kind.
 pub const QUERY_TAG: u8 = 0x80;
@@ -137,6 +139,16 @@ pub enum Command {
         pieces: Vec<WallPiece>,
         start_snapped: u32,
         end_snapped: u32,
+    },
+    /// Removes item `id` from `entity`'s production queue.
+    StopProduction {
+        entity: u32,
+        id: u32,
+    },
+    /// Turns the producers' auto-queue on or off.
+    Autoqueue {
+        on: bool,
+        entities: Vec<u32>,
     },
 }
 
@@ -423,6 +435,15 @@ impl Command {
                 out.varint(u64::from(*start_snapped));
                 out.varint(u64::from(*end_snapped));
             }
+            Command::StopProduction { entity, id } => {
+                out.0.push(STOP_PRODUCTION);
+                out.varint(u64::from(*entity));
+                out.varint(u64::from(*id));
+            }
+            Command::Autoqueue { on, entities } => {
+                out.0.extend_from_slice(&[AUTOQUEUE, u8::from(*on)]);
+                out.entities(entities);
+            }
         }
         out.0
     }
@@ -563,6 +584,14 @@ impl Command {
                     end_snapped: input.varint_u32()?,
                 }
             }
+            STOP_PRODUCTION => Command::StopProduction {
+                entity: input.varint_u32()?,
+                id: input.varint_u32()?,
+            },
+            AUTOQUEUE => Command::Autoqueue {
+                on: input.u8()? != 0,
+                entities: entities(&mut input)?,
+            },
             _ => return Err("unknown command"),
         };
         if !input.0.is_empty() {

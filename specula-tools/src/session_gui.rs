@@ -232,9 +232,10 @@ const TEXTURES: [(&str, &str); 105] = [
         "global/button/button_stone_selected.png",
     ),
 ];
-/// The `ModernDialog` sprite's textures (`gui/common/modern/sprites.xml`),
+/// The `ModernDialog` and `ModernButtonRed` sprites' textures
+/// (`gui/common/modern/sprites.xml`),
 /// which only the engine's own `mod` holds, under the same `UI` path.
-const MOD_TEXTURES: [(&str, &str); 7] = [
+const MOD_TEXTURES: [(&str, &str); 16] = [
     ("dialog-background", "global/modern/background.png"),
     ("dialog-shadow", "global/modern/shadow-low.png"),
     ("dialog-border", "global/modern/border.png"),
@@ -245,6 +246,42 @@ const MOD_TEXTURES: [(&str, &str); 7] = [
         "global/modern/titlebar-middle.png",
     ),
     ("dialog-titlebar-left", "global/modern/titlebar-left.png"),
+    (
+        "red-button-left-top",
+        "global/modern/button/red-unselected-left-top.png",
+    ),
+    (
+        "red-button-left-center",
+        "global/modern/button/red-unselected-left-center.png",
+    ),
+    (
+        "red-button-left-bottom",
+        "global/modern/button/red-unselected-left-bottom.png",
+    ),
+    (
+        "red-button-center-top",
+        "global/modern/button/red-unselected-center-top.png",
+    ),
+    (
+        "red-button-center-center",
+        "global/modern/button/red-unselected-center-center.png",
+    ),
+    (
+        "red-button-center-bottom",
+        "global/modern/button/red-unselected-center-bottom.png",
+    ),
+    (
+        "red-button-right-top",
+        "global/modern/button/red-unselected-right-top.png",
+    ),
+    (
+        "red-button-right-center",
+        "global/modern/button/red-unselected-right-center.png",
+    ),
+    (
+        "red-button-right-bottom",
+        "global/modern/button/red-unselected-right-bottom.png",
+    ),
 ];
 /// The engine's `sans` (config/default.cfg, [fonts.sans]): (family, CSS
 /// weight, file under fonts/). FreeSans is the engine's fallback for what

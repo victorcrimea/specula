@@ -360,6 +360,9 @@ struct QueuePanel {
     /// producer, for `tick`.
     shown: Vec<Queued>,
     queues: Vec<(u32, detail::Queue)>,
+    /// What a press of each cell orders, for the player of `/play`:
+    /// `removeFromProductionQueue` for a real item of their own.
+    orders: Vec<Option<Command>>,
 }
 
 /// One `unitQueueButton`.
@@ -385,12 +388,15 @@ struct CommandsPanel {
     research_orders: Vec<[Option<Command>; 2]>,
 }
 
-/// A commands panel button the page wires: a `training` cell, or a
-/// research column's bottom (false) or top (true) button.
+/// A button that gives orders, which the page wires: a commands panel
+/// `training` cell, a research column's bottom (false) or top (true)
+/// button, a queue cell, or a command row button.
 #[derive(Clone, Copy)]
 pub enum CommandButton {
     Training(usize),
     Research(usize, bool),
+    Queue(usize),
+    Row(usize),
 }
 
 /// One `unitTrainingButton`, `unitResearchButton`, `unitGateButton`,
@@ -508,6 +514,8 @@ pub enum Request {
     /// A construction button of the player of `/play`:
     /// `startBuildingPlacement`.
     Place(Place),
+    /// The delete command of the player of `/play`, which asks first.
+    ConfirmDelete(Vec<u32>),
 }
 
 /// A structure to place, and who builds it.
@@ -633,6 +641,7 @@ impl DetailsPanel {
                     .collect::<Result<_, _>>()?,
                 shown: Vec::new(),
                 queues: Vec::new(),
+                orders: vec![None; MAX_QUEUED],
             }),
             Err(_) => None,
         };
@@ -694,50 +703,76 @@ impl DetailsPanel {
         self.groups.iter().map(|group| &group.button.element)
     }
 
-    /// The training and research buttons, for the page to wire.
+    /// The training, research, queue and command row buttons, for the
+    /// page to wire.
     pub fn command_buttons(&self) -> Vec<(CommandButton, HtmlElement)> {
-        let Some(commands) = &self.commands else {
-            return Vec::new();
-        };
-        let training = commands
-            .training
-            .iter()
-            .enumerate()
-            .map(|(index, cell)| (CommandButton::Training(index), cell.cell.element.clone()));
-        let research = commands
-            .research
-            .iter()
-            .enumerate()
-            .flat_map(|(index, column)| {
-                [
-                    (
-                        CommandButton::Research(index, false),
-                        column.bottom.cell.element.clone(),
-                    ),
-                    (
-                        CommandButton::Research(index, true),
-                        column.top.cell.element.clone(),
-                    ),
-                ]
-            });
-        training.chain(research).collect()
+        let mut buttons = Vec::new();
+        if let Some(commands) = &self.commands {
+            let training =
+                commands.training.iter().enumerate().map(|(index, cell)| {
+                    (CommandButton::Training(index), cell.cell.element.clone())
+                });
+            let research = commands
+                .research
+                .iter()
+                .enumerate()
+                .flat_map(|(index, column)| {
+                    [
+                        (
+                            CommandButton::Research(index, false),
+                            column.bottom.cell.element.clone(),
+                        ),
+                        (
+                            CommandButton::Research(index, true),
+                            column.top.cell.element.clone(),
+                        ),
+                    ]
+                });
+            buttons.extend(training.chain(research));
+        }
+        if let Some(queue) = &self.queue {
+            buttons.extend(
+                queue
+                    .cells
+                    .iter()
+                    .enumerate()
+                    .map(|(index, cell)| (CommandButton::Queue(index), cell.cell.element.clone())),
+            );
+        }
+        if let Some(row) = &self.command_row {
+            buttons.extend(
+                row.buttons()
+                    .enumerate()
+                    .map(|(index, button)| (CommandButton::Row(index), button.clone())),
+            );
+        }
+        buttons
     }
 
-    /// A training, construction or research button was pressed: its
-    /// order or placement, if it gives one.
-    pub fn command_clicked(&self, button: CommandButton) {
-        let Some(commands) = &self.commands else {
-            return;
-        };
+    /// A button that gives orders was pressed, `shift` with the
+    /// session.noconfirmation key: its order or placement, if it gives
+    /// one.
+    pub fn command_clicked(&self, button: CommandButton, shift: bool) {
         let request = match button {
-            CommandButton::Training(index) => {
-                commands.training_orders.get(index).cloned().flatten()
-            }
-            CommandButton::Research(index, top) => commands
-                .research_orders
-                .get(index)
+            CommandButton::Training(index) => self
+                .commands
+                .as_ref()
+                .and_then(|commands| commands.training_orders.get(index).cloned().flatten()),
+            CommandButton::Research(index, top) => self
+                .commands
+                .as_ref()
+                .and_then(|commands| commands.research_orders.get(index))
                 .and_then(|orders| orders[usize::from(top)].clone())
                 .map(Request::Order),
+            CommandButton::Queue(index) => self
+                .queue
+                .as_ref()
+                .and_then(|queue| queue.orders.get(index).cloned().flatten())
+                .map(Request::Order),
+            CommandButton::Row(index) => self
+                .command_row
+                .as_ref()
+                .and_then(|row| row.clicked(index, shift)),
         };
         if let Some(request) = request {
             self.requests.borrow_mut().push(request);
@@ -1502,6 +1537,7 @@ impl QueuePanel {
         self.root.hidden(items.is_empty());
         let rows = items.len().div_ceil(QUEUE_ROW).max(1);
         self.root.style(format!("--rows: {rows}"));
+        self.orders.fill(None);
         for (i, cell) in self.cells.iter_mut().enumerate() {
             let Some(item) = items.get(i) else {
                 cell.cell.hidden(true);
@@ -1540,6 +1576,11 @@ impl QueuePanel {
             let owner = scene.dots.get(&item.producer).map_or(-1, |dot| dot.owner);
             cell.cell
                 .tooltip(&queue_tooltip(view, queued, item.ghost, owner));
+            self.orders[i] =
+                (!item.ghost && view.player == Some(owner)).then_some(Command::StopProduction {
+                    entity: item.producer,
+                    id: queued.id,
+                });
             if item.ghost {
                 cell.slider.style(format!("top: {SLIDER_INSET}px"));
             }

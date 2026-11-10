@@ -2,10 +2,10 @@
 //! (`g_SelectionPanels.Command` and `g_EntityCommands` in
 //! selection_panels.js and unit_actions.js): up to six 32 px buttons, which
 //! only the commands the viewer is allowed to see make. A pure observer is
-//! allowed only focus-rally and the shared dropsite lock, so those are all
-//! Specula shows today; the others are here for the playable client, which
-//! passes the player it controls.
+//! allowed only focus-rally and the shared dropsite lock; the player of
+//! `/play` sees the rest, of which autoqueue, stop and delete give orders.
 
+use specula_assets::command::Command;
 use web_sys::Document;
 use web_sys::HtmlElement;
 
@@ -15,6 +15,7 @@ use crate::detail::Group;
 use crate::detail::Groups;
 use crate::lang;
 use crate::panel::Out;
+use crate::panel::Request;
 use crate::panel::View;
 use crate::panel::create;
 use crate::panel::entity_groups;
@@ -54,10 +55,13 @@ struct Info {
     tooltip: String,
     count: u32,
     enabled: bool,
+    /// What a press orders, for the player of `/play`.
+    order: Option<Command>,
 }
 
 /// A selected entity.
 struct Selected {
+    id: u32,
     owner: i32,
     template: u32,
     groups: Groups,
@@ -211,6 +215,7 @@ fn infos(context: &Context) -> Vec<Info> {
             ),
             count: unloadable,
             enabled: true,
+            order: None,
         }),
     );
 
@@ -234,6 +239,7 @@ fn infos(context: &Context) -> Vec<Info> {
             ),
             count: turrets,
             enabled: true,
+            order: None,
         }),
     );
 
@@ -250,6 +256,13 @@ fn infos(context: &Context) -> Vec<Info> {
                 tooltip: tip("Self-Destruct", "Destroy the selected entities."),
                 count: 0,
                 enabled: true,
+                order: Some(Command::Delete {
+                    entities: selected
+                        .iter()
+                        .filter(|entity| context.undeletable(entity).is_none())
+                        .map(|entity| entity.id)
+                        .collect(),
+                }),
             }
         } else {
             let mut unique: Vec<String> = Vec::new();
@@ -263,6 +276,7 @@ fn infos(context: &Context) -> Vec<Info> {
                 tooltip: unique.join("\n"),
                 count: 0,
                 enabled: false,
+                order: None,
             }
         }),
     );
@@ -283,6 +297,10 @@ fn infos(context: &Context) -> Vec<Info> {
             tooltip: tip("Abort", "Cancel the current orders for the selected units."),
             count: 0,
             enabled: true,
+            order: Some(Command::Stop {
+                flags: 0,
+                entities: selected.iter().map(|entity| entity.id).collect(),
+            }),
         }),
     );
 
@@ -298,6 +316,7 @@ fn infos(context: &Context) -> Vec<Info> {
                 ),
                 count: 0,
                 enabled: true,
+                order: None,
             },
         ),
     );
@@ -316,6 +335,7 @@ fn infos(context: &Context) -> Vec<Info> {
             ),
             count: 0,
             enabled: true,
+            order: None,
         }),
     );
 
@@ -333,6 +353,7 @@ fn infos(context: &Context) -> Vec<Info> {
             ),
             count: 0,
             enabled: true,
+            order: None,
         }),
     );
 
@@ -352,6 +373,7 @@ fn infos(context: &Context) -> Vec<Info> {
             ),
             count: 0,
             enabled: true,
+            order: None,
         }),
     );
 
@@ -366,6 +388,7 @@ fn infos(context: &Context) -> Vec<Info> {
             ),
             count: 0,
             enabled: true,
+            order: None,
         }),
     );
 
@@ -380,6 +403,7 @@ fn infos(context: &Context) -> Vec<Info> {
             ),
             count: 0,
             enabled: true,
+            order: None,
         }),
     );
 
@@ -394,6 +418,7 @@ fn infos(context: &Context) -> Vec<Info> {
             ),
             count: 0,
             enabled: true,
+            order: None,
         }),
     );
 
@@ -413,6 +438,7 @@ fn infos(context: &Context) -> Vec<Info> {
             ),
             count: 0,
             enabled: true,
+            order: None,
         }),
     );
     add(
@@ -422,6 +448,7 @@ fn infos(context: &Context) -> Vec<Info> {
             tooltip: tip("Abort Guard", "Order the selected units to stop guarding."),
             count: 0,
             enabled: true,
+            order: None,
         }),
     );
 
@@ -436,6 +463,7 @@ fn infos(context: &Context) -> Vec<Info> {
             ),
             count: 0,
             enabled: true,
+            order: None,
         }),
     );
 
@@ -450,6 +478,7 @@ fn infos(context: &Context) -> Vec<Info> {
             ),
             count: 0,
             enabled: true,
+            order: None,
         }),
     );
 
@@ -483,6 +512,7 @@ fn infos(context: &Context) -> Vec<Info> {
                         ),
                         count: 0,
                         enabled: true,
+                        order: None,
                     }
                 } else {
                     Info {
@@ -493,6 +523,7 @@ fn infos(context: &Context) -> Vec<Info> {
                         ),
                         count: 0,
                         enabled: true,
+                        order: None,
                     }
                 }
             },
@@ -518,6 +549,7 @@ fn infos(context: &Context) -> Vec<Info> {
                         ),
                         count: 0,
                         enabled: false,
+                        order: None,
                     }
                 } else {
                     Info {
@@ -525,6 +557,7 @@ fn infos(context: &Context) -> Vec<Info> {
                         tooltip: tip("Locked Dropsite", "The use of this dropsite is prohibited."),
                         count: 0,
                         enabled: false,
+                        order: None,
                     }
                 }
             }),
@@ -532,6 +565,19 @@ fn infos(context: &Context) -> Vec<Info> {
 
     // autoqueue-on and autoqueue-off
     let autoqueue = |entity: &Selected| context.queue(entity).is_some_and(|queue| queue.autoqueue);
+    // `turnAutoQueueOn` and `turnAutoQueueOff`: the trainers it changes.
+    let switched = |on: bool| Command::Autoqueue {
+        on,
+        entities: selected
+            .iter()
+            .filter(|entity| {
+                context.has_component(entity, COMPONENT_TRAINER)
+                    && context.queue(entity).is_some()
+                    && autoqueue(entity) != on
+            })
+            .map(|entity| entity.id)
+            .collect(),
+    };
     add(
         PLAYER,
         any(&|entity| {
@@ -547,6 +593,7 @@ fn infos(context: &Context) -> Vec<Info> {
             ),
             count: 0,
             enabled: true,
+            order: Some(switched(true)),
         }),
     );
     add(
@@ -559,6 +606,7 @@ fn infos(context: &Context) -> Vec<Info> {
             ),
             count: 0,
             enabled: true,
+            order: Some(switched(false)),
         }),
     );
     infos
@@ -574,6 +622,8 @@ struct Button {
 pub(crate) struct CommandRow {
     root: Out,
     buttons: Vec<Button>,
+    /// What a press of each shown button orders.
+    orders: Vec<Option<Command>>,
 }
 
 impl CommandRow {
@@ -611,6 +661,7 @@ impl CommandRow {
         Ok(CommandRow {
             root: Out::new(row.clone()),
             buttons,
+            orders: vec![None; MAX_COMMANDS],
         })
     }
 
@@ -623,6 +674,7 @@ impl CommandRow {
             .filter_map(|&id| {
                 let dot = scene.dots.get(&id)?;
                 Some(Selected {
+                    id,
                     owner: dot.owner,
                     template: dot.template,
                     groups: entity_groups(scene, id, dot.template),
@@ -632,17 +684,19 @@ impl CommandRow {
         let context = Context {
             scene,
             selected: &selected,
-            player: None,
+            player: view.player,
         };
         let mut infos = infos(&context);
         infos.truncate(MAX_COMMANDS);
         self.root.hidden(infos.is_empty());
         let total = infos.len() as f64;
+        self.orders.fill(None);
         for (index, button) in self.buttons.iter_mut().enumerate() {
-            let Some(info) = infos.get(index) else {
+            let Some(info) = infos.get_mut(index) else {
                 button.button.hidden(true);
                 continue;
             };
+            self.orders[index] = info.order.take().filter(|_| info.enabled);
             button.button.style(format!(
                 "left: calc(50% + {}px)",
                 (index as f64 - total / 2.0) * COMMAND_STEP
@@ -662,6 +716,20 @@ impl CommandRow {
             });
             button.button.tooltip(&info.tooltip);
             button.button.hidden(false);
+        }
+    }
+
+    pub(crate) fn buttons(&self) -> impl Iterator<Item = &HtmlElement> {
+        self.buttons.iter().map(|button| &button.button.element)
+    }
+
+    /// Button `index` was pressed: its order, but for delete without the
+    /// session.noconfirmation key (Shift), which asks first, as
+    /// `DeleteSelectionConfirmation`.
+    pub(crate) fn clicked(&self, index: usize, shift: bool) -> Option<Request> {
+        match self.orders.get(index)?.clone()? {
+            Command::Delete { entities } if !shift => Some(Request::ConfirmDelete(entities)),
+            order => Some(Request::Order(order)),
         }
     }
 }
