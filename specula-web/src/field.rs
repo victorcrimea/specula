@@ -207,6 +207,19 @@ const ZOOM_ANCHOR_MAX: f32 = 4.0;
 /// Props reach past the root mesh (riders, spears, banners); a sphere
 /// this much larger than its bounds still holds them.
 const REACH_MARGIN: f32 = 1.5;
+/// The elephants the flat world stands on.
+/// TODO: they should stand on a world turtle, which the game has no model
+/// of (a crocodile scaled up looked wrong), so one has to be made first;
+/// until then they hang in the air under the map.
+const WORLD_ELEPHANT_ACTOR: &str = "fauna/elephant_asian.xml";
+/// The elephants' height and their distance from the map's centre, in map
+/// sides.
+const WORLD_ELEPHANT_HEIGHT: f32 = 0.25;
+const WORLD_ELEPHANT_RING: f32 = 0.4;
+/// How far under the lowest ground the tallest point of an elephant stays,
+/// in map sides: the head is the bounds' top and the idle animation lifts
+/// it, so with none the head shows through the ground over a low spot.
+const WORLD_CLEARANCE: f32 = 0.001;
 /// The actor of the template `DrawTargetMarker` (gui/session/unit_actions.js)
 /// places a walk order's marker with, special/target_marker.
 const TARGET_MARKER_ACTOR: &str = "special/target_marker.xml";
@@ -653,6 +666,8 @@ pub struct Field {
     /// The viewer's sky setting: the map's sky drawn behind everything,
     /// where off keeps the plain background.
     sky_visible: bool,
+    /// The viewer's flat world setting: elephants under the map.
+    world_support: bool,
     sky: Sky,
     /// The viewer's particles setting, the emitters, the pipelines for
     /// the view and for the water reflection, and this frame's instances.
@@ -1422,6 +1437,7 @@ impl Field {
             water_normals: None,
             water_group: None,
             sky_visible: false,
+            world_support: false,
             sky,
             particles_visible: false,
             particles: Particles::new(),
@@ -1710,6 +1726,7 @@ impl Field {
         self.place_rally_flags(progress, view_proj, &planes, pixel_scale, &mut groups);
         self.place_ghosts(progress, view_proj, &planes, pixel_scale, &mut groups);
         self.place_target_markers(progress, view_proj, &planes, pixel_scale, &mut groups);
+        self.place_world_support(view_proj, &planes, pixel_scale, &mut groups);
         if self.particles_visible {
             let dots = &self.entities.dots;
             let shots = &self.shots;
@@ -3317,6 +3334,8 @@ impl Field {
             {
                 let transform = flight.transform(t, stop, rest);
                 let place = ShotPlace {
+                    scale: 1.0,
+                    finest: false,
                     owner: shot.owner,
                     emitter: Owner::Shot(id),
                     time: t * 1000.0,
@@ -3342,6 +3361,8 @@ impl Field {
                 let at = flight.position(stop);
                 transform.translate(Vec3::new(at.x, rest, at.z));
                 let place = ShotPlace {
+                    scale: 1.0,
+                    finest: false,
                     owner: shot.owner,
                     emitter: Owner::Impact(id),
                     time: (t - stop) * 1000.0,
@@ -3404,6 +3425,8 @@ impl Field {
             let mut transform = Mat4::identity();
             transform.translate(at);
             let place = ShotPlace {
+                scale: 1.0,
+                finest: false,
                 owner,
                 emitter: Owner::Entity(id),
                 time,
@@ -3461,6 +3484,8 @@ impl Field {
             });
             transform.translate(Vec3::new(ghost.x, y, ghost.z));
             let place = ShotPlace {
+                scale: 1.0,
+                finest: false,
                 owner: ghost.owner,
                 // A preview has no particles to own.
                 emitter: Owner::Entity(0),
@@ -3526,6 +3551,8 @@ impl Field {
             let mut transform = Mat4::identity();
             transform.translate(at);
             let place = ShotPlace {
+                scale: 1.0,
+                finest: false,
                 owner: 0,
                 // A marker has no particles to own.
                 emitter: Owner::Entity(0),
@@ -3544,6 +3571,125 @@ impl Field {
             );
             self.particles_visible = particles;
         }
+    }
+
+    /// Four elephants facing outward under the map, the map on their backs.
+    fn place_world_support(
+        &mut self,
+        view_proj: &[[f32; 4]; 4],
+        planes: &[[f32; 4]; 6],
+        pixel_scale: f32,
+        groups: &mut HashMap<GroupKey, Vec<u8>>,
+    ) {
+        if !self.world_support {
+            return;
+        }
+        let Some(ground) = &self.ground else {
+            return;
+        };
+        let map = ground.image.size as f32 * TILE_SIZE;
+        let underside = ground.low;
+        let Some(elephant) = self.ghost_model(WORLD_ELEPHANT_ACTOR, 0) else {
+            return;
+        };
+        let Some((elephant_low, elephant_high)) = self.model_bounds(&elephant) else {
+            return;
+        };
+        let centre = map / 2.0;
+        let height = map * WORLD_ELEPHANT_HEIGHT;
+        let feet = underside - height - map * WORLD_CLEARANCE;
+        // Not the sim's clock: nothing here belongs to a turn.
+        let time = (now() % 3.6e6) as f32;
+        let place = ShotPlace {
+            scale: 1.0,
+            finest: true,
+            owner: 0,
+            emitter: Owner::Entity(0),
+            time,
+            progress: 0.0,
+        };
+
+        let factor = height / (elephant_high.y - elephant_low.y).max(f32::EPSILON);
+        let middle = elephant_low.lerp(elephant_high, 0.5);
+        for (index, (x, z)) in [(0.0, -1.0), (1.0, 0.0), (0.0, 1.0), (-1.0, 0.0)]
+            .into_iter()
+            .enumerate()
+        {
+            // Models turn by rotY + PI, and rotY faces (sin, cos).
+            let half = (f32::atan2(x, z) + std::f32::consts::PI) / 2.0;
+            let mut transform = Mat4::from_quat(Quat {
+                x: 0.0,
+                y: half.sin(),
+                z: 0.0,
+                w: half.cos(),
+            });
+            for row in 0..3 {
+                for column in 0..3 {
+                    transform.m[row][column] *= factor;
+                }
+            }
+            let ring = map * WORLD_ELEPHANT_RING;
+            // The body's middle, not its origin, stands on the ring.
+            let offset = transform.rotate(Vec3::new(middle.x, 0.0, middle.z));
+            transform.translate(Vec3::new(
+                centre + x * ring - offset.x,
+                feet - elephant_low.y * factor,
+                centre + z * ring - offset.z,
+            ));
+            let place = ShotPlace {
+                scale: factor,
+                time: time + index as f32 * 700.0,
+                ..place
+            };
+            self.place_world_model(
+                &elephant,
+                &transform,
+                &place,
+                view_proj,
+                planes,
+                pixel_scale,
+                groups,
+            );
+        }
+    }
+
+    /// `place_shot_model` for a model that has no particles to own.
+    #[allow(clippy::too_many_arguments)]
+    fn place_world_model(
+        &mut self,
+        model: &Model,
+        transform: &Mat4,
+        place: &ShotPlace,
+        view_proj: &[[f32; 4]; 4],
+        planes: &[[f32; 4]; 6],
+        pixel_scale: f32,
+        groups: &mut HashMap<GroupKey, Vec<u8>>,
+    ) {
+        let particles = std::mem::replace(&mut self.particles_visible, false);
+        self.place_shot_model(
+            model,
+            transform,
+            place,
+            view_proj,
+            planes,
+            pixel_scale,
+            groups,
+        );
+        self.particles_visible = particles;
+    }
+
+    /// The bounds of `model`'s mesh, once it is loaded.
+    fn model_bounds(&mut self, model: &Model) -> Option<(Vec3, Vec3)> {
+        let Shape::Mesh(file) = &model.shape else {
+            return None;
+        };
+        let Get::Ready(mesh) = self.store.borrow_mut().mesh(*file, false) else {
+            return None;
+        };
+        Some((
+            Vec3::new(mesh.min[0], mesh.min[1], mesh.min[2]),
+            Vec3::new(mesh.max[0], mesh.max[1], mesh.max[2]),
+        ))
     }
 
     fn ghost_model(&mut self, actor: &str, seed: u32) -> Option<Rc<Model>> {
@@ -3591,8 +3737,9 @@ impl Field {
         let low = Vec3::new(mesh.min[0], mesh.min[1], mesh.min[2]);
         let high = Vec3::new(mesh.max[0], mesh.max[1], mesh.max[2]);
         let centre = transform.transform(low.lerp(high, 0.5));
-        let radius =
-            Vec3::new(high.x - low.x, high.y - low.y, high.z - low.z).length() / 2.0 * REACH_MARGIN;
+        let radius = Vec3::new(high.x - low.x, high.y - low.y, high.z - low.z).length() / 2.0
+            * REACH_MARGIN
+            * place.scale;
         let Some(level) = screen_level(
             [centre.x, centre.y, centre.z],
             radius,
@@ -3615,7 +3762,11 @@ impl Field {
             color: owner_color(&dot, &self.palette),
             // Impostors are for entities; a projectile is too small to
             // need one.
-            level: level.min(COARSE_LEVEL),
+            level: if place.finest {
+                0
+            } else {
+                level.min(COARSE_LEVEL)
+            },
             time: Some(place.time),
         };
         self.emitting = self.particles_visible.then_some(place.emitter);
@@ -4218,6 +4369,10 @@ impl View for Field {
 
     fn set_sky(&mut self, on: bool) {
         self.sky_visible = on;
+    }
+
+    fn set_world_support(&mut self, on: bool) {
+        self.world_support = on;
     }
 
     fn set_silhouettes(&mut self, on: bool) {
@@ -5576,6 +5731,10 @@ fn now() -> f64 {
 /// Who a projectile or impact actor belongs to, and its animation time
 /// in ms.
 struct ShotPlace {
+    /// How much `transform` enlarges the model, for the culling radius.
+    scale: f32,
+    /// Always the finest mesh, whatever the distance.
+    finest: bool,
     owner: i32,
     /// What its particle props are kept by.
     emitter: Owner,

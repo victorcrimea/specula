@@ -32,6 +32,7 @@
   "Water": "settings group heading",
   "Scene": "settings group heading for sky, fog and particles",
   "Sky": "label: the sky rendering option",
+  "Flat world": "label: Easter egg option, draws elephants holding up the map from below, as in the flat earth myth",
   "Projectiles": "label: arrows and other projectiles shown or hidden",
   "Tooltips": "settings group heading",
   "Status bars": "settings group heading for the bars (health, capture) drawn over units and buildings",

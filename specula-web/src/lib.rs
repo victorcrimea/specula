@@ -169,6 +169,7 @@ const UPSCALE_SETTINGS_KEY: &str = "specula.upscale";
 const FOG_SETTINGS_KEY: &str = "specula.fog";
 const WATER_SETTINGS_KEY: &str = "specula.water";
 const SKY_SETTINGS_KEY: &str = "specula.sky";
+const WORLD_SUPPORT_SETTINGS_KEY: &str = "specula.worldsupport";
 const PARTICLES_SETTINGS_KEY: &str = "specula.particles";
 const SILHOUETTES_SETTINGS_KEY: &str = "specula.silhouettes";
 const PROJECTILES_SETTINGS_KEY: &str = "specula.projectiles";
@@ -299,6 +300,8 @@ trait View {
     fn set_water_effects(&mut self, _on: bool) {}
     /// Whether the map's sky is drawn behind everything, likewise.
     fn set_sky(&mut self, _on: bool) {}
+    /// Whether the elephants and the turtle under the map are drawn, likewise.
+    fn set_world_support(&mut self, _on: bool) {}
     /// Whether the actors' particles are drawn, likewise.
     fn set_particles(&mut self, _on: bool) {}
     /// Whether units behind structures, gaia and the ground are drawn as
@@ -1746,6 +1749,14 @@ async fn run(
             |view, on| view.set_sky(on),
             Vec::new(),
         );
+        wire_switch_default(
+            &app,
+            element(&document, "worldsupport")?,
+            WORLD_SUPPORT_SETTINGS_KEY,
+            |view, on| view.set_world_support(on),
+            Vec::new(),
+            true,
+        );
         wire_switch(
             &app,
             element(&document, "particles")?,
@@ -2439,10 +2450,22 @@ fn wire_switch(
     apply: fn(&mut dyn View, bool),
     dependents: Vec<HtmlSelectElement>,
 ) {
+    wire_switch_default(app, select, key, apply, dependents, false);
+}
+
+/// `wire_switch` for a list that is on, not off, until the visitor chooses.
+fn wire_switch_default(
+    app: &Rc<RefCell<App>>,
+    select: HtmlSelectElement,
+    key: &'static str,
+    apply: fn(&mut dyn View, bool),
+    dependents: Vec<HtmlSelectElement>,
+    default: bool,
+) {
     let saved = web_sys::window()
         .and_then(|window| window.local_storage().ok().flatten())
         .and_then(|storage| storage.get_item(key).ok().flatten())
-        .is_some_and(|text| text == "1");
+        .map_or(default, |text| text == "1");
     select.set_value(if saved { "1" } else { "0" });
     apply(&mut *app.borrow_mut().renderer, saved);
     for dependent in &dependents {
