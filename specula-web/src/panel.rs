@@ -392,8 +392,8 @@ struct CommandsPanel {
 
 /// A button that gives orders, which the page wires: a commands panel
 /// `training` cell, a research column's bottom (false) or top (true)
-/// button, a queue cell, a command row button, a stance button, or a
-/// formation button.
+/// button, a queue cell, a command row button, a stance button, an alert
+/// button, or a formation button.
 #[derive(Clone, Copy)]
 pub enum CommandButton {
     Training(usize),
@@ -401,6 +401,7 @@ pub enum CommandButton {
     Queue(usize),
     Row(usize),
     Stance(usize),
+    Alert(usize),
     Formation(usize),
 }
 
@@ -774,6 +775,11 @@ impl DetailsPanel {
                     .map(|(index, button)| (CommandButton::Stance(index), button.clone())),
             );
             buttons.extend(
+                left.alert_buttons()
+                    .enumerate()
+                    .map(|(index, button)| (CommandButton::Alert(index), button.clone())),
+            );
+            buttons.extend(
                 left.formation_buttons()
                     .enumerate()
                     .map(|(index, button)| (CommandButton::Formation(index), button.clone())),
@@ -811,6 +817,12 @@ impl DetailsPanel {
                 .as_ref()
                 .and_then(|garrison| garrison.left.as_ref())
                 .and_then(|left| left.stance_clicked(index))
+                .map(Request::Order),
+            CommandButton::Alert(index) => self
+                .garrison
+                .as_ref()
+                .and_then(|garrison| garrison.left.as_ref())
+                .and_then(|left| left.alert_clicked(index))
                 .map(Request::Order),
             CommandButton::Formation(index) => self
                 .garrison

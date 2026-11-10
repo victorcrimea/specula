@@ -51,6 +51,8 @@ const GUARD: u8 = 26;
 const OCCUPY_TURRET: u8 = 27;
 const PATROL: u8 = 28;
 const CALL_TO_ARMS: u8 = 29;
+const ALERT_RAISE: u8 = 30;
+const ALERT_END: u8 = 31;
 
 /// Above every command kind.
 pub const QUERY_TAG: u8 = 0x80;
@@ -217,6 +219,13 @@ pub enum Command {
         entities: Vec<u32>,
         x: f32,
         z: f32,
+    },
+    AlertRaise {
+        entities: Vec<u32>,
+    },
+    /// "alert-end".
+    AlertEnd {
+        entities: Vec<u32>,
     },
 }
 
@@ -539,6 +548,14 @@ impl Command {
                 out.0.push(REMOVE_GUARD);
                 out.entities(entities);
             }
+            Command::AlertRaise { entities } => {
+                out.0.push(ALERT_RAISE);
+                out.entities(entities);
+            }
+            Command::AlertEnd { entities } => {
+                out.0.push(ALERT_END);
+                out.entities(entities);
+            }
             Command::DropsiteSharing { shared, entities } => {
                 out.0
                     .extend_from_slice(&[DROPSITE_SHARING, u8::from(*shared)]);
@@ -752,6 +769,12 @@ impl Command {
                 entities: entities(&mut input)?,
             },
             REMOVE_GUARD => Command::RemoveGuard {
+                entities: entities(&mut input)?,
+            },
+            ALERT_RAISE => Command::AlertRaise {
+                entities: entities(&mut input)?,
+            },
+            ALERT_END => Command::AlertEnd {
                 entities: entities(&mut input)?,
             },
             DROPSITE_SHARING => Command::DropsiteSharing {

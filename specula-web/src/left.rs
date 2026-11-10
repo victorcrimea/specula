@@ -4,7 +4,8 @@
 //! frame next to the garrison buttons, in the engine's layout
 //! (`selection_panels_left/`). An observer's buttons are all disabled, so
 //! only barter's sell buttons answer a press, as the engine's do; the
-//! player of `/play` also orders its own units' stances and formations.
+//! player of `/play` also orders its own units' stances and formations and
+//! raises and ends its own alerts.
 //! A right click on a formation chooses the default one, for anyone.
 
 use std::cell::Cell;
@@ -156,6 +157,9 @@ pub(crate) struct LeftPanel {
     stance_orders: Vec<Option<Command>>,
     alert_root: Out,
     alerts: Vec<Tile>,
+    /// What a press of each alert button orders, for the player of
+    /// `/play`: `raiseAlert` and `endOfAlert`.
+    alert_orders: Vec<Option<Command>>,
     formation_root: Out,
     formations: Vec<Tile>,
     /// The formation each button shows, for a right click to choose.
@@ -226,6 +230,7 @@ impl LeftPanel {
             stance_orders: vec![None; MAX_STANCES],
             alert_root: Out::new(crate::element(document, "alert")?),
             alerts,
+            alert_orders: vec![None; MAX_ALERTS],
             formation_root: Out::new(crate::element(document, "formation")?),
             formations,
             formation_names: vec![None; MAX_FORMATIONS],
@@ -251,6 +256,16 @@ impl LeftPanel {
     /// Stance button `index` was pressed: its order, if it gives one.
     pub(crate) fn stance_clicked(&self, index: usize) -> Option<Command> {
         self.stance_orders.get(index).cloned().flatten()
+    }
+
+    /// The alert buttons, for the page to wire to `alert_clicked`.
+    pub(crate) fn alert_buttons(&self) -> impl Iterator<Item = &HtmlElement> {
+        self.alerts.iter().map(|tile| &tile.tile.element)
+    }
+
+    /// Alert button `index` was pressed: its order, if it gives one.
+    pub(crate) fn alert_clicked(&self, index: usize) -> Option<Command> {
+        self.alert_orders.get(index).cloned().flatten()
     }
 
     /// The formation buttons, for the page to wire to `formation_clicked`
@@ -490,6 +505,25 @@ impl LeftPanel {
         } else {
             None
         };
+        self.alert_orders.fill(None);
+        // `controlsPlayer(data.player)`, the first selected entity's owner.
+        if raiser
+            && selected
+                .first()
+                .is_some_and(|entity| view.player == Some(entity.owner))
+        {
+            // The engine sends only the selected entities with an
+            // `alertRaiser`.
+            let ids: Vec<u32> = selected
+                .iter()
+                .filter(|entity| entity.has_component(scene, COMPONENT_ALERT_RAISER))
+                .map(|entity| entity.id)
+                .collect();
+            self.alert_orders[0] = Some(Command::AlertRaise {
+                entities: ids.clone(),
+            });
+            self.alert_orders[1] = Some(Command::AlertEnd { entities: ids });
+        }
         for (index, tile) in self.alerts.iter_mut().enumerate() {
             if !raiser {
                 tile.tile.hidden(true);

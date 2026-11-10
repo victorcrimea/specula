@@ -590,6 +590,14 @@ fn order_json(order: &Order) -> String {
             out.text("type", "remove-guard");
             out.entities("entities", entities);
         }
+        Order::AlertRaise { entities } => {
+            out.text("type", "alert-raise");
+            out.entities("entities", entities);
+        }
+        Order::AlertEnd { entities } => {
+            out.text("type", "alert-end");
+            out.entities("entities", entities);
+        }
         Order::DropsiteSharing { shared, entities } => {
             out.text("type", "set-dropsite-sharing");
             out.entities("entities", entities);
