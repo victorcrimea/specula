@@ -4,9 +4,11 @@
 //! frame next to the garrison buttons, in the engine's layout
 //! (`selection_panels_left/`). An observer's buttons are all disabled, so
 //! only barter's sell buttons answer a press, as the engine's do; the
-//! player of `/play` also orders its own units' stances.
+//! player of `/play` also orders its own units' stances and formations.
+//! A right click on a formation chooses the default one, for anyone.
 
 use std::cell::Cell;
+use std::cell::RefCell;
 
 use specula_assets::command::Command;
 use wasm_bindgen::JsValue;
@@ -54,6 +56,9 @@ const BARTER_CODES: [&str; 4] = ["food", "wood", "stone", "metal"];
 const NULL_FORMATION: &str = "special/formations/null";
 /// `gui.session.defaultformation`'s default (config/default.cfg).
 const DEFAULT_FORMATION: &str = "special/formations/box";
+/// localStorage key of the default formation, as the engine keeps
+/// `gui.session.defaultformation` in the user's config.
+const DEFAULT_FORMATION_KEY: &str = "specula.formation";
 /// The alert tooltips' `["Civilian"]` and `["Trader"]`.
 const ALERT_CIVILIAN: &str = "Civilian";
 const ALERT_TRADER: &str = "Trader";
@@ -153,13 +158,19 @@ pub(crate) struct LeftPanel {
     alerts: Vec<Tile>,
     formation_root: Out,
     formations: Vec<Tile>,
+    /// The formation each button shows, for a right click to choose.
+    formation_names: Vec<Option<String>>,
+    /// What a press of each formation button orders, for the player of
+    /// `/play`: `performFormation`.
+    formation_orders: Vec<Option<Command>>,
     barter_root: Out,
     barter: Vec<BarterItem>,
     /// `BarterButtonManager.selectedResource`, an index of `BARTER_CODES`,
     /// and whether the page should fill the panel again.
     selected_resource: Cell<usize>,
     redraw: Cell<bool>,
-    default_formation: String,
+    /// `g_AutoFormation.defaultFormation`.
+    default_formation: RefCell<String>,
 }
 
 impl LeftPanel {
@@ -217,11 +228,13 @@ impl LeftPanel {
             alerts,
             formation_root: Out::new(crate::element(document, "formation")?),
             formations,
+            formation_names: vec![None; MAX_FORMATIONS],
+            formation_orders: vec![None; MAX_FORMATIONS],
             barter_root: Out::new(crate::element(document, "barter")?),
             barter: items,
             selected_resource: Cell::new(0),
             redraw: Cell::new(false),
-            default_formation: DEFAULT_FORMATION.to_string(),
+            default_formation: RefCell::new(stored_default_formation()),
         })
     }
 
@@ -238,6 +251,39 @@ impl LeftPanel {
     /// Stance button `index` was pressed: its order, if it gives one.
     pub(crate) fn stance_clicked(&self, index: usize) -> Option<Command> {
         self.stance_orders.get(index).cloned().flatten()
+    }
+
+    /// The formation buttons, for the page to wire to `formation_clicked`
+    /// and `formation_right_clicked`.
+    pub(crate) fn formation_buttons(&self) -> impl Iterator<Item = &HtmlElement> {
+        self.formations.iter().map(|tile| &tile.tile.element)
+    }
+
+    /// Formation button `index` was pressed: its order, if it gives one.
+    pub(crate) fn formation_clicked(&self, index: usize) -> Option<Command> {
+        self.formation_orders.get(index).cloned().flatten()
+    }
+
+    /// `g_AutoFormation.setDefault`, which the button's right press calls
+    /// whether or not it is enabled.
+    pub(crate) fn formation_right_clicked(&self, index: usize) {
+        let Some(Some(name)) = self.formation_names.get(index) else {
+            return;
+        };
+        if let Some(storage) =
+            web_sys::window().and_then(|window| window.local_storage().ok().flatten())
+        {
+            let _ = storage.set_item(DEFAULT_FORMATION_KEY, name);
+        }
+        self.default_formation.replace(name.clone());
+        self.redraw.set(true);
+    }
+
+    /// `g_AutoFormation.getDefault`: none for the null formation, which
+    /// would otherwise take units out of theirs on every walk.
+    pub(crate) fn default_formation(&self) -> Option<String> {
+        let name = self.default_formation.borrow();
+        (name.as_str() != NULL_FORMATION).then(|| name.clone())
     }
 
     /// `BarterButtonManager.setSelectedResource`.
@@ -480,14 +526,29 @@ impl LeftPanel {
     }
 
     fn show_formation(&mut self, view: &View, selected: &[Selected]) -> bool {
-        let scene = view.scene;
         let items = formation_items(view, selected);
         self.formation_root.hidden(items.is_empty());
+        // `controlsPlayer(data.player)`, the first selected entity's owner.
+        let controls = selected
+            .first()
+            .is_some_and(|entity| view.player == Some(entity.owner));
+        let ids: Vec<u32> = selected.iter().map(|entity| entity.id).collect();
+        self.formation_names.fill(None);
+        self.formation_orders.fill(None);
+        let default_formation = self.default_formation.borrow();
         for (index, tile) in self.formations.iter_mut().enumerate() {
             let Some(item) = items.get(index) else {
                 tile.tile.hidden(true);
                 continue;
             };
+            self.formation_names[index] = Some(item.name.clone());
+            // `enabled = formationOk && controlsPlayer(data.player)`.
+            if item.possible && controls {
+                self.formation_orders[index] = Some(Command::Formation {
+                    entities: ids.clone(),
+                    name: item.name.clone(),
+                });
+            }
             let icon = item
                 .info
                 .as_ref()
@@ -499,17 +560,18 @@ impl LeftPanel {
                 })
                 .unwrap_or_else(|| "null".to_string());
             tile.show(&format!("formation-{icon}"), item.selected);
-            let is_default = item.name == self.default_formation;
+            let is_default = item.name == *default_formation;
             tile.marker.hidden(!is_default);
-            tile.tile.class(String::from(if item.possible {
-                "item"
-            } else {
-                "item grey"
-            }));
+            tile.tile
+                .class(String::from(match (item.possible, item.predicted) {
+                    (true, false) => "item",
+                    (true, true) => "item predicted",
+                    (false, false) => "item grey",
+                    (false, true) => "item grey predicted",
+                }));
             tile.tint.style(String::new());
             tile.tile.tooltip(&formation_tooltip(item, is_default));
         }
-        let _ = scene;
         !items.is_empty()
     }
 }
@@ -620,6 +682,8 @@ struct FormationItem {
     possible: bool,
     /// `IsFormationSelected`.
     selected: bool,
+    /// Selected because of an order the stream has not reported yet.
+    predicted: bool,
 }
 
 /// `g_SelectionPanels.Formation.getItems`, with what `setupButton` asks of
@@ -675,24 +739,42 @@ fn formation_items(view: &View, selected: &[Selected]) -> Vec<FormationItem> {
             .filter(|entity| usable(entity, name))
             .count() as f64;
         let possible = name == NULL_FORMATION || count >= minimum;
-        // A formation of none is the null formation's.
-        let current = |entity: &Selected| match &entity.groups[detail::FORMATIONS] {
-            Some(Group::Formations { current, .. }) => {
-                string(scene, *current).unwrap_or(NULL_FORMATION) == name
-            }
-            _ => false,
+        // A formation of none is the null formation's; an ordered one
+        // stands in for the streamed one.
+        let current = |entity: &Selected| match view.predicted.formation(entity.id) {
+            Some(predicted) => predicted == name,
+            None => match &entity.groups[detail::FORMATIONS] {
+                Some(Group::Formations { current, .. }) => {
+                    string(scene, *current).unwrap_or(NULL_FORMATION) == name
+                }
+                _ => false,
+            },
         };
+        let selected_now = selected.iter().any(current);
         items.push(FormationItem {
             name: name.to_string(),
             info,
             possible,
-            selected: selected.iter().any(current),
+            selected: selected_now,
+            predicted: selected_now
+                && selected
+                    .iter()
+                    .any(|entity| view.predicted.formation(entity.id) == Some(name)),
         });
         if items.len() == MAX_FORMATIONS {
             break;
         }
     }
     items
+}
+
+/// `AutoFormation`'s constructor reading `gui.session.defaultformation`.
+fn stored_default_formation() -> String {
+    web_sys::window()
+        .and_then(|window| window.local_storage().ok().flatten())
+        .and_then(|storage| storage.get_item(DEFAULT_FORMATION_KEY).ok().flatten())
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| DEFAULT_FORMATION.to_string())
 }
 
 /// The tooltip of `g_SelectionPanels.Formation.setupButton`.

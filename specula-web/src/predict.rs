@@ -13,6 +13,9 @@ use crate::panel::entity_groups;
 use crate::panel::string;
 use crate::stream::Scene;
 
+/// `NULL_FORMATION`, which an entity in no formation is in.
+const NULL_FORMATION: &str = "special/formations/null";
+
 /// Long enough for a 200 ms turn and the round trip, short enough that a
 /// refused order does not leave a wrong mark for long.
 const TIMEOUT_MS: f64 = 3000.0;
@@ -22,6 +25,7 @@ const TIMEOUT_MS: f64 = 3000.0;
 enum Value {
     Stance(String),
     Autoqueue(bool),
+    Formation(String),
 }
 
 impl Value {
@@ -43,10 +47,19 @@ pub(crate) struct Predictions {
 
 impl Predictions {
     /// Records what `order` will set; any other command is ignored.
-    pub(crate) fn record(&mut self, order: &Command, now: f64) {
+    pub(crate) fn record(&mut self, order: &Command, scene: &Scene, now: f64) {
         let (entities, value) = match order {
-            Command::Stance { entities, name } => (entities, Value::Stance(name.clone())),
-            Command::Autoqueue { on, entities } => (entities, Value::Autoqueue(*on)),
+            Command::Stance { entities, name } => (entities.clone(), Value::Stance(name.clone())),
+            Command::Autoqueue { on, entities } => (entities.clone(), Value::Autoqueue(*on)),
+            // `GetFormationUnitAIs` leaves out those that cannot use it.
+            Command::Formation { entities, name } => (
+                entities
+                    .iter()
+                    .copied()
+                    .filter(|&entity| can_use_formation(scene, entity, name))
+                    .collect(),
+                Value::Formation(name.clone()),
+            ),
             _ => return,
         };
         // A later order of the same kind replaces the earlier one.
@@ -65,6 +78,15 @@ impl Predictions {
             .iter()
             .find_map(|prediction| match &prediction.value {
                 Value::Stance(name) if prediction.entity == entity => Some(name.as_str()),
+                _ => None,
+            })
+    }
+
+    pub(crate) fn formation(&self, entity: u32) -> Option<&str> {
+        self.list
+            .iter()
+            .find_map(|prediction| match &prediction.value {
+                Value::Formation(name) if prediction.entity == entity => Some(name.as_str()),
                 _ => None,
             })
     }
@@ -104,9 +126,26 @@ impl Predictions {
                     &groups[detail::QUEUE],
                     Some(Group::Queue(queue)) if queue.autoqueue == *on
                 ),
+                Value::Formation(name) => matches!(
+                    &groups[detail::FORMATIONS],
+                    Some(Group::Formations { current, .. })
+                        if string(scene, *current).unwrap_or(NULL_FORMATION) == name
+                ),
             };
             !confirmed
         });
         self.list.len() != before
     }
+}
+
+/// Whether `entity`'s UnitAI lists formation `name`.
+fn can_use_formation(scene: &Scene, entity: u32, name: &str) -> bool {
+    let Some(dot) = scene.dots.get(&entity) else {
+        return false;
+    };
+    matches!(
+        &entity_groups(scene, entity, dot.template)[detail::FORMATIONS],
+        Some(Group::Formations { list, .. })
+            if list.iter().any(|item| string(scene, *item) == Some(name))
+    )
 }

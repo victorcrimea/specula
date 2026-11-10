@@ -41,7 +41,8 @@ const QUERY_WALL_PREVIEW: u8 = 3;
 /// Replies not yet sent to the pages; a placement asks at most a couple at
 /// a time.
 const REPLY_BACKLOG: usize = 64;
-/// What every order the GUI gives names when no formation is wanted
+/// What every order the GUI gives but walk names, as
+/// `g_AutoFormation.getNull()` with `formationwalkonly`
 /// (`globalscripts/Formation.js`).
 const NULL_FORMATION: &str = "special/formations/null";
 const MAX_PLAYERS: usize = 8;
@@ -376,13 +377,17 @@ fn order_json(order: &Order) -> String {
             entities,
             x,
             z,
+            formation,
         } => {
             out.text("type", "walk");
             out.entities("entities", entities);
             out.number("x", *x);
             out.number("z", *z);
             out.order_flags(*flags);
-            out.text("formation", NULL_FORMATION);
+            // `g_AutoFormation.getDefault()`, undefined when it is null.
+            if !formation.is_empty() {
+                out.text("formation", formation);
+            }
         }
         Order::AttackWalk {
             flags,
@@ -521,6 +526,11 @@ fn order_json(order: &Order) -> String {
             out.text("type", "stance");
             out.entities("entities", entities);
             out.text("name", name);
+        }
+        Order::Formation { entities, name } => {
+            out.text("type", "formation");
+            out.entities("entities", entities);
+            out.text("formation", name);
         }
         Order::ConstructWall {
             flags,

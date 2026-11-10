@@ -51,8 +51,15 @@ pub struct Action {
 }
 
 /// The action for `player`'s entities among `selected`, none when the
-/// engine shows the default cursor and orders nothing.
-pub fn action(scene: &Scene, selected: &[u32], player: i32, target: &Target) -> Option<Action> {
+/// engine shows the default cursor and orders nothing. A walk puts them in
+/// `formation`, empty for none.
+pub fn action(
+    scene: &Scene,
+    selected: &[u32],
+    player: i32,
+    target: &Target,
+    formation: &str,
+) -> Option<Action> {
     let own: Vec<u32> = selected
         .iter()
         .copied()
@@ -234,6 +241,7 @@ pub fn action(scene: &Scene, selected: &[u32], player: i32, target: &Target) -> 
             entities: entities(),
             x,
             z,
+            formation: formation.to_string(),
         }),
         sound: Some(("order_walk", walker)),
     })

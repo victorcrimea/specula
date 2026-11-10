@@ -391,7 +391,8 @@ struct CommandsPanel {
 
 /// A button that gives orders, which the page wires: a commands panel
 /// `training` cell, a research column's bottom (false) or top (true)
-/// button, a queue cell, a command row button, or a stance button.
+/// button, a queue cell, a command row button, a stance button, or a
+/// formation button.
 #[derive(Clone, Copy)]
 pub enum CommandButton {
     Training(usize),
@@ -399,6 +400,7 @@ pub enum CommandButton {
     Queue(usize),
     Row(usize),
     Stance(usize),
+    Formation(usize),
 }
 
 /// One `unitTrainingButton`, `unitResearchButton`, `unitGateButton`,
@@ -707,8 +709,8 @@ impl DetailsPanel {
         self.groups.iter().map(|group| &group.button.element)
     }
 
-    /// The training, research, queue, command row and stance buttons, for
-    /// the page to wire.
+    /// The training, research, queue, command row, stance and formation
+    /// buttons, for the page to wire.
     pub fn command_buttons(&self) -> Vec<(CommandButton, HtmlElement)> {
         let mut buttons = Vec::new();
         if let Some(commands) = &self.commands {
@@ -760,6 +762,11 @@ impl DetailsPanel {
                     .enumerate()
                     .map(|(index, button)| (CommandButton::Stance(index), button.clone())),
             );
+            buttons.extend(
+                left.formation_buttons()
+                    .enumerate()
+                    .map(|(index, button)| (CommandButton::Formation(index), button.clone())),
+            );
         }
         buttons
     }
@@ -793,6 +800,12 @@ impl DetailsPanel {
                 .as_ref()
                 .and_then(|garrison| garrison.left.as_ref())
                 .and_then(|left| left.stance_clicked(index))
+                .map(Request::Order),
+            CommandButton::Formation(index) => self
+                .garrison
+                .as_ref()
+                .and_then(|garrison| garrison.left.as_ref())
+                .and_then(|left| left.formation_clicked(index))
                 .map(Request::Order),
         };
         if let Some(request) = request {
@@ -837,6 +850,34 @@ impl DetailsPanel {
         {
             left.sell_clicked(index);
         }
+    }
+
+    /// The formation buttons, for the page to wire their right click.
+    pub fn formation_buttons(&self) -> Vec<HtmlElement> {
+        self.garrison
+            .as_ref()
+            .and_then(|garrison| garrison.left.as_ref())
+            .map(|left| left.formation_buttons().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    /// A formation button was right clicked: it becomes the default.
+    pub fn formation_right_clicked(&self, index: usize) {
+        if let Some(left) = self
+            .garrison
+            .as_ref()
+            .and_then(|garrison| garrison.left.as_ref())
+        {
+            left.formation_right_clicked(index);
+        }
+    }
+
+    /// The formation walk orders carry, none for the null formation.
+    pub fn default_formation(&self) -> Option<String> {
+        self.garrison
+            .as_ref()
+            .and_then(|garrison| garrison.left.as_ref())
+            .and_then(LeftPanel::default_formation)
     }
 
     /// Whether a press changed what the panel shows.

@@ -16,7 +16,7 @@ use crate::bytes::ByteReader;
 
 /// The version of this format, which the server sends as the first byte of
 /// its seat message; a page on another version must reload.
-pub const COMMAND_VERSION: u8 = 1;
+pub const COMMAND_VERSION: u8 = 2;
 
 pub const QUEUED: u8 = 1;
 pub const PUSH_FRONT: u8 = 2;
@@ -40,6 +40,7 @@ const RETURN_RESOURCE: u8 = 15;
 const CONSTRUCT_WALL: u8 = 16;
 const STOP_PRODUCTION: u8 = 17;
 const AUTOQUEUE: u8 = 18;
+const FORMATION: u8 = 19;
 
 /// Above every command kind.
 pub const QUERY_TAG: u8 = 0x80;
@@ -49,11 +50,14 @@ const QUERY_WALL: u8 = 3;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Command {
+    /// `formation` is the default formation's template, empty for none
+    /// (`g_AutoFormation.getDefault()` returning undefined).
     Walk {
         flags: u8,
         entities: Vec<u32>,
         x: f32,
         z: f32,
+        formation: String,
     },
     AttackWalk {
         flags: u8,
@@ -149,6 +153,12 @@ pub enum Command {
     Autoqueue {
         on: bool,
         entities: Vec<u32>,
+    },
+    /// `performFormation`: moves the entities into formation template
+    /// `name`, the null formation's to leave theirs.
+    Formation {
+        entities: Vec<u32>,
+        name: String,
     },
 }
 
@@ -317,9 +327,11 @@ impl Command {
                 entities,
                 x,
                 z,
+                formation,
             } => {
                 out.head(WALK, *flags, entities);
                 out.point(*x, *z);
+                out.text(formation);
             }
             Command::AttackWalk {
                 flags,
@@ -444,6 +456,11 @@ impl Command {
                 out.0.extend_from_slice(&[AUTOQUEUE, u8::from(*on)]);
                 out.entities(entities);
             }
+            Command::Formation { entities, name } => {
+                out.0.push(FORMATION);
+                out.entities(entities);
+                out.text(name);
+            }
         }
         out.0
     }
@@ -462,6 +479,7 @@ impl Command {
                         entities,
                         x,
                         z,
+                        formation: input.text()?,
                     }
                 } else {
                     Command::AttackWalk {
@@ -553,6 +571,10 @@ impl Command {
                 }
             }
             STANCE => Command::Stance {
+                entities: entities(&mut input)?,
+                name: input.text()?,
+            },
+            FORMATION => Command::Formation {
                 entities: entities(&mut input)?,
                 name: input.text()?,
             },

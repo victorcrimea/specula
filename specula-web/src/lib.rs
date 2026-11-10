@@ -873,11 +873,16 @@ impl App {
             // The panels' buttons work for the seat's own from now on.
             self.details_dirty = true;
         }
+        let formation = self
+            .details
+            .as_ref()
+            .and_then(DetailsPanel::default_formation)
+            .unwrap_or_default();
         let selected = self.renderer.selected();
         let mut sounds = Vec::new();
         let mut markers = Vec::new();
         for target in targets {
-            if let Some(action) = orders::action(&self.scene, selected, seat, &target)
+            if let Some(action) = orders::action(&self.scene, selected, seat, &target, &formation)
                 && let Some(order) = action.command
                 && let Some(uplink) = &self.uplink
             {
@@ -906,7 +911,7 @@ impl App {
                     point: None,
                     queued: false,
                 };
-                orders::action(&self.scene, selected, seat, &target)
+                orders::action(&self.scene, selected, seat, &target, &formation)
             })
             .map(|action| action.cursor)
             .unwrap_or_default();
@@ -940,7 +945,7 @@ impl App {
                 Request::Order(order) => {
                     if let Some(uplink) = &self.uplink {
                         uplink.send(&order);
-                        self.predictions.record(&order, page_now());
+                        self.predictions.record(&order, &self.scene, page_now());
                         self.details_dirty = true;
                     }
                 }
@@ -1727,7 +1732,7 @@ fn element<T: JsCast>(document: &Document, id: &str) -> Result<T, String> {
 /// selects its group, or with Ctrl (session.deselectgroup) or the right
 /// button removes it.
 fn wire_details(app: &Rc<RefCell<App>>) {
-    let (portrait, buttons, sells, commands) = {
+    let (portrait, buttons, sells, commands, formations) = {
         let app = app.borrow();
         let Some(details) = &app.details else {
             return;
@@ -1737,6 +1742,7 @@ fn wire_details(app: &Rc<RefCell<App>>) {
             details.group_buttons().cloned().collect::<Vec<_>>(),
             details.barter_buttons(),
             details.command_buttons(),
+            details.formation_buttons(),
         )
     };
     // On `/play` they give the player's orders; for an observer they do
@@ -1769,6 +1775,17 @@ fn wire_details(app: &Rc<RefCell<App>>) {
         });
         button.set_onclick(Some(on_click.as_ref().unchecked_ref()));
         on_click.forget();
+    }
+    for (index, button) in formations.into_iter().enumerate() {
+        let target = Rc::clone(app);
+        let on_menu = Closure::<dyn FnMut(MouseEvent)>::new(move |event: MouseEvent| {
+            event.prevent_default();
+            if let Some(details) = &target.borrow().details {
+                details.formation_right_clicked(index);
+            }
+        });
+        button.set_oncontextmenu(Some(on_menu.as_ref().unchecked_ref()));
+        on_menu.forget();
     }
     for (index, button) in buttons.into_iter().enumerate() {
         let target = Rc::clone(app);
