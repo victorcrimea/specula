@@ -377,6 +377,8 @@ trait View {
     }
     /// The placement previews to draw.
     fn set_ghosts(&mut self, _ghosts: Vec<placement::Ghost>) {}
+    /// Shows a walk order's target marker at x and z in metres.
+    fn add_target_marker(&mut self, _x: f32, _z: f32) {}
     /// Where the camera is, for the benchmark to hold it there.
     fn camera(&self) -> Option<CameraPose> {
         None
@@ -873,17 +875,24 @@ impl App {
         }
         let selected = self.renderer.selected();
         let mut sounds = Vec::new();
+        let mut markers = Vec::new();
         for target in targets {
             if let Some(action) = orders::action(&self.scene, selected, seat, &target)
                 && let Some(order) = action.command
                 && let Some(uplink) = &self.uplink
             {
                 uplink.send(&order);
+                if let Command::Walk { x, z, .. } = order {
+                    markers.push((x, z));
+                }
                 sounds.extend(action.sound);
             }
         }
         for (name, id) in sounds {
             self.renderer.queue_sound(id, name);
+        }
+        for (x, z) in markers {
+            self.renderer.add_target_marker(x, z);
         }
         let selected = self.renderer.selected();
         // As `updateCursorAndTooltip`: the right click's cursor, else the

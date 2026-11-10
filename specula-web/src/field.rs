@@ -207,6 +207,12 @@ const ZOOM_ANCHOR_MAX: f32 = 4.0;
 /// Props reach past the root mesh (riders, spears, banners); a sphere
 /// this much larger than its bounds still holds them.
 const REACH_MARGIN: f32 = 1.5;
+/// The actor of the template `DrawTargetMarker` (gui/session/unit_actions.js)
+/// places a walk order's marker with, special/target_marker.
+const TARGET_MARKER_ACTOR: &str = "special/target_marker.xml";
+/// special/target_marker's Decay removes it after its 0.5 s DelayTime (it
+/// sinks at 10000 m/s), here on the wall clock rather than the turns.
+const TARGET_MARKER_MS: f64 = 500.0;
 const BACKGROUND: wgpu::Color = wgpu::Color {
     r: 0.06,
     g: 0.07,
@@ -753,6 +759,8 @@ pub struct Field {
     /// The mouse over the ground while placing.
     place_pointer: Option<placement::Pointer>,
     ghosts: Vec<Ghost>,
+    /// Walk orders' markers: x and z in metres, and when they were given.
+    target_markers: Vec<([f32; 2], f64)>,
     /// By actor and seed.
     ghost_models: HashMap<(String, u32), Option<Rc<Model>>>,
     /// The instance's shading, as `ICmpVisual::SetShadingColor`: 1 for the
@@ -1470,6 +1478,7 @@ impl Field {
             place_inputs: Vec::new(),
             place_pointer: None,
             ghosts: Vec::new(),
+            target_markers: Vec::new(),
             ghost_models: HashMap::new(),
             shading: 0.0,
             shots: HashMap::new(),
@@ -1669,6 +1678,7 @@ impl Field {
         }
         self.place_rally_flags(progress, view_proj, &planes, pixel_scale, &mut groups);
         self.place_ghosts(progress, view_proj, &planes, pixel_scale, &mut groups);
+        self.place_target_markers(progress, view_proj, &planes, pixel_scale, &mut groups);
         if self.particles_visible {
             let dots = &self.entities.dots;
             let shots = &self.shots;
@@ -3424,6 +3434,69 @@ impl Field {
         }
     }
 
+    /// The markers `AddTargetMarker` leaves where a walk order was given,
+    /// floating, as the template's Position says.
+    fn place_target_markers(
+        &mut self,
+        progress: f32,
+        view_proj: &[[f32; 4]; 4],
+        planes: &[[f32; 4]; 6],
+        pixel_scale: f32,
+        groups: &mut HashMap<GroupKey, Vec<u8>>,
+    ) {
+        let now = now();
+        self.target_markers
+            .retain(|(_, given)| now - given < TARGET_MARKER_MS);
+        if self.target_markers.is_empty() {
+            return;
+        }
+        let Some(ground) = &self.ground else {
+            return;
+        };
+        let image = &ground.image;
+        let placed: Vec<(Vec3, f64)> = self
+            .target_markers
+            .iter()
+            .map(|&([x, z], given)| {
+                (
+                    Vec3::new(x, image.ground(x, z).max(image.water_level), z),
+                    now - given,
+                )
+            })
+            .collect();
+        let Some(model) = self.ghost_model(TARGET_MARKER_ACTOR, 0) else {
+            return;
+        };
+        // A fixed time skips the actor's animation speed, which the
+        // engine's new local entity plays from its first frame.
+        let speed = model
+            .animations
+            .first()
+            .map_or(1.0, |animation| animation.speed);
+        for (at, age) in placed {
+            let mut transform = Mat4::identity();
+            transform.translate(at);
+            let place = ShotPlace {
+                owner: 0,
+                // A marker has no particles to own.
+                emitter: Owner::Entity(0),
+                time: age as f32 * speed,
+                progress,
+            };
+            let particles = std::mem::replace(&mut self.particles_visible, false);
+            self.place_shot_model(
+                &model,
+                &transform,
+                &place,
+                view_proj,
+                planes,
+                pixel_scale,
+                groups,
+            );
+            self.particles_visible = particles;
+        }
+    }
+
     fn ghost_model(&mut self, actor: &str, seed: u32) -> Option<Rc<Model>> {
         let key = (actor.to_string(), seed);
         if let Some(model) = self.ghost_models.get(&key) {
@@ -4413,6 +4486,10 @@ impl View for Field {
 
     fn set_ghosts(&mut self, ghosts: Vec<Ghost>) {
         self.ghosts = ghosts;
+    }
+
+    fn add_target_marker(&mut self, x: f32, z: f32) {
+        self.target_markers.push(([x, z], now()));
     }
 
     fn selected(&self) -> &[u32] {
