@@ -2,31 +2,36 @@
 //! show beyond the status bars, for every entity, sent only to viewers that
 //! have something selected. Varints and zigzag as in `wire.rs`.
 //!
-//! - kind 1 keyframe: varint turn, u8 detail version (8; a viewer also
-//!   reads 7, which had no stances, formations, commands or upgrades and
-//!   no player table, 6, which had no buildable lists, 5, which also had no stats, 4,
+//! - kind 1 keyframe: varint turn, u8 detail version (9; a viewer also
+//!   reads 8, which had no cleared masks, 7, which also had no stances,
+//!   formations, commands or upgrades and no player table, 6, which had no buildable lists, 5, which also had no stats, 4,
 //!   which also had no data table, 3, which also had no rally points,
 //!   2, whose lists are also of names only, and 1, which also had no
 //!   garrison owners, and ignores the stream at any other), u64 match id
 //!   (the visual stream's), list table, data table, player table, varint n, n x {varint template, varint mask, groups}: each
 //!   template's defaults, then varint count, count x {varint id delta,
-//!   varint mask, groups}. A keyframe leaves out a group equal to the
-//!   default of the entity's template (the template of the visual stream's
-//!   entity of that id) and an entity with nothing left. The groups of
+//!   varint cleared, varint mask, groups}. A keyframe leaves out a group
+//!   equal to the default of the entity's template (the template of the
+//!   visual stream's entity of that id) and an entity with nothing left;
+//!   cleared names the groups the entity lacks although its template's
+//!   defaults have them. The groups of
 //!   production queues, foundations and repairs are never defaults, and in
 //!   a keyframe each is followed by varint turns since it was sent.
 //! - kind 2 delta: varint turn, the lists added to the table, the data
 //!   table's entries that are new or changed, u8 1 and the player table
 //!   when it changed (else 0), varint
-//!   count, count x {varint id delta, varint mask, groups} of the groups
-//!   that changed, varint count, count x id delta of the entities gone.
+//!   count, count x {varint id delta, varint cleared, varint mask, groups}
+//!   of the groups that changed, cleared naming those the entity no longer
+//!   has, varint count, count x id delta of the entities gone.
 //!   Every turn of the visual stream has one, empty or not, so the two
 //!   streams line up turn by turn.
 //!
-//! An entity's groups are kept until it is gone; one a delta does not list
-//! is unchanged. A group a keyframe left out is sent in the delta of the
-//! turn its entity leaves the visual stream (garrisoned), since a viewer
-//! can no longer find its template; the defaults assume that entities of
+//! An entity's groups are kept until it is gone or a delta clears them; one
+//! a delta does not list is unchanged. A seat stops sending most groups of
+//! an entity that changes hands (`view/seat.rs`), which keeps its id. A
+//! group a keyframe left out is sent in the delta of the turn its entity
+//! leaves the visual stream (garrisoned), since a viewer can no longer
+//! find its template; the defaults assume that entities of
 //! one template have the same groups. The mask bits are the hook's kind 12 group bits
 //! (`SpeculaFeed.h`), and each group is sent as the panels show it:
 //! - 1 health: varint hitpoints, varint max, both rounded up;
@@ -537,23 +542,34 @@ impl DetailEncoder {
                 continue;
             };
             let mut mask = 0u64;
+            let mut cleared = 0u64;
             let mut groups = Writer::default();
             let forced = leaving.get(&id).copied().unwrap_or(0);
             for slot in 0..SLOTS {
                 let force = forced & 1 << slot != 0;
+                let held = |encoder: &Self| {
+                    encoder
+                        .sent
+                        .get(&id)
+                        .is_some_and(|sent| sent.groups[slot].is_some())
+                };
+                let had = held(self);
                 if let Some(group) = self.decide(id, slot, now, turn, sample, force) {
                     if let Some(sent) = self.sent.get_mut(&id) {
                         sent.defaulted &= !(1 << slot);
                     }
                     mask |= 1 << slot;
                     groups.0.extend_from_slice(&group);
+                } else if had && !held(self) {
+                    cleared |= 1 << slot;
                 }
             }
-            if mask == 0 {
+            if mask == 0 && cleared == 0 {
                 continue;
             }
             body.varint(u64::from(id - previous));
             previous = id;
+            body.varint(cleared);
             body.varint(mask);
             body.0.extend_from_slice(&groups.0);
             count += 1;
@@ -580,7 +596,8 @@ impl DetailEncoder {
     }
 
     /// The group as it goes into the delta, or `None` when what the viewer
-    /// holds, or reckons, is close enough and it is not `force`d.
+    /// holds, or reckons, is close enough and it is not `force`d, or when
+    /// the entity no longer has it, which forgets what the viewer holds.
     fn decide(
         &mut self,
         id: u32,
@@ -597,7 +614,15 @@ impl DetailEncoder {
             REPAIR => now.repair.as_ref().map(|b| building_base(b, turn)),
             _ => None,
         };
-        let group = encode_group(slot, now)?;
+        let Some(group) = encode_group(slot, now) else {
+            sent.bases[slot] = None;
+            if slot == QUEUE {
+                sent.queue_structure = None;
+            }
+            sent.defaulted &= !(1 << slot);
+            sent.groups[slot] = None;
+            return None;
+        };
         if is_reckoned(slot) {
             let base = base?;
             let stale = match (sent.bases[slot], &sent.groups[slot]) {
@@ -681,20 +706,26 @@ impl DetailEncoder {
                 .get(id)
                 .and_then(|template| defaults.get(template));
             let mut groups: Groups = sent.groups.clone();
+            let mut cleared = 0u64;
             sent.defaulted = 0;
             if let Some(template_defaults) = template_defaults {
                 for slot in 0..SLOTS {
                     if groups[slot].is_some() && groups[slot] == template_defaults[slot] {
                         groups[slot] = None;
                         sent.defaulted |= 1 << slot;
+                    } else if groups[slot].is_none() && template_defaults[slot].is_some() {
+                        // An enemy's entity of a template the seat's own
+                        // player has would take the owner's groups.
+                        cleared |= 1 << slot;
                     }
                 }
             }
-            if groups.iter().all(Option::is_none) {
+            if groups.iter().all(Option::is_none) && cleared == 0 {
                 continue;
             }
             body.varint(u64::from(id - previous));
             previous = *id;
+            body.varint(cleared);
             write_groups(&mut body, &groups, Some((&sent.bases, turn)));
             count += 1;
         }

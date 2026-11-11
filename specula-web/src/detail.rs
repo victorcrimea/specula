@@ -13,6 +13,8 @@ use crate::stream::Writer;
 
 const MESSAGE_KEYFRAME: u8 = 1;
 const MESSAGE_DELTA: u8 = 2;
+/// Archived matches keep it; it cannot clear a group.
+const DETAIL_VERSION_NO_CLEARED: u8 = 8;
 /// Archived matches keep it; it has no stances, formations, commands,
 /// upgrades or player table.
 const DETAIL_VERSION_NO_COMMANDS: u8 = 7;
@@ -305,6 +307,10 @@ pub struct Details {
     pub defaults: BTreeMap<u32, Groups>,
     /// By id, the groups sent for it.
     pub entities: BTreeMap<u32, Groups>,
+    /// By id, the slots its template's defaults do not fill: a seat's
+    /// player sees less of an enemy's entity than of its own of the same
+    /// template. Every id here is in `entities`.
+    pub cleared: BTreeMap<u32, u64>,
 }
 
 impl Details {
@@ -328,6 +334,7 @@ impl Details {
         if !matches!(
             version,
             DETAIL_VERSION
+                | DETAIL_VERSION_NO_CLEARED
                 | DETAIL_VERSION_NO_COMMANDS
                 | DETAIL_VERSION_NO_BUILDABLE
                 | DETAIL_VERSION_NO_STATS
@@ -357,8 +364,12 @@ impl Details {
         let mut id = 0u32;
         for _ in 0..cursor.varint()? {
             id = next_id(id, cursor)?;
+            let cleared = self.read_cleared(cursor)?;
             let groups = read_groups(cursor, turn, true, owners)?;
             self.entities.insert(id, groups);
+            if cleared != 0 {
+                self.cleared.insert(id, cleared);
+            }
         }
         Ok(())
     }
@@ -377,23 +388,46 @@ impl Details {
         let mut id = 0u32;
         for _ in 0..cursor.varint()? {
             id = next_id(id, cursor)?;
+            let cleared = self.read_cleared(cursor)?;
             let changed = read_groups(cursor, self.turn, false, owners)?;
             let groups = self
                 .entities
                 .entry(id)
                 .or_insert_with(|| std::array::from_fn(|_| None));
+            let mut kept = self.cleared.get(&id).copied().unwrap_or(0) | cleared;
             for (slot, group) in changed.into_iter().enumerate() {
                 if group.is_some() {
                     groups[slot] = group;
+                    kept &= !(1 << slot);
+                } else if cleared & 1 << slot != 0 {
+                    groups[slot] = None;
                 }
+            }
+            if kept == 0 {
+                self.cleared.remove(&id);
+            } else {
+                self.cleared.insert(id, kept);
             }
         }
         let mut id = 0u32;
         for _ in 0..cursor.varint()? {
             id = next_id(id, cursor)?;
             self.entities.remove(&id);
+            self.cleared.remove(&id);
         }
         Ok(())
+    }
+
+    /// An entity's cleared slots, which versions before 9 do not have.
+    fn read_cleared(&self, cursor: &mut ByteReader) -> Result<u64, &'static str> {
+        if self.version <= DETAIL_VERSION_NO_CLEARED {
+            return Ok(0);
+        }
+        let cleared = cursor.varint()?;
+        if cleared >> SLOTS != 0 {
+            return Err("unknown detail group");
+        }
+        Ok(cleared)
     }
 
     /// Whether its garrisons carry owners, which a delta does not say.
@@ -554,6 +588,9 @@ impl Details {
         for (id, groups) in &self.entities {
             out.varint(u64::from(id - previous));
             previous = *id;
+            if self.version > DETAIL_VERSION_NO_CLEARED {
+                out.varint(self.cleared.get(id).copied().unwrap_or(0));
+            }
             write_groups(&mut out, groups, Some(self.turn), owners);
         }
         out.0
@@ -565,7 +602,16 @@ impl Details {
         self.entities
             .get(&id)
             .and_then(|groups| groups[slot].as_ref())
-            .or_else(|| self.defaults.get(&template?)?[slot].as_ref())
+            .or_else(|| {
+                if self
+                    .cleared
+                    .get(&id)
+                    .is_some_and(|cleared| cleared & 1 << slot != 0)
+                {
+                    return None;
+                }
+                self.defaults.get(&template?)?[slot].as_ref()
+            })
     }
 
     /// Entity `id`'s groups, those it was not sent taken from its
@@ -578,8 +624,9 @@ impl Details {
             .cloned()
             .unwrap_or_else(|| std::array::from_fn(|_| None));
         if let Some(defaults) = template.and_then(|template| self.defaults.get(&template)) {
+            let cleared = self.cleared.get(&id).copied().unwrap_or(0);
             for (slot, group) in groups.iter_mut().enumerate() {
-                if group.is_none() {
+                if group.is_none() && cleared & 1 << slot == 0 {
                     group.clone_from(&defaults[slot]);
                 }
             }
