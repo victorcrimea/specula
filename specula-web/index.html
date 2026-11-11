@@ -211,13 +211,13 @@ body { cursor: var(--gui-cursor-default, default); }
   var(--gui-panel-shader-top-edge) 0 0 / 100% 1px no-repeat; }
 /* The engine's `-stroke` fonts: a 1 px black outline. The top panel
    shares the text and bar styles. */
-:is(#details, #top-panel, #diplomacy-window, #message-box) .text { position: absolute; display: flex; align-items: center;
+:is(#details, #top-panel, #diplomacy-window, #message-box, #research) .text { position: absolute; display: flex; align-items: center;
   white-space: pre; overflow: hidden; line-height: 1.1;
   -webkit-text-stroke: 2px black; paint-order: stroke fill; }
-:is(#details, #top-panel, #diplomacy-window, #message-box) .center { justify-content: center; text-align: center; }
+:is(#details, #top-panel, #diplomacy-window, #message-box, #research) .center { justify-content: center; text-align: center; }
 :is(#details, #top-panel) .right { justify-content: flex-end; text-align: right; }
 :is(#details, #top-panel) .sans-stroke-12 { font-size: 12px; font-weight: 400; }
-:is(#details, #top-panel) .sans-stroke-14 { font-size: 14px; font-weight: 400; }
+:is(#details, #top-panel, #research) .sans-stroke-14 { font-size: 14px; font-weight: 400; }
 :is(#details, #top-panel) .sans-bold-stroke-13 { font-size: 13px; font-weight: 700; }
 :is(#details, #top-panel, #diplomacy-window, #message-box) .sans-bold-stroke-14 { font-size: 14px; font-weight: 700; }
 :is(#details, #top-panel) .gold { color: var(--gui-gold); }
@@ -273,7 +273,7 @@ body { cursor: var(--gui-cursor-default, default); }
 #details-multiple { left: 6px; top: 6px; width: 216px; height: 154px; }
 /* iconButton: portrait_black.dds, 42 added to each channel under the
    mouse (snIconPortraitOver). */
-#details .group, #details .cell, #details .item { position: absolute; width: 38px; height: 38px;
+#details .group, #details .cell, :is(#details, #research) .item { position: absolute; width: 38px; height: 38px;
   padding: 0; margin: 0; border: 0;
   background: var(--gui-portrait-black) 0 0 / 100% 100%; }
 /* A button takes neither colour nor font from its parent by default. */
@@ -281,9 +281,9 @@ body { cursor: var(--gui-cursor-default, default); }
 #details .group:hover::after { content: ""; position: absolute; inset: 0;
   background: rgb(42, 42, 42); mix-blend-mode: plus-lighter; pointer-events: none; }
 #details :is(.group, .cell) > .owner { position: absolute; inset: 0; }
-#details :is(.group, .cell, .item) > img { position: absolute; left: 3px; top: 3px;
+#details :is(.group, .cell, .item) > img, #research .item > img { position: absolute; left: 3px; top: 3px;
   width: 32px; height: 32px; display: block; }
-#details :is(.group, .cell, .item) > .text { inset: 0; }
+#details :is(.group, .cell, .item) > .text, #research .item > .text { inset: 0; }
 #details-count-badge { left: 181px; top: 4px; width: 32px; height: 32px;
   background: var(--gui-groups) 0 0 / 100% 100% no-repeat; }
 #details-count { inset: 0; }
@@ -334,14 +334,14 @@ body { cursor: var(--gui-cursor-default, default); }
 #queue-cells { position: absolute; left: 48px; top: 6px; }
 #queue-progress { display: none; }
 /* queueProgressSlider over the undone part, from the top down. */
-#details .item > .slider { position: absolute; left: 3px; width: 32px; bottom: 3px;
+:is(#details, #research) .item > .slider { position: absolute; left: 3px; width: 32px; bottom: 3px;
   background: rgba(0, 255, 0, 0.502); }
 #details .item.ghost > .slider { background: rgba(0, 150, 250, 0.196); }
-#details .item > .paused { position: absolute; left: 3px; top: 3px; width: 32px; height: 32px;
+:is(#details, #research) .item > .paused { position: absolute; left: 3px; top: 3px; width: 32px; height: 32px;
   background: var(--gui-stop) 0 0 / 100% 100%; }
 /* "color:0 0 0 127:grayscale:": grayscale under a half black image. */
 #details .item.ghost > img { filter: grayscale(1); }
-#details .item.paused > img { filter: grayscale(1) brightness(0.502); }
+:is(#details, #research) .item.paused > img { filter: grayscale(1) brightness(0.502); }
 /* unitCommands, 50%+110 of the bottom bar: 224 px right of the details,
    402x166, the unitCommandsPanel sprite. For an observer it shows with any
    selection, its buttons disabled. Training at 6 6 in rows of 10, research
@@ -663,6 +663,15 @@ body { cursor: var(--gui-cursor-default, default); }
   background: rgba(15, 18, 20, 0.9); border: 1px solid #6b3a34;
   border-radius: 4px; user-select: text; -webkit-user-select: text; }
 #errors:empty { display: none; }
+/* ResearchProgress.xml: 38 px iconButtons 4 px apart on the right edge,
+   under the overlay counters. */
+#research { display: flex; flex-direction: column; gap: 4px;
+  font-family: "0ad sans", "0ad sans fallback", sans-serif; color: white;
+  user-select: none; -webkit-user-select: none; }
+#research[hidden], #research [hidden] { display: none; }
+#research .item { position: relative; color: inherit; font-family: inherit; cursor: pointer; }
+#research .item:hover::after { content: ""; position: absolute; inset: 0;
+  background: rgb(42, 42, 42); mix-blend-mode: plus-lighter; pointer-events: none; }
 #hud { position: fixed; top: calc(var(--top-height) + 44px); right: 8px; display: flex;
   flex-direction: column; align-items: flex-end; gap: 6px;
   max-width: calc(100vw - 32px); }
@@ -1010,6 +1019,7 @@ body:not([data-debug="storage"]) #stats-storage { display: none; }
 <pre id="stats-network" class="stats" aria-label="Network statistics" data-i18n-attrs="aria-label"></pre>
 <pre id="stats-profiling" class="stats" aria-label="Profiling statistics" data-i18n-attrs="aria-label"></pre>
 <pre id="stats-storage" class="stats" aria-label="Memory and storage statistics" data-i18n-attrs="aria-label"></pre>
+<div id="research" hidden></div>
 <pre id="errors" aria-live="polite"></pre>
 </div>
 <div id="loading" role="status">

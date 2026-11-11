@@ -31,6 +31,7 @@ mod postproc;
 mod predict;
 mod projectile;
 mod render;
+mod research;
 mod selection;
 mod shadow;
 mod silhouette;
@@ -104,6 +105,7 @@ use crate::placement::Placement;
 use crate::postproc::Upscale;
 use crate::predict::Predictions;
 use crate::render::Renderer;
+use crate::research::ResearchProgress;
 use crate::stream::Ground;
 use crate::stream::PlayerState;
 use crate::stream::Scene;
@@ -604,6 +606,8 @@ struct App {
     details_index: bool,
     /// Only the 3D page has the top panel.
     top: Option<TopPanel>,
+    /// Only the 3D page has the research overlay; it shows on `/play`.
+    research: Option<ResearchProgress>,
     /// Only the 3D page has the diplomacy window.
     diplomacy_window: Option<DiplomacyWindow>,
     /// Only `/play` asks before deleting.
@@ -1004,6 +1008,9 @@ impl App {
         {
             details.tick(f64::from(self.scene.turn) - 1.0 + f64::from(progress));
         }
+        if let Some(research) = &mut self.research {
+            research.tick(f64::from(self.scene.turn) - 1.0 + f64::from(progress));
+        }
         if let Some(tooltips) = &self.tooltips {
             tooltips.frame(now);
         }
@@ -1258,7 +1265,7 @@ impl App {
             |technology: &str| store.as_ref()?.borrow().technology_portrait_url(technology);
         let template_portrait =
             |template: &str| store.as_ref()?.borrow().template_portrait_url(template);
-        details.update(&panel::View {
+        let view = panel::View {
             scene: &self.scene,
             selected,
             palette: &self.palette,
@@ -1270,11 +1277,20 @@ impl App {
             detailed: self.detailed_tooltips,
             player: self.uplink.as_ref().and_then(Uplink::seat),
             predicted: &self.predictions,
-        });
+        };
+        details.update(&view);
+        if let Some(research) = &mut self.research {
+            research.update(&view);
+        }
     }
 
     /// Fills the top panel when its sources changed, and runs its fades.
     fn update_top(&mut self, now: f64) {
+        if let Some(research) = &self.research {
+            for request in research.take_requests() {
+                apply_request(&mut *self.renderer, request, &self.scene);
+            }
+        }
         let Some(top) = &mut self.top else {
             return;
         };
@@ -1664,6 +1680,13 @@ async fn run(
             .inspect_err(|error| web_sys::console::error_1(&format!("top panel: {error}").into()))
             .ok(),
     };
+    let research = match page {
+        Page::Map => None,
+        // An older page has no research overlay; the match still shows.
+        Page::Observer => ResearchProgress::new(&document)
+            .inspect_err(|error| web_sys::console::error_1(&format!("research: {error}").into()))
+            .ok(),
+    };
     let diplomacy_window = match page {
         Page::Map => None,
         // An older page has no diplomacy window; the match still shows.
@@ -1831,6 +1854,7 @@ async fn run(
         details_selected: Vec::new(),
         details_index: false,
         top,
+        research,
         diplomacy_window,
         message_box,
         game_menu,
@@ -1853,6 +1877,7 @@ async fn run(
     wire_controls(&app);
     wire_details(&app);
     wire_top(&app);
+    wire_research(&app);
     wire_diplomacy_window(&app, &window);
     wire_message_box(&app, &window);
     wire_game_menu(&app);
@@ -2439,6 +2464,27 @@ fn wire_idle(app: &Rc<RefCell<App>>, window: &web_sys::Window) {
     });
     button.set_onclick(Some(on_click.as_ref().unchecked_ref()));
     on_click.forget();
+}
+
+fn wire_research(app: &Rc<RefCell<App>>) {
+    let buttons = {
+        let app = app.borrow();
+        let Some(research) = &app.research else {
+            return;
+        };
+        research.buttons().cloned().collect::<Vec<_>>()
+    };
+    for (index, button) in buttons.into_iter().enumerate() {
+        let target = Rc::clone(app);
+        let on_click = Closure::<dyn FnMut()>::new(move || {
+            if let Some(research) = &target.borrow().research {
+                research.clicked(index);
+            }
+        });
+        button.set_onclick(Some(on_click.as_ref().unchecked_ref()));
+        // The overlay lives as long as the page, so its handlers do too.
+        on_click.forget();
+    }
 }
 
 fn wire_top(app: &Rc<RefCell<App>>) {
