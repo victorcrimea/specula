@@ -16,7 +16,7 @@ use crate::bytes::ByteReader;
 
 /// The version of this format, which the server sends as the first byte of
 /// its seat message; a page on another version must reload.
-pub const COMMAND_VERSION: u8 = 5;
+pub const COMMAND_VERSION: u8 = 6;
 
 pub const QUEUED: u8 = 1;
 pub const PUSH_FRONT: u8 = 2;
@@ -59,6 +59,10 @@ const BARTER: u8 = 34;
 const SET_TRADING_GOODS: u8 = 35;
 const SETUP_TRADE_ROUTE: u8 = 36;
 const CANCEL_TRADE_ROUTE: u8 = 37;
+const LOCK_GATE: u8 = 38;
+const PACK: u8 = 39;
+const CANCEL_PACK: u8 = 40;
+const UNLOAD_TEMPLATE: u8 = 41;
 
 /// Above every command kind.
 pub const QUERY_TAG: u8 = 0x80;
@@ -270,6 +274,30 @@ pub enum Command {
         entities: Vec<u32>,
         target: u32,
     },
+    /// "lock-gate": locks the gates among them, or unlocks them.
+    LockGate {
+        lock: bool,
+        entities: Vec<u32>,
+    },
+    /// "pack": packs them, or unpacks them.
+    Pack {
+        pack: bool,
+        entities: Vec<u32>,
+    },
+    /// "cancel-pack": cancels a pack, or an unpack.
+    CancelPack {
+        pack: bool,
+        entities: Vec<u32>,
+    },
+    /// "unload-template": one entity of `template` (a selection group
+    /// name or template name) owned by `owner` leaves the holders, or
+    /// every such entity with `all`.
+    UnloadTemplate {
+        all: bool,
+        template: String,
+        owner: u32,
+        holders: Vec<u32>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -463,7 +491,10 @@ impl Command {
             | Command::AlertRaise { entities }
             | Command::AlertEnd { entities }
             | Command::Upgrade { entities, .. }
-            | Command::CancelUpgrade { entities } => ids.extend(entities.iter_mut()),
+            | Command::CancelUpgrade { entities }
+            | Command::LockGate { entities, .. }
+            | Command::Pack { entities, .. }
+            | Command::CancelPack { entities, .. } => ids.extend(entities.iter_mut()),
             Command::Attack {
                 entities, target, ..
             }
@@ -497,9 +528,9 @@ impl Command {
                 ids.extend(entities.iter_mut());
                 ids.push(target);
             }
-            Command::UnloadAll { holders } | Command::UnloadAllByOwner { holders } => {
-                ids.extend(holders.iter_mut())
-            }
+            Command::UnloadAll { holders }
+            | Command::UnloadAllByOwner { holders }
+            | Command::UnloadTemplate { holders, .. } => ids.extend(holders.iter_mut()),
             Command::Rally {
                 entities,
                 target,
@@ -775,6 +806,29 @@ impl Command {
                 out.head(CALL_TO_ARMS, *flags, entities);
                 out.point(*x, *z);
             }
+            Command::LockGate { lock, entities } => {
+                out.0.extend_from_slice(&[LOCK_GATE, u8::from(*lock)]);
+                out.entities(entities);
+            }
+            Command::Pack { pack, entities } => {
+                out.0.extend_from_slice(&[PACK, u8::from(*pack)]);
+                out.entities(entities);
+            }
+            Command::CancelPack { pack, entities } => {
+                out.0.extend_from_slice(&[CANCEL_PACK, u8::from(*pack)]);
+                out.entities(entities);
+            }
+            Command::UnloadTemplate {
+                all,
+                template,
+                owner,
+                holders,
+            } => {
+                out.0.extend_from_slice(&[UNLOAD_TEMPLATE, u8::from(*all)]);
+                out.text(template);
+                out.varint(u64::from(*owner));
+                out.entities(holders);
+            }
         }
         out.0
     }
@@ -1023,6 +1077,24 @@ impl Command {
                     z,
                 }
             }
+            LOCK_GATE => Command::LockGate {
+                lock: input.u8()? != 0,
+                entities: entities(&mut input)?,
+            },
+            PACK => Command::Pack {
+                pack: input.u8()? != 0,
+                entities: entities(&mut input)?,
+            },
+            CANCEL_PACK => Command::CancelPack {
+                pack: input.u8()? != 0,
+                entities: entities(&mut input)?,
+            },
+            UNLOAD_TEMPLATE => Command::UnloadTemplate {
+                all: input.u8()? != 0,
+                template: input.text()?,
+                owner: input.varint_u32()?,
+                holders: entities(&mut input)?,
+            },
             _ => return Err("unknown command"),
         };
         if !input.0.is_empty() {

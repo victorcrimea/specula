@@ -52,7 +52,7 @@ const ALLY: u8 = 2;
 const OBSERVER: u8 = 4;
 
 /// `g_HotkeyTags`.
-const HOTKEY_COLOR: &str = "255 251 131";
+pub(crate) const HOTKEY_COLOR: &str = "255 251 131";
 
 /// What a command shows: `getInfo`'s result.
 struct Info {

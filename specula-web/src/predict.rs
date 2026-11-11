@@ -12,6 +12,8 @@ use crate::detail::Commands;
 use crate::detail::Group;
 use crate::panel::entity_groups;
 use crate::panel::string;
+use crate::panel::template_details;
+use crate::stream::COMPONENT_GATE;
 use crate::stream::Scene;
 
 /// `NULL_FORMATION`, which an entity in no formation is in.
@@ -28,6 +30,7 @@ enum Value {
     Autoqueue(bool),
     Formation(String),
     DropsiteShared(bool),
+    GateLocked(bool),
 }
 
 impl Value {
@@ -64,6 +67,15 @@ impl Predictions {
                     .filter(|&entity| can_use_formation(scene, entity, name))
                     .collect(),
                 Value::Formation(name.clone()),
+            ),
+            // The order names the whole selection; keep only the gates.
+            Command::LockGate { lock, entities } => (
+                entities
+                    .iter()
+                    .copied()
+                    .filter(|&entity| is_gate(scene, entity))
+                    .collect(),
+                Value::GateLocked(*lock),
             ),
             _ => return,
         };
@@ -114,6 +126,15 @@ impl Predictions {
             })
     }
 
+    pub(crate) fn gate_locked(&self, entity: u32) -> Option<bool> {
+        self.list
+            .iter()
+            .find_map(|prediction| match prediction.value {
+                Value::GateLocked(locked) if prediction.entity == entity => Some(locked),
+                _ => None,
+            })
+    }
+
     /// Drops the predictions the stream confirmed and those timed out;
     /// true when any was dropped, so the panels redraw. An entity without
     /// the group (gone, or out of the detail stream) waits for the
@@ -150,11 +171,25 @@ impl Predictions {
                     Some(Group::Formations { current, .. })
                         if string(scene, *current).unwrap_or(NULL_FORMATION) == name
                 ),
+                Value::GateLocked(locked) => matches!(
+                    &groups[detail::COMMANDS],
+                    Some(Group::Commands(commands))
+                        if (commands.flags & Commands::GATE_LOCKED != 0) == *locked
+                ),
             };
             !confirmed
         });
         self.list.len() != before
     }
+}
+
+/// Whether `entity` is a gate.
+fn is_gate(scene: &Scene, entity: u32) -> bool {
+    let Some(dot) = scene.dots.get(&entity) else {
+        return false;
+    };
+    template_details(scene, dot.template)
+        .is_some_and(|details| details.components & COMPONENT_GATE != 0)
 }
 
 /// Whether `entity`'s UnitAI lists formation `name`.

@@ -365,10 +365,15 @@ body { cursor: var(--gui-cursor-default, default); }
 #commands-training, #commands-research { position: absolute; left: 6px; top: 6px; }
 #commands-research { top: 84px; }
 #commands .column { position: absolute; width: 38px; height: 77px; }
-/* unitResearchPair, 38x76, its icon at 8 30 30 46, over both buttons. */
-#commands .pair { position: absolute; left: 0; top: 0; width: 38px; height: 76px; }
+/* unitResearchPair is an "empty" object, never hovered, so the buttons
+   under it take the clicks. */
+#commands .pair { position: absolute; left: 0; top: 0; width: 38px; height: 76px; pointer-events: none; }
 #commands .pair::before { content: ""; position: absolute; left: 8px; top: 30px;
   width: 22px; height: 16px; background: var(--gui-vertical-pair) 0 0 / 100% 100%; }
+/* unitResearchUnchosenIcon: over the other button of a pair while one is hovered. */
+#commands .column:has(> .pair:not([hidden])):has(> .item:hover) > .item:not(:hover)::after {
+  content: ""; position: absolute; left: 3px; top: 3px; width: 32px; height: 32px;
+  background: var(--gui-tech-pair-unavailable) 0 0 / 100% 100%; pointer-events: none; }
 /* "color:0 0 0 127:grayscale:" and resourcesToAlphaMask's red, both a
    solid colour over the icon. */
 :is(#details, #trade-window) .item > .tint { position: absolute; left: 3px; top: 3px; width: 32px; height: 32px; }

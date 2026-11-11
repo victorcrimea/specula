@@ -2179,8 +2179,11 @@ fn wire_details(app: &Rc<RefCell<App>>) {
     for (command, button) in commands {
         let target = Rc::clone(app);
         let on_click = Closure::<dyn FnMut(MouseEvent)>::new(move |event: MouseEvent| {
-            if let Some(details) = &target.borrow().details {
-                details.command_clicked(command, event.shift_key());
+            if let Ok(mut app) = target.try_borrow_mut() {
+                if let Some(details) = &mut app.details {
+                    details.command_clicked(command, event.shift_key(), event.ctrl_key());
+                }
+                app.details_dirty = true;
             }
         });
         button.set_onclick(Some(on_click.as_ref().unchecked_ref()));
@@ -2448,6 +2451,9 @@ fn wire_trade_window(app: &Rc<RefCell<App>>, window: &web_sys::Window) {
         // seen on the next key or blur.
         let shift = flag("shiftKey");
         if shift != app.mass_barter {
+            if !shift && let Some(details) = &mut app.details {
+                details.flush_batch();
+            }
             app.mass_barter = shift;
             app.details_dirty = true;
         }
@@ -2486,6 +2492,9 @@ fn wire_trade_window(app: &Rc<RefCell<App>>, window: &web_sys::Window) {
         if let Ok(mut app) = target.try_borrow_mut()
             && app.mass_barter
         {
+            if let Some(details) = &mut app.details {
+                details.flush_batch();
+            }
             app.mass_barter = false;
             app.details_dirty = true;
         }

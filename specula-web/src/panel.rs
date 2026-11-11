@@ -20,6 +20,7 @@ use web_sys::Document;
 use web_sys::HtmlElement;
 
 use crate::command_row::CommandRow;
+use crate::command_row::HOTKEY_COLOR;
 use crate::detail;
 use crate::detail::Commands;
 use crate::detail::DataKey;
@@ -58,6 +59,8 @@ const QUEUE_ROW: usize = 8;
 /// `g_SelectionPanels.Training.getMaxNumberOfItems` with no other right
 /// panel drawn, in rows of its `rowLength`.
 const MAX_TRAINABLE: usize = 40;
+/// `gui.session.batchtrainingsize`'s default, which the page has no setting for.
+const BATCH_SIZE: u32 = 5;
 const TRAINING_ROW: usize = 10;
 /// `g_SelectionPanels.Research.getMaxNumberOfItems`: columns of a pair's
 /// top over its bottom.
@@ -335,6 +338,17 @@ pub struct DetailsPanel {
     portrait_id: Option<u32>,
     group_ids: Vec<Vec<u32>>,
     requests: RefCell<Vec<Request>>,
+    /// `g_BatchTrainingEntities` and friends while Shift is held.
+    batch: Option<Batch>,
+}
+
+/// What a press of a garrison button unloads: `unloadTemplate`'s
+/// arguments, for a viewer who may.
+#[derive(Clone)]
+struct Unload {
+    template: String,
+    owner: u32,
+    holders: Vec<u32>,
 }
 
 /// The supplemental panel: `unitGarrisonPanel` and `healthGarrison`, and
@@ -349,6 +363,8 @@ struct GarrisonPanel {
     health_bar: Out,
     /// `None` on a page from before those panels.
     left: Option<LeftPanel>,
+    /// What each cell unloads, when the viewer may.
+    unloads: Vec<Option<Unload>>,
 }
 
 /// `unitQueuePanel`.
@@ -383,11 +399,28 @@ struct CommandsPanel {
     /// `getNumberOfRightPanelButtons` places them.
     training: Vec<CommandCell>,
     research: Vec<ResearchColumn>,
-    /// What a press of each `training` cell asks, for the player of
-    /// `/play`: an order, or a placement; none for an observer.
+    /// What a press of each `training` cell asks, for the player of `/play`:
+    /// an order, or a placement; none for an observer.
     training_orders: Vec<Option<Request>>,
     /// Likewise for each research column's bottom and top button.
     research_orders: Vec<[Option<Command>; 2]>,
+    /// What a Shift-press of each training cell batches.
+    training_batches: Vec<Option<Trainable>>,
+    /// The current selection, refreshed each redraw.
+    selection: Vec<u32>,
+}
+
+/// A training button the player may press, for a batch.
+#[derive(Clone)]
+struct Trainable {
+    template: String,
+    /// `getBuildingsWhichCanTrainEntity`: the player's selected producers
+    /// of it that are not upgrading, in selection order.
+    buildings: Vec<u32>,
+    /// `canBeAddedCount`; `None` without a limit.
+    can_be_added: Option<u32>,
+    /// The next count costs more than the player has.
+    short: bool,
 }
 
 /// A button that gives orders, which the page wires: a commands panel
@@ -403,6 +436,7 @@ pub enum CommandButton {
     Stance(usize),
     Alert(usize),
     Formation(usize),
+    Garrison(usize),
 }
 
 /// One `unitTrainingButton`, `unitResearchButton`, `unitGateButton`,
@@ -444,6 +478,10 @@ struct GlyphItem {
     tooltip: &'static str,
     /// `corners.png` over it.
     selected: bool,
+    /// What a press of this button orders, for the player of `/play`.
+    order: Command,
+    /// The corners mark comes from a prediction (gate only).
+    predicted: bool,
 }
 
 /// An upgrade button.
@@ -537,6 +575,16 @@ pub enum Request {
     ConfirmDelete(Vec<u32>),
     /// The command row's Barter & Trade.
     ToggleTrade,
+}
+
+/// `g_BatchTrainingEntities`, `g_BatchTrainingType`, `g_NumberOfBatches`
+/// and `g_BatchTrainingEntityAllowedCount` while Shift is held.
+struct Batch {
+    selection: Vec<u32>,
+    template: String,
+    buildings: Vec<u32>,
+    batches: u32,
+    allowed: Option<u32>,
 }
 
 /// A structure to place, and who builds it.
@@ -636,6 +684,7 @@ impl DetailsPanel {
                     .collect::<Result<_, _>>()?,
                 health: find("garrison-health")?,
                 health_bar: find("garrison-health-bar")?,
+                unloads: vec![None; MAX_GARRISONED],
             }),
             Err(_) => None,
         };
@@ -653,6 +702,8 @@ impl DetailsPanel {
                     .collect::<Result<_, _>>()?,
                 training_orders: vec![None; MAX_TRAINABLE],
                 research_orders: vec![[None, None]; MAX_RESEARCHABLE],
+                training_batches: vec![None; MAX_TRAINABLE],
+                selection: Vec::new(),
             }),
             _ => None,
         };
@@ -716,6 +767,7 @@ impl DetailsPanel {
             portrait_id: None,
             group_ids: Vec::new(),
             requests: RefCell::new(Vec::new()),
+            batch: None,
         })
     }
 
@@ -792,18 +844,20 @@ impl DetailsPanel {
                     .map(|(index, button)| (CommandButton::Formation(index), button.clone())),
             );
         }
+        if let Some(garrison) = &self.garrison {
+            buttons.extend(garrison.cells.iter().enumerate().map(|(index, cell)| {
+                (CommandButton::Garrison(index), cell.button.element.clone())
+            }));
+        }
         buttons
     }
 
     /// A button that gives orders was pressed, `shift` with the
     /// session.noconfirmation key: its order or placement, if it gives
-    /// one.
-    pub fn command_clicked(&self, button: CommandButton, shift: bool) {
+    /// one; `ctrl` removes a batch instead of adding one.
+    pub fn command_clicked(&mut self, button: CommandButton, shift: bool, ctrl: bool) {
         let request = match button {
-            CommandButton::Training(index) => self
-                .commands
-                .as_ref()
-                .and_then(|commands| commands.training_orders.get(index).cloned().flatten()),
+            CommandButton::Training(index) => self.training_click(index, shift, ctrl),
             CommandButton::Research(index, top) => self
                 .commands
                 .as_ref()
@@ -837,9 +891,133 @@ impl DetailsPanel {
                 .and_then(|garrison| garrison.left.as_ref())
                 .and_then(|left| left.formation_clicked(index))
                 .map(Request::Order),
+            CommandButton::Garrison(index) => self
+                .garrison
+                .as_ref()
+                .and_then(|garrison| garrison.unloads.get(index).cloned().flatten())
+                .map(|unload| {
+                    Request::Order(Command::UnloadTemplate {
+                        all: shift,
+                        template: unload.template,
+                        owner: unload.owner,
+                        holders: unload.holders,
+                    })
+                }),
         };
         if let Some(request) = request {
             self.requests.borrow_mut().push(request);
+        }
+    }
+
+    fn training_click(&mut self, index: usize, shift: bool, ctrl: bool) -> Option<Request> {
+        let order = self
+            .commands
+            .as_ref()?
+            .training_orders
+            .get(index)
+            .cloned()
+            .flatten();
+        if !shift {
+            return order;
+        }
+        // Batch training is only for real training cells; other right-panel
+        // buttons keep their normal order on Shift-click.
+        let trainable = self
+            .commands
+            .as_ref()?
+            .training_batches
+            .get(index)
+            .cloned()
+            .flatten();
+        let Some(trainable) = trainable else {
+            return order;
+        };
+        if trainable.can_be_added.is_some_and(|count| count <= 1) {
+            // Batch training only possible if we can train at least 2 units.
+            return order;
+        }
+        self.batch_press(trainable, ctrl)
+    }
+
+    /// Shift-press on a training button: accumulates or removes a batch.
+    fn batch_press(&mut self, t: Trainable, decrement: bool) -> Option<Request> {
+        let selection = self.commands.as_ref()?.selection.clone();
+        if let Some(batch) = &mut self.batch
+            && batch.selection == selection
+            && batch.template == t.template
+        {
+            if decrement {
+                batch.batches -= 1;
+                if batch.batches == 0 {
+                    self.batch = None;
+                }
+            } else if !t.short
+                && batch.allowed.is_none_or(|allowed| {
+                    allowed > batch.batches * BATCH_SIZE * t.buildings.len() as u32
+                })
+            {
+                batch.batches += 1;
+                batch.buildings = t.buildings;
+            }
+            if let Some(batch) = &mut self.batch {
+                batch.allowed = t.can_be_added;
+            }
+            return None;
+        }
+        if !decrement && self.batch.is_some() {
+            self.flush_batch();
+        }
+        if decrement || t.short {
+            return None;
+        }
+        self.batch = Some(Batch {
+            selection,
+            template: t.template,
+            buildings: t.buildings,
+            batches: 1,
+            allowed: t.can_be_added,
+        });
+        None
+    }
+
+    /// Posts the accumulated batch as one `Request::Orders`, if any.
+    pub fn flush_batch(&mut self) {
+        let Some(batch) = self.batch.take() else {
+            return;
+        };
+        let size = batch.batches * BATCH_SIZE;
+        let n = batch.buildings.len() as u32;
+        let mut orders = Vec::new();
+        if let Some(allowed) = batch.allowed
+            && allowed < size * n
+        {
+            let full = allowed / size;
+            if full > 0 {
+                orders.push(Command::Train {
+                    entities: batch.buildings[..full as usize].to_vec(),
+                    template: batch.template.clone(),
+                    count: size,
+                });
+            }
+            let rem = allowed % size;
+            if rem > 0
+                && let Some(building) = batch.buildings.get(full as usize)
+            {
+                orders.push(Command::Train {
+                    entities: vec![*building],
+                    template: batch.template.clone(),
+                    count: rem,
+                });
+            }
+        } else {
+            orders.push(Command::Train {
+                entities: batch.buildings,
+                template: batch.template,
+                count: size,
+            });
+        }
+        if !orders.is_empty() {
+            self.requests.borrow_mut().push(Request::Orders(orders));
         }
     }
 
@@ -997,7 +1175,7 @@ impl DetailsPanel {
             queue.tick(f64::from(view.scene.turn));
         }
         if let Some(commands) = &mut self.commands {
-            commands.show(view, &entities);
+            commands.show(view, &entities, self.batch.as_ref());
         }
         if let Some(row) = &mut self.command_row {
             row.show(view, &entities);
@@ -1493,6 +1671,9 @@ impl GarrisonPanel {
         // (id, template, owner) of every entity the selection holds.
         let mut held: Vec<(u32, u32, i32)> = Vec::new();
         let mut first_holds = false;
+        // The ids that have a Garrison group, in selection order: vanilla's
+        // filter on `state.garrisonHolder`.
+        let mut holders: Vec<u32> = Vec::new();
         for (index, &id) in entities.iter().enumerate() {
             let Some(dot) = scene.dots.get(&id) else {
                 continue;
@@ -1506,6 +1687,7 @@ impl GarrisonPanel {
                 continue;
             };
             first_holds |= index == 0;
+            holders.push(id);
             // A stream without owners: most garrisons are the holder's.
             held.extend(garrisoned.iter().map(|entity| {
                 (
@@ -1515,6 +1697,10 @@ impl GarrisonPanel {
                 )
             }));
         }
+        let player = entities
+            .first()
+            .and_then(|id| scene.dots.get(id))
+            .map(|dot| dot.owner);
         let find = |id: u32| held.iter().find(|entity| entity.0 == id).copied();
         let ids: Vec<u32> = held.iter().map(|entity| entity.0).collect();
         let grouped = crate::selection::groups(&ids, |id| {
@@ -1522,6 +1708,7 @@ impl GarrisonPanel {
             Some((owner, group_name(scene, template)?.to_string()))
         });
         self.grid.hidden(grouped.is_empty());
+        self.unloads.fill(None);
         for (index, cell) in self.cells.iter_mut().enumerate() {
             let Some((_, template, owner)) = grouped
                 .get(index)
@@ -1539,12 +1726,37 @@ impl GarrisonPanel {
                 player_color(view.palette, owner),
                 grouped[index].1.len(),
             );
-            // An observer cannot unload, so only the names and the owner.
-            cell.button.tooltip(&format!(
-                "{}\nPlayer: {}",
-                template_names(scene, template),
-                player_name(scene, owner)
-            ));
+            let can_unload =
+                view.player.is_some() && (view.player == player || view.player == Some(owner));
+            let tooltip = if can_unload && owner >= 0 {
+                self.unloads[index] = Some(Unload {
+                    template: group_name(scene, template).unwrap_or_default().to_string(),
+                    owner: owner as u32,
+                    holders: holders.clone(),
+                });
+                join_lines(vec![
+                    lang::format(
+                        &lang::translate("Unload %(name)s"),
+                        &[("name", &template_names(scene, template))],
+                    ),
+                    lang::translate(
+                        "Single-click to unload 1. Shift-click to unload all of this type.",
+                    ),
+                    lang::format(
+                        &lang::translate("Player: %(playername)s"),
+                        &[("playername", player_name(scene, owner))],
+                    ),
+                ])
+            } else {
+                join_lines(vec![
+                    template_names(scene, template),
+                    lang::format(
+                        &lang::translate("Player: %(playername)s"),
+                        &[("playername", player_name(scene, owner))],
+                    ),
+                ])
+            };
+            cell.button.tooltip(&tooltip);
         }
 
         let mut health = 0.0;
@@ -1802,14 +2014,19 @@ impl CommandCell {
     }
 
     /// A button of the engine's own texture `key`, with `corners.png` over
-    /// it when `selected`.
-    fn show_glyph(&mut self, key: &str, selected: bool) {
+    /// it when `selected`; `predicted` makes the corners blink until the
+    /// stream agrees.
+    fn show_glyph(&mut self, key: &str, selected: bool, predicted: bool) {
         self.icon.src(None);
         self.icon.hidden(true);
         self.glyph
             .style(format!("background-image: var(--gui-{key})"));
         self.glyph.hidden(false);
-        self.cell.class(String::from("item"));
+        self.cell.class(String::from(if predicted {
+            "item predicted"
+        } else {
+            "item"
+        }));
         self.tint.style(String::new());
         self.marker.hidden(true);
         self.slider.hidden(true);
@@ -1876,8 +2093,9 @@ impl ResearchColumn {
 impl CommandsPanel {
     /// `setupUnitPanel` of `Training`, `Construction` and `Research`, for an
     /// observer.
-    fn show(&mut self, view: &View, entities: &[u32]) {
+    fn show(&mut self, view: &View, entities: &[u32], batch: Option<&Batch>) {
         let scene = view.scene;
+        self.selection = entities.to_vec();
         let mut producers = Vec::new();
         let mut states: Vec<RightState> = Vec::new();
         for &id in entities {
@@ -1922,10 +2140,11 @@ impl CommandsPanel {
         let controls = view.player == Some(player);
         self.training_orders.fill(None);
         self.research_orders.fill([None, None]);
+        self.training_batches.fill(None);
 
         // `g_PanelsOrder`: Gate, Pack and Upgrade come before Training, and
         // `getNumberOfRightPanelButtons` puts the rest after them.
-        let gate = gate_items(scene, &states);
+        let gate = gate_items(view, &states);
         let pack = pack_items(scene, &states);
         let upgrades = upgrade_items(view, &states, player, controls);
         let upgrades = &upgrades[..upgrades.len().min(MAX_TRAINABLE - gate.len() - pack.len())];
@@ -1948,13 +2167,19 @@ impl CommandsPanel {
         let (gate_cells, other) = right_cells.split_at_mut(gate.len());
         let (pack_cells, upgrade_cells) = other.split_at_mut(pack.len());
         let mut drawn = before > 0;
-        for (cell, item) in gate_cells.iter_mut().zip(&gate) {
-            cell.show_glyph(item.key, item.selected);
+        for (i, (cell, item)) in gate_cells.iter_mut().zip(&gate).enumerate() {
+            cell.show_glyph(item.key, item.selected, item.predicted);
             cell.cell.tooltip(&lang::translate(item.tooltip));
+            if controls {
+                self.training_orders[i] = Some(Request::Order(item.order.clone()));
+            }
         }
-        for (cell, item) in pack_cells.iter_mut().zip(&pack) {
-            cell.show_glyph(item.key, false);
+        for (i, (cell, item)) in pack_cells.iter_mut().zip(&pack).enumerate() {
+            cell.show_glyph(item.key, false, false);
             cell.cell.tooltip(&lang::translate(item.tooltip));
+            if controls {
+                self.training_orders[gate.len() + i] = Some(Request::Order(item.order.clone()));
+            }
         }
         for (i, (cell, item)) in upgrade_cells.iter_mut().zip(upgrades).enumerate() {
             self.training_orders[gate.len() + pack.len() + i] =
@@ -1980,8 +2205,8 @@ impl CommandsPanel {
                 cell.cell.hidden(true);
                 continue;
             }
-            // `getTrainingStatus` without the batch key: one each in the
-            // producers that can train it, as far as the limit allows.
+            // `getBuildingsWhichCanTrainEntity`: not upgrading, having the
+            // template, in selection order.
             let producing = producers
                 .iter()
                 .filter(|producer| {
@@ -1992,9 +2217,17 @@ impl CommandsPanel {
                             .any(|other| string(scene, other.name) == Some(name))
                 })
                 .count() as u32;
-            let count = item
-                .can_be_added
-                .map_or(producing, |limit| producing.min(limit));
+            // `session.massbarter` and `session.batchtrain` are both Shift.
+            let batch_for_this = batch
+                .filter(|batch| batch.selection == entities && batch.template == name)
+                .map(|batch| (batch.batches, batch.allowed));
+            let (full, size, rem) = training_status(
+                producing,
+                item.can_be_added,
+                batch_for_this,
+                view.mass_barter,
+            );
+            let count = full * size + rem;
             // `multiplyEntityCosts`: floored after the multiplication.
             let short = needed_amounts(scene, player, item, |cost| {
                 (u64::from(cost) * u64::from(count) / 100) as f64
@@ -2009,13 +2242,19 @@ impl CommandsPanel {
                 needed(&short)
             };
             cell.show(unit_portrait(view, name), modifier, count);
-            cell.cell
-                .tooltip(&training_tooltip(view, item, player, count, &short));
+            cell.cell.tooltip(&training_tooltip(
+                view,
+                item,
+                player,
+                (full, size, rem),
+                &short,
+            ));
             drawn = true;
-            // `addTrainingToQueue` without batches: one in each producer
-            // that can; the engine refuses what cannot be paid for.
+            // `addTrainingToQueue`: one in each producer that can for a
+            // plain click, and the batch data for a Shift-click; the engine
+            // refuses what cannot be paid for.
             if controls && !matches!(modifier, Modifier::Grey) {
-                let entities: Vec<u32> = producers
+                let buildings: Vec<u32> = producers
                     .iter()
                     .filter(|producer| {
                         producer.owner == player
@@ -2028,10 +2267,16 @@ impl CommandsPanel {
                     .map(|producer| producer.id)
                     .collect();
                 self.training_orders[before + index] = Some(Request::Order(Command::Train {
-                    entities,
+                    entities: buildings.clone(),
                     template: name.to_string(),
                     count: 1,
                 }));
+                self.training_batches[before + index] = Some(Trainable {
+                    template: name.to_string(),
+                    buildings,
+                    can_be_added: item.can_be_added,
+                    short: !short.is_empty(),
+                });
             }
         }
 
@@ -2196,11 +2441,16 @@ fn upgrading_to(scene: &Scene, state: &RightState) -> Option<(f64, Option<String
 
 /// `g_SelectionPanels.Gate.getItems`: both buttons, the lock of the state
 /// some selected gate is in marked.
-fn gate_items(scene: &Scene, states: &[RightState]) -> Vec<GlyphItem> {
+fn gate_items(view: &View, states: &[RightState]) -> Vec<GlyphItem> {
+    let scene = view.scene;
+    let ids: Vec<u32> = states.iter().map(|state| state.id).collect();
     // Some(locked) of a gate.
     let locked = |state: &RightState| {
-        has_component(scene, state.template, COMPONENT_GATE)
-            .then(|| command_flags(state) & Commands::GATE_LOCKED != 0)
+        has_component(scene, state.template, COMPONENT_GATE).then(|| {
+            view.predicted
+                .gate_locked(state.id)
+                .unwrap_or(command_flags(state) & Commands::GATE_LOCKED != 0)
+        })
     };
     let hide_locked = states.iter().all(|state| locked(state) != Some(true));
     let hide_unlocked = states.iter().all(|state| locked(state) != Some(false));
@@ -2212,17 +2462,32 @@ fn gate_items(scene: &Scene, states: &[RightState]) -> Vec<GlyphItem> {
             key: "lock-locked",
             tooltip: "Lock Gate",
             selected: !hide_locked,
+            order: Command::LockGate {
+                lock: true,
+                entities: ids.clone(),
+            },
+            predicted: states
+                .iter()
+                .any(|state| view.predicted.gate_locked(state.id) == Some(true)),
         },
         GlyphItem {
             key: "lock-unlocked",
             tooltip: "Unlock Gate",
             selected: !hide_unlocked,
+            order: Command::LockGate {
+                lock: false,
+                entities: ids.clone(),
+            },
+            predicted: states
+                .iter()
+                .any(|state| view.predicted.gate_locked(state.id) == Some(false)),
         },
     ]
 }
 
 /// `g_SelectionPanels.Pack.getItems`.
 fn pack_items(scene: &Scene, states: &[RightState]) -> Vec<GlyphItem> {
+    let ids: Vec<u32> = states.iter().map(|state| state.id).collect();
     let (mut pack, mut unpack, mut pack_cancel, mut unpack_cancel) = (false, false, false, false);
     for state in states {
         if !has_component(scene, state.template, COMPONENT_PACK) {
@@ -2241,19 +2506,53 @@ fn pack_items(scene: &Scene, states: &[RightState]) -> Vec<GlyphItem> {
         }
     }
     let mut items = Vec::new();
-    let mut add = |used: bool, key: &'static str, tooltip: &'static str| {
+    let mut add = |used: bool, key: &'static str, tooltip: &'static str, order: Command| {
         if used {
             items.push(GlyphItem {
                 key,
                 tooltip,
                 selected: false,
+                order,
+                predicted: false,
             });
         }
     };
-    add(pack, "pack", "Pack");
-    add(unpack, "unpack", "Unpack");
-    add(pack_cancel, "cancel", "Cancel Packing");
-    add(unpack_cancel, "cancel", "Cancel Unpacking");
+    add(
+        pack,
+        "pack",
+        "Pack",
+        Command::Pack {
+            pack: true,
+            entities: ids.clone(),
+        },
+    );
+    add(
+        unpack,
+        "unpack",
+        "Unpack",
+        Command::Pack {
+            pack: false,
+            entities: ids.clone(),
+        },
+    );
+    add(
+        pack_cancel,
+        "cancel",
+        "Cancel Packing",
+        Command::CancelPack {
+            pack: true,
+            entities: ids.clone(),
+        },
+    );
+    add(
+        unpack_cancel,
+        "cancel",
+        "Cancel Unpacking",
+        Command::CancelPack {
+            pack: false,
+            entities: ids.clone(),
+        },
+    );
     items
 }
 
@@ -2609,14 +2908,79 @@ fn needed(short: &[(String, f64)]) -> Modifier {
     Modifier::Needed(NEEDED_ALPHA_MAX.min((total / 10.0).round() + NEEDED_ALPHA_BASE) / 255.0)
 }
 
+/// `formatBatchTrainingString`: the batch line vanilla appends to training tooltips.
+fn batch_training_string(full: u32, size: u32, rem: u32) -> String {
+    let total = full * size + rem;
+    if total < 2 {
+        return String::new();
+    }
+    let full_text = if full > 1 {
+        lang::format(
+            &lang::translate("%(buildings)s*%(batchSize)s"),
+            &[
+                ("buildings", &full.to_string()),
+                ("batchSize", &size.to_string()),
+            ],
+        )
+    } else if full == 1 {
+        size.to_string()
+    } else {
+        String::new()
+    };
+    let msgid = if (full > 1 || (full == 1 && rem > 0)) && rem > 0 {
+        "%(action)s to train %(number)s (%(fullBatch)s + %(remainderBatch)s)."
+    } else if full > 1 || (full == 1 && rem > 0) {
+        "%(action)s to train %(number)s (%(fullBatch)s)."
+    } else {
+        "%(action)s to train %(number)s."
+    };
+    let action = tooltip::tags(&lang::translate("Shift-click"), &[("font", "sans-bold-13")]);
+    let text = lang::format(
+        &lang::translate(msgid),
+        &[
+            ("action", &action),
+            ("number", &total.to_string()),
+            ("fullBatch", &full_text),
+            ("remainderBatch", &rem.to_string()),
+        ],
+    );
+    tooltip::colored(&tooltip::tags(&text, &[("font", "sans-13")]), HOTKEY_COLOR)
+}
+
+/// `getTrainingStatus`: (buildings with a full batch, the batch, the remainder).
+fn training_status(
+    buildings: u32,
+    can_be_added: Option<u32>,
+    batches: Option<(u32, Option<u32>)>,
+    shift: bool,
+) -> (u32, u32, u32) {
+    let (mut next, limit) = match batches {
+        Some((batches, allowed)) => (batches * BATCH_SIZE, allowed),
+        None => (0, can_be_added),
+    };
+    if shift && limit.is_none_or(|limit| limit > next * buildings) {
+        next += BATCH_SIZE;
+    }
+    next = next.max(1);
+    let mut full = buildings;
+    let mut rem = 0;
+    if let Some(limit) = limit
+        && limit < next * buildings
+    {
+        full = limit / next;
+        rem = limit % next;
+    }
+    (full, next, rem)
+}
+
 /// `g_SelectionPanels.Training.setupButton`'s tooltip for an observer:
-/// without the hotkey, the limits (only what can be added is sent), the
-/// template viewer line (V9) and the batch line.
+/// without the hotkey, the limits (only what can be added is sent) and
+/// the template viewer line (V9).
 fn training_tooltip(
     view: &View,
     item: &ListItem,
     player: i32,
-    count: u32,
+    status: (u32, u32, u32),
     short: &[(String, f64)],
 ) -> String {
     let Some(data) = view.template_data(item.name, player) else {
@@ -2627,11 +2991,12 @@ fn training_tooltip(
         tips::visible_classes(&data),
         tips::auras_tooltip(&data),
         tips::entity_tooltip(&data),
-        tips::cost_tooltip(&data, f64::from(count), None),
+        tips::cost_tooltip(&data, f64::from(status.0 * status.1 + status.2), None),
     ];
     if view.detailed {
         lines.extend(tips::detailed_lines(&data));
     }
+    lines.push(batch_training_string(status.0, status.1, status.2));
     if item.flags & ListItem::REQUIREMENTS_MET == 0 {
         let technology = |name: &str| {
             let name = string_index(view.scene, name)?;

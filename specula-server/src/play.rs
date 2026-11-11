@@ -743,6 +743,35 @@ fn order_json(order: &Order) -> String {
             out.text("template", template);
             out.boolean("queued", false);
         }
+        Order::LockGate { lock, entities } => {
+            out.text("type", "lock-gate");
+            out.entities("entities", entities);
+            out.boolean("lock", *lock);
+        }
+        Order::Pack { pack, entities } => {
+            out.text("type", "pack");
+            out.entities("entities", entities);
+            out.boolean("pack", *pack);
+            out.boolean("queued", false);
+        }
+        Order::CancelPack { pack, entities } => {
+            out.text("type", "cancel-pack");
+            out.entities("entities", entities);
+            out.boolean("pack", *pack);
+            out.boolean("queued", false);
+        }
+        Order::UnloadTemplate {
+            all,
+            template,
+            owner,
+            holders,
+        } => {
+            out.text("type", "unload-template");
+            out.boolean("all", *all);
+            out.text("template", template);
+            out.raw("owner", &owner.to_string());
+            out.entities("garrisonHolders", holders);
+        }
         Order::CancelUpgrade { entities } => {
             out.text("type", "cancel-upgrade");
             out.entities("entities", entities);
