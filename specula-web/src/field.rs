@@ -6594,8 +6594,14 @@ impl Camera {
                 return;
             }
             let (dx, dy) = (x - pointer.x, y - pointer.y);
-            if gesture != Some(Gesture::Band) && (!pointer.mouse || buttons & BUTTONS_MIDDLE != 0) {
-                self.pan(dx, dy);
+            if gesture != Some(Gesture::Band) {
+                if !pointer.mouse {
+                    self.pan(dx, dy);
+                } else if buttons & BUTTONS_MIDDLE != 0 {
+                    // The game's middle drag moves the camera with the mouse,
+                    // the opposite of a touch dragging the ground.
+                    self.pan(-dx, -dy);
+                }
             }
         }
         let pointer = &mut self.pointers[index];
