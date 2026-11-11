@@ -54,7 +54,7 @@ const BROTLI_QUALITY: u32 = 11;
 const BROTLI_WINDOW_BITS: u32 = 22;
 
 /// (custom property key, path under `UI`), copied as they are.
-const TEXTURES: [(&str, &str); 105] = [
+const TEXTURES: [(&str, &str); 108] = [
     ("hud-panels", "session/hud_panels.png"),
     ("line-horiz", "global/border/line_horiz.png"),
     ("line-vert", "global/border/line_vert.png"),
@@ -129,6 +129,12 @@ const TEXTURES: [(&str, &str); 105] = [
         "minimap-diplomacy-on-highlight",
         "session/minimap-diplomacy-on-highlight.png",
     ),
+    ("minimap-idle", "session/minimap-idle.png"),
+    (
+        "minimap-idle-highlight",
+        "session/minimap-idle-highlight.png",
+    ),
+    ("minimap-idle-disabled", "session/minimap-idle-disabled.png"),
     ("stance-defensive", "session/icons/stances/defensive.png"),
     // The `<icon>`s of gui/common/resources/, which tooltips name as
     // `[icon="icon_<code>"]`.

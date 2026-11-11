@@ -76,6 +76,7 @@ use crate::far::Far;
 use crate::far::LookKey;
 use crate::far::Request;
 use crate::gpu;
+use crate::idle;
 use crate::impostor;
 use crate::orders;
 use crate::overlay::Mark;
@@ -445,6 +446,8 @@ struct Camera {
     /// The right click's hotkey letters held, `orders::HOTKEY_*` bits but
     /// Ctrl's, which the events carry.
     hotkey_keys: u8,
+    /// selection.idleonly (I) is held: a bandbox takes only idle units.
+    idle_only: bool,
 }
 
 impl Camera {
@@ -617,6 +620,8 @@ struct Entities {
     captures: BTreeMap<u32, Vec<u8>>,
     /// The rally points the detail stream holds, by entity, none unset.
     rallies: BTreeMap<u32, Rally>,
+    /// The entities whose UnitAI the detail stream holds idle.
+    idle: BTreeSet<u32>,
     /// `Scene::los` and `Scene::choices`.
     los: Los,
     los_generation: u32,
@@ -1439,6 +1444,7 @@ impl Field {
             shift: false,
             preselecting: false,
             hotkey_keys: 0,
+            idle_only: false,
         }));
         wire_camera(&canvas, &camera)?;
         let document = web_sys::window()
@@ -2157,10 +2163,20 @@ impl Field {
         if let Some(player) = self.perspective.player() {
             ids.retain(|id| self.entity_dot(*id).is_some_and(|dot| dot.owner == player));
         }
-        pick::preferred(ids, |id, class| {
+        let has_class = |id: u32, class: &str| {
             self.dot_details(id)
                 .is_some_and(|(_, details)| pick::has_class(details, &self.entities.strings, class))
-        })
+        };
+        // `unitFilters.isIdle`, alone while selection.idleonly is held.
+        if self.camera.borrow().idle_only {
+            ids.retain(|id| {
+                self.entities.idle.contains(id)
+                    && has_class(*id, "Unit")
+                    && !has_class(*id, "Domestic")
+            });
+            return ids;
+        }
+        pick::preferred(ids, has_class)
     }
 
     /// `PickSimilarEntities` for a double click, or with `exact` a triple
@@ -4599,8 +4615,12 @@ impl View for Field {
             self.shadow.set_los(&self.device, &self.queue, grid, now());
         }
         entities.rallies.clear();
+        entities.idle.clear();
         if scene.details.known && scene.details.match_id == scene.match_id {
             for (id, dot) in &scene.dots {
+                if idle::unit_ai_idle(scene, *id, dot) {
+                    entities.idle.insert(*id);
+                }
                 let rally_point = entities
                     .template_details
                     .get(dot.template as usize)
@@ -7573,6 +7593,9 @@ fn wire_camera(canvas: &HtmlCanvasElement, camera: &Rc<RefCell<Camera>>) -> Resu
             if !down {
                 camera.keys &= !(key_bit(&code, false) | key_bit(&code, true));
                 camera.hotkey_keys &= !hotkey_bit(&code);
+                if code == "KeyI" {
+                    camera.idle_only = false;
+                }
                 return;
             }
             let tag = event
@@ -7603,6 +7626,9 @@ fn wire_camera(canvas: &HtmlCanvasElement, camera: &Rc<RefCell<Camera>>) -> Resu
             let ctrl = flag("ctrlKey");
             let shift = flag("shiftKey");
             camera.hotkey_keys |= hotkey_bit(&code);
+            if code == "KeyI" {
+                camera.idle_only = true;
+            }
             // Once, as the engine's hotkey press, not on each repeat.
             let press = !flag("repeat");
             match code.as_str() {
@@ -7650,6 +7676,7 @@ fn wire_camera(canvas: &HtmlCanvasElement, camera: &Rc<RefCell<Camera>>) -> Resu
         let mut camera = target.borrow_mut();
         camera.keys = 0;
         camera.hotkey_keys = 0;
+        camera.idle_only = false;
     });
     let _ = window.add_event_listener_with_callback("blur", on_blur.as_ref().unchecked_ref());
     on_blur.forget();

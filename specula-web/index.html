@@ -170,6 +170,20 @@ body { cursor: var(--gui-cursor-default, default); }
 #diplomacy:hover { background-image: var(--gui-minimap-diplomacy-off-highlight); }
 #diplomacy[aria-pressed="true"] { background-image: var(--gui-minimap-diplomacy-on); }
 #diplomacy[aria-pressed="true"]:hover { background-image: var(--gui-minimap-diplomacy-on-highlight); }
+/* idleWorkerButton (100%-119 100%-121 100%-4 100%-6), clipped as #diplomacy
+   is, about the texture's top left corner; /play only. */
+#idle-worker { position: absolute; left: 81px; top: 83px; width: 115px; height: 115px;
+  padding: 0; border: 0; touch-action: none;
+  background: var(--gui-minimap-idle) 0 0 / 100% 100% no-repeat;
+  clip-path: path(evenodd, "M0 0H115V115H0Z M121 0A121 121 0 1 0 -121 0A121 121 0 1 0 121 0Z"); }
+#idle-worker:hover { background-image: var(--gui-minimap-idle-highlight); }
+#idle-worker:disabled { background-image: var(--gui-minimap-idle-disabled); }
+#idle-worker[hidden], #idle-worker-count[hidden] { display: none; }
+/* totalNumberIdleWorkers (85% 89% 97% 98%), sans-bold-stroke-14. */
+#idle-worker-count { position: absolute; left: 170px; top: 181.5px; width: 24px; height: 18.5px;
+  display: flex; align-items: flex-end; justify-content: flex-end; pointer-events: none;
+  font: 700 14px/1.1 "0ad sans", "0ad sans fallback", sans-serif; color: white;
+  white-space: pre; -webkit-text-stroke: 2px black; paint-order: stroke fill; }
 /* selectionDetails, 50%-114 of the bottom bar, with the command row
    (unit_commands.xml) in its bottom 40 px. */
 #details { position: fixed; left: calc(50% - 114px); bottom: var(--panel-bottom);
@@ -893,6 +907,8 @@ body:not([data-debug="storage"]) #stats-storage { display: none; }
 <div id="minimap-circle"></div>
 <canvas id="minimap" aria-label="Minimap" data-i18n-attrs="aria-label"></canvas>
 <button id="diplomacy" type="button" aria-pressed="false" aria-label="Diplomacy colours" data-tooltip="Toggle Diplomacy Colors" data-tooltip-style="sessionToolTipBottom" data-i18n-attrs="aria-label data-tooltip"></button>
+<button id="idle-worker" type="button" hidden disabled aria-label="Idle workers" data-tooltip-style="sessionToolTipBottom" data-i18n-attrs="aria-label"></button>
+<span id="idle-worker-count" hidden></span>
 <button id="minimap-toggle" type="button" aria-expanded="true" aria-label="Fold the minimap"></button>
 <span class="edge top"></span><span class="edge right"></span><span class="edge bottom"></span><span class="edge left"></span>
 <span class="edge corner top-right"></span><span class="edge corner bottom-right"></span><span class="edge corner bottom-left"></span><span class="edge corner top-left"></span>

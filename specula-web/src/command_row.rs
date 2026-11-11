@@ -112,7 +112,8 @@ fn commands_none(order: &Command) -> bool {
     }
 }
 
-/// The keys of the command row's hotkeys, as `formatHotkeyCombinations`
+/// The keys of the command row's hotkeys and the idle worker button's, as
+/// `formatHotkeyCombinations`
 /// writes the engine's defaults (`config/default.cfg`); none for the
 /// unassigned ones. Barter's Ctrl+B is left out, as nothing here opens
 /// the trade dialog.
@@ -126,12 +127,14 @@ fn hotkey_keys(hotkey: &str) -> Option<&'static str> {
         "session.backtowork" => "Y",
         "session.guard" => "G",
         "session.patrol" => "P",
+        // `GetScancodeKeyNames` gives SDL's names, "." and "Keypad .".
+        "selection.idleworker" => "., Keypad .",
         _ => return None,
     })
 }
 
 /// `colorizeHotkey("%(hotkey)s" + " ", hotkey)`.
-fn hotkey_prefix(hotkey: &str) -> String {
+pub(crate) fn hotkey_prefix(hotkey: &str) -> String {
     let key = match hotkey_keys(hotkey) {
         Some(key) => key.to_string(),
         None => lang::format(

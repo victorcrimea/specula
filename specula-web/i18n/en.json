@@ -1,5 +1,6 @@
 {
   "Diplomacy colours": "toggle button: colour players by diplomatic stance (ally, enemy, neutral) instead of their own colours",
+  "Idle workers": "accessible name of the minimap button that selects the next idle worker; it also shows how many there are",
   "Perspective": "accessible name of the list choosing whose view of the match to show (observer or a player)",
   "Sound off": "button label while sound is off; pressing it turns sound on",
   "Master": "label of the master volume slider",

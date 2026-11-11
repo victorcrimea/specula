@@ -11,6 +11,7 @@ mod field;
 mod game_menu;
 mod gpu;
 mod icons;
+mod idle;
 mod impostor;
 mod lang;
 mod left;
@@ -634,6 +635,53 @@ struct App {
     placement: Placement,
     /// The command button action waiting for a left click on `/play`.
     preselected: Option<Preselect>,
+    /// On `/play`: the minimap's idle worker button.
+    idle_worker: Option<IdleWorker>,
+    idle_finder: idle::Finder,
+}
+
+/// The minimap's idle worker button and its count.
+struct IdleWorker {
+    button: HtmlButtonElement,
+    count: HtmlElement,
+    /// The count shown, `None` before the first.
+    shown: Option<usize>,
+}
+
+impl IdleWorker {
+    fn new(document: &Document) -> Result<Self, String> {
+        let button: HtmlButtonElement = element(document, "idle-worker")?;
+        let count: HtmlElement = element(document, "idle-worker-count")?;
+        let _ = button.set_attribute(
+            tooltip::ATTRIBUTE,
+            &format!(
+                "{}{}",
+                command_row::hotkey_prefix("selection.idleworker"),
+                lang::translate("Find idle worker\nNumber of idle workers.")
+            ),
+        );
+        button.set_hidden(false);
+        count.set_hidden(false);
+        Ok(IdleWorker {
+            button,
+            count,
+            shown: None,
+        })
+    }
+
+    /// `MiniMapIdleWorkerButton.rebuild`.
+    fn show(&mut self, count: usize) {
+        if self.shown == Some(count) {
+            return;
+        }
+        self.shown = Some(count);
+        self.button.set_disabled(count == 0);
+        self.count.set_text_content(Some(&if count == 0 {
+            String::new()
+        } else {
+            count.to_string()
+        }));
+    }
 }
 
 /// The range overlay lists, and the values they and the storage last got,
@@ -896,6 +944,14 @@ impl App {
             if let Some(minimap) = &mut self.minimap {
                 minimap.set_scene(&self.scene, &self.palette);
             }
+            if let Some(idle_worker) = &mut self.idle_worker {
+                let count = self
+                    .uplink
+                    .as_ref()
+                    .and_then(Uplink::seat)
+                    .map_or(0, |player| idle::count(&self.scene, player, idle::WORKERS));
+                idle_worker.show(count);
+            }
             self.dirty = true;
         }
         if let Some([x, z]) = self.minimap.as_ref().and_then(Minimap::take_target) {
@@ -952,6 +1008,36 @@ impl App {
             tooltips.frame(now);
         }
         timing::frame(page_now() - start, drew);
+    }
+
+    /// `findIdleUnit(classes)` on `/play`, with selection.add and
+    /// selection.offscreen as `append` and `offscreen`.
+    fn find_idle(&mut self, classes: &[&str], append: bool, offscreen: bool) {
+        let Some(player) = self.uplink.as_ref().and_then(Uplink::seat) else {
+            return;
+        };
+        let selected = self.renderer.selected().to_vec();
+        let found =
+            self.idle_finder
+                .find(&self.scene, player, classes, &selected, append, offscreen);
+        let Some(found) = found else {
+            if let Some(sound) = &mut self.sound {
+                sound
+                    .audio
+                    .play_group(idle::NO_IDLE_UNIT_SOUND, [0.0; 3], true, page_now());
+            }
+            return;
+        };
+        if append {
+            for id in found.ids {
+                self.renderer.select_entity(id, true);
+            }
+        } else {
+            self.renderer.select_group(&found.ids, false);
+        }
+        if let Some([x, z]) = found.focus {
+            self.renderer.move_to(x, z);
+        }
     }
 
     /// On `/play`: turns the right clicks into the seat's orders, and shows
@@ -1095,7 +1181,10 @@ impl App {
     /// Asks for the detail stream while something is selected.
     fn follow_selection(&mut self) {
         let selected = self.renderer.selected();
-        let wanted = !selected.is_empty();
+        // The player's idle units are counted and found from it. Not before
+        // the worker's first scene: until its wasm is loaded it has no
+        // handler, and the command would be lost.
+        let wanted = !selected.is_empty() || (self.uplink.is_some() && self.scene.match_id != 0);
         if wanted != self.detail_wanted {
             self.detail_wanted = wanted;
             self.command(COMMAND_DETAIL, f64::from(u8::from(wanted)));
@@ -1625,6 +1714,14 @@ async fn run(
     } else {
         None
     };
+    // An older page has no button; the hotkeys still work.
+    let idle_worker = if seated {
+        IdleWorker::new(&document)
+            .inspect_err(|error| web_sys::console::error_1(&format!("idle worker: {error}").into()))
+            .ok()
+    } else {
+        None
+    };
     let live_delay = match page {
         Page::Map => None,
         // The player's stream has no delay, whatever the observers' is.
@@ -1746,6 +1843,8 @@ async fn run(
         data_files: tips::DataFiles::default(),
         detailed_tooltips: false,
         uplink: seated.then(Uplink::open),
+        idle_worker,
+        idle_finder: idle::Finder::default(),
         seat_shown: None,
         cursor: String::new(),
         placement: Placement::default(),
@@ -1758,6 +1857,7 @@ async fn run(
     wire_message_box(&app, &window);
     wire_game_menu(&app);
     wire_command_hotkeys(&app, &window);
+    wire_idle(&app, &window);
     if page == Page::Observer {
         let shadows: HtmlSelectElement = element(&document, "shadows")?;
         wire_shadows(&app, shadows.clone());
@@ -2271,6 +2371,74 @@ fn wire_command_hotkeys(app: &Rc<RefCell<App>>, window: &web_sys::Window) {
     let _ = window.add_event_listener_with_callback("keydown", on_key.as_ref().unchecked_ref());
     // The window lives as long as the page, so its handler does too.
     on_key.forget();
+}
+
+/// The idle hotkeys (`hotkeys/misc.xml` and the idle worker button's, the
+/// engine's default keys): selection.idleworker (Period, NumDecimal),
+/// idlewarrior (Slash, NumDivide), idleunit (BackSlash) and idlebuilder
+/// (Semicolon), with Shift as selection.add and Alt as selection.offscreen.
+/// Repeats count, as the engine sends a held hotkey's KeyDown again.
+fn wire_idle(app: &Rc<RefCell<App>>, window: &web_sys::Window) {
+    if app.borrow().uplink.is_none() {
+        return;
+    }
+    let target = Rc::clone(app);
+    let on_key = Closure::<dyn FnMut(web_sys::Event)>::new(move |event: web_sys::Event| {
+        let text = |object: &JsValue, name: &str| {
+            js_sys::Reflect::get(object, &name.into())
+                .ok()
+                .and_then(|value| value.as_string())
+                .unwrap_or_default()
+        };
+        let flag = |name: &str| {
+            js_sys::Reflect::get(&event, &name.into()).is_ok_and(|value| value.is_truthy())
+        };
+        let tag = event
+            .target()
+            .map(|element| text(&element, "tagName"))
+            .unwrap_or_default();
+        if matches!(tag.as_str(), "INPUT" | "SELECT" | "TEXTAREA")
+            || flag("ctrlKey")
+            || flag("metaKey")
+        {
+            return;
+        }
+        let classes = match text(&event, "code").as_str() {
+            "Period" | "NumpadDecimal" => idle::WORKERS,
+            "Slash" | "NumpadDivide" => idle::WARRIORS,
+            "Backslash" => idle::UNITS,
+            "Semicolon" => idle::BUILDERS,
+            _ => return,
+        };
+        // Firefox's quick find, and Alt's menu bar.
+        event.prevent_default();
+        let Ok(mut app) = target.try_borrow_mut() else {
+            return;
+        };
+        if app.message_box.as_ref().is_some_and(MessageBox::is_open) {
+            return;
+        }
+        app.find_idle(classes, flag("shiftKey"), flag("altKey"));
+    });
+    let _ = window.add_event_listener_with_callback("keydown", on_key.as_ref().unchecked_ref());
+    // The window lives as long as the page, so its handler does too.
+    on_key.forget();
+    let Some(button) = app
+        .borrow()
+        .idle_worker
+        .as_ref()
+        .map(|idle_worker| idle_worker.button.clone())
+    else {
+        return;
+    };
+    let target = Rc::clone(app);
+    let on_click = Closure::<dyn FnMut(MouseEvent)>::new(move |event: MouseEvent| {
+        if let Ok(mut app) = target.try_borrow_mut() {
+            app.find_idle(idle::WORKERS, event.shift_key(), event.alt_key());
+        }
+    });
+    button.set_onclick(Some(on_click.as_ref().unchecked_ref()));
+    on_click.forget();
 }
 
 fn wire_top(app: &Rc<RefCell<App>>) {
