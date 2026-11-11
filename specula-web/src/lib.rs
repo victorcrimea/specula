@@ -2263,6 +2263,24 @@ fn wire_game_menu(app: &Rc<RefCell<App>>) {
             menu.toggle();
         }
     });
+    // Captured, as the view's own handlers may stop the press.
+    let target = Rc::clone(app);
+    let on_press = Closure::<dyn FnMut(web_sys::Event)>::new(move |event: web_sys::Event| {
+        if let Some(menu) = &target.borrow().game_menu {
+            let node = event
+                .target()
+                .and_then(|node| node.dyn_into::<web_sys::Node>().ok());
+            menu.close_unless_on(node.as_ref());
+        }
+    });
+    if let Some(window) = web_sys::window() {
+        let _ = window.add_event_listener_with_callback_and_bool(
+            "pointerdown",
+            on_press.as_ref().unchecked_ref(),
+            true,
+        );
+    }
+    on_press.forget();
     for (button, resign) in [(resign, true), (exit, false)] {
         let target = Rc::clone(app);
         on_click(&button, move || {

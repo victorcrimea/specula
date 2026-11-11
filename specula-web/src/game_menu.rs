@@ -10,6 +10,7 @@ use wasm_bindgen_futures::JsFuture;
 use web_sys::Document;
 use web_sys::HtmlButtonElement;
 use web_sys::HtmlElement;
+use web_sys::Node;
 use web_sys::Response;
 
 use crate::lang;
@@ -19,6 +20,7 @@ use crate::lang;
 const DEFEAT_SETTLE_MS: i32 = 3000;
 
 pub struct GameMenu {
+    root: HtmlElement,
     open: HtmlButtonElement,
     panel: HtmlElement,
     resign: HtmlButtonElement,
@@ -28,6 +30,7 @@ pub struct GameMenu {
 impl GameMenu {
     pub fn new(document: &Document) -> Result<Self, String> {
         let menu = GameMenu {
+            root: crate::element(document, "game-menu")?,
             open: crate::element(document, "game-menu-open")?,
             panel: crate::element(document, "game-menu-panel")?,
             resign: crate::element(document, "game-menu-resign")?,
@@ -36,7 +39,7 @@ impl GameMenu {
         lang::set_text(&menu.open, "Menu");
         lang::set_text(&menu.resign, "Resign");
         lang::set_text(&menu.exit, "Exit");
-        crate::element::<HtmlElement>(document, "game-menu")?.set_hidden(false);
+        menu.root.set_hidden(false);
         Ok(menu)
     }
 
@@ -53,6 +56,13 @@ impl GameMenu {
     /// `Menu.close`, which pressing one of its buttons does too.
     pub fn close(&self) {
         self.set_open(false);
+    }
+
+    /// A press anywhere but on the menu closes it.
+    pub fn close_unless_on(&self, target: Option<&Node>) {
+        if !self.panel.hidden() && !self.root.contains(target) {
+            self.close();
+        }
     }
 
     fn set_open(&self, open: bool) {

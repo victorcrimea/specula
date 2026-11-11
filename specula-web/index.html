@@ -102,7 +102,9 @@ body { cursor: var(--gui-cursor-default, default); }
    menuButtonPanel (Menu.xml, 100%-164 wide), whose buttons are
    4 4 100%-4 32 a row apart; the panel opens at once instead of sliding,
    and is a plain panel, as StonePanelThinBorder is not baked. */
-#game-menu { position: absolute; right: 0; top: 0; width: 164px; height: 0;
+/* In the bar, so that folding it folds the menu too; the bar reaches
+   3 px past the screen's edge. */
+#game-menu { position: absolute; right: 3px; top: 0; width: 164px; height: 0;
   transform: scale(var(--top-scale)); transform-origin: 100% 0; }
 #game-menu button { position: absolute; height: 28px; padding: 0; border: 0;
   color: white; font-family: inherit; background: var(--gui-stone-button) 0 0 / 100% 100%; }
@@ -112,6 +114,10 @@ body { cursor: var(--gui-cursor-default, default); }
 #game-menu-panel { position: absolute; left: 0; right: 0; top: 0; height: 100px;
   box-sizing: border-box; background: rgba(15, 18, 20, 0.9); border: 1px solid #3a4248; }
 #game-menu-panel > button { left: 4px; right: 4px; }
+/* The open panel reaches over the clock and the HUD, and over the fold
+   tab and the heroes, which all come later in the page. */
+#top-panel:has(#game-menu-panel:not([hidden])) { z-index: 50; }
+#top-bar:has(#game-menu-panel:not([hidden])) { z-index: 1; }
 #game-menu-resign { top: 36px; }
 #game-menu-exit { top: 68px; }
 /* PanelEntities.xml: up to 19 iconButtons in a row, 50 px and a 1 px
@@ -884,9 +890,6 @@ body:not([data-debug="storage"]) #stats-storage { display: none; }
 <div id="top-buttons">
 <button id="top-diplomacy" type="button" aria-label="Diplomacy" data-tooltip="Diplomacy" data-i18n-attrs="aria-label data-tooltip"></button>
 </div>
-</div>
-<button id="top-toggle" type="button" aria-expanded="true" aria-controls="top-bar" aria-label="Fold the top panel"></button>
-<div id="heroes"></div>
 <div id="game-menu" hidden>
 <div id="game-menu-panel" hidden>
 <button id="game-menu-resign" type="button" class="text center sans-bold-stroke-14"></button>
@@ -894,6 +897,9 @@ body:not([data-debug="storage"]) #stats-storage { display: none; }
 </div>
 <button id="game-menu-open" type="button" class="text center sans-bold-stroke-14" aria-expanded="false" aria-controls="game-menu-panel"></button>
 </div>
+</div>
+<button id="top-toggle" type="button" aria-expanded="true" aria-controls="top-bar" aria-label="Fold the top panel"></button>
+<div id="heroes"></div>
 </div>
 <div id="controls">
 <button id="menu-open" type="button" aria-expanded="false" aria-controls="controls" data-i18n>Menu</button>
