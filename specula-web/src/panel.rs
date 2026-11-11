@@ -27,6 +27,7 @@ use crate::detail::DataKey;
 use crate::detail::Group;
 use crate::detail::Groups;
 use crate::detail::ListItem;
+use crate::detail::PROGRESS_NONE;
 use crate::diplomacy::Perspective;
 use crate::lang;
 use crate::left::LeftPanel;
@@ -70,8 +71,6 @@ const RESEARCH_BOTTOM: usize = 39;
 /// `resourcesToAlphaMask`: the red's alpha, of 255.
 const NEEDED_ALPHA_BASE: f64 = 50.0;
 const NEEDED_ALPHA_MAX: f64 = 125.0;
-/// Pack and upgrade progress when not running.
-const PROGRESS_NONE: u8 = 255;
 /// The slider's `3 3 35 35` in its button.
 pub(crate) const SLIDER_INSET: f64 = 3.0;
 pub(crate) const SLIDER_SIDE: f64 = 32.0;

@@ -66,6 +66,8 @@ pub const TRADE_GARRISON: usize = 25;
 const SLOTS: usize = 26;
 /// Rally positions come in 1/16 m.
 pub const RALLY_UNITS_PER_METRE: f32 = 16.0;
+/// `Group::Progress`'s pack or upgrade when not running.
+pub const PROGRESS_NONE: u8 = 255;
 
 /// By group bit; `None` is a group not sent.
 pub type Groups = [Option<Group>; SLOTS];

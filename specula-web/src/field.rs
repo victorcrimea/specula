@@ -66,6 +66,7 @@ use crate::blend;
 use crate::blend::Splat;
 use crate::detail;
 use crate::detail::Group;
+use crate::detail::PROGRESS_NONE;
 use crate::detail::RALLY_UNITS_PER_METRE;
 use crate::detail::RallyPoint;
 use crate::diplomacy::Perspective;
@@ -622,6 +623,9 @@ struct Entities {
     rallies: BTreeMap<u32, Rally>,
     /// The entities whose UnitAI the detail stream holds idle.
     idle: BTreeSet<u32>,
+    /// The experience, pack and upgrade progress the detail stream holds,
+    /// by entity, only those with one.
+    progress: BTreeMap<u32, StatusProgress>,
     /// `Scene::los` and `Scene::choices`.
     los: Los,
     los_generation: u32,
@@ -662,6 +666,16 @@ impl Entities {
         let grid = self.los.players.get(&(player as u32))?;
         Some((grid.as_slice(), self.los.side))
     }
+}
+
+/// The stream 2 values `StatusBars.js`' experience, pack and upgrade
+/// bars read, of 1.
+#[derive(Clone, Copy, Default)]
+struct StatusProgress {
+    /// `None` with no experience or no required experience.
+    experience: Option<f32>,
+    pack: Option<f32>,
+    upgrade: Option<f32>,
 }
 
 struct Rally {
@@ -4616,6 +4630,7 @@ impl View for Field {
         }
         entities.rallies.clear();
         entities.idle.clear();
+        entities.progress.clear();
         if scene.details.known && scene.details.match_id == scene.match_id {
             for (id, dot) in &scene.dots {
                 if idle::unit_ai_idle(scene, *id, dot) {
@@ -4636,6 +4651,41 @@ impl View for Field {
                         Rally {
                             marker: *marker,
                             points: points.clone(),
+                        },
+                    );
+                }
+                let running = |byte: u8| (byte != PROGRESS_NONE).then(|| f32::from(byte) / 254.0);
+                let (pack, upgrade) =
+                    match scene
+                        .details
+                        .group(*id, Some(dot.template), detail::PROGRESS)
+                    {
+                        Some(Group::Progress { pack, upgrade, .. }) => {
+                            (running(*pack), running(*upgrade))
+                        }
+                        _ => (None, None),
+                    };
+                // `AddExperienceBar` skips a zero of either.
+                let experience =
+                    match scene
+                        .details
+                        .group(*id, Some(dot.template), detail::EXPERIENCE)
+                    {
+                        Some(Group::Experience {
+                            experience,
+                            required,
+                        }) if *experience > 0 && *required > 0 => {
+                            Some(*experience as f32 / *required as f32)
+                        }
+                        _ => None,
+                    };
+                if pack.is_some() || upgrade.is_some() || experience.is_some() {
+                    entities.progress.insert(
+                        *id,
+                        StatusProgress {
+                            experience,
+                            pack,
+                            upgrade,
                         },
                     );
                 }
@@ -6933,8 +6983,9 @@ fn packed(rgb: [f32; 3], alpha: f32) -> u32 {
 
 /// The sprites `StatusBars.js` adds for each drawn entity that is
 /// selected or highlighted, or that `all` shows, in its order. Experience,
-/// pack, upgrade and finite supply bars need stream 2; aura icons are not
-/// in the atlas.
+/// pack and upgrade come from stream 2, so they show only while it is
+/// subscribed; the finite supply bar still needs stream 2; aura icons are
+/// not in the atlas.
 fn status_bar_sprites<'a>(
     pickables: &[Pickable],
     entities: &'a Entities,
@@ -6978,7 +7029,9 @@ fn status_bar_sprites<'a>(
         let bar = |sprites: &mut Vec<Sprite<'a>>,
                    yoffset: &mut f32,
                    [background, foreground]: [&'static str; 2],
-                   amount: f32| {
+                   amount: f32,
+                   multiplier: f32| {
+            let height = height * multiplier;
             for (name, x1) in [
                 (background, width / 2.0),
                 (foreground, width * (amount - 0.5)),
@@ -6995,6 +7048,42 @@ fn status_bar_sprites<'a>(
             }
             *yoffset += height * 1.2;
         };
+        let progress = entities
+            .progress
+            .get(&pickable.id)
+            .copied()
+            .unwrap_or_default();
+        // `AddExperienceBar`, as `gui.session.experiencestatusbar` defaults to
+        // on; it reuses the pack textures.
+        if let Some(amount) = progress.experience {
+            bar(
+                &mut sprites,
+                &mut yoffset,
+                ["pack_bg.png", "pack_fg.png"],
+                amount,
+                2.0 / 3.0,
+            );
+        }
+        // `AddPackBar`.
+        if let Some(amount) = progress.pack {
+            bar(
+                &mut sprites,
+                &mut yoffset,
+                ["pack_bg.png", "pack_fg.png"],
+                amount,
+                1.0,
+            );
+        }
+        // `AddUpgradeBar`.
+        if let Some(amount) = progress.upgrade {
+            bar(
+                &mut sprites,
+                &mut yoffset,
+                ["upgrade_bg.png", "upgrade_fg.png"],
+                amount,
+                1.0,
+            );
+        }
         // `AddResourceSupplyBar`, of which only an infinite one is known.
         if details.components & COMPONENT_RESOURCE_SUPPLY != 0
             && details.flags & pick::FLAG_INFINITE_SUPPLY != 0
@@ -7003,6 +7092,7 @@ fn status_bar_sprites<'a>(
                 &mut sprites,
                 &mut yoffset,
                 ["supply_bg.png", "supply_fg.png"],
+                1.0,
                 1.0,
             );
         }
@@ -7034,6 +7124,7 @@ fn status_bar_sprites<'a>(
                 &mut yoffset,
                 ["health_bg.png", "health_fg.png"],
                 f32::from(dot.hitpoints) / 255.0,
+                1.0,
             );
         }
         // `AddRankIcon`, as `gui.session.rankabovestatusbar` defaults to on.
