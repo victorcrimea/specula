@@ -461,6 +461,8 @@ impl Camera {
 /// The right click's hotkey a letter is, the engine's defaults.
 fn hotkey_bit(code: &str) -> u8 {
     match code {
+        "KeyC" => orders::HOTKEY_CAPTURE,
+        "KeyF" => orders::HOTKEY_ATTACK,
         "KeyG" => orders::HOTKEY_GUARD,
         "KeyP" => orders::HOTKEY_PATROL,
         "KeyJ" => orders::HOTKEY_REPAIR,

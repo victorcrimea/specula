@@ -59,12 +59,16 @@ pub struct Target {
     pub left: bool,
 }
 
-/// The engine's session.garrison and session.occupyturret (Ctrl),
-/// session.guard (G), session.patrol (P) and session.repair (J).
+/// The engine's session.guard (G), session.patrol (P), session.repair (J),
+/// session.capture (C) and session.attack (F); and session.garrison,
+/// session.occupyturret, session.attackmove and session.autorallypoint,
+/// which the engine's default config all bind to Ctrl.
 pub const HOTKEY_GARRISON: u8 = 1;
 pub const HOTKEY_GUARD: u8 = 2;
 pub const HOTKEY_PATROL: u8 = 4;
 pub const HOTKEY_REPAIR: u8 = 8;
+pub const HOTKEY_CAPTURE: u8 = 16;
+pub const HOTKEY_ATTACK: u8 = 32;
 
 /// A command button's `preSelectedAction`: the action the next left
 /// click on the view takes.
@@ -139,14 +143,32 @@ pub fn action(
         formation,
     };
 
-    // `hotkeyActionCheck`, before the plain actions.
+    // "set-rallypoint": structures only, as commands to units take
+    // precedence, and vanilla checks it before every hotkey, so a
+    // fortress with F held still sets its rally point.
+    if !unit_ai
+        && able.iter().any(|&id| has(id, COMPONENT_RALLY_POINT))
+        && let Some(action) = rally(scene, &own, player, target, target_dot, flags, data)
+    {
+        return Some(action);
+    }
+
+    // `hotkeyActionCheck`, in the engine's order of `specificness`, before
+    // the plain actions.
     let held = |hotkey: u8| target.hotkeys & hotkey != 0;
     let by_hotkey = None
+        .or_else(|| held(HOTKEY_ATTACK).then(|| actions.attack()).flatten())
+        .or_else(|| held(HOTKEY_CAPTURE).then(|| actions.capture()).flatten())
         .or_else(|| held(HOTKEY_REPAIR).then(|| actions.repair()).flatten())
         .or_else(|| held(HOTKEY_GARRISON).then(|| actions.garrison()).flatten())
         .or_else(|| {
             held(HOTKEY_GARRISON)
                 .then(|| actions.occupy_turret())
+                .flatten()
+        })
+        .or_else(|| {
+            held(HOTKEY_GARRISON)
+                .then(|| actions.attack_move())
                 .flatten()
         })
         .or_else(|| held(HOTKEY_PATROL).then(|| actions.patrol()).flatten())
@@ -281,57 +303,9 @@ pub fn action(
         }
     }
 
-    // "set-rallypoint": structures only, as commands to units take
-    // precedence.
-    if !unit_ai
-        && able.iter().any(|&id| has(id, COMPONENT_RALLY_POINT))
-        && let Some(action) = rally(scene, &own, player, target, target_dot, flags, data)
-    {
-        return Some(action);
-    }
-
-    if let Some((id, dot)) = target_dot {
-        let target_details = template_details(scene, dot.template);
-        let bits = target_details.map_or(0, |details| details.components);
-        let relation = relation(scene, player, dot.owner);
-        let classes = target_classes(scene, target_details);
-        let attackers = || {
-            able.iter()
-                .filter(|&&unit| has(unit, COMPONENT_ATTACK))
-                .filter_map(|&unit| Some((unit, details(unit)?)))
-        };
-
-        // "attack", without capturing.
-        if dot.hitpoints > 0
-            && let Some((attacker, _)) =
-                attackers().find(|&(_, attacker)| can_attack(scene, attacker, relation, &classes))
-        {
-            return Some(Action {
-                cursor: "action-attack".to_string(),
-                tooltip: String::new(),
-                command: Some(Command::Attack {
-                    flags,
-                    entities: entities(),
-                    target: id,
-                }),
-                sound: Some(("order_attack", attacker)),
-            });
-        }
-        // "capture"
-        if bits & COMPONENT_CAPTURABLE != 0
-            && let Some((attacker, _)) =
-                attackers().find(|&(_, attacker)| can_capture(scene, attacker, relation, &classes))
-        {
-            return Some(Action {
-                cursor: "action-capture".to_string(),
-                tooltip: String::new(),
-                command: Some(Command::Attack {
-                    flags: flags | ALLOW_CAPTURE,
-                    entities: entities(),
-                    target: id,
-                }),
-                sound: Some(("order_attack", attacker)),
-            });
+    if target_dot.is_some() {
+        if let Some(action) = actions.attack().or_else(|| actions.capture()) {
+            return Some(action);
         }
         if let Some(action) = actions.repair() {
             return Some(action);
@@ -545,6 +519,56 @@ impl Actions<'_> {
             .or_else(|| self.target_dot.map(|(_, dot)| position(dot)))
     }
 
+    /// "attack", without capturing.
+    fn attack(&self) -> Option<Action> {
+        let (id, dot, _, relation) = self.target()?;
+        if dot.hitpoints == 0 {
+            return None;
+        }
+        let classes = target_classes(self.scene, self.details(id));
+        let &attacker = self.able.iter().find(|&&unit| {
+            self.has(unit, COMPONENT_ATTACK)
+                && self
+                    .details(unit)
+                    .is_some_and(|attacker| can_attack(self.scene, attacker, relation, &classes))
+        })?;
+        Some(Action {
+            cursor: "action-attack".to_string(),
+            tooltip: String::new(),
+            command: Some(Command::Attack {
+                flags: self.flags,
+                entities: self.own.to_vec(),
+                target: id,
+            }),
+            sound: Some(("order_attack", attacker)),
+        })
+    }
+
+    /// "capture"
+    fn capture(&self) -> Option<Action> {
+        let (id, _, bits, relation) = self.target()?;
+        if bits & COMPONENT_CAPTURABLE == 0 {
+            return None;
+        }
+        let classes = target_classes(self.scene, self.details(id));
+        let &attacker = self.able.iter().find(|&&unit| {
+            self.has(unit, COMPONENT_ATTACK)
+                && self
+                    .details(unit)
+                    .is_some_and(|attacker| can_capture(self.scene, attacker, relation, &classes))
+        })?;
+        Some(Action {
+            cursor: "action-capture".to_string(),
+            tooltip: String::new(),
+            command: Some(Command::Attack {
+                flags: self.flags | ALLOW_CAPTURE,
+                entities: self.own.to_vec(),
+                target: id,
+            }),
+            sound: Some(("order_attack", attacker)),
+        })
+    }
+
     /// "repair": builders on a friendly foundation or damaged building.
     fn repair(&self) -> Option<Action> {
         let (id, dot, bits, relation) = self.target()?;
@@ -674,6 +698,34 @@ impl Actions<'_> {
         })
     }
 
+    /// "attack-move" to the point, in no formation.
+    fn attack_move(&self) -> Option<Action> {
+        let &unit = self
+            .able
+            .iter()
+            .find(|&&unit| self.has(unit, COMPONENT_UNIT_AI))?;
+        Some(Action {
+            cursor: "action-attack-move".to_string(),
+            tooltip: String::new(),
+            command: self.point().map(|[x, z]| Command::AttackWalk {
+                flags: self.flags,
+                entities: self.own.to_vec(),
+                x,
+                z,
+            }),
+            sound: Some(("order_attack_move", unit)),
+        })
+    }
+
+    /// `allowCapture`: `HotkeyIsPressed("session.capture")`.
+    fn capture_flag(&self) -> u8 {
+        if self.target.hotkeys & HOTKEY_CAPTURE != 0 {
+            ALLOW_CAPTURE
+        } else {
+            0
+        }
+    }
+
     /// "patrol" to the point, in the default formation.
     fn patrol(&self) -> Option<Action> {
         let &unit = self.able.iter().find(|&&unit| {
@@ -684,7 +736,7 @@ impl Actions<'_> {
             cursor: "action-patrol".to_string(),
             tooltip: String::new(),
             command: self.point().map(|[x, z]| Command::Patrol {
-                flags: self.flags,
+                flags: self.flags | self.capture_flag(),
                 entities: self.own.to_vec(),
                 x,
                 z,
@@ -704,7 +756,7 @@ impl Actions<'_> {
             cursor: "action-attack".to_string(),
             tooltip: String::new(),
             command: self.point().map(|[x, z]| Command::CallToArms {
-                flags: self.flags,
+                flags: self.flags | self.capture_flag(),
                 entities: self.own.to_vec(),
                 x,
                 z,
@@ -877,12 +929,30 @@ fn can_capture(
             })
 }
 
-/// "set-rallypoint" without hotkeys: on a resource gather, from a market
-/// on another the default trade route, on a friendly foundation or
-/// damaged building repair, on an enemy attack, else walk. Garrisoning,
-/// turrets and treasures are not ordered, so those show the walk's arrow.
-/// None on a selected entity itself, which the engine unsets the rally
-/// point on.
+/// Whether the entity trains anything, as `trainer.entities.length`:
+/// with autorallypoint held, vanilla lets a selected building that trains
+/// units set its rally point on itself.
+fn trains_units(scene: &Scene, id: u32) -> bool {
+    let Some(dot) = scene.dots.get(&id) else {
+        return false;
+    };
+    match &entity_groups(scene, id, dot.template)[detail::TRAINABLE] {
+        Some(Group::List(index)) => scene
+            .details
+            .lists
+            .get(*index as usize)
+            .is_some_and(|list| !list.is_empty()),
+        _ => false,
+    }
+}
+
+/// "set-rallypoint": on a resource gather, from a market on another the
+/// default trade route, on a friendly foundation or damaged building
+/// repair, on an enemy attack, else walk, which Ctrl (session.attackmove)
+/// makes an attack-walk. Garrisoning, turrets and treasures are not
+/// ordered, so those show the walk's arrow. None on a selected entity
+/// itself, which the engine unsets the rally point on, unless Ctrl
+/// (session.autorallypoint) is held and it trains units.
 fn rally(
     scene: &Scene,
     own: &[u32],
@@ -892,11 +962,12 @@ fn rally(
     flags: u8,
     data: &DataFiles,
 ) -> Option<Action> {
+    let ctrl = target.hotkeys & HOTKEY_GARRISON != 0;
     let mut resource = (String::new(), String::new());
     let mut source = 0;
     let mut tooltip = String::new();
     let (cursor, order, rally_target, point) = match target_dot {
-        Some((id, _)) if own.contains(&id) => return None,
+        Some((id, _)) if own.contains(&id) && !(ctrl && trains_units(scene, id)) => return None,
         Some((id, dot)) => {
             let details = template_details(scene, dot.template);
             let bits = details.map_or(0, |details| details.components);
@@ -944,12 +1015,25 @@ fn rally(
                 } else {
                     return None;
                 }
+            } else if ctrl {
+                ("action-attack-move".to_string(), "attack-walk", 0)
             } else {
                 (String::new(), "walk", 0)
             };
             (cursor, order, rally_target, Some(position(dot)))
         }
-        None => (String::new(), "walk", 0, target.point),
+        None => {
+            if ctrl {
+                (
+                    "action-attack-move".to_string(),
+                    "attack-walk",
+                    0,
+                    target.point,
+                )
+            } else {
+                (String::new(), "walk", 0, target.point)
+            }
+        }
     };
     Some(Action {
         cursor,

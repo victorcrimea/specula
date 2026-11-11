@@ -633,6 +633,11 @@ fn order_json(order: &Order) -> String {
             out.number("z", *z);
             let mut data = Json::new();
             data.text("command", order);
+            // `RallyPointCommands.js` sends an attack-walk's targetClasses
+            // from the data, as the GUI's set-rallypoint puts them there.
+            if order == "attack-walk" {
+                data.raw("targetClasses", r#"{"attack":["Unit","Structure"]}"#);
+            }
             if *target != 0 {
                 data.raw("target", &target.to_string());
             }

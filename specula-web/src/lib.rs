@@ -1170,7 +1170,10 @@ impl App {
                 && let Some(uplink) = &self.uplink
             {
                 uplink.send(&order);
-                if let Command::Walk { x, z, .. } | Command::Patrol { x, z, .. } = order {
+                if let Command::Walk { x, z, .. }
+                | Command::Patrol { x, z, .. }
+                | Command::AttackWalk { x, z, .. } = order
+                {
                     markers.push((x, z));
                 }
                 sounds.extend(action.sound);
