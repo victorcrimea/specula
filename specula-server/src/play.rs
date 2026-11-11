@@ -47,6 +47,11 @@ const REPLY_BACKLOG: usize = 64;
 const NULL_FORMATION: &str = "special/formations/null";
 const MAX_PLAYERS: usize = 8;
 const MAX_DIFFICULTY: u8 = 5;
+/// `simulation/data/settings/starting_resources.json`, which the setup
+/// page offers.
+const STARTING_RESOURCES: [u32; 6] = [100, 300, 500, 1000, 3000, 50000];
+/// Its default, for a page from before the choice.
+const DEFAULT_STARTING_RESOURCES: u32 = 300;
 /// `feed::Player::state`.
 const PLAYER_ACTIVE: u8 = 0;
 
@@ -130,11 +135,13 @@ pub struct Setup {
     /// explored, as `MapExploration.setRevealed` makes it.
     pub explored: bool,
     pub revealed: bool,
+    /// The game setup's Starting Resources: each resource's amount.
+    pub resources: u32,
 }
 
 impl Setup {
-    /// From the setup page's form: `map`, `players`, `explored` and
-    /// `revealed` when checked, and for each player i from 1, `civ<i>`,
+    /// From the setup page's form: `map`, `players`, `resources`,
+    /// `explored` and `revealed` when checked, and for each player i from 1, `civ<i>`,
     /// `slot<i>` ("you", "petra" or "empty") and `difficulty<i>` for Petra.
     /// Checked when the game starts.
     pub fn from_form(form: &HashMap<String, String>) -> Result<Setup, &'static str> {
@@ -161,11 +168,16 @@ impl Setup {
             });
         }
         let revealed = form.contains_key("revealed");
+        let resources = match form.get("resources") {
+            Some(resources) => resources.parse().map_err(|_| "bad starting resources")?,
+            None => DEFAULT_STARTING_RESOURCES,
+        };
         Ok(Setup {
             map: field("map")?.to_string(),
             slots,
             explored: revealed || form.contains_key("explored"),
             revealed,
+            resources,
         })
     }
 }
@@ -456,6 +468,10 @@ fn engine_args(setup: &Setup) -> Result<Vec<String>, &'static str> {
     if setup.revealed {
         args.push("-autostart-specula-revealed".to_string());
     }
+    if !STARTING_RESOURCES.contains(&setup.resources) {
+        return Err("unknown starting resources");
+    }
+    args.push(format!("-autostart-specula-resources={}", setup.resources));
     for (index, slot) in setup.slots.iter().enumerate() {
         let player = index + 1;
         if slot.civ != "random" && !civs().any(|(code, _)| code == slot.civ) {

@@ -41,6 +41,7 @@ a { color: #8fc1e3; }
 <div class="row">
 <label><span data-i18n>Map</span> <select id="map" name="map"></select></label>
 <label><span data-i18n>Players</span> <select id="players" name="players"></select></label>
+<label title="Select the game's starting resources." data-i18n-attrs="title"><span data-i18n>Starting Resources</span> <select id="resources" name="resources"></select></label>
 </div>
 <div class="row">
 <label title="Toggle explored map (see initial map)." data-i18n-attrs="title"><input id="explored" name="explored" type="checkbox"> <span data-i18n>Explored Map</span></label>
@@ -59,11 +60,24 @@ const COLORS = ["#153795", "#961414", "#56b41f", "#e7c805", "#32aaaa", "#a050c8"
 // Petra's difficulties, 0 to 5, as the game setup names them.
 const DIFFICULTIES = ["Sandbox", "Very Easy", "Easy", "Medium", "Hard", "Very Hard"];
 const DEFAULT_DIFFICULTY = 3;
+// simulation/data/settings/starting_resources.json; the server takes only
+// these amounts.
+const STARTING_RESOURCES = [[100, "Very Low"], [300, "Low"], [500, "Medium"], [1000, "High"],
+  [3000, "Very High"], [50000, "Deathmatch"]];
+const DEFAULT_RESOURCES = 300;
 const T = (text) => window.speculaT(text);
+// `translateWithContext`: the lookup key is the context and the msgid
+// joined by EOT, and a miss hands the key back.
+const TC = (context, text) => {
+  const key = `${context}\u0004${text}`;
+  const translated = T(key);
+  return translated === key ? text : translated;
+};
 
 const form = document.getElementById("setup");
 const mapSelect = document.getElementById("map");
 const playersSelect = document.getElementById("players");
+const resourcesSelect = document.getElementById("resources");
 const slots = document.getElementById("slots");
 const error = document.getElementById("error");
 let setup = null;
@@ -126,6 +140,17 @@ const buildMaps = () => {
   if (chosen) mapSelect.value = chosen;
 };
 
+const buildResources = () => {
+  const chosen = resourcesSelect.value || DEFAULT_RESOURCES;
+  resourcesSelect.replaceChildren(...STARTING_RESOURCES.map(([amount, title]) => {
+    const element = option(amount, TC("startingResources", title));
+    element.title = T("Initial amount of each resource: %(resources)s.")
+      .replace("%(resources)s", amount);
+    return element;
+  }));
+  resourcesSelect.value = chosen;
+};
+
 const showStatus = () => {
   document.getElementById("status").hidden = !setup.running;
   document.getElementById("watch").hidden = setup.mine;
@@ -160,7 +185,7 @@ form.addEventListener("submit", async (event) => {
   for (let count = 2; count <= 8; ++count) playersSelect.append(option(count, count));
   playersSelect.addEventListener("change", buildSlots);
   showStatus();
-  window.speculaOnLanguage(() => { buildMaps(); buildSlots(); });
+  window.speculaOnLanguage(() => { buildMaps(); buildResources(); buildSlots(); });
 })();
 </script>
 <script type="module">
