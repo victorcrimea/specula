@@ -83,6 +83,8 @@
   "Match over": "status text when the match ended",
   "Match over. Next match in %(time)s": "status text; the value is a countdown such as 0:42",
   "Match over. Waiting for the next match": "status text",
+  "New match": "button on the player's page once their game has ended: opens the page that sets up a new game against the computer",
+  "Rematch": "button on the player's page once their game has ended: starts a game again at once, with the same map, civilisations and opponents",
   "Live stream starts in %(time)s": "status text while the delayed broadcast has not started yet; the value is a countdown such as 1:42",
   "Default (browser: %(name)s)": "first entry of the language list; the value is the language name the browser asks for",
   "warming up": "benchmark phase, lower case, used inside a status line",

@@ -167,6 +167,7 @@ async fn main() {
                 play_page,
                 play_setup,
                 play_new,
+                play_action,
                 play_viewer,
                 play_detail_viewer,
                 play_segment_file,
@@ -299,9 +300,9 @@ async fn play_page(
 #[rocket::get("/play/setup")]
 fn play_setup(play: &State<Option<Arc<Play>>>, cookies: &CookieJar<'_>) -> Option<Json> {
     let play = play.as_ref()?;
-    let (running, mine) = play.status(usage::visitor(cookies).as_deref());
+    let status = play.status(usage::visitor(cookies).as_deref());
     Some(Json(
-        play::setup_json(running, mine),
+        play::setup_json(&status),
         Header::new("Cache-Control", "no-store"),
     ))
 }
@@ -323,6 +324,26 @@ fn play_new(
     let visitor = usage::visitor(cookies).ok_or(refuse("no visitor cookie"))?;
     let setup = Setup::from_form(&form).map_err(refuse)?;
     play.start(&visitor, &setup).map_err(refuse)
+}
+
+/// The player's page's Resign, Exit and Rematch, for the visitor's game;
+/// the text says why not.
+#[rocket::post("/play/<action>")]
+fn play_action(
+    action: &str,
+    play: &State<Option<Arc<Play>>>,
+    cookies: &CookieJar<'_>,
+) -> Result<(), rocket::response::status::BadRequest<&'static str>> {
+    let refuse = rocket::response::status::BadRequest;
+    let play = play.as_ref().ok_or(refuse("not in play mode"))?;
+    let visitor = usage::visitor(cookies).ok_or(refuse("no visitor cookie"))?;
+    match action {
+        "resign" => play.resign(&visitor),
+        "end" => play.end(&visitor),
+        "rematch" => play.rematch(&visitor),
+        _ => Err("unknown action"),
+    }
+    .map_err(refuse)
 }
 
 /// The stream of the visitor's seat: undelayed, and only what its player

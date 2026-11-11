@@ -83,6 +83,8 @@
   "Match over": "Partita terminata",
   "Match over. Next match in %(time)s": "Partita terminata. Prossima partita tra %(time)s",
   "Match over. Waiting for the next match": "Partita terminata. In attesa della prossima partita",
+  "New match": "Nuova partita",
+  "Rematch": "Rivincita",
   "Live stream starts in %(time)s": "La diretta inizia tra %(time)s",
   "Default (browser: %(name)s)": "Predefinito (browser: %(name)s)",
   "warming up": "riscaldamento",

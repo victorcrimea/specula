@@ -83,6 +83,8 @@
   "Match over": "경기 종료",
   "Match over. Next match in %(time)s": "경기 종료. %(time)s 후 다음 경기",
   "Match over. Waiting for the next match": "경기 종료. 다음 경기를 기다리는 중",
+  "New match": "새 경기",
+  "Rematch": "재경기",
   "Live stream starts in %(time)s": "%(time)s 후 생중계 시작",
   "Default (browser: %(name)s)": "기본값 (브라우저: %(name)s)",
   "warming up": "워밍업",

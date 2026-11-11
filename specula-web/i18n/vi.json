@@ -83,6 +83,8 @@
   "Match over": "Trận đấu đã kết thúc",
   "Match over. Next match in %(time)s": "Trận đấu đã kết thúc. Trận tiếp theo sau %(time)s",
   "Match over. Waiting for the next match": "Trận đấu đã kết thúc. Đang chờ trận tiếp theo",
+  "New match": "Trận mới",
+  "Rematch": "Tái đấu",
   "Live stream starts in %(time)s": "Phát trực tiếp bắt đầu sau %(time)s",
   "Default (browser: %(name)s)": "Mặc định (trình duyệt: %(name)s)",
   "warming up": "khởi động",

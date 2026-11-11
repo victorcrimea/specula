@@ -1722,6 +1722,13 @@ impl Hub {
         self.state.lock().unwrap().observer.set_players(players);
     }
 
+    /// The feed's latest state of `player`, as `feed::Player::state`.
+    pub fn player_state(&self, player: u32) -> Option<u8> {
+        let state = self.state.lock().unwrap();
+        let players = &state.observer.players.players;
+        players.get(player as usize).map(|player| player.state)
+    }
+
     pub fn set_economy(&self, economy: &[Economy]) {
         self.state.lock().unwrap().observer.economy = economy.iter().map(Funds::new).collect();
     }

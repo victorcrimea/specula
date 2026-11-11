@@ -83,6 +83,8 @@
   "Match over": "比赛结束",
   "Match over. Next match in %(time)s": "比赛结束。%(time)s 后开始下一场比赛",
   "Match over. Waiting for the next match": "比赛结束。正在等待下一场比赛",
+  "New match": "新比赛",
+  "Rematch": "再来一局",
   "Live stream starts in %(time)s": "直播将在 %(time)s 后开始",
   "Default (browser: %(name)s)": "默认（浏览器：%(name)s）",
   "warming up": "预热",

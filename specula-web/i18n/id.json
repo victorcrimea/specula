@@ -83,6 +83,8 @@
   "Match over": "Pertandingan selesai",
   "Match over. Next match in %(time)s": "Pertandingan selesai. Pertandingan berikutnya dalam %(time)s",
   "Match over. Waiting for the next match": "Pertandingan selesai. Menunggu pertandingan berikutnya",
+  "New match": "Pertandingan baru",
+  "Rematch": "Tanding ulang",
   "Live stream starts in %(time)s": "Siaran langsung dimulai dalam %(time)s",
   "Default (browser: %(name)s)": "Bawaan (peramban: %(name)s)",
   "warming up": "pemanasan",

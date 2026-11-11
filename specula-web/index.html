@@ -98,6 +98,22 @@ body { cursor: var(--gui-cursor-default, default); }
 #top-diplomacy { left: 0; background-image: var(--gui-diplomacy); }
 #top-buttons > button:hover::after { content: ""; position: absolute; inset: 0;
   background: rgb(42, 42, 42); mix-blend-mode: plus-lighter; pointer-events: none; }
+/* menuButton (top_panel/MenuButton.xml, 100%-164 4 100%-8 32) over
+   menuButtonPanel (Menu.xml, 100%-164 wide), whose buttons are
+   4 4 100%-4 32 a row apart; the panel opens at once instead of sliding,
+   and is a plain panel, as StonePanelThinBorder is not baked. */
+#game-menu { position: absolute; right: 0; top: 0; width: 164px; height: 0;
+  transform: scale(var(--top-scale)); transform-origin: 100% 0; }
+#game-menu button { position: absolute; height: 28px; padding: 0; border: 0;
+  color: white; font-family: inherit; background: var(--gui-stone-button) 0 0 / 100% 100%; }
+#game-menu button:hover:not(:disabled) { background-image: var(--gui-stone-button-over); }
+#game-menu button:disabled { color: rgba(210, 210, 210, 0.627); filter: brightness(0.75); }
+#game-menu-open { left: 0; right: 8px; top: 4px; }
+#game-menu-panel { position: absolute; left: 0; right: 0; top: 0; height: 100px;
+  box-sizing: border-box; background: rgba(15, 18, 20, 0.9); border: 1px solid #3a4248; }
+#game-menu-panel > button { left: 4px; right: 4px; }
+#game-menu-resign { top: 36px; }
+#game-menu-exit { top: 68px; }
 /* PanelEntities.xml: up to 19 iconButtons in a row, 50 px and a 1 px
    margin, under the controls rather than right under the bar. */
 #heroes { position: absolute; left: 2px; top: calc(var(--top-height) + 42px);
@@ -660,7 +676,7 @@ body:not([data-debug="storage"]) #stats-storage { display: none; }
   max-width: calc(100vw - 32px); box-sizing: border-box;
   font: 13px system-ui, sans-serif; color: #e6e9eb;
   background: rgba(15, 18, 20, 0.9); border: 1px solid #3a4248; border-radius: 4px; }
-#match-over[hidden], #current[hidden] { display: none; }
+#match-over[hidden], #current[hidden], #match-over [hidden] { display: none; }
 #stream-start { position: fixed; left: 50%; top: 30%; transform: translateX(-50%);
   padding: 8px 10px; max-width: calc(100vw - 32px); box-sizing: border-box;
   font: 13px system-ui, sans-serif; color: #e6e9eb;
@@ -848,6 +864,13 @@ body:not([data-debug="storage"]) #stats-storage { display: none; }
 </div>
 <button id="top-toggle" type="button" aria-expanded="true" aria-controls="top-bar" aria-label="Fold the top panel"></button>
 <div id="heroes"></div>
+<div id="game-menu" hidden>
+<div id="game-menu-panel" hidden>
+<button id="game-menu-resign" type="button" class="text center sans-bold-stroke-14"></button>
+<button id="game-menu-exit" type="button" class="text center sans-bold-stroke-14"></button>
+</div>
+<button id="game-menu-open" type="button" class="text center sans-bold-stroke-14" aria-expanded="false" aria-controls="game-menu-panel"></button>
+</div>
 </div>
 <div id="controls">
 <button id="menu-open" type="button" aria-expanded="false" aria-controls="controls" data-i18n>Menu</button>
@@ -989,6 +1012,8 @@ body:not([data-debug="storage"]) #stats-storage { display: none; }
 <div id="match-over" role="status" hidden>
 <span id="match-over-text">Match over</span>
 <button id="match-over-current" type="button" disabled data-i18n>Current match</button>
+<button id="match-over-new" type="button" hidden data-i18n>New match</button>
+<button id="match-over-rematch" type="button" hidden data-i18n>Rematch</button>
 <button id="match-over-close" type="button" aria-label="Close" data-i18n-attrs="aria-label">x</button>
 </div>
 <div id="diplomacy-window" role="dialog" aria-labelledby="diplomacy-title" hidden>

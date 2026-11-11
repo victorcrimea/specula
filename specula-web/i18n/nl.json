@@ -83,6 +83,8 @@
   "Match over": "Spel afgelopen",
   "Match over. Next match in %(time)s": "Spel afgelopen. Volgend spel over %(time)s",
   "Match over. Waiting for the next match": "Spel afgelopen. Wachten op het volgende spel",
+  "New match": "Nieuw spel",
+  "Rematch": "Revanche",
   "Live stream starts in %(time)s": "Livestream begint over %(time)s",
   "Default (browser: %(name)s)": "Standaard (browser: %(name)s)",
   "warming up": "opwarmen",

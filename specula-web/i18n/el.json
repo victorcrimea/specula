@@ -83,6 +83,8 @@
   "Match over": "Ο αγώνας τελείωσε",
   "Match over. Next match in %(time)s": "Ο αγώνας τελείωσε. Επόμενος αγώνας σε %(time)s",
   "Match over. Waiting for the next match": "Ο αγώνας τελείωσε. Αναμονή για τον επόμενο αγώνα",
+  "New match": "Νέος αγώνας",
+  "Rematch": "Ρεβάνς",
   "Live stream starts in %(time)s": "Η ζωντανή μετάδοση ξεκινά σε %(time)s",
   "Default (browser: %(name)s)": "Προεπιλογή (πρόγραμμα περιήγησης: %(name)s)",
   "warming up": "προθέρμανση",

@@ -83,6 +83,8 @@
   "Match over": "A meccs véget ért",
   "Match over. Next match in %(time)s": "A meccs véget ért. A következő meccs %(time)s múlva",
   "Match over. Waiting for the next match": "A meccs véget ért. Várakozás a következő meccsre",
+  "New match": "Új meccs",
+  "Rematch": "Visszavágó",
   "Live stream starts in %(time)s": "Az élő közvetítés %(time)s múlva kezdődik",
   "Default (browser: %(name)s)": "Alapértelmezett (böngésző: %(name)s)",
   "warming up": "bemelegítés",

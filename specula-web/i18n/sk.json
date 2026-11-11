@@ -83,6 +83,8 @@
   "Match over": "Zápas sa skončil",
   "Match over. Next match in %(time)s": "Zápas sa skončil. Ďalší zápas o %(time)s",
   "Match over. Waiting for the next match": "Zápas sa skončil. Čaká sa na ďalší zápas",
+  "New match": "Nový zápas",
+  "Rematch": "Odveta",
   "Live stream starts in %(time)s": "Živý prenos začne za %(time)s",
   "Default (browser: %(name)s)": "Predvolené (prehliadač: %(name)s)",
   "warming up": "zahrievanie",

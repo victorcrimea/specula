@@ -47,6 +47,8 @@ const REPLY_BACKLOG: usize = 64;
 const NULL_FORMATION: &str = "special/formations/null";
 const MAX_PLAYERS: usize = 8;
 const MAX_DIFFICULTY: u8 = 5;
+/// `feed::Player::state`.
+const PLAYER_ACTIVE: u8 = 0;
 
 /// The random maps the setup page offers: script name and the engine's
 /// name for it (`settings.Name` of `maps/random/<name>.json`), which the
@@ -77,9 +79,11 @@ pub fn civs() -> impl Iterator<Item = (&'static str, &'static str)> {
         .filter_map(|line| line.split_once('\t'))
 }
 
-/// What the setup page reads: whether a game is running and is the
-/// visitor's, and the maps and civs to choose from.
-pub fn setup_json(running: bool, mine: bool) -> String {
+/// What the setup page and the player's page read: whether a game is
+/// running and is the visitor's, whether its seat is defeated, whether the
+/// visitor's last game can be repeated, and the maps and civs to choose
+/// from.
+pub fn setup_json(status: &Status) -> String {
     let pairs = |items: &mut dyn Iterator<Item = (&str, &str)>| {
         let mut out = String::from("[");
         for (index, (code, name)) in items.enumerate() {
@@ -96,14 +100,28 @@ pub fn setup_json(running: bool, mine: bool) -> String {
         out
     };
     let mut json = Json::new();
-    json.boolean("running", running);
-    json.boolean("mine", mine);
+    json.boolean("running", status.running);
+    json.boolean("mine", status.mine);
+    json.boolean("defeated", status.defeated);
+    json.boolean("rematch", status.rematch);
     json.raw("maps", &pairs(&mut MAPS.iter().copied()));
     json.raw("civs", &pairs(&mut civs()));
     json.finish()
 }
 
+/// The visitor's view of the game, for `setup_json`.
+pub struct Status {
+    pub running: bool,
+    pub mine: bool,
+    /// The visitor's seat is not active any more: they resigned or were
+    /// beaten while the others play on.
+    pub defeated: bool,
+    /// The visitor started the last game, which a rematch repeats.
+    pub rematch: bool,
+}
+
 /// What the setup page chose.
+#[derive(Clone)]
 pub struct Setup {
     pub map: String,
     /// One per player, in order.
@@ -152,6 +170,7 @@ impl Setup {
     }
 }
 
+#[derive(Clone)]
 pub struct Slot {
     /// A civ code, or "random".
     pub civ: String,
@@ -194,6 +213,8 @@ struct Game {
     seat: u8,
     generation: u64,
     running: bool,
+    /// What it was started with, for a rematch.
+    setup: Setup,
 }
 
 impl Play {
@@ -234,6 +255,7 @@ impl Play {
             seat,
             generation,
             running: true,
+            setup: setup.clone(),
         });
         println!("game {generation} for {owner}: {}", args.join(" "));
         // The engine connects the feed after this, so its first turn
@@ -273,13 +295,77 @@ impl Play {
         (Some(game.owner.as_str()) == visitor).then_some(game.seat)
     }
 
-    /// Whether a game is running, and whether it is `visitor`'s.
-    pub fn status(&self, visitor: Option<&str>) -> (bool, bool) {
+    pub fn status(&self, visitor: Option<&str>) -> Status {
+        let (running, owned, seat) = {
+            let inner = self.inner.lock().unwrap();
+            match &inner.game {
+                Some(game) => (
+                    game.running,
+                    Some(game.owner.as_str()) == visitor,
+                    game.seat,
+                ),
+                None => (false, false, 0),
+            }
+        };
+        Status {
+            running,
+            mine: running && owned,
+            defeated: running && owned && self.seat_defeated(seat),
+            rematch: owned,
+        }
+    }
+
+    /// Whether the feed reports `seat` as no longer active. Asked without
+    /// `inner` held, so the two locks are never taken in both orders.
+    fn seat_defeated(&self, seat: u8) -> bool {
+        self.hub
+            .player_state(u32::from(seat))
+            .is_some_and(|state| state != PLAYER_ACTIVE)
+    }
+
+    /// The running game `owner` holds the seat of, as its seat number.
+    fn running_seat(&self, owner: &str) -> Result<u8, &'static str> {
         let inner = self.inner.lock().unwrap();
         match &inner.game {
-            Some(game) if game.running => (true, Some(game.owner.as_str()) == visitor),
-            _ => (false, false),
+            Some(game) if game.running && game.owner == owner => Ok(game.seat),
+            _ => Err("no game of yours is running"),
         }
+    }
+
+    /// Resigns `owner`'s seat, as the session's Resign does
+    /// (`ResignConfirmation.js`); the others play on.
+    pub fn resign(&self, owner: &str) -> Result<(), &'static str> {
+        let seat = self.running_seat(owner)?;
+        self.send_json(seat, r#"{"type":"resign"}"#);
+        Ok(())
+    }
+
+    /// Ends `owner`'s game for everyone: the engine is stopped, and the
+    /// runner thread and the feed's end take it from there.
+    pub fn end(&self, owner: &str) -> Result<(), &'static str> {
+        let mut inner = self.inner.lock().unwrap();
+        match &mut inner.game {
+            Some(game) if game.running && game.owner == owner => {
+                observer::kill_recorded(&self.socket);
+                // At once rather than once the runner has seen the engine
+                // exit, so the page reloaded after this shows the end.
+                game.running = false;
+                Ok(())
+            }
+            _ => Err("no game of yours is running"),
+        }
+    }
+
+    /// Starts `owner`'s last game again with the same setup.
+    pub fn rematch(self: &Arc<Self>, owner: &str) -> Result<(), &'static str> {
+        let setup = {
+            let inner = self.inner.lock().unwrap();
+            match &inner.game {
+                Some(game) if game.owner == owner => game.setup.clone(),
+                _ => return Err("no game to repeat"),
+            }
+        };
+        self.start(owner, &setup)
     }
 
     pub fn set_uplink(&self, stream: Option<UnixStream>) {
@@ -288,7 +374,10 @@ impl Play {
 
     /// Posts `order` for `player`; dropped when no engine is connected.
     pub fn send(&self, player: u8, order: &Order) {
-        let json = order_json(order);
+        self.send_json(player, &order_json(order));
+    }
+
+    fn send_json(&self, player: u8, json: &str) {
         let mut record = Vec::with_capacity(json.len() + 6);
         record.push(UPLINK_COMMAND);
         record.extend_from_slice(&(json.len() as u32 + 1).to_le_bytes());

@@ -83,6 +83,8 @@
   "Match over": "Partida acabada",
   "Match over. Next match in %(time)s": "Partida acabada. Propera partida en %(time)s",
   "Match over. Waiting for the next match": "Partida acabada. Esperant la propera partida",
+  "New match": "Partida nova",
+  "Rematch": "Revenja",
   "Live stream starts in %(time)s": "La retransmissió en directe comença d'aquí a %(time)s",
   "Default (browser: %(name)s)": "Per defecte (navegador: %(name)s)",
   "warming up": "escalfament",

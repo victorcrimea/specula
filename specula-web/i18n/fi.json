@@ -83,6 +83,8 @@
   "Match over": "Peli on päättynyt",
   "Match over. Next match in %(time)s": "Peli on päättynyt. Seuraava peli %(time)s kuluttua",
   "Match over. Waiting for the next match": "Peli on päättynyt. Odotetaan seuraavaa peliä",
+  "New match": "Uusi peli",
+  "Rematch": "Uusintapeli",
   "Live stream starts in %(time)s": "Suora lähetys alkaa %(time)s kuluttua",
   "Default (browser: %(name)s)": "Oletus (selain: %(name)s)",
   "warming up": "lämmitys",

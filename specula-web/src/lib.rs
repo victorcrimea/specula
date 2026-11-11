@@ -8,6 +8,7 @@ mod diplomacy;
 mod diplomacy_window;
 mod far;
 mod field;
+mod game_menu;
 mod gpu;
 mod icons;
 mod impostor;
@@ -53,6 +54,8 @@ use std::cell::Cell;
 use std::cell::RefCell;
 use std::collections::BTreeSet;
 use std::rc::Rc;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 
 use specula_assets::command::Command;
 use specula_assets::files::MusicKind;
@@ -88,8 +91,10 @@ use crate::detail::Details;
 use crate::diplomacy::Perspective;
 use crate::diplomacy_window::DiplomacyWindow;
 use crate::field::Field;
+use crate::game_menu::GameMenu;
 use crate::icons::IconAtlas;
 use crate::message_box::MessageBox;
+use crate::message_box::Pending;
 use crate::minimap::Minimap;
 use crate::orders::Preselect;
 use crate::panel::DetailsPanel;
@@ -130,6 +135,14 @@ type FrameCallback = Closure<dyn FnMut(f64)>;
 
 /// A multiplayer turn is 200 ms of simulation time (DEFAULT_TURN_LENGTH);
 /// the real interval depends on game speed and is measured.
+/// The page is a seat's own view on `/play`, whose files come from the
+/// seat's routes, rather than the observers'.
+static SEATED: AtomicBool = AtomicBool::new(false);
+
+pub fn seated() -> bool {
+    SEATED.load(Ordering::Relaxed)
+}
+
 const TURN_MS: f64 = 200.0;
 const TURN_MS_MIN: f64 = 50.0;
 const TURN_MS_MAX: f64 = 1000.0;
@@ -594,6 +607,10 @@ struct App {
     diplomacy_window: Option<DiplomacyWindow>,
     /// Only `/play` asks before deleting.
     message_box: Option<MessageBox>,
+    /// On `/play`: Resign and Exit.
+    game_menu: Option<GameMenu>,
+    /// On `/play`: the seat was reported resigned or beaten.
+    defeat_noticed: bool,
     /// The toggles `/play` ordered that the stream has not reported yet.
     predictions: Predictions,
     /// A turn, the palette or the perspective changed since it was filled;
@@ -706,6 +723,16 @@ struct MatchOver {
     /// Closed by the viewer; it opens again when another match ends.
     closed: bool,
     shown: String,
+    /// On `/play`, where the next match is one the player starts: New
+    /// match, and Rematch if the server keeps the last setup. The bar's
+    /// button is then New match too.
+    owner: Option<OwnerButtons>,
+}
+
+struct OwnerButtons {
+    new_match: HtmlButtonElement,
+    rematch: HtmlButtonElement,
+    can_rematch: bool,
 }
 
 impl MatchOver {
@@ -726,8 +753,15 @@ impl MatchOver {
         self.next_ready = flags & STATUS_NEXT_READY != 0;
         self.switch_at = now + f64::from(switch_in_ms);
         self.button.set_hidden(!ended);
-        self.button.set_disabled(!self.next_ready);
-        self.popup_button.set_disabled(!self.next_ready);
+        if let Some(owner) = &self.owner {
+            self.button.set_disabled(false);
+            self.popup_button.set_hidden(true);
+            owner.new_match.set_hidden(false);
+            owner.rematch.set_hidden(!owner.can_rematch);
+        } else {
+            self.button.set_disabled(!self.next_ready);
+            self.popup_button.set_disabled(!self.next_ready);
+        }
         self.popup.set_hidden(!ended || self.closed);
     }
 
@@ -741,7 +775,9 @@ impl MatchOver {
             return;
         }
         let left = self.switch_at - now;
-        let text = if left > 0.0 {
+        let text = if self.owner.is_some() {
+            lang::translate("Match over")
+        } else if left > 0.0 {
             let seconds = (left / 1000.0).ceil() as u64;
             lang::format(
                 &lang::translate("Match over. Next match in %(time)s"),
@@ -755,6 +791,20 @@ impl MatchOver {
             self.shown = text;
         }
     }
+}
+
+/// The match over popup's New match and Rematch, and the bar's button
+/// relabelled New match; an older page has none.
+fn owner_buttons(document: &Document, status: Option<&game_menu::Status>) -> Option<OwnerButtons> {
+    let new_match = element(document, "match-over-new").ok()?;
+    let rematch = element(document, "match-over-rematch").ok()?;
+    let bar: HtmlElement = element(document, "current").ok()?;
+    lang::set_text(&bar, "New match");
+    Some(OwnerButtons {
+        new_match,
+        rematch,
+        can_rematch: status.is_some_and(|status| status.rematch),
+    })
 }
 
 /// The countdown shown while the server holds back the match's first
@@ -930,6 +980,14 @@ impl App {
             .is_some_and(|player| player.state == PlayerState::Active);
         if self.perspective_select.disabled() != playing {
             self.perspective_select.set_disabled(playing);
+        }
+        let defeated = usize::try_from(seat)
+            .ok()
+            .and_then(|seat| self.scene.players.get(seat))
+            .is_some_and(|player| player.state == PlayerState::Defeated);
+        if defeated && !self.defeat_noticed {
+            self.defeat_noticed = true;
+            game_menu::after_defeat();
         }
         if playing && self.perspective != Perspective::Player(seat as usize) {
             self.perspective = Perspective::Player(seat as usize);
@@ -1536,13 +1594,33 @@ async fn run(
         Page::Observer => Some(Warmup::new(element(&document, "warmup")?)),
     };
     // `/play` is the 3D page for the player of a game the server hosts: the
-    // live stream, and orders.
-    let play = page == Page::Observer && window.location().pathname().as_deref() == Ok("/play");
+    // live stream, and orders. The server gives it only to that player.
+    let owner = page == Page::Observer && window.location().pathname().as_deref() == Ok("/play");
+    let status = if owner {
+        game_menu::status()
+            .await
+            .inspect_err(|error| web_sys::console::error_1(&error.into()))
+            .ok()
+    } else {
+        None
+    };
+    // A player who resigned or was beaten watches the rest as the observers
+    // do, with their delay, and gives no more orders.
+    let seated = owner && !status.as_ref().is_some_and(|status| status.defeated);
+    SEATED.store(seated, Ordering::Relaxed);
     // An older page has no message box; Delete then does nothing without
     // Shift.
-    let message_box = if play {
+    let message_box = if owner {
         MessageBox::new(&document)
             .inspect_err(|error| web_sys::console::error_1(&format!("message box: {error}").into()))
+            .ok()
+    } else {
+        None
+    };
+    // An older page has no menu; the game then ends only by itself.
+    let game_menu = if owner {
+        GameMenu::new(&document)
+            .inspect_err(|error| web_sys::console::error_1(&format!("game menu: {error}").into()))
             .ok()
     } else {
         None
@@ -1550,7 +1628,7 @@ async fn run(
     let live_delay = match page {
         Page::Map => None,
         // The player's stream has no delay, whatever the observers' is.
-        Page::Observer if play => None,
+        Page::Observer if seated => None,
         // A cached older page has no label; the match still shows.
         Page::Observer => element(&document, "live-delay").ok(),
     };
@@ -1566,7 +1644,7 @@ async fn run(
         js_sys::encode_uri_component(&glue_url),
         js_sys::encode_uri_component(&wasm_url)
     );
-    if play {
+    if seated {
         worker_url.push_str("&play=1");
     }
     // A shared link names a match and a moment in it; the worker opens it.
@@ -1637,6 +1715,11 @@ async fn run(
             switch_at: 0.0,
             closed: false,
             shown: String::new(),
+            owner: if owner {
+                owner_buttons(&document, status.as_ref())
+            } else {
+                None
+            },
         },
         stream_start: StreamStart {
             element: stream_start,
@@ -1653,6 +1736,8 @@ async fn run(
         top,
         diplomacy_window,
         message_box,
+        game_menu,
+        defeat_noticed: false,
         predictions: Predictions::default(),
         top_dirty: true,
         top_index: false,
@@ -1660,7 +1745,7 @@ async fn run(
         tooltips,
         data_files: tips::DataFiles::default(),
         detailed_tooltips: false,
-        uplink: play.then(Uplink::open),
+        uplink: seated.then(Uplink::open),
         seat_shown: None,
         cursor: String::new(),
         placement: Placement::default(),
@@ -1671,6 +1756,7 @@ async fn run(
     wire_top(&app);
     wire_diplomacy_window(&app, &window);
     wire_message_box(&app, &window);
+    wire_game_menu(&app);
     wire_command_hotkeys(&app, &window);
     if page == Page::Observer {
         let shadows: HtmlSelectElement = element(&document, "shadows")?;
@@ -2038,6 +2124,42 @@ fn wire_diplomacy_window(app: &Rc<RefCell<App>>, window: &web_sys::Window) {
     on_key.forget();
 }
 
+/// The Menu and its Resign and Exit, which ask first as the session's do.
+fn wire_game_menu(app: &Rc<RefCell<App>>) {
+    let Some((open, resign, exit)) = app.borrow().game_menu.as_ref().map(|menu| {
+        let (open, resign, exit) = menu.buttons();
+        (open.clone(), resign.clone(), exit.clone())
+    }) else {
+        return;
+    };
+    let target = Rc::clone(app);
+    on_click(&open, move || {
+        if let Some(menu) = &target.borrow().game_menu {
+            menu.toggle();
+        }
+    });
+    for (button, resign) in [(resign, true), (exit, false)] {
+        let target = Rc::clone(app);
+        on_click(&button, move || {
+            let app = &mut *target.borrow_mut();
+            if let Some(menu) = &app.game_menu {
+                menu.close();
+            }
+            // `closeOpenDialogs`.
+            if let Some(diplomacy_window) = &mut app.diplomacy_window {
+                diplomacy_window.set_open(false);
+            }
+            if let Some(message_box) = &mut app.message_box {
+                if resign {
+                    message_box.confirm_resign();
+                } else {
+                    message_box.confirm_exit();
+                }
+            }
+        });
+    }
+}
+
 /// The message box's No and Yes, and Escape, its cancel hotkey.
 fn wire_message_box(app: &Rc<RefCell<App>>, window: &web_sys::Window) {
     let Some((no, yes)) = app.borrow().message_box.as_ref().map(|message_box| {
@@ -2055,11 +2177,27 @@ fn wire_message_box(app: &Rc<RefCell<App>>, window: &web_sys::Window) {
     let target = Rc::clone(app);
     on_click(&yes, move || {
         let mut app = target.borrow_mut();
-        let entities = app.message_box.as_mut().and_then(MessageBox::accept);
-        if let Some(entities) = entities
-            && let Some(uplink) = &app.uplink
-        {
-            uplink.send(&Command::Delete { entities });
+        match app.message_box.as_mut().and_then(MessageBox::accept) {
+            Some(Pending::Delete(entities)) => {
+                if let Some(uplink) = &app.uplink {
+                    uplink.send(&Command::Delete { entities });
+                }
+            }
+            // The stream reports the defeat, which moves the page on.
+            Some(Pending::Resign) => wasm_bindgen_futures::spawn_local(async {
+                if let Err(error) = game_menu::post("resign").await {
+                    web_sys::console::error_1(&error.into());
+                }
+            }),
+            // Reloaded either way: a game that had already ended shows its
+            // end on the seat's stream, sooner than the observers' delay.
+            Some(Pending::Exit) => wasm_bindgen_futures::spawn_local(async {
+                if let Err(error) = game_menu::post("end").await {
+                    web_sys::console::error_1(&error.into());
+                }
+                game_menu::reload();
+            }),
+            None => {}
         }
     });
     let target = Rc::clone(app);
@@ -3118,9 +3256,23 @@ fn wire_playback(app: &Rc<RefCell<App>>) {
             app.match_over.close_button.clone(),
         )
     };
+    let owner = app
+        .borrow()
+        .match_over
+        .owner
+        .as_ref()
+        .map(|owner| (owner.new_match.clone(), owner.rematch.clone()));
+    if let Some((new_match, rematch)) = owner {
+        on_click(&new_match, open_setup);
+        on_click(&rematch, game_menu::rematch);
+    }
     let target = Rc::clone(app);
     let on_current = Closure::<dyn FnMut()>::new(move || {
         let app = target.borrow();
+        if app.match_over.owner.is_some() {
+            open_setup();
+            return;
+        }
         if app.match_over.archived {
             // The live stream is a page without the match in its link.
             if let Some(window) = web_sys::window() {
@@ -3144,6 +3296,13 @@ fn wire_playback(app: &Rc<RefCell<App>>) {
     if let Some(copy_link) = copy_link {
         let target = Rc::clone(app);
         on_click(&copy_link, move || copy_match_link(&target));
+    }
+}
+
+/// The setup page, for a new game in place of the player's.
+fn open_setup() {
+    if let Some(window) = web_sys::window() {
+        let _ = window.location().set_href("/play?new");
     }
 }
 
@@ -3302,6 +3461,12 @@ fn connect(app: &Rc<RefCell<App>>) {
                     .borrow_mut()
                     .match_over
                     .show_status(flags, u32_at(33).unwrap_or(0), now);
+                {
+                    let app = receiver.borrow();
+                    if let Some(menu) = &app.game_menu {
+                        menu.update(!seated() || app.defeat_noticed, app.match_over.ended);
+                    }
+                }
                 receiver.borrow_mut().show_live_delay();
                 receiver.borrow_mut().show_status(
                     first,
