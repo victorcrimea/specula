@@ -31,6 +31,7 @@ use specula_assets::variation;
 use specula_assets::variation::Selections;
 
 use super::Common;
+use super::Dot;
 use super::Funds;
 use super::LaunchExtra;
 use super::Los;
@@ -890,6 +891,7 @@ impl Seat {
         // The entities as the seat's stream holds them.
         let mut entities = Vec::with_capacity(view.len());
         self.stream.dot_choices.clear();
+        self.stream.dot_starts.clear();
         for entity in &view {
             let handle = self.handles.of(entity.id);
             let template = self.local.template(feed, &mut self.stream, entity.template);
@@ -914,6 +916,10 @@ impl Seat {
                 let chosen = self.chosen(feed, actors, entity.id, visual, selections);
                 self.stream.dot_choices.insert(handle, chosen);
             }
+            // In the feed's tables, as the observers' dots are.
+            let dot = Dot::new(entity, 0, false, input.turn, 0, 0);
+            let starts = feed.starts(entity.id, &dot, start);
+            self.stream.dot_starts.insert(handle, starts);
             entities.push(Entity {
                 id: handle,
                 template,

@@ -1142,6 +1142,11 @@ struct Stream {
     choices: Table<[Vec<u32>; 3]>,
     choice_ids: HashMap<[Vec<u32>; 3], u32>,
     dot_choices: HashMap<u32, u32>,
+    /// A seat's: by id this turn, the turns the entities' animations and
+    /// syncs started on as the observers' stream counts them, since an
+    /// entity that comes back into sight gets a new id but the engine
+    /// played its animation and decay on all the while.
+    dot_starts: HashMap<u32, (u32, u32)>,
     /// A seat's additions to this turn's launches, by projectile id.
     launch_extras: HashMap<u32, LaunchExtra>,
 }
@@ -1188,6 +1193,7 @@ impl Stream {
             choices: Table::new(),
             choice_ids: HashMap::new(),
             dot_choices: HashMap::new(),
+            dot_starts: HashMap::new(),
             launch_extras: HashMap::new(),
         }
     }
@@ -1241,6 +1247,24 @@ impl Stream {
             }
         };
         index as u32 + 1
+    }
+
+    /// The turns `dot`'s animation and sync started on, from last turn's
+    /// dot of `id`; `start` for the first turn of a match.
+    fn starts(&self, id: u32, dot: &Dot, start: bool) -> (u32, u32) {
+        let mut starts = (dot.animation_turn, dot.sync_turn);
+        // The hook only sees the state after each turn, so an animation
+        // counts as started on the turn it first shows. The old match's
+        // ids are unrelated to the new one's.
+        if let Some(before) = self.dots.get(&id).filter(|_| !start) {
+            if before.animation == dot.animation && before.once == dot.once {
+                starts.0 = before.animation_turn;
+            }
+            if before.sync_repeat == dot.sync_repeat && before.sync_offset == dot.sync_offset {
+                starts.1 = before.sync_turn;
+            }
+        }
+        starts
     }
 
     /// Encodes a turn of `entities`, whose indices are this stream's, and
@@ -1307,19 +1331,11 @@ impl Stream {
                     dot.chosen = *chosen;
                     dot.seed = 0;
                 }
-                // The hook only sees the state after each turn, so an
-                // animation counts as started on the turn it first shows.
-                // The old match's ids are unrelated to the new one's.
-                if let Some(before) = self.dots.get(&entity.id).filter(|_| !start) {
-                    if before.animation == dot.animation && before.once == dot.once {
-                        dot.animation_turn = before.animation_turn;
-                    }
-                    if before.sync_repeat == dot.sync_repeat
-                        && before.sync_offset == dot.sync_offset
-                    {
-                        dot.sync_turn = before.sync_turn;
-                    }
-                }
+                (dot.animation_turn, dot.sync_turn) = self
+                    .dot_starts
+                    .get(&entity.id)
+                    .copied()
+                    .unwrap_or_else(|| self.starts(entity.id, &dot, start));
                 (entity.id, dot)
             })
             .collect();
