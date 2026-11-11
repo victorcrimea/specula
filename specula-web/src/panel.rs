@@ -432,6 +432,7 @@ struct ResearchColumn {
 
 /// A selected entity, as the right panels read it.
 struct RightState {
+    id: u32,
     owner: i32,
     template: u32,
     groups: Groups,
@@ -453,6 +454,8 @@ struct UpgradeItem {
     /// The part done, while it upgrades.
     progress: Option<f64>,
     tooltip: String,
+    /// `upgradeEntity` or `cancelUpgradeEntity`, for the seat's own.
+    order: Option<Command>,
 }
 
 /// `setupButton`'s sprite modifier.
@@ -1883,6 +1886,7 @@ impl CommandsPanel {
                 buildable: list(detail::BUILDABLE),
             });
             states.push(RightState {
+                id,
                 owner: dot.owner,
                 template: dot.template,
                 groups,
@@ -1900,7 +1904,7 @@ impl CommandsPanel {
         // `getNumberOfRightPanelButtons` puts the rest after them.
         let gate = gate_items(scene, &states);
         let pack = pack_items(scene, &states);
-        let upgrades = upgrade_items(view, &states, player);
+        let upgrades = upgrade_items(view, &states, player, controls);
         let upgrades = &upgrades[..upgrades.len().min(MAX_TRAINABLE - gate.len() - pack.len())];
         let before = gate.len() + pack.len() + upgrades.len();
         let trainable = list_items(
@@ -1929,7 +1933,9 @@ impl CommandsPanel {
             cell.show_glyph(item.key, false);
             cell.cell.tooltip(&lang::translate(item.tooltip));
         }
-        for (cell, item) in upgrade_cells.iter_mut().zip(upgrades) {
+        for (i, (cell, item)) in upgrade_cells.iter_mut().zip(upgrades).enumerate() {
+            self.training_orders[gate.len() + pack.len() + i] =
+                item.order.clone().map(Request::Order);
             cell.show(unit_portrait(view, &item.name), item.modifier, item.count);
             cell.marker.hidden(false);
             match item.progress {
@@ -2241,9 +2247,23 @@ fn same_restriction_category(a: &JsValue, b: &JsValue) -> bool {
     false
 }
 
+/// Not upgrading, and not training or researching.
+fn is_upgradable(scene: &Scene, state: &RightState) -> bool {
+    upgrading_to(scene, state).is_none()
+        && !matches!(
+            &state.groups[detail::QUEUE],
+            Some(Group::Queue(queue)) if !queue.items.is_empty()
+        )
+}
+
 /// `g_SelectionPanels.Upgrade`, for an observer: the first selected
 /// entity's upgrades, when every selected entity is of one template.
-fn upgrade_items(view: &View, states: &[RightState], player: i32) -> Vec<UpgradeItem> {
+fn upgrade_items(
+    view: &View,
+    states: &[RightState],
+    player: i32,
+    controls: bool,
+) -> Vec<UpgradeItem> {
     let scene = view.scene;
     let Some(first) = states.first() else {
         return Vec::new();
@@ -2276,16 +2296,9 @@ fn upgrade_items(view: &View, states: &[RightState], player: i32) -> Vec<Upgrade
             .filter(|(_, target)| target.as_deref() == Some(name))
             .map(|(progress, _)| progress)
             .collect();
-        // Not upgrading, and not training or researching.
         let upgradable = states
             .iter()
-            .filter(|state| {
-                upgrading_to(scene, state).is_none()
-                    && !matches!(
-                        &state.groups[detail::QUEUE],
-                        Some(Group::Queue(queue)) if !queue.items.is_empty()
-                    )
-            })
+            .filter(|state| is_upgradable(scene, state))
             .count() as u32;
         let (generic, specific) = tips::name_parts(&data);
         let primary = if specific.is_empty() {
@@ -2309,7 +2322,7 @@ fn upgrade_items(view: &View, states: &[RightState], player: i32) -> Vec<Upgrade
                 &[("primaryName", primary), ("secondaryName", secondary)],
             )
         };
-        let (modifier, count, progress, tooltip);
+        let (modifier, count, progress, tooltip, order);
         if upgrading.is_empty() && upgradable > 0 {
             // `multiplyEntityCosts(item, upgradableEntStates.length)`.
             let short = needed_amounts(scene, player, item, |cost| {
@@ -2330,6 +2343,16 @@ fn upgrade_items(view: &View, states: &[RightState], player: i32) -> Vec<Upgrade
             };
             count = if upgradable > 1 { upgradable } else { 0 };
             progress = None;
+            // As the training buttons: the engine refuses what cannot be
+            // paid for.
+            order = (controls && !matches!(modifier, Modifier::Grey)).then(|| Command::Upgrade {
+                entities: states
+                    .iter()
+                    .filter(|state| is_upgradable(scene, state))
+                    .map(|state| state.id)
+                    .collect(),
+                template: name.to_string(),
+            });
             // `getEntityCostTooltip` of the upgrade's own costs for the
             // whole selection.
             let costs: Vec<(String, f64)> = item
@@ -2362,10 +2385,14 @@ fn upgrade_items(view: &View, states: &[RightState], player: i32) -> Vec<Upgrade
                     .fold(0.0, f64::max),
             );
             tooltip = lang::translate("Cancel Upgrading");
+            order = controls.then(|| Command::CancelUpgrade {
+                entities: states.iter().map(|state| state.id).collect(),
+            });
         } else {
             modifier = Modifier::Grey;
             count = 0;
             progress = None;
+            order = None;
             tooltip = tooltip::objection_font(&lang::translate_plural(
                 "Cannot upgrade when the entity is training, researching or already upgrading.",
                 "Cannot upgrade when all entities are training, researching or already upgrading.",
@@ -2378,6 +2405,7 @@ fn upgrade_items(view: &View, states: &[RightState], player: i32) -> Vec<Upgrade
             count,
             progress,
             tooltip,
+            order,
         });
     }
     items

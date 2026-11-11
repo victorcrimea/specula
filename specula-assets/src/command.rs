@@ -53,6 +53,8 @@ const PATROL: u8 = 28;
 const CALL_TO_ARMS: u8 = 29;
 const ALERT_RAISE: u8 = 30;
 const ALERT_END: u8 = 31;
+const UPGRADE: u8 = 32;
+const CANCEL_UPGRADE: u8 = 33;
 
 /// Above every command kind.
 pub const QUERY_TAG: u8 = 0x80;
@@ -230,6 +232,13 @@ pub enum Command {
     },
     /// "alert-end".
     AlertEnd {
+        entities: Vec<u32>,
+    },
+    Upgrade {
+        entities: Vec<u32>,
+        template: String,
+    },
+    CancelUpgrade {
         entities: Vec<u32>,
     },
 }
@@ -421,7 +430,9 @@ impl Command {
             | Command::DropsiteSharing { entities, .. }
             | Command::CallToArms { entities, .. }
             | Command::AlertRaise { entities }
-            | Command::AlertEnd { entities } => ids.extend(entities.iter_mut()),
+            | Command::AlertEnd { entities }
+            | Command::Upgrade { entities, .. }
+            | Command::CancelUpgrade { entities } => ids.extend(entities.iter_mut()),
             Command::Attack {
                 entities, target, ..
             }
@@ -647,6 +658,15 @@ impl Command {
                 out.0.push(ALERT_END);
                 out.entities(entities);
             }
+            Command::Upgrade { entities, template } => {
+                out.0.push(UPGRADE);
+                out.entities(entities);
+                out.text(template);
+            }
+            Command::CancelUpgrade { entities } => {
+                out.0.push(CANCEL_UPGRADE);
+                out.entities(entities);
+            }
             Command::DropsiteSharing { shared, entities } => {
                 out.0
                     .extend_from_slice(&[DROPSITE_SHARING, u8::from(*shared)]);
@@ -868,6 +888,13 @@ impl Command {
                 entities: entities(&mut input)?,
             },
             ALERT_END => Command::AlertEnd {
+                entities: entities(&mut input)?,
+            },
+            UPGRADE => Command::Upgrade {
+                entities: entities(&mut input)?,
+                template: input.text()?,
+            },
+            CANCEL_UPGRADE => Command::CancelUpgrade {
                 entities: entities(&mut input)?,
             },
             DROPSITE_SHARING => Command::DropsiteSharing {

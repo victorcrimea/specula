@@ -717,6 +717,17 @@ fn order_json(order: &Order) -> String {
             out.text("type", "alert-end");
             out.entities("entities", entities);
         }
+        Order::Upgrade { entities, template } => {
+            out.text("type", "upgrade");
+            out.entities("entities", entities);
+            out.text("template", template);
+            out.boolean("queued", false);
+        }
+        Order::CancelUpgrade { entities } => {
+            out.text("type", "cancel-upgrade");
+            out.entities("entities", entities);
+            out.boolean("queued", false);
+        }
         Order::DropsiteSharing { shared, entities } => {
             out.text("type", "set-dropsite-sharing");
             out.entities("entities", entities);
