@@ -80,7 +80,12 @@
 //!   classes, varint ejectable turret occupants;
 //! - 4194304 upgrades (67108864): varint index into the list table, the
 //!   upgrades of an Upgrade, each with the costs, requirements and limits
-//!   of the upgrade as the Upgrade panel reads them (time left out).
+//!   of the upgrade as the Upgrade panel reads them (time left out);
+//! - 8388608 trade route (134217728): varint first and second market ids,
+//!   0 for none, f32 `GetTraderGainMultiplier`;
+//! - 16777216 market (268435456): f32 `GetInternationalBonus`;
+//! - 33554432 trade garrison (536870912): f32 a trader's
+//!   `GetGarrisonGainMultiplier`, for those that have one.
 //!
 //! Strings (resource types, templates and technologies, stances, the
 //! upgrade target, goods, the marker actor) are 1-based indices into the visual stream's
@@ -157,7 +162,10 @@ const STANCES: usize = 19;
 const FORMATIONS: usize = 20;
 const COMMANDS: usize = 21;
 const UPGRADES: usize = 22;
-const SLOTS: usize = 23;
+const TRADE_ROUTE: usize = 23;
+const MARKET: usize = 24;
+const TRADE_GARRISON: usize = 25;
+const SLOTS: usize = 26;
 /// Rally positions are sent in 1/16 m, finer than a line is wide.
 const RALLY_UNITS_PER_METRE: f32 = 16.0;
 const TURN_MS: f64 = 200.0;
@@ -297,6 +305,14 @@ fn encode_group(slot: usize, details: &EntityDetails) -> Option<Vec<u8>> {
         RESEARCHABLE => out.varint(u64::from(details.researchable?)),
         BUILDABLE => out.varint(u64::from(details.buildable?)),
         UPGRADES => out.varint(u64::from(details.upgrades?)),
+        TRADE_ROUTE => {
+            let route = details.trade_route.as_ref()?;
+            out.varint(u64::from(route.first));
+            out.varint(u64::from(route.second));
+            out.f32(route.multiplier);
+        }
+        MARKET => out.f32(details.market_bonus?),
+        TRADE_GARRISON => out.f32(details.trade_garrison?),
         STANCES => {
             let stances = details.stances.as_ref()?;
             out.varint(stances.len() as u64);
@@ -824,6 +840,15 @@ fn write_players(out: &mut Writer, players: &[PlayerGui]) {
             out.varint(one_based(*resource));
             out.f32(*buy);
             out.f32(*sell);
+        }
+        out.u8(u8::from(player.can_barter));
+        out.varint(player.trading_goods.len() as u64);
+        for (resource, percent) in &player.trading_goods {
+            out.varint(one_based(*resource));
+            out.u8(*percent);
+        }
+        for count in player.traders {
+            out.varint(u64::from(count));
         }
     }
 }

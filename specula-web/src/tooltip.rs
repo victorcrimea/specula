@@ -23,6 +23,9 @@ use crate::lang::translate;
 pub const ATTRIBUTE: &str = "data-tooltip";
 /// A setup.xml tooltip name, `sessionToolTip` when absent.
 pub const STYLE_ATTRIBUTE: &str = "data-tooltip-style";
+/// The view's action tooltip, `informationTooltip`, with a sprite of its
+/// own.
+pub const INFORMATION: &str = "informationTooltip";
 const LONG_PRESS_MS: f64 = 500.0;
 /// A touch that moves further is a pan, not a press.
 const LONG_PRESS_SLOP: f64 = 10.0;
@@ -80,6 +83,13 @@ fn style(name: &str) -> Style {
             delay_ms: 100.0,
             offset: [-4.0, -4.0],
             bottom: true,
+        },
+        // gui/session/styles.xml's, which the session shows at once.
+        INFORMATION => Style {
+            font: "sans-bold-14",
+            delay_ms: 0.0,
+            offset: [16.0, 32.0],
+            bottom: false,
         },
         _ => Style {
             font: "sans-14",
@@ -157,8 +167,16 @@ impl Tooltips {
                 .target
                 .dyn_ref::<HtmlElement>()
                 .is_none_or(|element| element.offset_parent().is_some());
-        if markup.is_empty() || !visible {
+        if !visible {
             hide(state);
+            return;
+        }
+        // The view's action tooltip comes and goes under a still mouse, as
+        // the engine's `informationTooltip` does.
+        if markup.is_empty() {
+            if state.shown.take().is_some() {
+                state.tooltip.set_hidden(true);
+            }
             return;
         }
         let name = pending
@@ -172,6 +190,11 @@ impl Tooltips {
         let at = pending.at;
         if state.shown.as_ref() != Some(&(markup.clone(), name.clone())) {
             state.tooltip.set_inner_html(&to_html(&markup));
+            state.tooltip.set_class_name(if name == INFORMATION {
+                "information"
+            } else {
+                ""
+            });
             // Measured in its font before `place` moves it.
             state.placed = font_css(style.font);
             let _ = state.tooltip.set_attribute("style", &state.placed);

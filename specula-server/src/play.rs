@@ -625,6 +625,7 @@ fn order_json(order: &Order) -> String {
             target,
             resource_type,
             resource_template,
+            source,
         } => {
             out.text("type", "set-rallypoint");
             out.entities("entities", entities);
@@ -634,6 +635,9 @@ fn order_json(order: &Order) -> String {
             data.text("command", order);
             if *target != 0 {
                 data.raw("target", &target.to_string());
+            }
+            if *source != 0 {
+                data.raw("source", &source.to_string());
             }
             // Without them, a unit sent to the rally point after its
             // resource ran out throws in `GatherNearPosition`, which aborts
@@ -744,6 +748,20 @@ fn order_json(order: &Order) -> String {
             out.entities("entities", entities);
             out.boolean("queued", false);
         }
+        Order::Barter { sell, buy, amount } => {
+            out.text("type", "barter");
+            out.text("sell", sell);
+            out.text("buy", buy);
+            out.raw("amount", &amount.to_string());
+        }
+        Order::SetTradingGoods { goods } => {
+            out.text("type", "set-trading-goods");
+            let mut shares = Json::new();
+            for (code, percent) in goods {
+                shares.raw(code, &percent.to_string());
+            }
+            out.raw("tradingGoods", &shares.finish());
+        }
         Order::DropsiteSharing { shared, entities } => {
             out.text("type", "set-dropsite-sharing");
             out.entities("entities", entities);
@@ -759,6 +777,29 @@ fn order_json(order: &Order) -> String {
             entities,
             target,
         } => out.targeted("occupy-turret", *flags, entities, *target),
+        Order::SetupTradeRoute {
+            flags,
+            entities,
+            target,
+        } => {
+            out.text("type", "setup-trade-route");
+            out.entities("entities", entities);
+            out.raw("target", &target.to_string());
+            out.raw("source", "null");
+            out.raw("route", "null");
+            out.boolean("queued", flags & QUEUED != 0);
+            out.text("formation", NULL_FORMATION);
+        }
+        Order::CancelTradeRoute {
+            flags,
+            entities,
+            target,
+        } => {
+            out.text("type", "cancel-setup-trade-route");
+            out.entities("entities", entities);
+            out.raw("target", &target.to_string());
+            out.boolean("queued", flags & QUEUED != 0);
+        }
         Order::Patrol {
             flags,
             entities,

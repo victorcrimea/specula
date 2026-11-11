@@ -3,8 +3,8 @@
 //! selection_panels.js and unit_actions.js): up to six 32 px buttons, which
 //! only the commands the viewer is allowed to see make. A pure observer is
 //! allowed only focus-rally and the shared dropsite lock; the player of
-//! `/play` sees the rest, all of which act but Barter & Trade, as there is
-//! no trade dialog. Their hotkeys go through `CommandRow::hotkey`.
+//! `/play` sees the rest, all of which act. Their hotkeys go through
+//! `CommandRow::hotkey`.
 
 use specula_assets::command::Command;
 use web_sys::Document;
@@ -76,6 +76,8 @@ enum Press {
     Preselect(Preselect),
     /// `Engine.CameraMoveTo`, x and z in metres.
     Focus([f32; 2]),
+    /// `g_TradeDialog.toggle`.
+    ToggleTrade,
 }
 
 impl Press {
@@ -115,8 +117,7 @@ fn commands_none(order: &Command) -> bool {
 /// The keys of the command row's hotkeys and the idle worker button's, as
 /// `formatHotkeyCombinations`
 /// writes the engine's defaults (`config/default.cfg`); none for the
-/// unassigned ones. Barter's Ctrl+B is left out, as nothing here opens
-/// the trade dialog.
+/// unassigned ones.
 fn hotkey_keys(hotkey: &str) -> Option<&'static str> {
     Some(match hotkey {
         "session.unload" | "session.unloadturrets" => "U",
@@ -127,6 +128,8 @@ fn hotkey_keys(hotkey: &str) -> Option<&'static str> {
         "session.backtowork" => "Y",
         "session.guard" => "G",
         "session.patrol" => "P",
+        "session.gui.barter.toggle" => "Ctrl+B",
+        "session.massbarter" | "session.fulltradeswap" => "Shift",
         // `GetScancodeKeyNames` gives SDL's names, "." and "Keypad .".
         "selection.idleworker" => "., Keypad .",
         _ => return None,
@@ -135,6 +138,11 @@ fn hotkey_keys(hotkey: &str) -> Option<&'static str> {
 
 /// `colorizeHotkey("%(hotkey)s" + " ", hotkey)`.
 pub(crate) fn hotkey_prefix(hotkey: &str) -> String {
+    format!("{} ", hotkey_text(hotkey))
+}
+
+/// `colorizeHotkey("%(hotkey)s", hotkey)`.
+pub(crate) fn hotkey_text(hotkey: &str) -> String {
     let key = match hotkey_keys(hotkey) {
         Some(key) => key.to_string(),
         None => lang::format(
@@ -142,7 +150,7 @@ pub(crate) fn hotkey_prefix(hotkey: &str) -> String {
             &[("hotkeyName", hotkey)],
         ),
     };
-    format!("{} ", tooltip::colored(&format!("\\[{key}]"), HOTKEY_COLOR))
+    tooltip::colored(&format!("\\[{key}]"), HOTKEY_COLOR)
 }
 
 /// A selected entity.
@@ -669,19 +677,20 @@ fn infos(context: &Context) -> Vec<Info> {
         }),
     );
 
-    // select-trading-goods, which would open the trade dialog.
+    // select-trading-goods
     add(
         PLAYER,
         any(&|entity| context.has_component(entity, COMPONENT_MARKET)).then(|| Info {
             name: "select-trading-goods",
             icon: "command-economics",
-            tooltip: tip(
+            tooltip: hotkey_tip(
+                "session.gui.barter.toggle",
                 "Barter & Trade",
                 "Open the dialog for managing resource trading and bartering.",
             ),
             count: 0,
             enabled: true,
-            press: None,
+            press: Some(Press::ToggleTrade),
         }),
     );
 
@@ -1005,5 +1014,6 @@ fn request(press: Press, shift: bool) -> Option<Request> {
         },
         Press::Preselect(preselect) => Request::Preselect(preselect),
         Press::Focus([x, z]) => Request::Focus { x, z },
+        Press::ToggleTrade => Request::ToggleTrade,
     })
 }

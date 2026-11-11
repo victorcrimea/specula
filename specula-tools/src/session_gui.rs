@@ -34,6 +34,8 @@ use std::process::ExitCode;
 use fast_image_resize::PixelType;
 use fast_image_resize::Resizer;
 use fast_image_resize::images::Image;
+use specula_assets::bc;
+use specula_tools::dds;
 
 const DEFAULT_MOD: &str = "../0ad/binaries/data/mods/public";
 const DEFAULT_OUTPUT: &str = "specula-web/gui";
@@ -54,7 +56,7 @@ const BROTLI_QUALITY: u32 = 11;
 const BROTLI_WINDOW_BITS: u32 = 22;
 
 /// (custom property key, path under `UI`), copied as they are.
-const TEXTURES: [(&str, &str); 108] = [
+const TEXTURES: [(&str, &str); 113] = [
     ("hud-panels", "session/hud_panels.png"),
     ("line-horiz", "global/border/line_horiz.png"),
     ("line-vert", "global/border/line_vert.png"),
@@ -237,12 +239,18 @@ const TEXTURES: [(&str, &str); 108] = [
         "stone-button-over",
         "global/button/button_stone_selected.png",
     ),
+    ("arrow-up", "global/button/arrowbox_up.dds"),
+    ("arrow-up-over", "global/button/arrowbox_up_over.dds"),
+    ("arrow-down", "global/button/arrowbox_dn.dds"),
+    ("arrow-down-over", "global/button/arrowbox_dn_over.dds"),
+    ("info", "global/icon/info.png"),
 ];
-/// The `ModernDialog` and `ModernButtonRed` sprites' textures
+/// The `ModernDialog`, `ModernButtonRed` and `ModernGoldLine` sprites' textures
 /// (`gui/common/modern/sprites.xml`),
 /// which only the engine's own `mod` holds, under the same `UI` path.
-const MOD_TEXTURES: [(&str, &str); 16] = [
+const MOD_TEXTURES: [(&str, &str); 17] = [
     ("dialog-background", "global/modern/background.png"),
+    ("gold-line", "global/modern/gold-separator.png"),
     ("dialog-shadow", "global/modern/shadow-low.png"),
     ("dialog-border", "global/modern/border.png"),
     ("dialog-deco-top", "global/modern/dialog-deco-top.png"),
@@ -695,8 +703,15 @@ fn decode_dds(bytes: &[u8]) -> Result<Rgba, &'static str> {
     let u32_at = |at: usize| u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap());
     let height = u32_at(12);
     let width = u32_at(16);
+    // The trade dialog's arrows are DXT1.
     if u32_at(80) & FOURCC_FLAG != 0 {
-        return Err("compressed DDS, not expected here");
+        let format = dds::block_format(bytes).map_err(|_| "unknown compressed DDS format")?;
+        let pixels = bc::decode(format, width, height, &bytes[HEADER..])?;
+        return Ok(Rgba {
+            width,
+            height,
+            pixels,
+        });
     }
     let bits = u32_at(88);
     if bits != 32 {

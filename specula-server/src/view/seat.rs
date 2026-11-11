@@ -1163,10 +1163,12 @@ impl Seat {
             details.data.insert(local, *hash);
             self.named.insert(*hash);
         }
+        let me = self.player as usize;
         details.player_gui = source
             .player_gui
             .iter()
-            .map(|player| PlayerGui {
+            .enumerate()
+            .map(|(index, player)| PlayerGui {
                 formations: player
                     .formations
                     .iter()
@@ -1183,6 +1185,27 @@ impl Seat {
                         )
                     })
                     .collect(),
+                can_barter: player.can_barter,
+                // The engine shows a player only its own traders.
+                trading_goods: if all || index == me {
+                    player
+                        .trading_goods
+                        .iter()
+                        .map(|(resource, percent)| {
+                            (
+                                self.local.optional(feed, &mut self.stream, *resource),
+                                *percent,
+                            )
+                        })
+                        .collect()
+                } else {
+                    Vec::new()
+                },
+                traders: if all || index == me {
+                    player.traders
+                } else {
+                    [0; 5]
+                },
             })
             .collect();
         // Every group is compared with what the seat holds, so all count as
@@ -1248,6 +1271,8 @@ impl Seat {
                 .collect()
         });
         out.experience = groups.experience;
+        out.market_bonus = groups.market_bonus;
+        out.trade_garrison = groups.trade_garrison.filter(|_| full);
         out.trader = groups.trader.clone().map(|mut trader| {
             trader.goods = local.optional(feed, stream, trader.goods);
             trader
@@ -1345,6 +1370,19 @@ impl Seat {
                 self.handles.of(holder)
             }
         });
+        // Another player's route is not the seat's to see.
+        out.trade_route = groups
+            .trade_route
+            .clone()
+            .filter(|_| full)
+            .map(|mut route| {
+                for market in [&mut route.first, &mut route.second] {
+                    if *market != 0 {
+                        *market = self.handles.of(*market);
+                    }
+                }
+                route
+            });
         out.rally = groups.rally.as_ref().map(|rally| crate::feed::Rally {
             marker: local.optional(feed, stream, rally.marker),
             points: rally.points.clone(),

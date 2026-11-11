@@ -13,7 +13,13 @@ use crate::stream::Writer;
 
 const MESSAGE_KEYFRAME: u8 = 1;
 const MESSAGE_DELTA: u8 = 2;
-/// Archived matches keep it; it cannot clear a group.
+/// Archived matches keep it; it has no market or trade garrison group.
+const DETAIL_VERSION_NO_TRADE_GAIN: u8 = 11;
+/// Archived matches keep it; it also has no trade route group.
+const DETAIL_VERSION_NO_TRADE_ROUTE: u8 = 10;
+/// Archived matches keep it; its player table also has no trade state.
+const DETAIL_VERSION_NO_TRADE: u8 = 9;
+/// Archived matches keep it; it also cannot clear a group.
 const DETAIL_VERSION_NO_CLEARED: u8 = 8;
 /// Archived matches keep it; it has no stances, formations, commands,
 /// upgrades or player table.
@@ -54,7 +60,10 @@ pub const STANCES: usize = 19;
 pub const FORMATIONS: usize = 20;
 pub const COMMANDS: usize = 21;
 pub const UPGRADES: usize = 22;
-const SLOTS: usize = 23;
+pub const TRADE_ROUTE: usize = 23;
+pub const MARKET: usize = 24;
+pub const TRADE_GARRISON: usize = 25;
+const SLOTS: usize = 26;
 /// Rally positions come in 1/16 m.
 pub const RALLY_UNITS_PER_METRE: f32 = 16.0;
 
@@ -115,6 +124,17 @@ pub enum Group {
         goods: u32,
         gain: u32,
     },
+    /// A trader's first and second markets, 0 for none, and its
+    /// `GetTraderGainMultiplier`.
+    TradeRoute {
+        first: u32,
+        second: u32,
+        multiplier: f32,
+    },
+    /// A market's `GetInternationalBonus`.
+    MarketBonus(f32),
+    /// A trader's `GetGarrisonGainMultiplier`.
+    TradeGarrison(f32),
     Rally {
         /// The flag's actor.
         marker: u32,
@@ -163,6 +183,14 @@ pub struct PlayerGui {
     pub formations: Vec<u32>,
     /// 1-based resource code, buy price, sell price.
     pub prices: Vec<(u32, f32, f32)>,
+    /// Whether the player has a market, `canBarter`.
+    pub can_barter: bool,
+    /// 1-based resource code and percent, `GetTradingGoods`; empty for
+    /// another player than a seat's own.
+    pub trading_goods: Vec<(u32, u8)>,
+    /// `GetTraderNumber`: land total, trading, garrisoned; ship total,
+    /// trading.
+    pub traders: [u16; 5],
 }
 
 /// A rally point and the line to it, in `RALLY_UNITS_PER_METRE`.
@@ -334,6 +362,9 @@ impl Details {
         if !matches!(
             version,
             DETAIL_VERSION
+                | DETAIL_VERSION_NO_TRADE_GAIN
+                | DETAIL_VERSION_NO_TRADE_ROUTE
+                | DETAIL_VERSION_NO_TRADE
                 | DETAIL_VERSION_NO_CLEARED
                 | DETAIL_VERSION_NO_COMMANDS
                 | DETAIL_VERSION_NO_BUILDABLE
@@ -472,7 +503,21 @@ impl Details {
                 let prices = (0..cursor.varint()?)
                     .map(|_| Ok((cursor.varint_u32()?, cursor.f32()?, cursor.f32()?)))
                     .collect::<Result<_, &'static str>>()?;
-                Ok(PlayerGui { formations, prices })
+                let mut player = PlayerGui {
+                    formations,
+                    prices,
+                    ..PlayerGui::default()
+                };
+                if self.version > DETAIL_VERSION_NO_TRADE {
+                    player.can_barter = cursor.u8()? != 0;
+                    player.trading_goods = (0..cursor.varint()?)
+                        .map(|_| Ok((cursor.varint_u32()?, cursor.u8()?)))
+                        .collect::<Result<_, &'static str>>()?;
+                    for count in &mut player.traders {
+                        *count = u16::try_from(cursor.varint()?).unwrap_or(u16::MAX);
+                    }
+                }
+                Ok(player)
             })
             .collect::<Result<_, &'static str>>()?;
         Ok(())
@@ -574,6 +619,17 @@ impl Details {
                     out.varint(u64::from(*resource));
                     out.f32(*buy);
                     out.f32(*sell);
+                }
+                if self.version > DETAIL_VERSION_NO_TRADE {
+                    out.u8(u8::from(player.can_barter));
+                    out.varint(player.trading_goods.len() as u64);
+                    for (resource, percent) in &player.trading_goods {
+                        out.varint(u64::from(*resource));
+                        out.u8(*percent);
+                    }
+                    for count in player.traders {
+                        out.varint(u64::from(count));
+                    }
                 }
             }
         }
@@ -805,6 +861,13 @@ fn read_group(
             goods: cursor.varint_u32()?,
             gain: cursor.varint_u32()?,
         },
+        TRADE_ROUTE => Group::TradeRoute {
+            first: cursor.varint_u32()?,
+            second: cursor.varint_u32()?,
+            multiplier: cursor.f32()?,
+        },
+        MARKET => Group::MarketBonus(cursor.f32()?),
+        TRADE_GARRISON => Group::TradeGarrison(cursor.f32()?),
         STATS => Group::Stats(cursor.u64()?),
         RALLY => {
             let marker = cursor.varint_u32()?;
@@ -947,6 +1010,16 @@ fn write_group(out: &mut Writer, group: &Group, owners: bool) {
             out.varint(u64::from(*goods));
             out.varint(u64::from(*gain));
         }
+        Group::TradeRoute {
+            first,
+            second,
+            multiplier,
+        } => {
+            out.varint(u64::from(*first));
+            out.varint(u64::from(*second));
+            out.f32(*multiplier);
+        }
+        Group::MarketBonus(value) | Group::TradeGarrison(value) => out.f32(*value),
         Group::Stats(hash) => out.u64(*hash),
         Group::Stances(stances) => {
             out.varint(stances.len() as u64);

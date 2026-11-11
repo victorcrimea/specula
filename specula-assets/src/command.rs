@@ -16,7 +16,7 @@ use crate::bytes::ByteReader;
 
 /// The version of this format, which the server sends as the first byte of
 /// its seat message; a page on another version must reload.
-pub const COMMAND_VERSION: u8 = 3;
+pub const COMMAND_VERSION: u8 = 5;
 
 pub const QUEUED: u8 = 1;
 pub const PUSH_FRONT: u8 = 2;
@@ -55,6 +55,10 @@ const ALERT_RAISE: u8 = 30;
 const ALERT_END: u8 = 31;
 const UPGRADE: u8 = 32;
 const CANCEL_UPGRADE: u8 = 33;
+const BARTER: u8 = 34;
+const SET_TRADING_GOODS: u8 = 35;
+const SETUP_TRADE_ROUTE: u8 = 36;
+const CANCEL_TRADE_ROUTE: u8 = 37;
 
 /// Above every command kind.
 pub const QUERY_TAG: u8 = 0x80;
@@ -147,6 +151,8 @@ pub enum Command {
         target: u32,
         resource_type: String,
         resource_template: String,
+        /// The "trade" order's origin market, 0 otherwise.
+        source: u32,
     },
     Stance {
         entities: Vec<u32>,
@@ -241,6 +247,29 @@ pub enum Command {
     CancelUpgrade {
         entities: Vec<u32>,
     },
+    /// Sells `amount` of resource `sell` for `buy` at a market's prices.
+    Barter {
+        sell: String,
+        buy: String,
+        amount: u32,
+    },
+    /// The share in percent of each resource code the traders carry.
+    SetTradingGoods {
+        goods: Vec<(String, u8)>,
+    },
+    /// "setup-trade-route": the market becomes the traders' origin, or
+    /// their destination once they have one.
+    SetupTradeRoute {
+        flags: u8,
+        entities: Vec<u32>,
+        target: u32,
+    },
+    /// "cancel-setup-trade-route": the origin is dropped.
+    CancelTradeRoute {
+        flags: u8,
+        entities: Vec<u32>,
+        target: u32,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -253,6 +282,8 @@ pub struct WallPiece {
 
 /// Far more pieces than a wall across the largest map has.
 const MAX_PIECES: usize = 1024;
+/// Far more resources than any mod trades.
+const MAX_GOODS: usize = 64;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Query {
@@ -454,7 +485,10 @@ impl Command {
             | Command::OccupyTurret {
                 entities, target, ..
             }
-            | Command::Rally {
+            | Command::SetupTradeRoute {
+                entities, target, ..
+            }
+            | Command::CancelTradeRoute {
                 entities, target, ..
             }
             | Command::Patrol {
@@ -465,6 +499,16 @@ impl Command {
             }
             Command::UnloadAll { holders } | Command::UnloadAllByOwner { holders } => {
                 ids.extend(holders.iter_mut())
+            }
+            Command::Rally {
+                entities,
+                target,
+                source,
+                ..
+            } => {
+                ids.extend(entities.iter_mut());
+                ids.push(target);
+                ids.push(source);
             }
             Command::Research { entity, .. } | Command::StopProduction { entity, .. } => {
                 ids.push(entity)
@@ -479,6 +523,7 @@ impl Command {
                 ids.push(start_snapped);
                 ids.push(end_snapped);
             }
+            Command::Barter { .. } | Command::SetTradingGoods { .. } => {}
         }
         ids.retain(|id| **id != 0);
         ids
@@ -584,6 +629,7 @@ impl Command {
                 target,
                 resource_type,
                 resource_template,
+                source,
             } => {
                 out.head(RALLY, *flags, entities);
                 out.point(*x, *z);
@@ -591,6 +637,7 @@ impl Command {
                 out.varint(u64::from(*target));
                 out.text(resource_type);
                 out.text(resource_template);
+                out.varint(u64::from(*source));
             }
             Command::Stance { entities, name } => {
                 out.0.push(STANCE);
@@ -667,6 +714,20 @@ impl Command {
                 out.0.push(CANCEL_UPGRADE);
                 out.entities(entities);
             }
+            Command::Barter { sell, buy, amount } => {
+                out.0.push(BARTER);
+                out.text(sell);
+                out.text(buy);
+                out.varint(u64::from(*amount));
+            }
+            Command::SetTradingGoods { goods } => {
+                out.0.push(SET_TRADING_GOODS);
+                out.varint(goods.len() as u64);
+                for (code, percent) in goods {
+                    out.text(code);
+                    out.0.push(*percent);
+                }
+            }
             Command::DropsiteSharing { shared, entities } => {
                 out.0
                     .extend_from_slice(&[DROPSITE_SHARING, u8::from(*shared)]);
@@ -682,6 +743,16 @@ impl Command {
                 entities,
                 target,
             } => out.targeted(OCCUPY_TURRET, *flags, entities, *target),
+            Command::SetupTradeRoute {
+                flags,
+                entities,
+                target,
+            } => out.targeted(SETUP_TRADE_ROUTE, *flags, entities, *target),
+            Command::CancelTradeRoute {
+                flags,
+                entities,
+                target,
+            } => out.targeted(CANCEL_TRADE_ROUTE, *flags, entities, *target),
             Command::Patrol {
                 flags,
                 entities,
@@ -733,7 +804,8 @@ impl Command {
                     }
                 }
             }
-            ATTACK | GATHER | REPAIR | GARRISON | RETURN_RESOURCE | GUARD | OCCUPY_TURRET => {
+            ATTACK | GATHER | REPAIR | GARRISON | RETURN_RESOURCE | GUARD | OCCUPY_TURRET
+            | SETUP_TRADE_ROUTE | CANCEL_TRADE_ROUTE => {
                 let flags = input.u8()?;
                 let entities = entities(&mut input)?;
                 let target = input.varint_u32()?;
@@ -764,6 +836,16 @@ impl Command {
                         target,
                     },
                     OCCUPY_TURRET => Command::OccupyTurret {
+                        flags,
+                        entities,
+                        target,
+                    },
+                    SETUP_TRADE_ROUTE => Command::SetupTradeRoute {
+                        flags,
+                        entities,
+                        target,
+                    },
+                    CANCEL_TRADE_ROUTE => Command::CancelTradeRoute {
                         flags,
                         entities,
                         target,
@@ -823,6 +905,7 @@ impl Command {
                     target: input.varint_u32()?,
                     resource_type: input.text()?,
                     resource_template: input.text()?,
+                    source: input.varint_u32()?,
                 }
             }
             STANCE => Command::Stance {
@@ -897,6 +980,21 @@ impl Command {
             CANCEL_UPGRADE => Command::CancelUpgrade {
                 entities: entities(&mut input)?,
             },
+            BARTER => Command::Barter {
+                sell: input.text()?,
+                buy: input.text()?,
+                amount: input.varint_u32()?,
+            },
+            SET_TRADING_GOODS => {
+                let count = input.varint_u32()? as usize;
+                if count > MAX_GOODS {
+                    return Err("too many trading goods");
+                }
+                let goods = (0..count)
+                    .map(|_| Ok((input.text()?, input.u8()?)))
+                    .collect::<Result<_, &'static str>>()?;
+                Command::SetTradingGoods { goods }
+            }
             DROPSITE_SHARING => Command::DropsiteSharing {
                 shared: input.u8()? != 0,
                 entities: entities(&mut input)?,

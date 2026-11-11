@@ -89,13 +89,16 @@ body { cursor: var(--gui-cursor-default, default); }
   translate: -50% 0; rotate: 225deg; border-right: 2px solid #e6e9eb; border-bottom: 2px solid #e6e9eb; }
 #top-panel.collapsed #top-toggle::before { top: 1px; rotate: 45deg; }
 /* diplomacyButton (top_panel/IconButtons/DiplomacyDialogButton.xml,
-   100%-254 4 100%-226 32). */
-#top-buttons { position: absolute; right: 226px; top: 0; width: 28px; height: 36px;
+   100%-254 4 100%-226 32) and tradeButton (TradeDialogButton.xml,
+   100%-224 4 100%-196 32). */
+#top-buttons { position: absolute; right: 196px; top: 0; width: 58px; height: 36px;
   transform: scale(var(--top-scale)); transform-origin: 100% 0; }
 #top-buttons > button { position: absolute; top: 4px; width: 28px; height: 28px; padding: 0;
   border: 0; background-color: transparent;
   background-size: 100% 100%; background-repeat: no-repeat; }
 #top-diplomacy { left: 0; background-image: var(--gui-diplomacy); }
+#top-trade { left: 30px; background-image: var(--gui-command-economics); }
+#top-buttons > button[hidden] { display: none; }
 #top-buttons > button:hover::after { content: ""; position: absolute; inset: 0;
   background: rgb(42, 42, 42); mix-blend-mode: plus-lighter; pointer-events: none; }
 /* menuButton (top_panel/MenuButton.xml, 100%-164 4 100%-8 32) over
@@ -217,15 +220,15 @@ body { cursor: var(--gui-cursor-default, default); }
   var(--gui-panel-shader-top-edge) 0 0 / 100% 1px no-repeat; }
 /* The engine's `-stroke` fonts: a 1 px black outline. The top panel
    shares the text and bar styles. */
-:is(#details, #top-panel, #diplomacy-window, #message-box, #research) .text { position: absolute; display: flex; align-items: center;
+:is(#details, #top-panel, #diplomacy-window, #trade-window, #message-box, #research) .text { position: absolute; display: flex; align-items: center;
   white-space: pre; overflow: hidden; line-height: 1.1;
   -webkit-text-stroke: 2px black; paint-order: stroke fill; }
-:is(#details, #top-panel, #diplomacy-window, #message-box, #research) .center { justify-content: center; text-align: center; }
+:is(#details, #top-panel, #diplomacy-window, #trade-window, #message-box, #research) .center { justify-content: center; text-align: center; }
 :is(#details, #top-panel) .right { justify-content: flex-end; text-align: right; }
 :is(#details, #top-panel) .sans-stroke-12 { font-size: 12px; font-weight: 400; }
 :is(#details, #top-panel, #research) .sans-stroke-14 { font-size: 14px; font-weight: 400; }
 :is(#details, #top-panel) .sans-bold-stroke-13 { font-size: 13px; font-weight: 700; }
-:is(#details, #top-panel, #diplomacy-window, #message-box) .sans-bold-stroke-14 { font-size: 14px; font-weight: 700; }
+:is(#details, #top-panel, #diplomacy-window, #trade-window, #message-box) .sans-bold-stroke-14 { font-size: 14px; font-weight: 700; }
 :is(#details, #top-panel) .gold { color: var(--gui-gold); }
 /* A bar: barBorder around it, the background, the foreground and
    statsBarShaderHorizontal or ...Vertical over them. */
@@ -279,7 +282,7 @@ body { cursor: var(--gui-cursor-default, default); }
 #details-multiple { left: 6px; top: 6px; width: 216px; height: 154px; }
 /* iconButton: portrait_black.dds, 42 added to each channel under the
    mouse (snIconPortraitOver). */
-#details .group, #details .cell, :is(#details, #research) .item { position: absolute; width: 38px; height: 38px;
+#details .group, #details .cell, :is(#details, #research, #trade-window) .item { position: absolute; width: 38px; height: 38px;
   padding: 0; margin: 0; border: 0;
   background: var(--gui-portrait-black) 0 0 / 100% 100%; }
 /* A button takes neither colour nor font from its parent by default. */
@@ -319,7 +322,7 @@ body { cursor: var(--gui-cursor-default, default); }
    the bottom, 40 px high, the stance buttons 2 px in, the alert buttons in
    the last 118 px. */
 #barter-cells, #formation-cells { position: absolute; left: 6px; top: 6px; }
-#details .barter { position: absolute; width: 38px; height: 80px; }
+:is(#details, #trade-window) .barter { position: absolute; width: 38px; height: 80px; }
 #stance, #alert { position: absolute; left: 4px; right: 4px; bottom: 4px; height: 40px;
   background: rgba(0, 0, 0, 0.333); }
 #stance-cells { position: absolute; left: 2px; top: 1px; }
@@ -368,7 +371,7 @@ body { cursor: var(--gui-cursor-default, default); }
   width: 22px; height: 16px; background: var(--gui-vertical-pair) 0 0 / 100% 100%; }
 /* "color:0 0 0 127:grayscale:" and resourcesToAlphaMask's red, both a
    solid colour over the icon. */
-#details .item > .tint { position: absolute; left: 3px; top: 3px; width: 32px; height: 32px; }
+:is(#details, #trade-window) .item > .tint { position: absolute; left: 3px; top: 3px; width: 32px; height: 32px; }
 #details .item.grey > img { filter: grayscale(1); }
 #details .item.grey > .tint { background: rgba(0, 0, 0, 0.498); }
 /* unitCommandPanel at 0 100%-40 100% 100%-4 (z 30), its buttons iconButtons
@@ -383,14 +386,14 @@ body { cursor: var(--gui-cursor-default, default); }
 /* The buttons of the left panels and the right panel draw their icon as a
    texture of session.css; corners.png marks the chosen one, upgrade.png the
    default formation, and a barter caption is resourceText over the top half. */
-#details .item > .icon, #details .item > .selection, #details .item > .marker {
+:is(#details, #trade-window) .item > :is(.icon, .selection, .marker) {
   position: absolute; left: 3px; top: 3px; width: 32px; height: 32px;
   background: none 0 0 / 100% 100% no-repeat; }
-#details .item > .selection { background-image: var(--gui-corners); }
-#details .item > .marker { background-image: var(--gui-upgrade); }
-#details .item > .tint { background-repeat: no-repeat; }
-#details .item.grey > .icon, #details .item.selected > .icon { filter: grayscale(1); }
-#details .item > .caption { inset: 0 0 50% 0; justify-content: flex-start; }
+:is(#details, #trade-window) .item > .selection { background-image: var(--gui-corners); }
+:is(#details, #trade-window) .item > .marker { background-image: var(--gui-upgrade); }
+:is(#details, #trade-window) .item > .tint { background-repeat: no-repeat; }
+:is(#details, #trade-window) .item:is(.grey, .selected) > .icon { filter: grayscale(1); }
+:is(#details, #trade-window) .item > .caption { inset: 0 0 50% 0; justify-content: flex-start; }
 /* Not the engine's: on /play a toggle ordered but not yet streamed back
    blinks until the stream agrees or the order times out. */
 /* Off first, so even an order confirmed within half a cycle shows. */
@@ -720,32 +723,32 @@ body:not([data-debug="storage"]) #stats-storage { display: none; }
   font-family: "0ad sans", "0ad sans fallback", sans-serif; color: white;
   user-select: none; -webkit-user-select: none; }
 #diplomacy-window[hidden], #diplomacy-window [hidden] { display: none; }
-:is(#diplomacy-window, #message-box-dialog) > .frame { position: absolute; pointer-events: none; background-repeat: no-repeat; }
-:is(#diplomacy-window, #message-box-dialog) > .background { left: 4px; top: 0; right: 4px; bottom: 4px;
+:is(#diplomacy-window, #trade-window, #message-box-dialog) > .frame { position: absolute; pointer-events: none; background-repeat: no-repeat; }
+:is(#diplomacy-window, #trade-window, #message-box-dialog) > .background { left: 4px; top: 0; right: 4px; bottom: 4px;
   background: var(--gui-dialog-background) 0 0 / 512px 512px repeat; }
-:is(#diplomacy-window, #message-box-dialog) > .shade { left: 4px; right: 4px; height: 128px;
+:is(#diplomacy-window, #trade-window, #message-box-dialog) > .shade { left: 4px; right: 4px; height: 128px;
   background-image: var(--gui-dialog-shadow); background-size: 100% 100%; }
-:is(#diplomacy-window, #message-box-dialog) > .shade.top { top: 0; scale: -1 -1; }
-:is(#diplomacy-window, #message-box-dialog) > .shade.bottom { bottom: 4px; }
-:is(#diplomacy-window, #message-box-dialog) > .edge { left: 4px; right: 4px; height: 8px;
+:is(#diplomacy-window, #trade-window, #message-box-dialog) > .shade.top { top: 0; scale: -1 -1; }
+:is(#diplomacy-window, #trade-window, #message-box-dialog) > .shade.bottom { bottom: 4px; }
+:is(#diplomacy-window, #trade-window, #message-box-dialog) > .edge { left: 4px; right: 4px; height: 8px;
   background: var(--gui-dialog-border) 0 0 / 2048px 8px repeat-x; }
-:is(#diplomacy-window, #message-box-dialog) > .edge.top { top: -4px; }
-:is(#diplomacy-window, #message-box-dialog) > .edge.bottom { bottom: 0; }
-:is(#diplomacy-window, #message-box-dialog) > .deco { width: 64px; height: 32px; background-size: 100% 100%; }
-:is(#diplomacy-window, #message-box-dialog) > .deco.top-left { left: -14px; top: -21px;
+:is(#diplomacy-window, #trade-window, #message-box-dialog) > .edge.top { top: -4px; }
+:is(#diplomacy-window, #trade-window, #message-box-dialog) > .edge.bottom { bottom: 0; }
+:is(#diplomacy-window, #trade-window, #message-box-dialog) > .deco { width: 64px; height: 32px; background-size: 100% 100%; }
+:is(#diplomacy-window, #trade-window, #message-box-dialog) > .deco.top-left { left: -14px; top: -21px;
   background-image: var(--gui-dialog-deco-top); scale: -1 1; }
-:is(#diplomacy-window, #message-box-dialog) > .deco.top-right { right: -14px; top: -21px;
+:is(#diplomacy-window, #trade-window, #message-box-dialog) > .deco.top-right { right: -14px; top: -21px;
   background-image: var(--gui-dialog-deco-top); }
-:is(#diplomacy-window, #message-box-dialog) > .deco.bottom-left { left: -31px; bottom: -10px;
+:is(#diplomacy-window, #trade-window, #message-box-dialog) > .deco.bottom-left { left: -31px; bottom: -10px;
   background-image: var(--gui-dialog-deco-bottom); scale: -1 1; }
-:is(#diplomacy-window, #message-box-dialog) > .deco.bottom-right { right: -31px; bottom: -10px;
+:is(#diplomacy-window, #trade-window, #message-box-dialog) > .deco.bottom-right { right: -31px; bottom: -10px;
   background-image: var(--gui-dialog-deco-bottom); }
-:is(#diplomacy-window, #message-box-dialog) > .titlebar { top: -18px; height: 33px; background-size: 100% 100%; }
-:is(#diplomacy-window, #message-box-dialog) > .titlebar.middle { left: calc(50% - 108px); width: 216px;
+:is(#diplomacy-window, #trade-window, #message-box-dialog) > .titlebar { top: -18px; height: 33px; background-size: 100% 100%; }
+:is(#diplomacy-window, #trade-window, #message-box-dialog) > .titlebar.middle { left: calc(50% - 108px); width: 216px;
   background: var(--gui-dialog-titlebar-middle) 0 0 / 128px 100% repeat-x; }
-:is(#diplomacy-window, #message-box-dialog) > .titlebar.left { left: calc(50% - 134px); width: 32px;
+:is(#diplomacy-window, #trade-window, #message-box-dialog) > .titlebar.left { left: calc(50% - 134px); width: 32px;
   background-image: var(--gui-dialog-titlebar-left); }
-:is(#diplomacy-window, #message-box-dialog) > .titlebar.right { left: calc(50% + 102px); width: 32px;
+:is(#diplomacy-window, #trade-window, #message-box-dialog) > .titlebar.right { left: calc(50% + 102px); width: 32px;
   background-image: var(--gui-dialog-titlebar-left); scale: -1 -1; }
 #diplomacy-title { left: calc(50% - 96px); top: -16px; width: 192px; height: 32px; }
 #diplomacy-table { position: absolute; left: 32px; right: 32px; top: 32px;
@@ -767,6 +770,43 @@ body:not([data-debug="storage"]) #stats-storage { display: none; }
 #diplomacy-close { left: calc(50% + 100px); bottom: 22px; width: 128px; height: 28px;
   padding: 0; border: 0; color: white; font-family: inherit; }
 #diplomacy-close:hover { background-image: var(--gui-stone-button-over); }
+/* tradeDialogPanel (gui/session/trade/TradeDialog.xml) in the same frame;
+   the wasm sets its size and builds BarterPanel.xml and TradePanel.xml. */
+#trade-window { position: fixed; left: 50%; top: 50%; translate: -50% -50%;
+  width: var(--dialog-width, 432px); height: var(--dialog-height, 388px);
+  max-width: calc(100vw - 32px);
+  font-family: "0ad sans", "0ad sans fallback", sans-serif; color: white;
+  user-select: none; -webkit-user-select: none; }
+#trade-window[hidden], #trade-window [hidden] { display: none; }
+#trade-window .block { position: absolute; }
+#trade-title { left: calc(50% - 96px); top: -16px; width: 192px; height: 32px; }
+#trade-barter { left: 24px; right: 24px; top: 24px; height: 122px; }
+#trade-trade { left: 24px; right: 24px; top: 168px; bottom: 64px; }
+#trade-window .line { background: var(--gui-gold-line) 0 0 / 100% 100% no-repeat; }
+#trade-window .stone { background: var(--gui-stone-button) 0 0 / 100% 100%; }
+#trade-window button.stone:not(.disabled):hover { background-image: var(--gui-stone-button-over); }
+#trade-window .stone.disabled { filter: brightness(0.75); }
+/* iconInfoWhite: info.png at 20% 15% 80% 75%, lowered 3 px and white. */
+#trade-window .help::after { content: ""; position: absolute; left: 20%; top: calc(15% + 3px);
+  width: 60%; height: 60%; background: var(--gui-info) 0 0 / 100% 100% no-repeat;
+  filter: brightness(0) invert(1); }
+/* tradeResourceButton at 4 0 36 100%, its arrows at 36 0 52 50% and
+   36 50% 52 100%. */
+#trade-window .good { position: absolute; left: 4px; top: 0; width: 32px; height: 32px;
+  padding: 0; border: 0; color: white; font-family: inherit; }
+#trade-window .good > .icon, #trade-window .good > .selection { position: absolute;
+  background: none 0 0 / 100% 100% no-repeat; }
+#trade-window .good > .selection { background-image: var(--gui-corners); }
+#trade-window .arrow { position: absolute; left: 36px; width: 16px; height: 16px;
+  padding: 0; border: 0; background: var(--gui-arrow-up) 0 0 / 100% 100% no-repeat; }
+#trade-window .arrow.up { top: 0; }
+#trade-window .arrow.up:hover { background-image: var(--gui-arrow-up-over); }
+#trade-window .arrow.down { top: 16px; background-image: var(--gui-arrow-down); }
+#trade-window .arrow.down:hover { background-image: var(--gui-arrow-down-over); }
+#trade-window .status { white-space: pre-wrap; line-height: 1.1;
+  -webkit-text-stroke: 2px black; paint-order: stroke fill; }
+#trade-close { left: calc(50% - 64px); bottom: 22px; width: 128px; height: 28px;
+  padding: 0; border: 0; color: white; font-family: inherit; }
 /* mod/gui/msgbox in the ModernDialog frame above, over ModernFade (black
    at 85/255); SessionMessageBox's 400x200. ModernButtonRed is nine
    textures: 8 px corners and edges, the centre tiled at 128x16. */
@@ -872,6 +912,10 @@ body:not([data-debug="storage"]) #stats-storage { display: none; }
   font-family: "0ad sans", "0ad sans fallback", sans-serif; color: white;
   line-height: 1.2; white-space: pre-wrap; overflow-wrap: break-word; }
 #tooltip[hidden] { display: none; }
+/* informationTooltip (gui/session/styles.xml): BackgroundInformationTooltip,
+   black at 192/255 with a 1 px white edge, buffer_zone 6, maxwidth 300. */
+#tooltip.information { max-width: 300px; padding: 6px;
+  background: rgba(0, 0, 0, 0.753); border-color: white; }
 #tooltip .icon { display: inline-block; width: 16px; height: 16px;
   vertical-align: -3px; background: center / 100% 100% no-repeat; }
 </style>
@@ -889,6 +933,7 @@ body:not([data-debug="storage"]) #stats-storage { display: none; }
 </div>
 <div id="top-buttons">
 <button id="top-diplomacy" type="button" aria-label="Diplomacy" data-tooltip="Diplomacy" data-i18n-attrs="aria-label data-tooltip"></button>
+<button id="top-trade" type="button" hidden aria-label="Barter &amp; Trade" data-i18n-attrs="aria-label"></button>
 </div>
 <div id="game-menu" hidden>
 <div id="game-menu-panel" hidden>
@@ -1061,6 +1106,17 @@ body:not([data-debug="storage"]) #stats-storage { display: none; }
 </div>
 <div id="diplomacy-ceasefire" class="text sans-bold-stroke-14" hidden></div>
 <button id="diplomacy-close" type="button" class="text center sans-bold-stroke-14 stone"></button>
+</div>
+<div id="trade-window" role="dialog" aria-labelledby="trade-title" hidden>
+<span class="frame background"></span><span class="frame shade top"></span><span class="frame shade bottom"></span>
+<span class="frame edge top"></span><span class="frame edge bottom"></span>
+<span class="frame deco top-left"></span><span class="frame deco top-right"></span>
+<span class="frame deco bottom-left"></span><span class="frame deco bottom-right"></span>
+<span class="frame titlebar middle"></span><span class="frame titlebar left"></span><span class="frame titlebar right"></span>
+<div id="trade-title" class="text center sans-bold-stroke-14"></div>
+<div id="trade-barter" class="block"></div>
+<div id="trade-trade" class="block"></div>
+<button id="trade-close" type="button" class="text center sans-bold-stroke-14 stone"></button>
 </div>
 <div id="message-box" role="alertdialog" aria-modal="true" aria-labelledby="message-box-title" aria-describedby="message-box-caption" hidden>
 <div id="message-box-dialog">

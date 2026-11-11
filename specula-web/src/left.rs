@@ -4,8 +4,8 @@
 //! frame next to the garrison buttons, in the engine's layout
 //! (`selection_panels_left/`). An observer's buttons are all disabled, so
 //! only barter's sell buttons answer a press, as the engine's do; the
-//! player of `/play` also orders its own units' stances and formations and
-//! raises and ends its own alerts.
+//! player of `/play` also orders its own units' stances and formations,
+//! raises and ends its own alerts and barters at its own markets.
 //! A right click on a formation chooses the default one, for anyone.
 
 use std::cell::Cell;
@@ -16,6 +16,7 @@ use wasm_bindgen::JsValue;
 use web_sys::Document;
 use web_sys::HtmlElement;
 
+use crate::barter::BarterButtons;
 use crate::detail;
 use crate::detail::DataKey;
 use crate::detail::Group;
@@ -27,7 +28,6 @@ use crate::panel::create;
 use crate::panel::entity_groups;
 use crate::panel::grid_position;
 use crate::panel::string;
-use crate::panel::string_index;
 use crate::panel::template_details;
 use crate::pick;
 use crate::stream::COMPONENT_ALERT_RAISER;
@@ -46,13 +46,6 @@ const MAX_FORMATIONS: usize = 15;
 const FORMATION_ROW: usize = 5;
 /// The buttons of `barter_panel.xml`.
 const MAX_BARTER: usize = 5;
-/// `BarterButton.prototype.BarterResourceSellQuantity`.
-const BARTER_QUANTITY: f64 = 100.0;
-/// A buy button under its sell button, `BarterButton.xml`.
-const BARTER_BUY_TOP: usize = 42;
-/// `g_ResourceData.GetBarterableCodes()`, in the order of the resources'
-/// data files.
-const BARTER_CODES: [&str; 4] = ["food", "wood", "stone", "metal"];
 /// `NULL_FORMATION`.
 const NULL_FORMATION: &str = "special/formations/null";
 /// `gui.session.defaultformation`'s default (config/default.cfg).
@@ -84,20 +77,24 @@ impl Selected {
 }
 
 /// An `iconButton` of the panels, with the overlays some draw over it.
-struct Tile {
-    tile: Out,
+pub(crate) struct Tile {
+    pub(crate) tile: Out,
     icon: Out,
     /// `corners.png`.
     selection: Out,
     /// `upgrade.png`, the default formation's mark.
     marker: Out,
     /// The red or black colour modifiers of a sprite.
-    tint: Out,
-    caption: Out,
+    pub(crate) tint: Out,
+    pub(crate) caption: Out,
 }
 
 impl Tile {
-    fn new(document: &Document, parent: &HtmlElement, position: &str) -> Result<Self, String> {
+    pub(crate) fn new(
+        document: &Document,
+        parent: &HtmlElement,
+        position: &str,
+    ) -> Result<Self, String> {
         let tile: HtmlElement = create(document, "div")?;
         let _ = tile.set_attribute("class", "item");
         let _ = tile.set_attribute("style", position);
@@ -135,18 +132,12 @@ impl Tile {
 
     /// The icon is a texture of `session.css`, named by its custom
     /// property key.
-    fn show(&mut self, key: &str, selected: bool) {
+    pub(crate) fn show(&mut self, key: &str, selected: bool) {
         self.icon
             .style(format!("background-image: var(--gui-{key})"));
         self.selection.hidden(!selected);
         self.tile.hidden(false);
     }
-}
-
-/// A sell button, with the buy button under it.
-struct BarterItem {
-    sell: Tile,
-    buy: Tile,
 }
 
 pub(crate) struct LeftPanel {
@@ -168,10 +159,8 @@ pub(crate) struct LeftPanel {
     /// `/play`: `performFormation`.
     formation_orders: Vec<Option<Command>>,
     barter_root: Out,
-    barter: Vec<BarterItem>,
-    /// `BarterButtonManager.selectedResource`, an index of `BARTER_CODES`,
-    /// and whether the page should fill the panel again.
-    selected_resource: Cell<usize>,
+    barter: BarterButtons,
+    /// Whether the page should fill the panel again.
     redraw: Cell<bool>,
     /// `g_AutoFormation.defaultFormation`.
     default_formation: RefCell<String>,
@@ -207,23 +196,9 @@ impl LeftPanel {
         let formations = row(formation, MAX_FORMATIONS, &|i| {
             grid_position(i, FORMATION_ROW)
         })?;
-        let mut items = Vec::new();
-        for i in 0..MAX_BARTER {
-            let item: HtmlElement = create(document, "div")?;
-            let _ = item.set_attribute("class", "barter");
-            let _ = item.set_attribute("style", &grid_position(i, usize::MAX));
-            barter
-                .append_child(&item)
-                .map_err(|_| "cannot add a barter item")?;
-            items.push(BarterItem {
-                sell: Tile::new(document, &item, "left: 0; top: 0")?,
-                buy: Tile::new(
-                    document,
-                    &item,
-                    &format!("left: 0; top: {BARTER_BUY_TOP}px"),
-                )?,
-            });
-        }
+        let barter = BarterButtons::new(document, barter, MAX_BARTER, "barter", &|i| {
+            grid_position(i, usize::MAX)
+        })?;
         Ok(LeftPanel {
             stance_root: Out::new(crate::element(document, "stance")?),
             stances,
@@ -236,16 +211,15 @@ impl LeftPanel {
             formation_names: vec![None; MAX_FORMATIONS],
             formation_orders: vec![None; MAX_FORMATIONS],
             barter_root: Out::new(crate::element(document, "barter")?),
-            barter: items,
-            selected_resource: Cell::new(0),
+            barter,
             redraw: Cell::new(false),
             default_formation: RefCell::new(stored_default_formation()),
         })
     }
 
-    /// The sell buttons, for the page to wire to `sell_clicked`.
-    pub(crate) fn sell_buttons(&self) -> impl Iterator<Item = &HtmlElement> {
-        self.barter.iter().map(|item| &item.sell.tile.element)
+    /// The barter buttons, for the page to wire.
+    pub(crate) fn barter(&self) -> &BarterButtons {
+        &self.barter
     }
 
     /// The stance buttons, for the page to wire to `stance_clicked`.
@@ -301,17 +275,11 @@ impl LeftPanel {
         (name.as_str() != NULL_FORMATION).then(|| name.clone())
     }
 
-    /// `BarterButtonManager.setSelectedResource`.
-    pub(crate) fn sell_clicked(&self, index: usize) {
-        if index < BARTER_CODES.len() {
-            self.selected_resource.set(index);
-            self.redraw.set(true);
-        }
-    }
-
     /// Whether a press changed what the panel shows, once.
     pub(crate) fn take_redraw(&self) -> bool {
-        self.redraw.replace(false)
+        // Both are taken, so neither is left for the next frame.
+        let barter = self.barter.take_redraw();
+        self.redraw.replace(false) || barter
     }
 
     /// `g_SelectionPanels.Barter`; true when the panel is used, which keeps
@@ -329,84 +297,8 @@ impl LeftPanel {
         // `setViewedPlayer(data.player)`: the first selected entity's
         // owner, and no buttons for gaia.
         let player = selected.first().map_or(-1, |entity| entity.owner);
-        let selected_code = BARTER_CODES[self.selected_resource.get().min(BARTER_CODES.len() - 1)];
-        let stock = |code: &str| {
-            let index = string_index(scene, code)?;
-            let economy = usize::try_from(player)
-                .ok()
-                .and_then(|player| scene.economy.get(player))?;
-            economy
-                .resources
-                .iter()
-                .find(|stock| stock.code == index)
-                .map(|stock| f64::from(stock.amount))
-        };
-        let prices = usize::try_from(player)
-            .ok()
-            .and_then(|player| scene.details.players.get(player))
-            .map(|player| player.prices.as_slice())
-            .unwrap_or_default();
-        let price = |code: &str| {
-            let index = string_index(scene, code)?;
-            prices
-                .iter()
-                .find(|(resource, _, _)| *resource == index)
-                .map(|(_, buy, sell)| (f64::from(*buy), f64::from(*sell)))
-        };
-        // `neededResourcesSell` and `neededResourcesBuy`.
-        let short = |code: &str| stock(code).is_some_and(|stock| stock < BARTER_QUANTITY);
-        let buy_short = short(selected_code);
-        for (index, item) in self.barter.iter_mut().enumerate() {
-            let Some(&code) = BARTER_CODES.get(index) else {
-                item.sell.tile.hidden(true);
-                item.buy.tile.hidden(true);
-                continue;
-            };
-            if player < 1 {
-                item.sell.tile.hidden(true);
-                item.buy.tile.hidden(true);
-                continue;
-            }
-            let is_selected = code == selected_code;
-            let name = lang::translate_context(
-                "withinSentence",
-                tooltip::resource_data(code).map_or(code, |(name, _)| name),
-            );
-            item.sell.show(&format!("resource-{code}"), is_selected);
-            item.sell.tint.style(barter_tint(is_selected, short(code)));
-            item.sell.tile.class(String::from(if is_selected {
-                "item selected"
-            } else {
-                "item"
-            }));
-            item.sell.caption.text(&lang::format(
-                &lang::translate_context("sell action", "-%(amount)s"),
-                &[("amount", &BARTER_QUANTITY.to_string())],
-            ));
-            item.sell.tile.tooltip(&lang::format(
-                &lang::translate("Sell %(resource)s"),
-                &[("resource", &name)],
-            ));
-
-            item.buy.show(&format!("resource-{code}"), false);
-            item.buy.tint.style(barter_tint(false, buy_short));
-            // Math.round of the amount bought.
-            let bought = match (price(selected_code), price(code)) {
-                (Some((_, sell)), Some((buy, _))) if buy > 0.0 => {
-                    (sell / buy * BARTER_QUANTITY + 0.5).floor()
-                }
-                _ => 0.0,
-            };
-            item.buy.caption.text(&lang::format(
-                &lang::translate_context("buy action", "+%(amount)s"),
-                &[("amount", &bought.to_string())],
-            ));
-            item.buy.tile.tooltip(&lang::format(
-                &lang::translate("Buy %(resource)s"),
-                &[("resource", &name)],
-            ));
-            item.buy.tile.hidden(is_selected);
-        }
+        self.barter
+            .update(scene, player, view.player == Some(player), view.mass_barter);
         true
     }
 
@@ -607,23 +499,6 @@ impl LeftPanel {
             tile.tile.tooltip(&formation_tooltip(item, is_default));
         }
         !items.is_empty()
-    }
-}
-
-/// `barterButton`'s sprite modifiers: `SelectedModifier`, then
-/// `DisabledModifier` over it.
-fn barter_tint(selected: bool, short: bool) -> String {
-    let mut layers = Vec::new();
-    if short {
-        layers.push("linear-gradient(rgba(255, 0, 0, 0.314), rgba(255, 0, 0, 0.314))");
-    }
-    if selected {
-        layers.push("linear-gradient(rgba(0, 0, 0, 0.392), rgba(0, 0, 0, 0.392))");
-    }
-    if layers.is_empty() {
-        String::new()
-    } else {
-        format!("background: {}", layers.join(", "))
     }
 }
 

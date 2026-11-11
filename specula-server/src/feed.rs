@@ -77,6 +77,9 @@ const DETAIL_STANCES: u32 = 8388608;
 const DETAIL_FORMATIONS: u32 = 16777216;
 const DETAIL_COMMANDS: u32 = 33554432;
 const DETAIL_UPGRADES: u32 = 67108864;
+const DETAIL_TRADE_ROUTE: u32 = 134217728;
+const DETAIL_MARKET: u32 = 268435456;
+const DETAIL_TRADE_GARRISON: u32 = 536870912;
 const NO_LIMIT: u16 = 0xFFFF;
 const QUEUE_UNIT: u8 = 0;
 const QUEUE_TECHNOLOGY: u8 = 1;
@@ -365,6 +368,11 @@ pub struct EntityDetails {
     /// The entity it is garrisoned in or a turret on, 0 for none.
     pub holder: Option<u32>,
     pub trader: Option<Trader>,
+    pub trade_route: Option<TradeRoute>,
+    /// A market's `GetInternationalBonus`.
+    pub market_bonus: Option<f32>,
+    /// A trader's `GetGarrisonGainMultiplier`, for those that have one.
+    pub trade_garrison: Option<f32>,
     pub ranges: Option<Vec<RangeOverlay>>,
     /// The owner of each entity of `garrison`, in its order, -1 for none.
     /// Older hooks do not send it.
@@ -404,6 +412,9 @@ impl EntityDetails {
         take(&mut self.progress, changed.progress);
         take(&mut self.holder, changed.holder);
         take(&mut self.trader, changed.trader);
+        take(&mut self.trade_route, changed.trade_route);
+        take(&mut self.market_bonus, changed.market_bonus);
+        take(&mut self.trade_garrison, changed.trade_garrison);
         take(&mut self.ranges, changed.ranges);
         take(&mut self.garrison_owners, changed.garrison_owners);
         take(&mut self.rally, changed.rally);
@@ -511,6 +522,15 @@ pub struct Trader {
     pub gain: f32,
 }
 
+/// A trader's `GetFirstMarket` and `GetSecondMarket`, 0 for none, and its
+/// `GetTraderGainMultiplier`.
+#[derive(Clone)]
+pub struct TradeRoute {
+    pub first: u32,
+    pub second: u32,
+    pub multiplier: f32,
+}
+
 /// A range circle the selection shows, as `RangeOverlayManager` hands it to
 /// the renderer.
 #[derive(Clone)]
@@ -543,13 +563,20 @@ pub struct RallyPoint {
 }
 
 /// What a player's panels read that is not an entity's: the formations the
-/// civ may use and the barter prices; index 0 is gaia.
+/// civ may use, the barter prices and the trade dialog's state; index 0 is
+/// gaia.
 #[derive(Clone, PartialEq)]
 pub struct PlayerGui {
     /// String record indices of formation templates.
     pub formations: Vec<Option<u32>>,
     /// Resource code string index, buy price, sell price.
     pub prices: Vec<(Option<u32>, f32, f32)>,
+    pub can_barter: bool,
+    /// Resource code string index and percent, `GetTradingGoods`.
+    pub trading_goods: Vec<(Option<u32>, u8)>,
+    /// `GetTraderNumber`: land total, trading, garrisoned; ship total,
+    /// trading.
+    pub traders: [u16; 5],
 }
 
 /// A player's top panel numbers; index 0 is gaia.
@@ -1592,6 +1619,19 @@ fn decode_groups(cursor: &mut Cursor, mask: u32) -> io::Result<EntityDetails> {
     if mask & DETAIL_UPGRADES != 0 {
         details.upgrades = Some(cursor.u32()?);
     }
+    if mask & DETAIL_TRADE_ROUTE != 0 {
+        details.trade_route = Some(TradeRoute {
+            first: cursor.u32()?,
+            second: cursor.u32()?,
+            multiplier: cursor.f32()?,
+        });
+    }
+    if mask & DETAIL_MARKET != 0 {
+        details.market_bonus = Some(cursor.f32()?);
+    }
+    if mask & DETAIL_TRADE_GARRISON != 0 {
+        details.trade_garrison = Some(cursor.f32()?);
+    }
     Ok(details)
 }
 
@@ -1672,6 +1712,14 @@ fn decode_production_list(payload: &[u8]) -> io::Result<Record> {
 }
 
 fn decode_player_gui(payload: &[u8]) -> io::Result<Record> {
+    // An engine built before the trade dialog's fields sends none, and the
+    // feed version did not change with them.
+    decode_player_gui_fields(payload, true)
+        .or_else(|_| decode_player_gui_fields(payload, false))
+        .map(Record::PlayerGui)
+}
+
+fn decode_player_gui_fields(payload: &[u8], trade: bool) -> io::Result<Vec<PlayerGui>> {
     let mut cursor = Cursor(payload);
     let count = cursor.u32()?;
     let mut players = Vec::new();
@@ -1682,12 +1730,28 @@ fn decode_player_gui(payload: &[u8]) -> io::Result<Record> {
         let prices = (0..cursor.u8()?)
             .map(|_| Ok((optional(cursor.u32()?), cursor.f32()?, cursor.f32()?)))
             .collect::<io::Result<_>>()?;
-        players.push(PlayerGui { formations, prices });
+        let mut player = PlayerGui {
+            formations,
+            prices,
+            can_barter: false,
+            trading_goods: Vec::new(),
+            traders: [0; 5],
+        };
+        if trade {
+            player.can_barter = cursor.u8()? != 0;
+            player.trading_goods = (0..cursor.u8()?)
+                .map(|_| Ok((optional(cursor.u32()?), cursor.u8()?)))
+                .collect::<io::Result<_>>()?;
+            for count in &mut player.traders {
+                *count = cursor.u16()?;
+            }
+        }
+        players.push(player);
     }
     if !cursor.0.is_empty() {
         return Err(invalid("player GUI record has trailing bytes"));
     }
-    Ok(Record::PlayerGui(players))
+    Ok(players)
 }
 
 fn decode_renames(payload: &[u8]) -> io::Result<Record> {

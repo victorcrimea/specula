@@ -535,6 +535,8 @@ pub enum Request {
     Place(Place),
     /// The delete command of the player of `/play`, which asks first.
     ConfirmDelete(Vec<u32>),
+    /// The command row's Barter & Trade.
+    ToggleTrade,
 }
 
 /// A structure to place, and who builds it.
@@ -571,6 +573,8 @@ pub struct View<'a> {
     pub detailed: bool,
     /// The player the viewer commands on `/play`, `None` for an observer.
     pub player: Option<i32>,
+    /// session.massbarter (Shift) is held.
+    pub mass_barter: bool,
     /// Drawn in place of the streamed state, marked as predicted.
     pub predicted: &'a Predictions,
 }
@@ -869,12 +873,18 @@ impl DetailsPanel {
         }
     }
 
-    /// The barter sell buttons, for the page to wire.
-    pub fn barter_buttons(&self) -> Vec<HtmlElement> {
+    /// The barter sell and buy buttons, for the page to wire.
+    pub fn barter_buttons(&self) -> (Vec<HtmlElement>, Vec<HtmlElement>) {
         self.garrison
             .as_ref()
             .and_then(|garrison| garrison.left.as_ref())
-            .map(|left| left.sell_buttons().cloned().collect())
+            .map(|left| {
+                let barter = left.barter();
+                (
+                    barter.sell_buttons().cloned().collect(),
+                    barter.buy_buttons().cloned().collect(),
+                )
+            })
             .unwrap_or_default()
     }
 
@@ -886,7 +896,20 @@ impl DetailsPanel {
             .as_ref()
             .and_then(|garrison| garrison.left.as_ref())
         {
-            left.sell_clicked(index);
+            left.barter().sell_clicked(index);
+        }
+    }
+
+    /// Barter buy button `index` was pressed, `mass` with
+    /// session.massbarter held.
+    pub fn barter_buy_clicked(&self, index: usize, mass: bool) {
+        if let Some(order) = self
+            .garrison
+            .as_ref()
+            .and_then(|garrison| garrison.left.as_ref())
+            .and_then(|left| left.barter().buy_clicked(index, mass))
+        {
+            self.requests.borrow_mut().push(Request::Order(order));
         }
     }
 

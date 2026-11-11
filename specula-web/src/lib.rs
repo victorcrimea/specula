@@ -1,5 +1,6 @@
 mod assets;
 mod audio;
+mod barter;
 mod bench;
 mod blend;
 mod command_row;
@@ -44,6 +45,8 @@ mod timing;
 mod tips;
 mod tooltip;
 mod top;
+mod trade;
+mod trade_window;
 mod unit;
 mod uplink;
 mod usage;
@@ -113,6 +116,7 @@ use crate::stream::Sound;
 use crate::stream::SoundTarget;
 use crate::terrain::TerrainImage;
 use crate::top::TopPanel;
+use crate::trade_window::TradeWindow;
 use crate::uplink::Uplink;
 use crate::warmup::Warmup;
 use crate::worker::COMMAND_CURRENT_MATCH;
@@ -610,6 +614,10 @@ struct App {
     research: Option<ResearchProgress>,
     /// Only the 3D page has the diplomacy window.
     diplomacy_window: Option<DiplomacyWindow>,
+    /// Only the 3D page has the Barter & Trade dialog.
+    trade_window: Option<TradeWindow>,
+    /// session.massbarter (Shift) is held.
+    mass_barter: bool,
     /// Only `/play` asks before deleting.
     message_box: Option<MessageBox>,
     /// On `/play`: Resign and Exit.
@@ -633,6 +641,8 @@ struct App {
     uplink: Option<Uplink>,
     /// The seat the perspective was last moved to.
     seat_shown: Option<i32>,
+    /// The view's `data-tooltip`, the hovered action's.
+    action_tooltip: String,
     /// The `data-cursor` of the view, empty for the default arrow.
     cursor: String,
     /// The structure being placed on `/play`.
@@ -1002,6 +1012,14 @@ impl App {
                 perspective: self.perspective,
             });
         }
+        if let Some(trade_window) = &mut self.trade_window {
+            trade_window.update(&trade_window::View {
+                scene: &self.scene,
+                perspective: self.perspective,
+                player: self.uplink.as_ref().and_then(Uplink::seat),
+                mass_barter: self.mass_barter,
+            });
+        }
         // The frame moves from the turn before the scene's to the scene's.
         if let Some(details) = &mut self.details
             && !self.renderer.selected().is_empty()
@@ -1050,6 +1068,22 @@ impl App {
     /// On `/play`: turns the right clicks into the seat's orders, and shows
     /// the match from the seat once it is known. Elsewhere the clicks are
     /// dropped.
+    fn toggle_trade(&mut self, open: Option<bool>) {
+        toggle_trade(
+            &mut self.trade_window,
+            &mut self.diplomacy_window,
+            self.perspective,
+            open,
+        );
+    }
+
+    /// An order from the trade dialog, for the player of `/play`.
+    fn send_trade_order(&self, order: Option<Command>) {
+        if let (Some(order), Some(uplink)) = (order, &self.uplink) {
+            uplink.send(&order);
+        }
+    }
+
     fn give_orders(&mut self) {
         let targets = self.renderer.take_order_targets();
         let Some(seat) = self.uplink.as_ref().and_then(Uplink::seat) else {
@@ -1122,7 +1156,14 @@ impl App {
                     None
                 }
                 (None, true) => None,
-                (None, false) => orders::action(&self.scene, selected, seat, &target, &formation),
+                (None, false) => orders::action(
+                    &self.scene,
+                    selected,
+                    seat,
+                    &target,
+                    &formation,
+                    &self.data_files,
+                ),
             };
             if let Some(action) = action
                 && let Some(order) = action.command
@@ -1166,11 +1207,23 @@ impl App {
                         &formation,
                         preselect,
                     ),
-                    None => orders::action(&self.scene, selected, seat, &target, &formation),
+                    None => orders::action(
+                        &self.scene,
+                        selected,
+                        seat,
+                        &target,
+                        &formation,
+                        &self.data_files,
+                    ),
                 }
             })
-            .map(|action| action.cursor)
+            .map(|action| (action.cursor, action.tooltip))
             .unwrap_or_default();
+        let (cursor, tooltip) = cursor;
+        if tooltip != self.action_tooltip {
+            let _ = self.canvas.set_attribute(tooltip::ATTRIBUTE, &tooltip);
+            self.action_tooltip = tooltip;
+        }
         if cursor != self.cursor {
             let _ = if cursor.is_empty() {
                 self.canvas.remove_attribute("data-cursor")
@@ -1233,9 +1286,18 @@ impl App {
                         if let Some(diplomacy_window) = &mut self.diplomacy_window {
                             diplomacy_window.set_open(false);
                         }
+                        if let Some(trade_window) = &mut self.trade_window {
+                            trade_window.set_open(false, self.perspective);
+                        }
                         message_box.confirm_delete(entities);
                     }
                 }
+                Request::ToggleTrade => toggle_trade(
+                    &mut self.trade_window,
+                    &mut self.diplomacy_window,
+                    self.perspective,
+                    None,
+                ),
                 request => apply_request(&mut *self.renderer, request, &self.scene),
             }
         }
@@ -1276,6 +1338,7 @@ impl App {
             data: &self.data_files,
             detailed: self.detailed_tooltips,
             player: self.uplink.as_ref().and_then(Uplink::seat),
+            mass_barter: self.mass_barter,
             predicted: &self.predictions,
         };
         details.update(&view);
@@ -1696,6 +1759,15 @@ async fn run(
             })
             .ok(),
     };
+    let trade_window = match page {
+        Page::Map => None,
+        // An older page has no trade dialog; the match still shows.
+        Page::Observer => TradeWindow::new(&document)
+            .inspect_err(|error| {
+                web_sys::console::error_1(&format!("trade window: {error}").into())
+            })
+            .ok(),
+    };
     let tooltips = match page {
         Page::Map => None,
         // An older page has no tooltip box; the panels still show.
@@ -1720,6 +1792,12 @@ async fn run(
     // do, with their delay, and gives no more orders.
     let seated = owner && !status.as_ref().is_some_and(|status| status.defeated);
     SEATED.store(seated, Ordering::Relaxed);
+    // Always there, even empty, so the tooltips follow the view from the
+    // first move and show an action's text as soon as it has one.
+    if seated && page == Page::Observer {
+        let _ = canvas.set_attribute(tooltip::ATTRIBUTE, "");
+        let _ = canvas.set_attribute(tooltip::STYLE_ATTRIBUTE, tooltip::INFORMATION);
+    }
     // An older page has no message box; Delete then does nothing without
     // Shift.
     let message_box = if owner {
@@ -1856,6 +1934,8 @@ async fn run(
         top,
         research,
         diplomacy_window,
+        trade_window,
+        mass_barter: false,
         message_box,
         game_menu,
         defeat_noticed: false,
@@ -1871,6 +1951,7 @@ async fn run(
         idle_finder: idle::Finder::default(),
         seat_shown: None,
         cursor: String::new(),
+        action_tooltip: String::new(),
         placement: Placement::default(),
         preselected: None,
     }));
@@ -1879,6 +1960,7 @@ async fn run(
     wire_top(&app);
     wire_research(&app);
     wire_diplomacy_window(&app, &window);
+    wire_trade_window(&app, &window);
     wire_message_box(&app, &window);
     wire_game_menu(&app);
     wire_command_hotkeys(&app, &window);
@@ -2079,7 +2161,7 @@ fn element<T: JsCast>(document: &Document, id: &str) -> Result<T, String> {
 /// selects its group, or with Ctrl (session.deselectgroup) or the right
 /// button removes it.
 fn wire_details(app: &Rc<RefCell<App>>) {
-    let (portrait, buttons, sells, commands, formations) = {
+    let (portrait, buttons, (sells, buys), commands, formations) = {
         let app = app.borrow();
         let Some(details) = &app.details else {
             return;
@@ -2123,6 +2205,16 @@ fn wire_details(app: &Rc<RefCell<App>>) {
         button.set_onclick(Some(on_click.as_ref().unchecked_ref()));
         on_click.forget();
     }
+    for (index, button) in buys.into_iter().enumerate() {
+        let target = Rc::clone(app);
+        let on_click = Closure::<dyn FnMut(MouseEvent)>::new(move |event: MouseEvent| {
+            if let Some(details) = &target.borrow().details {
+                details.barter_buy_clicked(index, event.shift_key());
+            }
+        });
+        button.set_onclick(Some(on_click.as_ref().unchecked_ref()));
+        on_click.forget();
+    }
     for (index, button) in formations.into_iter().enumerate() {
         let target = Rc::clone(app);
         let on_menu = Closure::<dyn FnMut(MouseEvent)>::new(move |event: MouseEvent| {
@@ -2155,6 +2247,24 @@ fn wire_details(app: &Rc<RefCell<App>>) {
     }
 }
 
+/// `TradeDialog.toggle`, or with `open` set to it; opening closes the
+/// diplomacy window, as `closeOpenDialogs`.
+fn toggle_trade(
+    trade_window: &mut Option<TradeWindow>,
+    diplomacy_window: &mut Option<DiplomacyWindow>,
+    perspective: Perspective,
+    open: Option<bool>,
+) {
+    let Some(trade_window) = trade_window else {
+        return;
+    };
+    let open = open.unwrap_or(!trade_window.is_open());
+    if open && let Some(diplomacy_window) = diplomacy_window {
+        diplomacy_window.set_open(false);
+    }
+    trade_window.set_open(open, perspective);
+}
+
 /// What a panel's button asked for.
 fn apply_request(renderer: &mut dyn View, request: Request, scene: &Scene) {
     match request {
@@ -2174,7 +2284,8 @@ fn apply_request(renderer: &mut dyn View, request: Request, scene: &Scene) {
         | Request::Orders(_)
         | Request::Preselect(_)
         | Request::Place(_)
-        | Request::ConfirmDelete(_) => {}
+        | Request::ConfirmDelete(_)
+        | Request::ToggleTrade => {}
     }
 }
 
@@ -2194,8 +2305,13 @@ fn wire_diplomacy_window(app: &Rc<RefCell<App>>, window: &web_sys::Window) {
         return;
     };
     let set = |app: &Rc<RefCell<App>>, open: Option<bool>| {
-        if let Some(diplomacy_window) = &mut app.borrow_mut().diplomacy_window {
+        let app = &mut *app.borrow_mut();
+        if let Some(diplomacy_window) = &mut app.diplomacy_window {
             let open = open.unwrap_or(!diplomacy_window.is_open());
+            // `closeOpenDialogs`.
+            if open && let Some(trade_window) = &mut app.trade_window {
+                trade_window.set_open(false, app.perspective);
+            }
             diplomacy_window.set_open(open);
         }
     };
@@ -2249,6 +2365,152 @@ fn wire_diplomacy_window(app: &Rc<RefCell<App>>, window: &web_sys::Window) {
     on_key.forget();
 }
 
+/// The Barter & Trade dialog: `#top-trade` (`tradeButton`), its Close, its
+/// barter and trade buttons, and the engine's session.gui.barter.toggle
+/// (Ctrl+B); Escape closes it, as `closeOpenDialogs`. Shift is also
+/// session.massbarter and session.fulltradeswap, held while pressing, and
+/// the barter captions follow it as the engine's do.
+fn wire_trade_window(app: &Rc<RefCell<App>>, window: &web_sys::Window) {
+    let Some((close, sells, buys, trades)) =
+        app.borrow().trade_window.as_ref().map(|trade_window| {
+            let barter = trade_window.barter();
+            (
+                trade_window.close_button().clone(),
+                barter.sell_buttons().cloned().collect::<Vec<_>>(),
+                barter.buy_buttons().cloned().collect::<Vec<_>>(),
+                trade_window.trade_buttons(),
+            )
+        })
+    else {
+        return;
+    };
+    let target = Rc::clone(app);
+    on_click(&close, move || {
+        target.borrow_mut().toggle_trade(Some(false))
+    });
+    if let Some(button) = window
+        .document()
+        .and_then(|document| element::<HtmlElement>(&document, "top-trade").ok())
+    {
+        let target = Rc::clone(app);
+        on_click(&button, move || target.borrow_mut().toggle_trade(None));
+    }
+    for (index, button) in sells.into_iter().enumerate() {
+        let target = Rc::clone(app);
+        on_click(&button, move || {
+            if let Some(trade_window) = &target.borrow().trade_window {
+                trade_window.barter().sell_clicked(index);
+            }
+        });
+    }
+    for (index, button) in buys.iter().enumerate() {
+        on_shift_click(app, button, move |app, shift| {
+            let order = app
+                .trade_window
+                .as_ref()
+                .and_then(|trade_window| trade_window.barter().buy_clicked(index, shift));
+            app.send_trade_order(order);
+        });
+    }
+    for (index, (button, up, down)) in trades.iter().enumerate() {
+        on_shift_click(app, button, move |app, shift| {
+            let order = app
+                .trade_window
+                .as_mut()
+                .and_then(|trade_window| trade_window.trade_clicked(index, shift));
+            app.send_trade_order(order);
+        });
+        for (arrow, is_up) in [(up, true), (down, false)] {
+            on_shift_click(app, arrow, move |app, _| {
+                let order = app
+                    .trade_window
+                    .as_mut()
+                    .and_then(|trade_window| trade_window.arrow_clicked(index, is_up));
+                app.send_trade_order(order);
+            });
+        }
+    }
+    let target = Rc::clone(app);
+    let on_key = Closure::<dyn FnMut(web_sys::Event)>::new(move |event: web_sys::Event| {
+        let text = |object: &JsValue, name: &str| {
+            js_sys::Reflect::get(object, &name.into())
+                .ok()
+                .and_then(|value| value.as_string())
+                .unwrap_or_default()
+        };
+        let flag = |name: &str| {
+            js_sys::Reflect::get(&event, &name.into()).is_ok_and(|value| value.is_truthy())
+        };
+        let Ok(mut app) = target.try_borrow_mut() else {
+            return;
+        };
+        // On every key, as a Shift released over another window is only
+        // seen on the next key or blur.
+        let shift = flag("shiftKey");
+        if shift != app.mass_barter {
+            app.mass_barter = shift;
+            app.details_dirty = true;
+        }
+        if event.type_() != "keydown" {
+            return;
+        }
+        let tag = event
+            .target()
+            .map(|element| text(&element, "tagName"))
+            .unwrap_or_default();
+        if matches!(tag.as_str(), "INPUT" | "SELECT" | "TEXTAREA")
+            || flag("altKey")
+            || flag("metaKey")
+        {
+            return;
+        }
+        match text(&event, "code").as_str() {
+            "KeyB" if flag("ctrlKey") && !shift => {
+                // The browser's bookmarks panel would take it otherwise.
+                event.prevent_default();
+                if !flag("repeat") {
+                    app.toggle_trade(None);
+                }
+            }
+            "Escape" if !flag("ctrlKey") && !shift => app.toggle_trade(Some(false)),
+            _ => {}
+        }
+    });
+    for kind in ["keydown", "keyup"] {
+        let _ = window.add_event_listener_with_callback(kind, on_key.as_ref().unchecked_ref());
+    }
+    // The dialog lives as long as the page, so its handler does too.
+    on_key.forget();
+    let target = Rc::clone(app);
+    let on_blur = Closure::<dyn FnMut()>::new(move || {
+        if let Ok(mut app) = target.try_borrow_mut()
+            && app.mass_barter
+        {
+            app.mass_barter = false;
+            app.details_dirty = true;
+        }
+    });
+    let _ = window.add_event_listener_with_callback("blur", on_blur.as_ref().unchecked_ref());
+    on_blur.forget();
+}
+
+/// A click on `button` calls `handler` with whether Shift was held.
+fn on_shift_click(
+    app: &Rc<RefCell<App>>,
+    button: &HtmlElement,
+    handler: impl Fn(&mut App, bool) + 'static,
+) {
+    let target = Rc::clone(app);
+    let on_click = Closure::<dyn FnMut(MouseEvent)>::new(move |event: MouseEvent| {
+        if let Ok(mut app) = target.try_borrow_mut() {
+            handler(&mut app, event.shift_key());
+        }
+    });
+    button.set_onclick(Some(on_click.as_ref().unchecked_ref()));
+    // The page's buttons live as long as it does, so their handlers do too.
+    on_click.forget();
+}
+
 /// The Menu and its Resign and Exit, which ask first as the session's do.
 fn wire_game_menu(app: &Rc<RefCell<App>>) {
     let Some((open, resign, exit)) = app.borrow().game_menu.as_ref().map(|menu| {
@@ -2291,6 +2553,9 @@ fn wire_game_menu(app: &Rc<RefCell<App>>) {
             // `closeOpenDialogs`.
             if let Some(diplomacy_window) = &mut app.diplomacy_window {
                 diplomacy_window.set_open(false);
+            }
+            if let Some(trade_window) = &mut app.trade_window {
+                trade_window.set_open(false, app.perspective);
             }
             if let Some(message_box) = &mut app.message_box {
                 if resign {
@@ -2769,6 +3034,9 @@ fn wire_language(app: &Rc<RefCell<App>>, select: HtmlSelectElement) {
                         app.top_dirty = true;
                         if let Some(diplomacy_window) = &mut app.diplomacy_window {
                             diplomacy_window.invalidate();
+                        }
+                        if let Some(trade_window) = &mut app.trade_window {
+                            trade_window.invalidate();
                         }
                         app.dirty = true;
                     }

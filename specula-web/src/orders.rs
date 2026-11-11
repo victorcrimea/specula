@@ -12,7 +12,9 @@ use specula_assets::command::QUEUED;
 
 use crate::detail;
 use crate::detail::Commands;
+use crate::detail::DataKey;
 use crate::detail::Group;
+use crate::lang;
 use crate::left::matches_class_list;
 use crate::panel::entity_groups;
 use crate::panel::mutual_allies;
@@ -25,6 +27,7 @@ use crate::stream::COMPONENT_FOUNDATION;
 use crate::stream::COMPONENT_GARRISON_HOLDER;
 use crate::stream::COMPONENT_GARRISONABLE;
 use crate::stream::COMPONENT_GUARD;
+use crate::stream::COMPONENT_MARKET;
 use crate::stream::COMPONENT_RALLY_POINT;
 use crate::stream::COMPONENT_REPAIRABLE;
 use crate::stream::COMPONENT_RESOURCE_DROPSITE;
@@ -38,6 +41,11 @@ use crate::stream::Scene;
 use crate::stream::Stance;
 use crate::stream::TEMPLATE_UNCONTROLLABLE;
 use crate::stream::TemplateDetails;
+use crate::tips;
+use crate::tips::DataFiles;
+use crate::tooltip;
+use crate::trade;
+use crate::trade::Details;
 
 /// Where a right click landed, or where the mouse is: the entity under the
 /// cursor, and the ground point, x and z in metres.
@@ -77,19 +85,24 @@ pub enum Preselect {
 /// `firstAbleEntity`.
 pub struct Action {
     pub cursor: String,
+    /// The `informationTooltip` at the mouse, in the engine's markup;
+    /// empty for none.
+    pub tooltip: String,
     pub command: Option<Command>,
     pub sound: Option<(&'static str, u32)>,
 }
 
 /// The action for `player`'s entities among `selected`, none when the
 /// engine shows the default cursor and orders nothing. A walk puts them in
-/// `formation`, empty for none.
+/// `formation`, empty for none; `data` has the template data a rally
+/// point's trade route reads.
 pub fn action(
     scene: &Scene,
     selected: &[u32],
     player: i32,
     target: &Target,
     formation: &str,
+    data: &DataFiles,
 ) -> Option<Action> {
     let (own, able) = own_and_able(scene, selected, player)?;
     let details = |id: u32| {
@@ -103,6 +116,7 @@ pub fn action(
         // The "uncontrollable" action.
         return Some(Action {
             cursor: "cursor-no".to_string(),
+            tooltip: String::new(),
             command: None,
             sound: None,
         });
@@ -147,6 +161,54 @@ pub fn action(
         let bits = target_details.map_or(0, |details| details.components);
         let relation = relation(scene, player, dot.owner);
 
+        // "setup-trade-route", for the first trader it is possible for.
+        let route = able.iter().find_map(|&unit| {
+            let details = trade::trading_details(scene, player, unit, id)?;
+            let tooltip = match &details {
+                Details::IsFirst { both: false, .. } => return None,
+                Details::IsFirst { gain, .. } => format!(
+                    "{}\n{}",
+                    lang::translate("Origin trade market."),
+                    trade::gain_line(scene, gain.as_ref())
+                ),
+                Details::IsSecond { gain } => format!(
+                    "{}\n{}",
+                    lang::translate("Destination trade market."),
+                    trade::gain_line(scene, gain.as_ref())
+                ),
+                Details::SetFirst => lang::translate("Right-click to set as origin trade market"),
+                Details::SetSecond { gain } if gain.trader_gain == 0.0 => {
+                    return Some((unit, false, too_close()));
+                }
+                Details::SetSecond { gain } => format!(
+                    "{}\n{}",
+                    lang::translate("Right-click to set as destination trade market."),
+                    trade::gain_line(scene, Some(gain))
+                ),
+            };
+            Some((unit, true, tooltip))
+        });
+        if let Some((trader, possible, tooltip)) = route {
+            if !possible {
+                return Some(Action {
+                    cursor: "action-setup-trade-route-disabled".to_string(),
+                    tooltip,
+                    command: None,
+                    sound: None,
+                });
+            }
+            return Some(Action {
+                cursor: "action-setup-trade-route".to_string(),
+                tooltip,
+                command: Some(Command::SetupTradeRoute {
+                    flags,
+                    entities: entities(),
+                    target: id,
+                }),
+                sound: Some(("order_trade", trader)),
+            });
+        }
+
         // "gather"
         if bits & COMPONENT_RESOURCE_SUPPLY != 0
             && let Some((gatherer, resource)) = able.iter().find_map(|&unit| {
@@ -165,6 +227,7 @@ pub fn action(
                 } else {
                     format!("action-gather-{resource}")
                 },
+                tooltip: String::new(),
                 command: Some(Command::Gather {
                     flags,
                     entities: entities(),
@@ -187,6 +250,7 @@ pub fn action(
         {
             return Some(Action {
                 cursor: format!("action-return-{carried}"),
+                tooltip: String::new(),
                 command: Some(Command::ReturnResource {
                     flags,
                     entities: entities(),
@@ -195,13 +259,33 @@ pub fn action(
                 sound: Some(("order_gather", carrier)),
             });
         }
+        // "cancel-setup-trade-route": the origin, before a destination.
+        if able.iter().any(|&unit| {
+            matches!(
+                trade::trading_details(scene, player, unit, id),
+                Some(Details::IsFirst { both: false, .. })
+            )
+        }) {
+            return Some(Action {
+                cursor: "action-cancel-setup-trade-route".to_string(),
+                tooltip: lang::translate(
+                    "This is the origin trade market.\nRight-click to cancel trade route.",
+                ),
+                command: Some(Command::CancelTradeRoute {
+                    flags,
+                    entities: entities(),
+                    target: id,
+                }),
+                sound: None,
+            });
+        }
     }
 
     // "set-rallypoint": structures only, as commands to units take
     // precedence.
     if !unit_ai
         && able.iter().any(|&id| has(id, COMPONENT_RALLY_POINT))
-        && let Some(action) = rally(scene, &own, player, target, target_dot, flags)
+        && let Some(action) = rally(scene, &own, player, target, target_dot, flags, data)
     {
         return Some(action);
     }
@@ -224,6 +308,7 @@ pub fn action(
         {
             return Some(Action {
                 cursor: "action-attack".to_string(),
+                tooltip: String::new(),
                 command: Some(Command::Attack {
                     flags,
                     entities: entities(),
@@ -239,6 +324,7 @@ pub fn action(
         {
             return Some(Action {
                 cursor: "action-capture".to_string(),
+                tooltip: String::new(),
                 command: Some(Command::Attack {
                     flags: flags | ALLOW_CAPTURE,
                     entities: entities(),
@@ -259,6 +345,7 @@ pub fn action(
         .or_else(|| target_dot.map(|(_, dot)| position(dot)));
     Some(Action {
         cursor: String::new(),
+        tooltip: String::new(),
         command: point.map(|[x, z]| Command::Walk {
             flags,
             entities: entities(),
@@ -305,6 +392,7 @@ pub fn preselected(
     };
     Some(action.unwrap_or_else(|| Action {
         cursor: disabled.to_string(),
+        tooltip: String::new(),
         command: None,
         sound: None,
     }))
@@ -337,6 +425,67 @@ fn own_and_able(scene: &Scene, selected: &[u32], player: i32) -> Option<(Vec<u32
 
 /// What the actions that both a hotkey and a command button pick read:
 /// each one's `actionCheck`, through `getActionInfo`'s first able entity.
+/// The set-rallypoint market branch: the selected market that sets it and
+/// `GetTradingRouteGain`'s `traderGain` to `target` for the first trader
+/// it trains. `None` where the engine goes on to the next branch, and
+/// while the trader's template data has not loaded.
+fn rally_trade_gain(
+    scene: &Scene,
+    own: &[u32],
+    player: i32,
+    target: u32,
+    data: &DataFiles,
+) -> Option<(u32, trade::Gain)> {
+    // `getActionInfo`'s entState: the first that has a rally point.
+    let &market = own.iter().find(|&&id| {
+        scene
+            .dots
+            .get(&id)
+            .and_then(|dot| template_details(scene, dot.template))
+            .is_some_and(|details| details.components & COMPONENT_RALLY_POINT != 0)
+    })?;
+    let (_, naval) = trade::market_types(scene, market)?;
+    let (_, target_naval) = trade::market_types(scene, target)?;
+    let target_dot = scene.dots.get(&target)?;
+    let target_bits =
+        template_details(scene, target_dot.template).map_or(0, |details| details.components);
+    // A foundation has a Market too, but no `market` entity state.
+    if market == target
+        || target_bits & (COMPONENT_MARKET | COMPONENT_FOUNDATION) != COMPONENT_MARKET
+        || (naval && !target_naval)
+        || is_enemy(scene, player, target_dot.owner)
+    {
+        return None;
+    }
+    let dot = scene.dots.get(&market)?;
+    let lists = &scene.details.lists;
+    let trainable = match &entity_groups(scene, market, dot.template)[detail::TRAINABLE] {
+        Some(Group::List(index)) => lists.get(*index as usize)?,
+        _ => return None,
+    };
+    // `GetTemplateData(...).trader` of the first trainable that has one.
+    let mut multiplier = None;
+    for item in trainable {
+        let key = DataKey::Template {
+            name: item.name,
+            player: dot.owner,
+        };
+        let Some(&hash) = scene.details.data.get(&key) else {
+            continue;
+        };
+        let template = data.get(hash)?;
+        let trader = tips::field(&template, "trader");
+        if trader.is_object() {
+            multiplier = Some(tips::number_field(&trader, "GainMultiplier"));
+            break;
+        }
+    }
+    Some((
+        market,
+        trade::calculate_gain(scene, market, target, trade::For::Template(multiplier?))?,
+    ))
+}
+
 struct Actions<'a> {
     scene: &'a Scene,
     own: &'a [u32],
@@ -411,6 +560,7 @@ impl Actions<'_> {
             .find(|&&unit| self.has(unit, COMPONENT_BUILDER))?;
         Some(Action {
             cursor: "action-repair".to_string(),
+            tooltip: String::new(),
             command: Some(Command::Repair {
                 flags: self.flags,
                 entities: self.own.to_vec(),
@@ -446,6 +596,7 @@ impl Actions<'_> {
         })?;
         Some(Action {
             cursor: "action-garrison".to_string(),
+            tooltip: String::new(),
             command: Some(Command::Garrison {
                 flags: self.flags,
                 entities: self.own.to_vec(),
@@ -475,6 +626,7 @@ impl Actions<'_> {
         })?;
         Some(Action {
             cursor: "action-occupy-turret".to_string(),
+            tooltip: String::new(),
             command: Some(Command::OccupyTurret {
                 flags: self.flags,
                 entities: self.own.to_vec(),
@@ -497,6 +649,7 @@ impl Actions<'_> {
         })?;
         Some(Action {
             cursor: "action-guard".to_string(),
+            tooltip: String::new(),
             command: Some(Command::Guard {
                 flags: self.flags,
                 entities: self.own.to_vec(),
@@ -513,6 +666,7 @@ impl Actions<'_> {
         })?;
         Some(Action {
             cursor: "action-remove-guard".to_string(),
+            tooltip: String::new(),
             command: Some(Command::RemoveGuard {
                 entities: self.own.to_vec(),
             }),
@@ -528,6 +682,7 @@ impl Actions<'_> {
         })?;
         Some(Action {
             cursor: "action-patrol".to_string(),
+            tooltip: String::new(),
             command: self.point().map(|[x, z]| Command::Patrol {
                 flags: self.flags,
                 entities: self.own.to_vec(),
@@ -547,6 +702,7 @@ impl Actions<'_> {
             .find(|&&unit| self.has(unit, COMPONENT_UNIT_AI))?;
         Some(Action {
             cursor: "action-attack".to_string(),
+            tooltip: String::new(),
             command: self.point().map(|[x, z]| Command::CallToArms {
                 flags: self.flags,
                 entities: self.own.to_vec(),
@@ -574,6 +730,20 @@ impl Relation {
     fn enemy(self) -> bool {
         matches!(self, Relation::Enemy | Relation::Gaia)
     }
+}
+
+/// The disabled "set second" and rally route's tooltip, in
+/// `g_DisabledTags`.
+fn too_close() -> String {
+    tooltip::colored(
+        &lang::translate("This market is too close to the origin market."),
+        "255 140 0",
+    )
+}
+
+/// `isEnemy` of `player` towards `owner`, gaia included.
+pub(crate) fn is_enemy(scene: &Scene, player: i32, owner: i32) -> bool {
+    relation(scene, player, owner).enemy()
 }
 
 /// `player`'s stance towards `owner`.
@@ -707,11 +877,12 @@ fn can_capture(
             })
 }
 
-/// "set-rallypoint" without hotkeys: on a resource gather, on a friendly
-/// foundation or damaged building repair, on an enemy attack, else walk.
-/// Garrisoning, turrets, treasures and trade routes are not ordered, so
-/// those show the walk's arrow. None on a selected entity itself, which
-/// the engine unsets the rally point on.
+/// "set-rallypoint" without hotkeys: on a resource gather, from a market
+/// on another the default trade route, on a friendly foundation or
+/// damaged building repair, on an enemy attack, else walk. Garrisoning,
+/// turrets and treasures are not ordered, so those show the walk's arrow.
+/// None on a selected entity itself, which the engine unsets the rally
+/// point on.
 fn rally(
     scene: &Scene,
     own: &[u32],
@@ -719,8 +890,11 @@ fn rally(
     target: &Target,
     target_dot: Option<(u32, &Dot)>,
     flags: u8,
+    data: &DataFiles,
 ) -> Option<Action> {
     let mut resource = (String::new(), String::new());
+    let mut source = 0;
+    let mut tooltip = String::new();
     let (cursor, order, rally_target, point) = match target_dot {
         Some((id, _)) if own.contains(&id) => return None,
         Some((id, dot)) => {
@@ -741,6 +915,22 @@ fn rally(
                     format!("action-gather-{specific}")
                 };
                 (cursor, "gather", id)
+            } else if let Some((market, gain)) = rally_trade_gain(scene, own, player, id, data) {
+                if gain.trader_gain == 0.0 {
+                    return Some(Action {
+                        cursor: "action-setup-trade-route-disabled".to_string(),
+                        tooltip: too_close(),
+                        command: None,
+                        sound: None,
+                    });
+                }
+                tooltip = format!(
+                    "{}\n{}",
+                    lang::translate("Right-click to establish a default route for new traders."),
+                    trade::gain_line(scene, Some(&gain))
+                );
+                source = market;
+                ("action-setup-trade-route".to_string(), "trade", id)
             } else if friendly
                 && (bits & COMPONENT_FOUNDATION != 0
                     || (bits & COMPONENT_REPAIRABLE != 0 && dot.hitpoints < 255))
@@ -763,6 +953,7 @@ fn rally(
     };
     Some(Action {
         cursor,
+        tooltip,
         command: point.map(|[x, z]| Command::Rally {
             flags,
             entities: own.to_vec(),
@@ -772,6 +963,7 @@ fn rally(
             target: rally_target,
             resource_type: resource.0,
             resource_template: resource.1,
+            source,
         }),
         // unit_actions.js plays nothing on setting a rally point.
         sound: None,

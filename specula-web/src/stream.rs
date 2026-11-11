@@ -73,6 +73,7 @@ pub const COMPONENT_UNIT_AI: u32 = 1 << 9;
 pub const COMPONENT_TRAINER: u32 = 1 << 10;
 pub const COMPONENT_PACK: u32 = 1 << 12;
 pub const COMPONENT_UPGRADE: u32 = 1 << 13;
+pub const COMPONENT_TRADER: u32 = 1 << 14;
 pub const COMPONENT_GARRISONABLE: u32 = 1 << 15;
 pub const COMPONENT_TURRETABLE: u32 = 1 << 16;
 pub const COMPONENT_ATTACK: u32 = 1 << 17;
@@ -83,6 +84,9 @@ pub const COMPONENT_RESOURCE_DROPSITE: u32 = 1 << 24;
 pub const COMPONENT_TURRET_HOLDER: u32 = 1 << 25;
 pub const COMPONENT_MARKET: u32 = 1 << 26;
 pub const COMPONENT_GUARD: u32 = 1 << 27;
+/// `Market.HasType`, sent after the component bits.
+pub const COMPONENT_MARKET_LAND: u32 = 1 << 28;
+pub const COMPONENT_MARKET_NAVAL: u32 = 1 << 29;
 /// `TemplateDetails::flags`: Identity's Undeletable.
 pub const TEMPLATE_UNDELETABLE: u32 = 2048;
 /// And Identity's Controllable false.
