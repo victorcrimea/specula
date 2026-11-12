@@ -334,6 +334,7 @@ use crate::feed::TemplateDetails;
 use crate::feed::Terrain;
 use crate::feed::Territory;
 use crate::history::History;
+use crate::summary_envelope;
 use crate::terrain::Ground;
 use crate::web;
 use crate::wire::Writer;
@@ -782,6 +783,90 @@ struct Archive {
     detail_segments: Vec<Option<Message>>,
     terrain: Option<(u64, TerrainFile)>,
     data_files: DataFiles,
+    summaries: Vec<Arc<SummaryEntry>>,
+}
+
+/// One capture of a match, shared by the queue, the shown match and the
+/// thread compressing it.
+pub struct SummaryEntry {
+    pub match_id: u64,
+    pub turn: u32,
+    inner: Mutex<EntryState>,
+}
+
+struct EntryState {
+    /// The envelope `{"turn":N,"final":b,"metadata":<full JSON>}`,
+    /// uncompressed, until the brotli copy exists.
+    raw: Option<Arc<[u8]>>,
+    brotli: Option<Arc<[u8]>>,
+    /// The publisher has shown it to `/`.
+    released: bool,
+    /// It is in the history, or there is none.
+    stored: bool,
+}
+
+/// A capture's envelope and whether it is compressed.
+pub struct SummaryBody {
+    pub bytes: Arc<[u8]>,
+    pub brotli: bool,
+}
+
+/// Compresses off the feed and seat threads: quality 11 takes long enough
+/// on a large capture to stall a stream.
+pub(crate) fn spawn_brotli(raw: Arc<[u8]>, store: impl FnOnce(Arc<[u8]>) + Send + 'static) {
+    std::thread::spawn(move || {
+        let brotli: Arc<[u8]> = web::compress(&raw).into();
+        store(brotli);
+    });
+}
+
+/// Writes the history copy of a released capture, once. The caller must
+/// not hold the entry's lock.
+fn store_summary(history: Option<&Mutex<History>>, entry: &SummaryEntry, protect: &[u64]) {
+    let Some(history) = history else {
+        return;
+    };
+    let brotli = {
+        let mut inner = entry.inner.lock().unwrap();
+        if !inner.released || inner.stored {
+            return;
+        }
+        let Some(brotli) = inner.brotli.clone() else {
+            return;
+        };
+        inner.stored = true;
+        brotli
+    };
+    if let Err(error) =
+        history
+            .lock()
+            .unwrap()
+            .write_summary(entry.match_id, entry.turn, &brotli, protect)
+    {
+        eprintln!(
+            "cannot store summary {} of match {:016x}: {error}",
+            entry.turn, entry.match_id
+        );
+    }
+}
+
+/// The capture at or before `turn`, or the last one.
+fn summary_body(entries: &[Arc<SummaryEntry>], turn: Option<u32>) -> Option<SummaryBody> {
+    let entry = entries
+        .iter()
+        .rev()
+        .find(|entry| turn.is_none_or(|turn| entry.turn <= turn))?;
+    let inner = entry.inner.lock().unwrap();
+    if let Some(brotli) = &inner.brotli {
+        return Some(SummaryBody {
+            bytes: Arc::clone(brotli),
+            brotli: true,
+        });
+    }
+    inner.raw.as_ref().map(|raw| SummaryBody {
+        bytes: Arc::clone(raw),
+        brotli: false,
+    })
 }
 
 #[derive(Clone)]
@@ -982,6 +1067,8 @@ enum Release {
         visual: TrackOp,
         detail: TrackOp,
     },
+    /// Queued like the turns around it, so `/` sees it `delay` late.
+    Summary(Arc<SummaryEntry>),
     End {
         match_id: u64,
         visual_tail: Vec<u8>,
@@ -1003,6 +1090,8 @@ struct Shown {
     /// Set from the end of a match until the next one's first turn.
     ended: Option<Ended>,
     previous: Option<Archive>,
+    /// Every capture released for the shown match, in turn order.
+    summaries: Vec<Arc<SummaryEntry>>,
 }
 
 impl Shown {
@@ -1040,6 +1129,7 @@ impl Shown {
                 if let Some(match_id) = start {
                     self.match_id = match_id;
                     self.ended = None;
+                    self.summaries.clear();
                 }
                 self.has_turn = true;
                 let visual = self.visual.apply(visual, store(self.match_id, false));
@@ -1047,6 +1137,14 @@ impl Shown {
                 // No receivers is not an error: nobody is watching yet.
                 let _ = self.visual.sender.send(visual);
                 let _ = self.detail.sender.send(detail);
+            }
+            Release::Summary(entry) => {
+                if entry.match_id != self.match_id {
+                    return;
+                }
+                self.summaries.push(Arc::clone(&entry));
+                entry.inner.lock().unwrap().released = true;
+                store_summary(history, &entry, &protect);
             }
             Release::End {
                 match_id,
@@ -1064,6 +1162,7 @@ impl Shown {
                     detail_segments: std::mem::take(&mut self.detail.segments),
                     terrain,
                     data_files,
+                    summaries: std::mem::take(&mut self.summaries),
                 });
                 // Viewers learn of the end only now.
                 ended.at = Instant::now();
@@ -1579,6 +1678,7 @@ impl Shown {
             detail: Track::new(),
             ended: None,
             previous: None,
+            summaries: Vec::new(),
         }
     }
 }
@@ -1985,6 +2085,110 @@ impl Hub {
         self.state.lock().unwrap().feed_activity
     }
 
+    /// A capture of the match being encoded; `/` is shown it with the
+    /// turns, `delay` late. Ignored before the match's first turn.
+    pub fn set_summary(self: &Arc<Self>, turn: u32, is_final: bool, full: Arc<[u8]>) {
+        // Before the envelope is built: a capture outside a match costs
+        // nothing.
+        {
+            let state = self.state.lock().unwrap();
+            if !state.has_turn || state.ended {
+                return;
+            }
+        }
+        let Some(raw) = summary_envelope(turn, is_final, &full) else {
+            return;
+        };
+        let raw: Arc<[u8]> = raw.into();
+        let entry = {
+            let mut state = self.state.lock().unwrap();
+            if !state.has_turn || state.ended {
+                return;
+            }
+            let entry = Arc::new(SummaryEntry {
+                match_id: state.match_id,
+                turn,
+                inner: Mutex::new(EntryState {
+                    raw: Some(Arc::clone(&raw)),
+                    brotli: None,
+                    released: false,
+                    stored: self.history.is_none(),
+                }),
+            });
+            self.queue(&mut state, Release::Summary(Arc::clone(&entry)));
+            entry
+        };
+        let hub = Arc::clone(self);
+        spawn_brotli(raw, move |brotli| {
+            let write = {
+                let mut inner = entry.inner.lock().unwrap();
+                inner.brotli = Some(brotli);
+                inner.raw = None;
+                inner.released && !inner.stored
+            };
+            if !write {
+                return;
+            }
+            let protect = {
+                let state = hub.state.lock().unwrap();
+                // A match the history has dropped since gets no file back.
+                let previous = state
+                    .shown
+                    .previous
+                    .as_ref()
+                    .map_or(0, |archive| archive.match_id);
+                if ![state.match_id, state.shown.match_id, previous].contains(&entry.match_id) {
+                    return;
+                }
+                [
+                    state.match_id,
+                    state
+                        .shown
+                        .previous
+                        .as_ref()
+                        .map_or(0, |archive| archive.match_id),
+                ]
+            };
+            store_summary(hub.history.as_deref(), &entry, &protect);
+        });
+    }
+
+    /// The capture at or before `turn` of a match as `/` may see it: the
+    /// shown or the previous match from memory, any other from the
+    /// history. The history is written only as a capture is shown, so it
+    /// holds nothing ahead of the stream.
+    pub fn summary(&self, match_id: u64, turn: Option<u32>) -> Option<SummaryBody> {
+        {
+            let state = self.state.lock().unwrap();
+            let previous = state
+                .shown
+                .previous
+                .as_ref()
+                .filter(|archive| archive.match_id == match_id)
+                .and_then(|archive| summary_body(&archive.summaries, turn));
+            if previous.is_some() {
+                return previous;
+            }
+            if match_id == state.shown.match_id
+                && state.shown.has_turn
+                && let Some(body) = summary_body(&state.shown.summaries, turn)
+            {
+                return Some(body);
+            }
+        }
+        let path = self
+            .history
+            .as_ref()?
+            .lock()
+            .unwrap()
+            .summary_at(match_id, turn)?;
+        let bytes: Arc<[u8]> = std::fs::read(path).ok()?.into();
+        Some(SummaryBody {
+            bytes,
+            brotli: true,
+        })
+    }
+
     /// Called when the feed is gone. A feed that never sent a turn ends
     /// nothing.
     pub fn end_match(&self) {
@@ -2294,7 +2498,7 @@ fn ending(
             data_files,
             ..
         } => Some((terrain.as_ref(), data_files)),
-        Release::Turn { .. } => None,
+        Release::Turn { .. } | Release::Summary(_) => None,
     })
 }
 

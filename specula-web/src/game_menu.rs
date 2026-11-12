@@ -1,6 +1,6 @@
 //! The session's Menu (`top_panel/MenuButton.xml`, `Menu.xml`,
 //! `MenuButtons.js`) on `/play`, for the visitor who started the game, with
-//! only its Resign and Exit; and the requests they and the match over
+//! only its Summary, Resign and Exit; and the requests they and the match over
 //! popup's Rematch make of the server.
 
 use wasm_bindgen::JsCast;
@@ -23,6 +23,7 @@ pub struct GameMenu {
     root: HtmlElement,
     open: HtmlButtonElement,
     panel: HtmlElement,
+    summary: HtmlButtonElement,
     resign: HtmlButtonElement,
     exit: HtmlButtonElement,
 }
@@ -33,19 +34,21 @@ impl GameMenu {
             root: crate::element(document, "game-menu")?,
             open: crate::element(document, "game-menu-open")?,
             panel: crate::element(document, "game-menu-panel")?,
+            summary: crate::element(document, "game-menu-summary")?,
             resign: crate::element(document, "game-menu-resign")?,
             exit: crate::element(document, "game-menu-exit")?,
         };
         lang::set_text(&menu.open, "Menu");
+        lang::set_text(&menu.summary, "Summary");
         lang::set_text(&menu.resign, "Resign");
         lang::set_text(&menu.exit, "Exit");
         menu.root.set_hidden(false);
         Ok(menu)
     }
 
-    /// Menu, Resign and Exit.
-    pub fn buttons(&self) -> (&HtmlElement, &HtmlElement, &HtmlElement) {
-        (&self.open, &self.resign, &self.exit)
+    /// Menu, Summary, Resign and Exit.
+    pub fn buttons(&self) -> (&HtmlElement, &HtmlElement, &HtmlElement, &HtmlElement) {
+        (&self.open, &self.summary, &self.resign, &self.exit)
     }
 
     /// `Menu.toggle`.
@@ -91,6 +94,8 @@ pub struct Status {
     pub defeated: bool,
     /// The visitor's last game can be started again.
     pub rematch: bool,
+    /// The visitor's seat, 0 when the game is not theirs.
+    pub seat: usize,
 }
 
 pub async fn status() -> Result<Status, String> {
@@ -113,6 +118,10 @@ pub async fn status() -> Result<Status, String> {
     Ok(Status {
         defeated: flag("defeated"),
         rematch: flag("rematch"),
+        seat: js_sys::Reflect::get(&json, &"seat".into())
+            .ok()
+            .and_then(|seat| seat.as_f64())
+            .unwrap_or(0.0) as usize,
     })
 }
 

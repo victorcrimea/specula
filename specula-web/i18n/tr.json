@@ -99,5 +99,9 @@
   "Back to your game": "Oyununa dön",
   "Players": "Oyuncular",
   "You": "Sen",
-  "Cannot start the game: %(error)s": "Oyun başlatılamıyor: %(error)s"
+  "Cannot start the game: %(error)s": "Oyun başlatılamıyor: %(error)s",
+  "View summary": "Özeti görüntüle",
+  "Continue watching": "İzlemeye devam et",
+  "Last recorded scores": "Son kaydedilen puanlar",
+  "Chart type": "Grafik türü"
 }

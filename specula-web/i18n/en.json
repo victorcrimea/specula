@@ -99,5 +99,9 @@
   "Back to your game": "link from the game setup page back to the visitor's own game in progress",
   "Players": "game setup: label of the list choosing how many players the game has",
   "You": "game setup: the visitor plays this slot",
-  "Cannot start the game: %(error)s": "game setup error; %(error)s is the server's reason, in English"
+  "Cannot start the game: %(error)s": "game setup error; %(error)s is the server's reason, in English",
+  "View summary": "button of the defeat or victory popup that opens the match summary",
+  "Continue watching": "button of the defeat popup that closes it, after which the player goes on watching the match as an observer",
+  "Last recorded scores": "heading of the match summary when the game stopped before the final scores were taken; the numbers are the last ones recorded",
+  "Chart type": "label of a list in the match summary's charts that chooses which part of a value to draw (for example trained, killed or lost)"
 }

@@ -99,5 +99,9 @@
   "Back to your game": "Kembali ke permainan Anda",
   "Players": "Pemain",
   "You": "Anda",
-  "Cannot start the game: %(error)s": "Tidak dapat memulai permainan: %(error)s"
+  "Cannot start the game: %(error)s": "Tidak dapat memulai permainan: %(error)s",
+  "View summary": "Lihat ringkasan",
+  "Continue watching": "Lanjutkan menonton",
+  "Last recorded scores": "Skor terakhir yang tercatat",
+  "Chart type": "Jenis grafik"
 }

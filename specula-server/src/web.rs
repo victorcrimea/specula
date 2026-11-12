@@ -86,6 +86,12 @@ const BROTLI_WINDOW_BITS: u32 = 22;
 /// Whether the request takes `Content-Encoding: br`.
 pub struct AcceptsBrotli(bool);
 
+impl AcceptsBrotli {
+    pub fn accepts(&self) -> bool {
+        self.0
+    }
+}
+
 #[rocket::async_trait]
 impl<'r> FromRequest<'r> for AcceptsBrotli {
     type Error = std::convert::Infallible;
@@ -123,6 +129,17 @@ pub struct Encoded<B> {
     content_type: ContentType,
     brotli: bool,
     cache: &'static str,
+}
+
+impl<B> Encoded<B> {
+    pub fn new(body: B, content_type: ContentType, brotli: bool, cache: &'static str) -> Self {
+        Encoded {
+            body,
+            content_type,
+            brotli,
+            cache,
+        }
+    }
 }
 
 impl<'r, B: Responder<'r, 'static>> Responder<'r, 'static> for Encoded<B> {

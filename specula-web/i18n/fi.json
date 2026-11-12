@@ -99,5 +99,9 @@
   "Back to your game": "Takaisin peliisi",
   "Players": "Pelaajat",
   "You": "Sinä",
-  "Cannot start the game: %(error)s": "Peliä ei voi aloittaa: %(error)s"
+  "Cannot start the game: %(error)s": "Peliä ei voi aloittaa: %(error)s",
+  "View summary": "Näytä yhteenveto",
+  "Continue watching": "Jatka katselua",
+  "Last recorded scores": "Viimeksi tallennetut pisteet",
+  "Chart type": "Kaavion tyyppi"
 }

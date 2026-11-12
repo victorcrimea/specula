@@ -99,5 +99,9 @@
   "Back to your game": "自分のゲームに戻る",
   "Players": "プレイヤー数",
   "You": "あなた",
-  "Cannot start the game: %(error)s": "ゲームを開始できません: %(error)s"
+  "Cannot start the game: %(error)s": "ゲームを開始できません: %(error)s",
+  "View summary": "概要を見る",
+  "Continue watching": "観戦を続ける",
+  "Last recorded scores": "最後に記録されたスコア",
+  "Chart type": "グラフの種類"
 }

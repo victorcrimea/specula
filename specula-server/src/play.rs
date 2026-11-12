@@ -26,8 +26,12 @@ use specula_assets::command::QueryKind;
 
 use rocket::tokio::sync::broadcast;
 
+use crate::feed::Summary;
 use crate::observer;
+use crate::summary_envelope;
 use crate::view::Hub;
+use crate::view::SummaryBody;
+use crate::view::spawn_brotli;
 
 const PLAY_SCRIPT: &str = "scripts/play.sh";
 /// The engine's default port is taken by any 0 A.D. hosted on this machine.
@@ -109,6 +113,7 @@ pub fn setup_json(status: &Status) -> String {
     json.boolean("mine", status.mine);
     json.boolean("defeated", status.defeated);
     json.boolean("rematch", status.rematch);
+    json.raw("seat", &status.seat.unwrap_or(0).to_string());
     json.raw("maps", &pairs(&mut MAPS.iter().copied()));
     json.raw("civs", &pairs(&mut civs()));
     json.finish()
@@ -123,6 +128,9 @@ pub struct Status {
     pub defeated: bool,
     /// The visitor started the last game, which a rematch repeats.
     pub rematch: bool,
+    /// The visitor's seat while the game is theirs, running or not, which
+    /// the summary reads after the engine has exited.
+    pub seat: Option<u8>,
 }
 
 /// What the setup page chose.
@@ -227,6 +235,20 @@ struct Game {
     running: bool,
     /// What it was started with, for a rematch.
     setup: Setup,
+    /// Every statistics capture of the owner's seat, kept after the engine
+    /// exits.
+    summaries: Vec<Arc<SeatCapture>>,
+}
+
+/// One capture of the owner's seat, and its envelope once compressed.
+struct SeatCapture {
+    turn: u32,
+    inner: Mutex<SeatBody>,
+}
+
+struct SeatBody {
+    raw: Option<Arc<[u8]>>,
+    brotli: Option<Arc<[u8]>>,
 }
 
 impl Play {
@@ -268,6 +290,7 @@ impl Play {
             generation,
             running: true,
             setup: setup.clone(),
+            summaries: Vec::new(),
         });
         println!("game {generation} for {owner}: {}", args.join(" "));
         // The engine connects the feed after this, so its first turn
@@ -324,7 +347,94 @@ impl Play {
             mine: running && owned,
             defeated: running && owned && self.seat_defeated(seat),
             rematch: owned,
+            seat: owned.then_some(seat).filter(|&seat| seat != 0),
         }
+    }
+
+    /// The generation of the game now current, which a feed connected for
+    /// it files its summaries under, so a closing feed cannot write into a
+    /// rematch.
+    pub fn current_generation(&self) -> Option<u64> {
+        self.inner
+            .lock()
+            .unwrap()
+            .game
+            .as_ref()
+            .map(|game| game.generation)
+    }
+
+    /// Every capture is kept, but only the owner's seat: the other copies
+    /// are never served through `/play`.
+    pub fn set_summary(&self, generation: u64, summary: Summary) {
+        let (capture, raw) = {
+            let mut inner = self.inner.lock().unwrap();
+            let Some(game) = inner
+                .game
+                .as_mut()
+                .filter(|game| game.generation == generation)
+            else {
+                return;
+            };
+            let Some(view) = summary
+                .seats
+                .get(usize::from(game.seat))
+                .and_then(|view| view.as_ref())
+            else {
+                return;
+            };
+            let Some(raw) = summary_envelope(summary.turn, summary.is_final, view) else {
+                return;
+            };
+            let raw: Arc<[u8]> = raw.into();
+            let capture = Arc::new(SeatCapture {
+                turn: summary.turn,
+                inner: Mutex::new(SeatBody {
+                    raw: Some(Arc::clone(&raw)),
+                    brotli: None,
+                }),
+            });
+            // A final capture on the turn of a periodic one replaces it.
+            if game
+                .summaries
+                .last()
+                .is_some_and(|last| last.turn == summary.turn)
+            {
+                game.summaries.pop();
+            }
+            game.summaries.push(Arc::clone(&capture));
+            (capture, raw)
+        };
+        spawn_brotli(raw, move |brotli| {
+            let mut inner = capture.inner.lock().unwrap();
+            inner.brotli = Some(brotli);
+            inner.raw = None;
+        });
+    }
+
+    /// The owner's seat view at or before `turn`, or the last one. Never
+    /// the full copy: it holds the opponents' statistics.
+    pub fn summary(&self, visitor: Option<&str>, turn: Option<u32>) -> Option<SummaryBody> {
+        let inner = self.inner.lock().unwrap();
+        let game = inner.game.as_ref()?;
+        if Some(game.owner.as_str()) != visitor {
+            return None;
+        }
+        let capture = game
+            .summaries
+            .iter()
+            .rev()
+            .find(|capture| turn.is_none_or(|turn| capture.turn <= turn))?;
+        let body = capture.inner.lock().unwrap();
+        if let Some(brotli) = &body.brotli {
+            return Some(SummaryBody {
+                bytes: Arc::clone(brotli),
+                brotli: true,
+            });
+        }
+        body.raw.as_ref().map(|raw| SummaryBody {
+            bytes: Arc::clone(raw),
+            brotli: false,
+        })
     }
 
     /// Whether the feed reports `seat` as no longer active. Asked without

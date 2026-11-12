@@ -99,5 +99,9 @@
   "Back to your game": "返回你的遊戲",
   "Players": "玩家",
   "You": "你",
-  "Cannot start the game: %(error)s": "無法開始遊戲：%(error)s"
+  "Cannot start the game: %(error)s": "無法開始遊戲：%(error)s",
+  "View summary": "檢視摘要",
+  "Continue watching": "繼續觀戰",
+  "Last recorded scores": "最後記錄的分數",
+  "Chart type": "圖表類型"
 }

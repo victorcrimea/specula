@@ -39,6 +39,7 @@ mod silhouette;
 mod sky;
 mod stored;
 mod stream;
+mod summary;
 mod terrain;
 mod territory;
 mod timing;
@@ -114,6 +115,8 @@ use crate::stream::PlayerState;
 use crate::stream::Scene;
 use crate::stream::Sound;
 use crate::stream::SoundTarget;
+use crate::summary::Source;
+use crate::summary::SummaryWindow;
 use crate::terrain::TerrainImage;
 use crate::top::TopPanel;
 use crate::trade_window::TradeWindow;
@@ -622,8 +625,16 @@ struct App {
     message_box: Option<MessageBox>,
     /// On `/play`: Resign and Exit.
     game_menu: Option<GameMenu>,
-    /// On `/play`: the seat was reported resigned or beaten.
-    defeat_noticed: bool,
+    /// On `/play`: the seat was reported resigned, beaten or victorious.
+    finish_noticed: bool,
+    /// Only the 3D page has the match summary.
+    summary: Option<Rc<RefCell<SummaryWindow>>>,
+    /// On `/play`: the visitor's seat while the game is theirs, running or
+    /// not, whose own copy of the summary the page reads.
+    owner_seat: Option<usize>,
+    /// The outcome of the result offer that View summary was pressed on,
+    /// which closing the summary returns to.
+    offer_return: Option<bool>,
     /// The toggles `/play` ordered that the stream has not reported yet.
     predictions: Predictions,
     /// A turn, the palette or the perspective changed since it was filled;
@@ -1108,13 +1119,34 @@ impl App {
         if self.perspective_select.disabled() != playing {
             self.perspective_select.set_disabled(playing);
         }
-        let defeated = usize::try_from(seat)
+        let finished = usize::try_from(seat)
             .ok()
             .and_then(|seat| self.scene.players.get(seat))
-            .is_some_and(|player| player.state == PlayerState::Defeated);
-        if defeated && !self.defeat_noticed {
-            self.defeat_noticed = true;
-            game_menu::after_defeat();
+            .map(|player| player.state)
+            .filter(|state| *state != PlayerState::Active);
+        if let Some(state) = finished
+            && !self.finish_noticed
+        {
+            self.finish_noticed = true;
+            let won = state == PlayerState::Won;
+            let summary_open = self
+                .summary
+                .as_ref()
+                .is_some_and(|summary| summary.try_borrow().is_ok_and(|summary| summary.is_open()));
+            // Without the summary window there is nothing to offer, so the
+            // page keeps its old behavior.
+            let offer = self.summary.is_some() && !self.match_over.ended;
+            if offer && summary_open {
+                // The summary already stands in for the offer; closing it
+                // shows the offer.
+                self.offer_return = Some(won);
+            } else if offer && self.message_box.is_some() {
+                if let Some(message_box) = &mut self.message_box {
+                    message_box.offer_result(won);
+                }
+            } else if !won {
+                game_menu::after_defeat();
+            }
         }
         if playing && self.perspective != Perspective::Player(seat as usize) {
             self.perspective = Perspective::Player(seat as usize);
@@ -1591,6 +1623,12 @@ impl App {
         self.speed_select.set_value(&speed.to_string());
         // Live plays at the match's own pace.
         self.speed_select.set_disabled(self.live);
+        // A capture covers 30 s; while the window is open, ask only once
+        // the playhead leaves what it can stand for.
+        let at_end = playhead >= newest && (self.match_over.ended || self.match_over.archived);
+        if let (Some(summary), Some(source)) = (self.summary.clone(), summary_source(self)) {
+            summary::follow(&summary, source, playhead, at_end);
+        }
     }
 
     fn update_palette(&mut self) {
@@ -1760,6 +1798,13 @@ async fn run(
             .inspect_err(|error| {
                 web_sys::console::error_1(&format!("diplomacy window: {error}").into())
             })
+            .ok(),
+    };
+    let summary = match page {
+        Page::Map => None,
+        // An older page has no summary window; the match still shows.
+        Page::Observer => SummaryWindow::new(&document)
+            .inspect_err(|error| web_sys::console::error_1(&format!("summary: {error}").into()))
             .ok(),
     };
     let trade_window = match page {
@@ -1941,7 +1986,13 @@ async fn run(
         mass_barter: false,
         message_box,
         game_menu,
-        defeat_noticed: false,
+        finish_noticed: false,
+        summary,
+        owner_seat: status
+            .as_ref()
+            .map(|status| status.seat)
+            .filter(|seat| owner && *seat != 0),
+        offer_return: None,
         predictions: Predictions::default(),
         top_dirty: true,
         top_index: false,
@@ -1966,6 +2017,7 @@ async fn run(
     wire_trade_window(&app, &window);
     wire_message_box(&app, &window);
     wire_game_menu(&app);
+    wire_summary(&app, &window);
     wire_command_hotkeys(&app, &window);
     wire_idle(&app, &window);
     if page == Page::Observer {
@@ -2526,7 +2578,7 @@ fn on_shift_click(
 /// The Menu and its Resign and Exit, which ask first as the session's do.
 fn wire_game_menu(app: &Rc<RefCell<App>>) {
     let Some((open, resign, exit)) = app.borrow().game_menu.as_ref().map(|menu| {
-        let (open, resign, exit) = menu.buttons();
+        let (open, _, resign, exit) = menu.buttons();
         (open.clone(), resign.clone(), exit.clone())
     }) else {
         return;
@@ -2580,6 +2632,136 @@ fn wire_game_menu(app: &Rc<RefCell<App>>) {
     }
 }
 
+/// Where the summary window's numbers come from: the seat's own copies on
+/// `/play`, else the match on screen, at the playhead when that is behind
+/// the live edge.
+fn summary_source(app: &App) -> Option<Source> {
+    let turn = (!app.live).then_some(app.playhead);
+    if let Some(seat) = app.owner_seat {
+        return Some(Source::Play {
+            seat,
+            running: !app.match_over.ended,
+            turn,
+        });
+    }
+    Some(Source::Stream {
+        match_id: app.scene.match_id,
+        turn,
+    })
+}
+
+fn open_summary(summary: &Rc<RefCell<SummaryWindow>>, source: Source, playhead: u32) {
+    if let Ok(mut window) = summary.try_borrow_mut() {
+        window.prepare(&source);
+        window.set_open(true);
+    }
+    summary::refresh(summary, source, playhead);
+}
+
+/// Closes the summary; one opened from the result offer goes back to it.
+fn close_summary(app: &Rc<RefCell<App>>) {
+    let Ok(mut app) = app.try_borrow_mut() else {
+        return;
+    };
+    let Some(summary) = app.summary.clone() else {
+        return;
+    };
+    if let Ok(mut summary) = summary.try_borrow_mut() {
+        summary.set_open(false);
+    }
+    if let Some(won) = app.offer_return.take()
+        && !app.match_over.ended
+        && let Some(message_box) = &mut app.message_box
+    {
+        message_box.offer_result(won);
+    }
+}
+
+/// The buttons that open the summary (`#summary-open` in the controls, the
+/// game menu's entry, the match over popup's), its Close, and Escape. It
+/// changes nothing of the match: closing it never ends or restarts it.
+fn wire_summary(app: &Rc<RefCell<App>>, window: &web_sys::Window) {
+    let Some(summary) = app.borrow().summary.clone() else {
+        return;
+    };
+    let open = |app: &Rc<RefCell<App>>| {
+        let (summary, source, playhead) = {
+            let app = &mut *app.borrow_mut();
+            // A summary opened by hand has no offer to return to, unless
+            // it is opened under a pending offer.
+            if !app.message_box.as_ref().is_some_and(MessageBox::is_offer) {
+                app.offer_return = None;
+            }
+            if let Some(diplomacy_window) = &mut app.diplomacy_window {
+                diplomacy_window.set_open(false);
+            }
+            if let Some(trade_window) = &mut app.trade_window {
+                trade_window.set_open(false, app.perspective);
+            }
+            (app.summary.clone(), summary_source(app), app.playhead)
+        };
+        if let (Some(summary), Some(source)) = (summary, source) {
+            open_summary(&summary, source, playhead);
+        }
+    };
+    let mut buttons: Vec<HtmlElement> = ["summary-open", "match-over-summary"]
+        .into_iter()
+        .filter_map(|id| {
+            window
+                .document()
+                .and_then(|document| element(&document, id).ok())
+        })
+        .collect();
+    if let Some(menu) = &app.borrow().game_menu {
+        buttons.push(menu.buttons().1.clone());
+    }
+    for button in buttons {
+        let target = Rc::clone(app);
+        let from_menu = button.id() == "game-menu-summary";
+        on_click(&button, move || {
+            if from_menu && let Some(menu) = &target.borrow().game_menu {
+                menu.close();
+            }
+            open(&target);
+        });
+    }
+    let close = summary.borrow().close_button().clone();
+    let target = Rc::clone(app);
+    on_click(&close, move || close_summary(&target));
+    let target = Rc::clone(app);
+    let on_key = Closure::<dyn FnMut(web_sys::Event)>::new(move |event: web_sys::Event| {
+        let code = js_sys::Reflect::get(&event, &"code".into())
+            .ok()
+            .and_then(|value| value.as_string());
+        if code.as_deref() != Some("Escape") {
+            return;
+        }
+        let open = target
+            .try_borrow()
+            .ok()
+            .and_then(|app| app.summary.clone())
+            .is_some_and(|summary| summary.try_borrow().is_ok_and(|summary| summary.is_open()));
+        if open {
+            close_summary(&target);
+        }
+    });
+    let _ = window.add_event_listener_with_callback("keydown", on_key.as_ref().unchecked_ref());
+    on_key.forget();
+}
+
+/// No, or Escape, on the open message box; Continue watching of the result
+/// offer goes on to the page a defeat leads to.
+fn cancel_message_box(app: &Rc<RefCell<App>>) {
+    let Ok(mut app) = app.try_borrow_mut() else {
+        return;
+    };
+    if let Some(Pending::Result { won: false }) =
+        app.message_box.as_mut().and_then(MessageBox::cancel)
+    {
+        game_menu::after_defeat();
+    }
+}
+
 /// The message box's No and Yes, and Escape, its cancel hotkey.
 fn wire_message_box(app: &Rc<RefCell<App>>, window: &web_sys::Window) {
     let Some((no, yes)) = app.borrow().message_box.as_ref().map(|message_box| {
@@ -2589,11 +2771,7 @@ fn wire_message_box(app: &Rc<RefCell<App>>, window: &web_sys::Window) {
         return;
     };
     let target = Rc::clone(app);
-    on_click(&no, move || {
-        if let Some(message_box) = &mut target.borrow_mut().message_box {
-            message_box.cancel();
-        }
-    });
+    on_click(&no, move || cancel_message_box(&target));
     let target = Rc::clone(app);
     on_click(&yes, move || {
         let mut app = target.borrow_mut();
@@ -2617,6 +2795,21 @@ fn wire_message_box(app: &Rc<RefCell<App>>, window: &web_sys::Window) {
                 }
                 game_menu::reload();
             }),
+            Some(Pending::Result { won }) => {
+                app.offer_return = Some(won);
+                let source = summary_source(&app);
+                if let (Some(summary), Some(source)) = (app.summary.clone(), source) {
+                    let playhead = app.playhead;
+                    drop(app);
+                    open_summary(&summary, source, playhead);
+                } else {
+                    drop(app);
+                    // Never strand the player when the window cannot open.
+                    if !won {
+                        game_menu::after_defeat();
+                    }
+                }
+            }
             None => {}
         }
     });
@@ -2628,11 +2821,11 @@ fn wire_message_box(app: &Rc<RefCell<App>>, window: &web_sys::Window) {
         if code.as_deref() != Some("Escape") {
             return;
         }
-        if let Ok(mut app) = target.try_borrow_mut()
-            && let Some(message_box) = &mut app.message_box
-            && message_box.is_open()
-        {
-            message_box.cancel();
+        let open = target
+            .try_borrow()
+            .is_ok_and(|app| app.message_box.as_ref().is_some_and(MessageBox::is_open));
+        if open {
+            cancel_message_box(&target);
         }
     });
     let _ = window.add_event_listener_with_callback("keydown", on_key.as_ref().unchecked_ref());
@@ -3046,6 +3239,11 @@ fn wire_language(app: &Rc<RefCell<App>>, select: HtmlSelectElement) {
                         app.top_dirty = true;
                         if let Some(diplomacy_window) = &mut app.diplomacy_window {
                             diplomacy_window.invalidate();
+                        }
+                        if let Some(summary) = &app.summary
+                            && let Ok(mut summary) = summary.try_borrow_mut()
+                        {
+                            summary.invalidate();
                         }
                         if let Some(trade_window) = &mut app.trade_window {
                             trade_window.invalidate();
@@ -3976,7 +4174,19 @@ fn connect(app: &Rc<RefCell<App>>) {
                 {
                     let app = receiver.borrow();
                     if let Some(menu) = &app.game_menu {
-                        menu.update(!seated() || app.defeat_noticed, app.match_over.ended);
+                        menu.update(!seated() || app.finish_noticed, app.match_over.ended);
+                    }
+                }
+                // The match over popup takes the offer's place, and the
+                // game has nothing left to reload for.
+                if let Ok(mut app) = receiver.try_borrow_mut()
+                    && app.match_over.ended
+                {
+                    app.offer_return = None;
+                    if let Some(message_box) = &mut app.message_box
+                        && message_box.is_offer()
+                    {
+                        message_box.cancel();
                     }
                 }
                 receiver.borrow_mut().show_live_delay();

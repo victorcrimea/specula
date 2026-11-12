@@ -99,5 +99,9 @@
   "Back to your game": "Πίσω στο παιχνίδι σου",
   "Players": "Παίκτες",
   "You": "Εσύ",
-  "Cannot start the game: %(error)s": "Δεν είναι δυνατή η έναρξη του παιχνιδιού: %(error)s"
+  "Cannot start the game: %(error)s": "Δεν είναι δυνατή η έναρξη του παιχνιδιού: %(error)s",
+  "View summary": "Προβολή σύνοψης",
+  "Continue watching": "Συνέχεια παρακολούθησης",
+  "Last recorded scores": "Τελευταίες καταγεγραμμένες βαθμολογίες",
+  "Chart type": "Τύπος γραφήματος"
 }

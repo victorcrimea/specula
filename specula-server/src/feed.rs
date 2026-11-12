@@ -9,6 +9,7 @@ use std::collections::HashSet;
 use std::io;
 use std::io::ErrorKind;
 use std::io::Read;
+use std::sync::Arc;
 
 const MAGIC: [u8; 4] = *b"SPCF";
 const VERSION: u32 = 15;
@@ -37,6 +38,7 @@ const RECORD_PLAYER_GUI: u8 = 21;
 const RECORD_FORMATION_DATA: u8 = 22;
 const RECORD_QUERY_REPLY: u8 = 23;
 const RECORD_LOS: u8 = 24;
+const RECORD_SUMMARY: u8 = 25;
 const ENTITY_SIZE: usize = 84;
 const ENTITY_SIZE_V14: usize = 74;
 const SOUND_SIZE: usize = 29;
@@ -766,6 +768,19 @@ pub enum Record {
         side: u32,
         players: Vec<Vec<LosRun>>,
     },
+    /// Kind 25: the statistics summary, whole and per seat.
+    Summary(Summary),
+}
+
+/// The statistics summary of one capture, as JSON.
+#[derive(Clone)]
+pub struct Summary {
+    pub turn: u32,
+    pub is_final: bool,
+    /// Every player, for `/` and the history.
+    pub full: Arc<[u8]>,
+    /// Indexed by player id; a seat's own view, for `/play`.
+    pub seats: Vec<Option<Arc<[u8]>>>,
 }
 
 /// `LOS_EXPLORED` and `LOS_VISIBLE` of a vertex state.
@@ -914,6 +929,7 @@ pub fn read_record(reader: &mut impl Read, version: u32) -> io::Result<Option<Re
             RECORD_TERRITORY => return decode_territory(&payload).map(Some),
             RECORD_SOUNDS => return decode_sounds(&payload, version).map(Some),
             RECORD_LOS => return decode_los(&payload).map(Some),
+            RECORD_SUMMARY => return decode_summary(&payload).map(Some),
             RECORD_PROJECTILES => return decode_projectiles(&payload).map(Some),
             RECORD_VARIABLE_SET => return decode_variable_set(&payload).map(Some),
             RECORD_TEMPLATE_DETAILS => return decode_template_details(&payload).map(Some),
@@ -1264,6 +1280,36 @@ fn decode_los(payload: &[u8]) -> io::Result<Record> {
         return Err(invalid("LOS record longer than its contents"));
     }
     Ok(Record::Los { side, players })
+}
+
+fn decode_summary(payload: &[u8]) -> io::Result<Record> {
+    let mut cursor = Cursor(payload);
+    let turn = cursor.u32()?;
+    let flags = cursor.u8()?;
+    let count = cursor.u8()?;
+    let mut full = None;
+    let mut seats: Vec<Option<Arc<[u8]>>> = Vec::new();
+    for _ in 0..count {
+        let view = usize::from(cursor.u8()?);
+        let length = cursor.u32()? as usize;
+        let json = cursor.bytes(length)?;
+        std::str::from_utf8(json).map_err(|_| invalid("summary not UTF-8"))?;
+        if view == 0 {
+            full = Some(Arc::from(json));
+        } else {
+            if seats.len() <= view {
+                seats.resize(view + 1, None);
+            }
+            seats[view] = Some(Arc::from(json));
+        }
+    }
+    let full = full.ok_or_else(|| invalid("summary without the full view"))?;
+    Ok(Record::Summary(Summary {
+        turn,
+        is_final: flags & 1 != 0,
+        full,
+        seats,
+    }))
 }
 
 fn decode_projectiles(payload: &[u8]) -> io::Result<Record> {

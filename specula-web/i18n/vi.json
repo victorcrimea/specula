@@ -99,5 +99,9 @@
   "Back to your game": "Quay lại trò chơi của bạn",
   "Players": "Người chơi",
   "You": "Bạn",
-  "Cannot start the game: %(error)s": "Không thể bắt đầu trò chơi: %(error)s"
+  "Cannot start the game: %(error)s": "Không thể bắt đầu trò chơi: %(error)s",
+  "View summary": "Xem tóm tắt",
+  "Continue watching": "Tiếp tục xem",
+  "Last recorded scores": "Điểm số ghi nhận gần nhất",
+  "Chart type": "Loại biểu đồ"
 }

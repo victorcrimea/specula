@@ -99,5 +99,9 @@
   "Back to your game": "내 게임으로 돌아가기",
   "Players": "플레이어",
   "You": "나",
-  "Cannot start the game: %(error)s": "게임을 시작할 수 없습니다: %(error)s"
+  "Cannot start the game: %(error)s": "게임을 시작할 수 없습니다: %(error)s",
+  "View summary": "요약 보기",
+  "Continue watching": "계속 관전",
+  "Last recorded scores": "마지막으로 기록된 점수",
+  "Chart type": "차트 유형"
 }

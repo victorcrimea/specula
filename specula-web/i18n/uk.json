@@ -99,5 +99,9 @@
   "Back to your game": "Повернутися до своєї гри",
   "Players": "Гравці",
   "You": "Ви",
-  "Cannot start the game: %(error)s": "Не вдалося почати гру: %(error)s"
+  "Cannot start the game: %(error)s": "Не вдалося почати гру: %(error)s",
+  "View summary": "Переглянути підсумки",
+  "Continue watching": "Продовжити спостереження",
+  "Last recorded scores": "Останні записані результати",
+  "Chart type": "Тип"
 }

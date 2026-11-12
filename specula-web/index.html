@@ -114,15 +114,16 @@ body { cursor: var(--gui-cursor-default, default); }
 #game-menu button:hover:not(:disabled) { background-image: var(--gui-stone-button-over); }
 #game-menu button:disabled { color: rgba(210, 210, 210, 0.627); filter: brightness(0.75); }
 #game-menu-open { left: 0; right: 8px; top: 4px; }
-#game-menu-panel { position: absolute; left: 0; right: 0; top: 0; height: 100px;
+#game-menu-panel { position: absolute; left: 0; right: 0; top: 0; height: 132px;
   box-sizing: border-box; background: rgba(15, 18, 20, 0.9); border: 1px solid #3a4248; }
 #game-menu-panel > button { left: 4px; right: 4px; }
 /* The open panel reaches over the clock and the HUD, and over the fold
    tab and the heroes, which all come later in the page. */
 #top-panel:has(#game-menu-panel:not([hidden])) { z-index: 50; }
 #top-bar:has(#game-menu-panel:not([hidden])) { z-index: 1; }
-#game-menu-resign { top: 36px; }
-#game-menu-exit { top: 68px; }
+#game-menu-summary { top: 36px; }
+#game-menu-resign { top: 68px; }
+#game-menu-exit { top: 100px; }
 /* PanelEntities.xml: up to 19 iconButtons in a row, 50 px and a 1 px
    margin, under the controls rather than right under the bar. */
 #heroes { position: absolute; left: 2px; top: calc(var(--top-height) + 42px);
@@ -220,15 +221,15 @@ body { cursor: var(--gui-cursor-default, default); }
   var(--gui-panel-shader-top-edge) 0 0 / 100% 1px no-repeat; }
 /* The engine's `-stroke` fonts: a 1 px black outline. The top panel
    shares the text and bar styles. */
-:is(#details, #top-panel, #diplomacy-window, #trade-window, #message-box, #research) .text { position: absolute; display: flex; align-items: center;
+:is(#details, #top-panel, #diplomacy-window, #trade-window, #match-summary, #message-box, #research) .text { position: absolute; display: flex; align-items: center;
   white-space: pre; overflow: hidden; line-height: 1.1;
   -webkit-text-stroke: 2px black; paint-order: stroke fill; }
-:is(#details, #top-panel, #diplomacy-window, #trade-window, #message-box, #research) .center { justify-content: center; text-align: center; }
+:is(#details, #top-panel, #diplomacy-window, #trade-window, #match-summary, #message-box, #research) .center { justify-content: center; text-align: center; }
 :is(#details, #top-panel) .right { justify-content: flex-end; text-align: right; }
 :is(#details, #top-panel) .sans-stroke-12 { font-size: 12px; font-weight: 400; }
 :is(#details, #top-panel, #research) .sans-stroke-14 { font-size: 14px; font-weight: 400; }
 :is(#details, #top-panel) .sans-bold-stroke-13 { font-size: 13px; font-weight: 700; }
-:is(#details, #top-panel, #diplomacy-window, #trade-window, #message-box) .sans-bold-stroke-14 { font-size: 14px; font-weight: 700; }
+:is(#details, #top-panel, #diplomacy-window, #trade-window, #match-summary, #message-box) .sans-bold-stroke-14 { font-size: 14px; font-weight: 700; }
 :is(#details, #top-panel) .gold { color: var(--gui-gold); }
 /* A bar: barBorder around it, the background, the foreground and
    statsBarShaderHorizontal or ...Vertical over them. */
@@ -728,32 +729,32 @@ body:not([data-debug="storage"]) #stats-storage { display: none; }
   font-family: "0ad sans", "0ad sans fallback", sans-serif; color: white;
   user-select: none; -webkit-user-select: none; }
 #diplomacy-window[hidden], #diplomacy-window [hidden] { display: none; }
-:is(#diplomacy-window, #trade-window, #message-box-dialog) > .frame { position: absolute; pointer-events: none; background-repeat: no-repeat; }
-:is(#diplomacy-window, #trade-window, #message-box-dialog) > .background { left: 4px; top: 0; right: 4px; bottom: 4px;
+:is(#diplomacy-window, #trade-window, #message-box-dialog, #match-summary) > .frame { position: absolute; pointer-events: none; background-repeat: no-repeat; }
+:is(#diplomacy-window, #trade-window, #message-box-dialog, #match-summary) > .background { left: 4px; top: 0; right: 4px; bottom: 4px;
   background: var(--gui-dialog-background) 0 0 / 512px 512px repeat; }
-:is(#diplomacy-window, #trade-window, #message-box-dialog) > .shade { left: 4px; right: 4px; height: 128px;
+:is(#diplomacy-window, #trade-window, #message-box-dialog, #match-summary) > .shade { left: 4px; right: 4px; height: 128px;
   background-image: var(--gui-dialog-shadow); background-size: 100% 100%; }
-:is(#diplomacy-window, #trade-window, #message-box-dialog) > .shade.top { top: 0; scale: -1 -1; }
-:is(#diplomacy-window, #trade-window, #message-box-dialog) > .shade.bottom { bottom: 4px; }
-:is(#diplomacy-window, #trade-window, #message-box-dialog) > .edge { left: 4px; right: 4px; height: 8px;
+:is(#diplomacy-window, #trade-window, #message-box-dialog, #match-summary) > .shade.top { top: 0; scale: -1 -1; }
+:is(#diplomacy-window, #trade-window, #message-box-dialog, #match-summary) > .shade.bottom { bottom: 4px; }
+:is(#diplomacy-window, #trade-window, #message-box-dialog, #match-summary) > .edge { left: 4px; right: 4px; height: 8px;
   background: var(--gui-dialog-border) 0 0 / 2048px 8px repeat-x; }
-:is(#diplomacy-window, #trade-window, #message-box-dialog) > .edge.top { top: -4px; }
-:is(#diplomacy-window, #trade-window, #message-box-dialog) > .edge.bottom { bottom: 0; }
-:is(#diplomacy-window, #trade-window, #message-box-dialog) > .deco { width: 64px; height: 32px; background-size: 100% 100%; }
-:is(#diplomacy-window, #trade-window, #message-box-dialog) > .deco.top-left { left: -14px; top: -21px;
+:is(#diplomacy-window, #trade-window, #message-box-dialog, #match-summary) > .edge.top { top: -4px; }
+:is(#diplomacy-window, #trade-window, #message-box-dialog, #match-summary) > .edge.bottom { bottom: 0; }
+:is(#diplomacy-window, #trade-window, #message-box-dialog, #match-summary) > .deco { width: 64px; height: 32px; background-size: 100% 100%; }
+:is(#diplomacy-window, #trade-window, #message-box-dialog, #match-summary) > .deco.top-left { left: -14px; top: -21px;
   background-image: var(--gui-dialog-deco-top); scale: -1 1; }
-:is(#diplomacy-window, #trade-window, #message-box-dialog) > .deco.top-right { right: -14px; top: -21px;
+:is(#diplomacy-window, #trade-window, #message-box-dialog, #match-summary) > .deco.top-right { right: -14px; top: -21px;
   background-image: var(--gui-dialog-deco-top); }
-:is(#diplomacy-window, #trade-window, #message-box-dialog) > .deco.bottom-left { left: -31px; bottom: -10px;
+:is(#diplomacy-window, #trade-window, #message-box-dialog, #match-summary) > .deco.bottom-left { left: -31px; bottom: -10px;
   background-image: var(--gui-dialog-deco-bottom); scale: -1 1; }
-:is(#diplomacy-window, #trade-window, #message-box-dialog) > .deco.bottom-right { right: -31px; bottom: -10px;
+:is(#diplomacy-window, #trade-window, #message-box-dialog, #match-summary) > .deco.bottom-right { right: -31px; bottom: -10px;
   background-image: var(--gui-dialog-deco-bottom); }
-:is(#diplomacy-window, #trade-window, #message-box-dialog) > .titlebar { top: -18px; height: 33px; background-size: 100% 100%; }
-:is(#diplomacy-window, #trade-window, #message-box-dialog) > .titlebar.middle { left: calc(50% - 108px); width: 216px;
+:is(#diplomacy-window, #trade-window, #message-box-dialog, #match-summary) > .titlebar { top: -18px; height: 33px; background-size: 100% 100%; }
+:is(#diplomacy-window, #trade-window, #message-box-dialog, #match-summary) > .titlebar.middle { left: calc(50% - 108px); width: 216px;
   background: var(--gui-dialog-titlebar-middle) 0 0 / 128px 100% repeat-x; }
-:is(#diplomacy-window, #trade-window, #message-box-dialog) > .titlebar.left { left: calc(50% - 134px); width: 32px;
+:is(#diplomacy-window, #trade-window, #message-box-dialog, #match-summary) > .titlebar.left { left: calc(50% - 134px); width: 32px;
   background-image: var(--gui-dialog-titlebar-left); }
-:is(#diplomacy-window, #trade-window, #message-box-dialog) > .titlebar.right { left: calc(50% + 102px); width: 32px;
+:is(#diplomacy-window, #trade-window, #message-box-dialog, #match-summary) > .titlebar.right { left: calc(50% + 102px); width: 32px;
   background-image: var(--gui-dialog-titlebar-left); scale: -1 -1; }
 #diplomacy-title { left: calc(50% - 96px); top: -16px; width: 192px; height: 32px; }
 #diplomacy-table { position: absolute; left: 32px; right: 32px; top: 32px;
@@ -769,12 +770,55 @@ body:not([data-debug="storage"]) #stats-storage { display: none; }
   background: center / contain no-repeat; }
 #diplomacy-header .swatch { width: 12px; height: 12px; margin-top: 2px;
   box-shadow: 0 0 0 1px black; }
-#diplomacy-window .stone { background: var(--gui-stone-button) 0 0 / 100% 100%; }
-#diplomacy-window .stone.disabled { filter: brightness(0.75); }
+#diplomacy-window .stone, #match-summary .stone { background: var(--gui-stone-button) 0 0 / 100% 100%; }
+#diplomacy-window .stone.disabled, #match-summary .stone.disabled { filter: brightness(0.75); }
 #diplomacy-ceasefire { left: 32px; right: 32px; bottom: 62px; height: 28px; align-items: flex-start; }
 #diplomacy-close { left: calc(50% + 100px); bottom: 22px; width: 128px; height: 28px;
   padding: 0; border: 0; color: white; font-family: inherit; }
 #diplomacy-close:hover { background-image: var(--gui-stone-button-over); }
+/* The match summary (gui/summary/summary.xml) in the same frame: a table
+   of counters per panel, or the two charts; narrow screens scroll the
+   table rather than the page. */
+#match-summary { position: fixed; left: 50%; top: 50%; translate: -50% -50%;
+  width: min(1120px, calc(100vw - 32px)); height: min(660px, calc(100vh - 48px));
+  font-family: "0ad sans", "0ad sans fallback", sans-serif; color: white; z-index: 40; }
+#match-summary[hidden], #match-summary [hidden] { display: none; }
+#summary-title { left: calc(50% - 96px); top: -16px; width: 192px; height: 32px; }
+#match-summary { display: flex; flex-direction: column; box-sizing: border-box; padding: 24px 24px 64px; }
+#summary-head { position: relative; display: flex; flex-wrap: wrap; justify-content: space-between;
+  gap: 4px 16px; font-size: 14px; font-weight: 700; }
+#summary-outcome { flex: 1 1 100%; text-align: center; font-size: 16px; }
+#summary-tabs { position: relative; display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0; }
+#summary-tabs .tab { padding: 4px 10px; color: white; font-weight: 700; font-size: 13px; font-family: inherit;
+  border: 0; background: var(--gui-stone-button) 0 0 / 100% 100%; }
+#summary-tabs .tab:hover { background-image: var(--gui-stone-button-over); }
+#summary-tabs .tab.selected { filter: brightness(1.35); }
+#summary-body { position: relative; flex: 1 1 auto; min-height: 0; overflow: auto; font-size: 13px; }
+#summary-message { padding: 24px; text-align: center; }
+#summary-table .caption { margin-bottom: 4px; font-weight: 700; white-space: pre-line; }
+#summary-table .scroll { overflow-x: auto; }
+#summary-table table { border-collapse: collapse; min-width: 100%; }
+#summary-table th { padding: 2px 6px; font-weight: 700; text-align: center; white-space: pre-line;
+  vertical-align: bottom; }
+#summary-table td { padding: 3px 6px; text-align: center; white-space: pre-line; }
+#summary-table td.name { text-align: left; white-space: nowrap; }
+#summary-table .icons { display: inline-flex; gap: 2px; margin-right: 6px; vertical-align: middle; }
+#summary-table .outcome, #summary-table .emblem { display: inline-block; width: 24px; height: 24px;
+  background: center / contain no-repeat; }
+#summary-table tr.team td { border-top: 1px solid rgba(255, 255, 255, 0.4); font-weight: 700; }
+#summary-charts { display: flex; flex-wrap: wrap; gap: 12px; }
+#summary-charts .team-toggle { flex: 1 1 100%; }
+#summary-charts .slot { flex: 1 1 420px; min-width: 0; }
+#summary-charts .controls { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; margin-bottom: 4px; }
+#summary-charts select { max-width: 100%; }
+#summary-charts .chart { width: 100%; height: auto; font-size: 10px; fill: white; }
+#summary-charts .chart .grid { stroke: rgba(255, 255, 255, 0.25); stroke-width: 1; }
+#summary-charts .chart polyline { stroke-width: 2; }
+#summary-charts .x-label { text-align: center; }
+#summary-charts .legend { display: flex; flex-wrap: wrap; gap: 2px 12px; justify-content: center; }
+#summary-close { left: calc(50% - 64px); bottom: 22px; width: 128px; height: 28px;
+  padding: 0; border: 0; color: white; font-family: inherit; }
+#summary-close:hover { background-image: var(--gui-stone-button-over); }
 /* tradeDialogPanel (gui/session/trade/TradeDialog.xml) in the same frame;
    the wasm sets its size and builds BarterPanel.xml and TradePanel.xml. */
 #trade-window { position: fixed; left: 50%; top: 50%; translate: -50% -50%;
@@ -942,6 +986,7 @@ body:not([data-debug="storage"]) #stats-storage { display: none; }
 </div>
 <div id="game-menu" hidden>
 <div id="game-menu-panel" hidden>
+<button id="game-menu-summary" type="button" class="text center sans-bold-stroke-14"></button>
 <button id="game-menu-resign" type="button" class="text center sans-bold-stroke-14"></button>
 <button id="game-menu-exit" type="button" class="text center sans-bold-stroke-14"></button>
 </div>
@@ -955,6 +1000,7 @@ body:not([data-debug="storage"]) #stats-storage { display: none; }
 <button id="menu-open" type="button" aria-expanded="false" aria-controls="controls" data-i18n>Menu</button>
 <button id="settings-open" type="button" aria-expanded="false" aria-controls="settings" data-i18n>Settings</button>
 <button id="diplomacy-open" type="button" data-i18n>Diplomacy</button>
+<button id="summary-open" type="button" data-i18n>Summary</button>
 <select id="perspective" aria-label="Perspective" data-i18n-attrs="aria-label">
 <option value="0" data-i18n>Observer</option>
 </select>
@@ -1094,6 +1140,7 @@ body:not([data-debug="storage"]) #stats-storage { display: none; }
 <div id="match-over" role="status" hidden>
 <span id="match-over-text">Match over</span>
 <button id="match-over-current" type="button" disabled data-i18n>Current match</button>
+<button id="match-over-summary" type="button" data-i18n>Summary</button>
 <button id="match-over-new" type="button" hidden data-i18n>New match</button>
 <button id="match-over-rematch" type="button" hidden data-i18n>Rematch</button>
 <button id="match-over-close" type="button" aria-label="Close" data-i18n-attrs="aria-label">x</button>
@@ -1111,6 +1158,26 @@ body:not([data-debug="storage"]) #stats-storage { display: none; }
 </div>
 <div id="diplomacy-ceasefire" class="text sans-bold-stroke-14" hidden></div>
 <button id="diplomacy-close" type="button" class="text center sans-bold-stroke-14 stone"></button>
+</div>
+<div id="match-summary" role="dialog" aria-labelledby="summary-title" hidden>
+<span class="frame background"></span><span class="frame shade top"></span><span class="frame shade bottom"></span>
+<span class="frame edge top"></span><span class="frame edge bottom"></span>
+<span class="frame deco top-left"></span><span class="frame deco top-right"></span>
+<span class="frame deco bottom-left"></span><span class="frame deco bottom-right"></span>
+<span class="frame titlebar middle"></span><span class="frame titlebar left"></span><span class="frame titlebar right"></span>
+<div id="summary-title" class="text center sans-bold-stroke-14"></div>
+<div id="summary-head">
+<div id="summary-outcome"></div>
+<div id="summary-elapsed"></div>
+<div id="summary-map"></div>
+</div>
+<div id="summary-tabs" role="tablist"></div>
+<div id="summary-body">
+<div id="summary-message" hidden></div>
+<div id="summary-table" hidden></div>
+<div id="summary-charts" hidden></div>
+</div>
+<button id="summary-close" type="button" class="text center sans-bold-stroke-14 stone"></button>
 </div>
 <div id="trade-window" role="dialog" aria-labelledby="trade-title" hidden>
 <span class="frame background"></span><span class="frame shade top"></span><span class="frame shade bottom"></span>

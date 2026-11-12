@@ -99,5 +99,9 @@
   "Back to your game": "Itzuli zure partidara",
   "Players": "Jokalariak",
   "You": "Zu",
-  "Cannot start the game: %(error)s": "Ezin da partida hasi: %(error)s"
+  "Cannot start the game: %(error)s": "Ezin da partida hasi: %(error)s",
+  "View summary": "Ikusi laburpena",
+  "Continue watching": "Jarraitu ikusten",
+  "Last recorded scores": "Azken puntuazio erregistratuak",
+  "Chart type": "Grafiko mota"
 }

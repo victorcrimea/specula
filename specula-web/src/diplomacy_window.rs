@@ -370,7 +370,7 @@ fn stance_text(stance: Stance) -> (&'static str, &'static str, u32) {
 }
 
 /// `g_CivData[civ].Name`, translated as the engine's `loadCivData` does.
-fn civ_name(civ: &str) -> String {
+pub(crate) fn civ_name(civ: &str) -> String {
     CIVS.lines()
         .filter(|line| !line.starts_with('#'))
         .filter_map(|line| line.split_once('\t'))
@@ -394,7 +394,7 @@ fn ceasefire_active(scene: &Scene) -> bool {
 }
 
 /// `timeToString`: `mm:ss` under an hour, else `HH:mm:ss`.
-fn time_to_string(ms: f64) -> String {
+pub(crate) fn time_to_string(ms: f64) -> String {
     let seconds = (ms / 1000.0) as u64;
     let (hours, minutes, seconds) = (seconds / 3600, seconds / 60 % 60, seconds % 60);
     if hours > 0 {

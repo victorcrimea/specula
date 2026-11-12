@@ -6,6 +6,9 @@
 //! - `terrain-<id>` and `terrain-<id>.br`: the terrain resource and its
 //!   brotli copy, by terrain id as 16 hex digits.
 //! - `data/<hash>`: the kind 18 and 19 JSON, by hash as 16 hex digits.
+//! - `summary/<turn>.br`: every statistics capture shown to `/`, the brotli
+//!   of its envelope, by turn as 8 hex digits. A later capture does not
+//!   hold an earlier one's "now" sample, so each is kept.
 //!
 //! Each file is written under a `.tmp` name and renamed, so a crash leaves
 //! no half file. Match ids are nanosecond timestamps, so the smallest is the
@@ -24,6 +27,7 @@ const BROTLI_SUFFIX: &str = ".br";
 const SEGMENTS_DIR: &str = "seg";
 const DETAIL_DIR: &str = "detail";
 const DATA_DIR: &str = "data";
+const SUMMARY_DIR: &str = "summary";
 
 #[derive(Default)]
 struct Stored {
@@ -32,6 +36,8 @@ struct Stored {
     segments: usize,
     terrains: Vec<u64>,
     data: Vec<u64>,
+    /// The turns of the stored captures, sorted.
+    summaries: Vec<u32>,
 }
 
 pub struct History {
@@ -177,6 +183,43 @@ impl History {
         Ok(())
     }
 
+    pub fn write_summary(
+        &mut self,
+        match_id: u64,
+        turn: u32,
+        brotli: &[u8],
+        protect: &[u64],
+    ) -> io::Result<()> {
+        let path = self
+            .match_dir(match_id)
+            .join(SUMMARY_DIR)
+            .join(format!("{turn:08x}{BROTLI_SUFFIX}"));
+        self.write(match_id, &path, brotli, protect)?;
+        let stored = self.matches.entry(match_id).or_default();
+        if let Err(index) = stored.summaries.binary_search(&turn) {
+            stored.summaries.insert(index, turn);
+        }
+        Ok(())
+    }
+
+    /// The file of the capture at or before `turn`; the last one for `None`.
+    pub fn summary_at(&self, match_id: u64, turn: Option<u32>) -> Option<PathBuf> {
+        let stored = self.matches.get(&match_id)?;
+        let turn = match turn {
+            Some(turn) => *stored
+                .summaries
+                .iter()
+                .rev()
+                .find(|known| **known <= turn)?,
+            None => *stored.summaries.last()?,
+        };
+        Some(
+            self.match_dir(match_id)
+                .join(SUMMARY_DIR)
+                .join(format!("{turn:08x}{BROTLI_SUFFIX}")),
+        )
+    }
+
     fn write(
         &mut self,
         match_id: u64,
@@ -299,6 +342,12 @@ fn parse_hex(name: &str) -> Option<u64> {
         .flatten()
 }
 
+fn parse_turn(name: &str) -> Option<u32> {
+    (name.len() == 8)
+        .then(|| u32::from_str_radix(name, 16).ok())
+        .flatten()
+}
+
 /// Sizes and names one match directory; a `.tmp` file a crash left behind
 /// is deleted.
 fn scan_match(dir: &Path) -> io::Result<Stored> {
@@ -325,6 +374,13 @@ fn scan_match(dir: &Path) -> io::Result<Stored> {
                         }
                     }
                     DATA_DIR => stored.data.extend(parse_hex(&file_name)),
+                    SUMMARY_DIR => {
+                        if let Some(turn) =
+                            file_name.strip_suffix(BROTLI_SUFFIX).and_then(parse_turn)
+                        {
+                            stored.summaries.push(turn);
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -339,6 +395,7 @@ fn scan_match(dir: &Path) -> io::Result<Stored> {
             stored.terrains.push(id);
         }
     }
+    stored.summaries.sort_unstable();
     Ok(stored)
 }
 

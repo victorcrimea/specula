@@ -99,5 +99,9 @@
   "Back to your game": "Volver á túa partida",
   "Players": "Xogadores",
   "You": "Ti",
-  "Cannot start the game: %(error)s": "Non se pode iniciar a partida: %(error)s"
+  "Cannot start the game: %(error)s": "Non se pode iniciar a partida: %(error)s",
+  "View summary": "Ver o resumo",
+  "Continue watching": "Seguir mirando",
+  "Last recorded scores": "Últimas puntuacións rexistradas",
+  "Chart type": "Tipo de gráfico"
 }

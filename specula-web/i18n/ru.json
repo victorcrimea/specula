@@ -99,5 +99,9 @@
   "Back to your game": "Вернуться к своей игре",
   "Players": "Игроки",
   "You": "Вы",
-  "Cannot start the game: %(error)s": "Не удалось начать игру: %(error)s"
+  "Cannot start the game: %(error)s": "Не удалось начать игру: %(error)s",
+  "View summary": "Посмотреть итоги",
+  "Continue watching": "Продолжить наблюдение",
+  "Last recorded scores": "Последние записанные результаты",
+  "Chart type": "Тип"
 }

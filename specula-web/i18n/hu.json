@@ -99,5 +99,9 @@
   "Back to your game": "Vissza a játékodhoz",
   "Players": "Játékosok",
   "You": "Te",
-  "Cannot start the game: %(error)s": "A játék nem indítható: %(error)s"
+  "Cannot start the game: %(error)s": "A játék nem indítható: %(error)s",
+  "View summary": "Összegzés megtekintése",
+  "Continue watching": "Nézés folytatása",
+  "Last recorded scores": "Utoljára rögzített pontszámok",
+  "Chart type": "Diagram típusa"
 }

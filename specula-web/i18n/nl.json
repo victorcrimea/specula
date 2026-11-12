@@ -99,5 +99,9 @@
   "Back to your game": "Terug naar je spel",
   "Players": "Spelers",
   "You": "Jij",
-  "Cannot start the game: %(error)s": "Kan het spel niet starten: %(error)s"
+  "Cannot start the game: %(error)s": "Kan het spel niet starten: %(error)s",
+  "View summary": "Samenvatting bekijken",
+  "Continue watching": "Verder kijken",
+  "Last recorded scores": "Laatst vastgelegde scores",
+  "Chart type": "Grafiektype"
 }

@@ -29,6 +29,11 @@ pub enum Pending {
     Delete(Vec<u32>),
     Resign,
     Exit,
+    /// The seat's game is decided: Continue watching (No, Escape) or View
+    /// summary (Yes). `won` is the outcome.
+    Result {
+        won: bool,
+    },
 }
 
 impl MessageBox {
@@ -85,19 +90,42 @@ impl MessageBox {
         );
     }
 
+    /// The original's end of game offer: no Quit, as Exit is in the menu.
+    pub fn offer_result(&mut self, won: bool) {
+        self.open_with(
+            if won { "VICTORIOUS!" } else { "DEFEATED!" },
+            if won {
+                "You have won the battle!"
+            } else {
+                "You have been defeated\u{2026}"
+            },
+            ("Continue watching", "View summary"),
+            Pending::Result { won },
+        );
+    }
+
+    /// Whether the open box is the result offer.
+    pub fn is_offer(&self) -> bool {
+        matches!(self.pending, Some(Pending::Result { .. }))
+    }
+
     fn open(&mut self, title: &str, caption: &str, pending: Pending) {
+        self.open_with(title, caption, ("No", "Yes"), pending);
+    }
+
+    fn open_with(&mut self, title: &str, caption: &str, buttons: (&str, &str), pending: Pending) {
         self.title.text(&lang::translate(title));
         self.caption.text(&lang::translate(caption));
-        self.no_label.text(&lang::translate("No"));
-        self.yes_label.text(&lang::translate("Yes"));
+        self.no_label.text(&lang::translate(buttons.0));
+        self.yes_label.text(&lang::translate(buttons.1));
         self.pending = Some(pending);
         self.root.hidden(false);
     }
 
-    /// No, or the cancel hotkey (Escape).
-    pub fn cancel(&mut self) {
-        self.pending = None;
+    /// No, or the cancel hotkey (Escape): what was open.
+    pub fn cancel(&mut self) -> Option<Pending> {
         self.root.hidden(true);
+        self.pending.take()
     }
 
     /// Yes: what to do.

@@ -28,6 +28,7 @@ use rocket::fairing::AdHoc;
 use rocket::fs::FileServer;
 use rocket::futures::SinkExt;
 use rocket::futures::StreamExt;
+use rocket::http::ContentType;
 use rocket::http::CookieJar;
 use rocket::http::Header;
 use rocket::tokio::sync::broadcast::Receiver;
@@ -48,6 +49,7 @@ use crate::play::Setup;
 use crate::usage::Usage;
 use crate::view::Hub;
 use crate::view::Message;
+use crate::view::SummaryBody;
 use crate::view::View;
 
 const DEFAULT_SOCKET: &str = "/tmp/specula-feed.sock";
@@ -144,7 +146,7 @@ async fn main() {
     let feed_play = play.clone();
     // The feed is blocking std I/O, so it gets its own thread rather than
     // a slot in Rocket's async runtime.
-    std::thread::spawn(move || accept_observers(listener, &feed_hub, feed_play.as_deref()));
+    std::thread::spawn(move || accept_observers(listener, &feed_hub, feed_play.as_ref()));
     let supervised = observe.is_some() || play.is_some();
     if let Some((host, port)) = observe {
         let supervisor_hub = Arc::clone(&hub);
@@ -175,11 +177,13 @@ async fn main() {
                 play_terrain,
                 play_data,
                 play_command,
+                play_summary,
                 web::terrain,
                 web::data,
                 segment_file,
                 detail_segment_file,
                 match_info,
+                match_summary,
                 beat,
                 stats,
                 web::index,
@@ -215,7 +219,7 @@ async fn main() {
 }
 
 /// `play`: in play mode, where the commands go back over the feed socket.
-fn accept_observers(listener: UnixListener, hub: &Hub, play: Option<&Play>) {
+fn accept_observers(listener: UnixListener, hub: &Arc<Hub>, play: Option<&Arc<Play>>) {
     // One observer at a time: each one is a whole match.
     for stream in listener.incoming() {
         match stream {
@@ -225,7 +229,10 @@ fn accept_observers(listener: UnixListener, hub: &Hub, play: Option<&Play>) {
                 if let Some(play) = play {
                     play.set_uplink(stream.try_clone().ok());
                 }
-                let served = serve(stream, hub, play);
+                // A feed that outlives its game must not write into the
+                // rematch's.
+                let generation = play.and_then(|play| play.current_generation());
+                let served = serve(stream, hub, play, generation);
                 if let Some(play) = play {
                     play.set_uplink(None);
                 }
@@ -598,6 +605,86 @@ fn match_info(
 #[response(content_type = "text")]
 struct MatchInfo(String, Header<'static>);
 
+/// The envelope the summary routes answer: the capture's turn, whether it
+/// is the final one, and the engine's JSON as it is.
+pub(crate) fn summary_envelope(turn: u32, is_final: bool, metadata: &[u8]) -> Option<Vec<u8>> {
+    std::str::from_utf8(metadata).ok()?;
+    let mut body = format!("{{\"turn\":{turn},\"final\":{is_final},\"metadata\":").into_bytes();
+    body.extend_from_slice(metadata);
+    body.push(b'}');
+    Some(body)
+}
+
+/// An envelope as the response body, shared with the entry that holds it
+/// rather than copied for each request.
+struct SharedBytes(Arc<[u8]>);
+
+impl AsRef<[u8]> for SharedBytes {
+    fn as_ref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl<'r> rocket::response::Responder<'r, 'static> for SharedBytes {
+    fn respond_to(self, _: &'r rocket::Request<'_>) -> rocket::response::Result<'static> {
+        rocket::Response::build()
+            .sized_body(self.0.len(), std::io::Cursor::new(self))
+            .ok()
+    }
+}
+
+/// Serves an envelope, compressed when the client takes brotli and the
+/// stored copy is.
+fn summary_response(body: SummaryBody, accepts: bool) -> Option<web::Encoded<SharedBytes>> {
+    let brotli = body.brotli && accepts;
+    let bytes: Arc<[u8]> = if body.brotli && !accepts {
+        // A client without brotli is rare; the decode must not hold up the
+        // runtime's other requests meanwhile.
+        rocket::tokio::task::block_in_place(|| {
+            let mut reader = brotli::Decompressor::new(&body.bytes[..], 4096);
+            let mut bytes = Vec::new();
+            std::io::Read::read_to_end(&mut reader, &mut bytes).ok()?;
+            Some(Arc::from(bytes))
+        })?
+    } else {
+        body.bytes
+    };
+    Some(web::Encoded::new(
+        SharedBytes(bytes),
+        ContentType::JSON,
+        brotli,
+        "no-store",
+    ))
+}
+
+/// The statistics summary of a match as `/` may see it, which trails the
+/// game by `--delay` like the stream.
+#[rocket::get("/match/<id>/summary?<turn>")]
+fn match_summary(
+    id: &str,
+    turn: Option<u32>,
+    accepts: web::AcceptsBrotli,
+    hub: &State<Arc<Hub>>,
+) -> Option<web::Encoded<SharedBytes>> {
+    let summary = hub.summary(u64::from_str_radix(id, 16).ok()?, turn)?;
+    summary_response(summary, accepts.accepts())
+}
+
+/// The statistics summary of the visitor's own seat, undelayed: only what
+/// the seat itself may see in the summary.
+#[rocket::get("/play/summary?<turn>")]
+fn play_summary(
+    turn: Option<u32>,
+    play: &State<Option<Arc<Play>>>,
+    accepts: web::AcceptsBrotli,
+    cookies: &CookieJar<'_>,
+) -> Option<web::Encoded<SharedBytes>> {
+    let metadata = play
+        .as_ref()?
+        .summary(usage::visitor(cookies).as_deref(), turn)?;
+    summary_response(metadata, accepts.accepts())
+}
+
 /// The client's heartbeat, a `sendBeacon` from `usage.rs` there.
 #[rocket::post("/beat", data = "<body>")]
 fn beat(body: String, usage: &State<Arc<Usage>>, cookies: &CookieJar<'_>) {
@@ -722,7 +809,12 @@ fn remove_stale_socket(path: &str) -> io::Result<()> {
     }
 }
 
-fn serve(stream: UnixStream, hub: &Hub, play: Option<&Play>) -> io::Result<()> {
+fn serve(
+    stream: UnixStream,
+    hub: &Arc<Hub>,
+    play: Option<&Arc<Play>>,
+    generation: Option<u64>,
+) -> io::Result<()> {
     let mut reader = BufReader::new(stream);
     let version = feed::read_header(&mut reader)?;
     let mut templates = HashMap::new();
@@ -765,6 +857,12 @@ fn serve(stream: UnixStream, hub: &Hub, play: Option<&Play>) -> io::Result<()> {
             Record::Stats { index, json } => details.set_stats(index, hub.add_data(json)),
             Record::PlayerGui(player_gui) => details.set_player_gui(player_gui),
             Record::Los { side, players } => hub.set_los(side, players),
+            Record::Summary(summary) => {
+                hub.set_summary(summary.turn, summary.is_final, Arc::clone(&summary.full));
+                if let (Some(play), Some(generation)) = (play, generation) {
+                    play.set_summary(generation, summary);
+                }
+            }
             Record::QueryReply { id, json } => {
                 if let Some(play) = play {
                     play.reply(id, &json);

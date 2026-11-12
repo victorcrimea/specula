@@ -99,5 +99,9 @@
   "Back to your game": "Zpět do vaší hry",
   "Players": "Hráči",
   "You": "Vy",
-  "Cannot start the game: %(error)s": "Hru nelze spustit: %(error)s"
+  "Cannot start the game: %(error)s": "Hru nelze spustit: %(error)s",
+  "View summary": "Zobrazit souhrn",
+  "Continue watching": "Pokračovat ve sledování",
+  "Last recorded scores": "Naposledy zaznamenané výsledky",
+  "Chart type": "Typ grafu"
 }

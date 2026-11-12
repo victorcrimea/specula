@@ -99,5 +99,9 @@
   "Back to your game": "Tillbaka till ditt spel",
   "Players": "Spelare",
   "You": "Du",
-  "Cannot start the game: %(error)s": "Det går inte att starta spelet: %(error)s"
+  "Cannot start the game: %(error)s": "Det går inte att starta spelet: %(error)s",
+  "View summary": "Visa sammanfattning",
+  "Continue watching": "Fortsätt titta",
+  "Last recorded scores": "Senast registrerade poäng",
+  "Chart type": "Diagramtyp"
 }
