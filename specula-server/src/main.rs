@@ -494,9 +494,10 @@ fn play_command(
                 let Some(seat) = play.seat(visitor.as_deref()) else {
                     continue;
                 };
-                // The page names entities by the seat's handles; one the
-                // seat does not hold now drops the order, as the seat
-                // cannot have been shown it.
+                // The page names entities by the seat's handles. Each keeps
+                // its last id for the match, so the engine filters a stale
+                // one; a handle never issued is no entity the seat was
+                // shown, and drops the order.
                 let to_feed = |ids: Vec<&mut u32>| {
                     ids.into_iter()
                         .all(|id| match hub.seat_entity(u32::from(seat), *id) {

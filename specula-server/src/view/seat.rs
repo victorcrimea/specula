@@ -176,10 +176,14 @@ struct ChoiceKey {
 }
 
 /// The seat's handles for the feed's ids, both ways. Handles are never
-/// reused, so a stale one names nothing.
+/// reused, so a stale one still names the entity it last stood for.
 #[derive(Default)]
 struct Handles {
     to_local: HashMap<u32, u32>,
+    /// Every handle issued this match, kept after its id loses it: the page
+    /// draws behind the newest turn, so its orders may name a unit that
+    /// just died or left sight, and the engine filters those as vanilla's
+    /// `ProcessCommand` and UnitAI do rather than the whole order going.
     to_feed: HashMap<u32, u32>,
     next: u32,
     /// The ids referred to this turn; the others lose their handles.
@@ -216,7 +220,6 @@ impl Handles {
     fn end_turn(&mut self) {
         let referenced = std::mem::take(&mut self.referenced);
         self.to_local.retain(|id, _| referenced.contains(id));
-        self.to_feed.retain(|_, id| referenced.contains(id));
     }
 }
 
@@ -789,7 +792,8 @@ impl Seat {
         )
     }
 
-    /// The handle's id in the feed, if the seat holds it.
+    /// The feed's id the handle last named this match, if the seat ever
+    /// issued it.
     pub fn entity(&self, handle: u32) -> Option<u32> {
         self.handles.to_feed.get(&handle).copied()
     }

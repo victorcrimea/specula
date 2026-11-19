@@ -2040,7 +2040,7 @@ impl Hub {
         Some(seat.terrain_resource(source, water))
     }
 
-    /// The feed's id of a seat's handle, while the seat holds it.
+    /// The feed's id a seat's handle last named this match.
     pub fn seat_entity(&self, player: u32, handle: u32) -> Option<u32> {
         let state = self.state.lock().unwrap();
         state
