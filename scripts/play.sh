@@ -20,6 +20,9 @@ pyrogenesis=${PYROGENESIS:-$(dirname "$0")/../../0ad-specula/binaries/system/pyr
 
 # -unique-logs: a crash or oos_dump must not overwrite the log of another
 # engine running on the same machine.
+# specula.commanddelay: the host is its game's only client, with the
+# server in its own process, so a web order needs to wait for one turn,
+# not the multiplayer default of four.
 exec "$pyrogenesis" \
 	-autostart-host \
 	-autostart-specula-play \
@@ -29,4 +32,5 @@ exec "$pyrogenesis" \
 	-autostart-playername=specula \
 	-unique-logs \
 	-conf=specula.feed:"$socket" \
+	-conf=specula.commanddelay:1 \
 	"$@"
