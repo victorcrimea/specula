@@ -591,6 +591,16 @@ impl Playback {
                 }
             }
         }
+        // Not a turn: it has no place in the playback's turn order, so it
+        // only reaches a viewer who is live, and the keyframes of the others
+        // carry the state.
+        if stream::is_pause(&message) {
+            if let Err(error) = self.live_scene.apply(&message, 1.0) {
+                self.drop_stream(error);
+                return Applied::Failed;
+            }
+            return Applied::Live(message);
+        }
         let previous_match = self.live_scene.match_id;
         let mut scene = std::mem::take(&mut self.live_scene);
         let applied = self
@@ -724,8 +734,13 @@ impl Playback {
         // Live runs at the match's own pace.
         self.speed = self.live_scene.game_speed;
         self.cancel_timer();
-        if jump && !was_live && self.has_match() {
-            self.post_scene(0.0, &self.live_scene.encode_keyframe());
+        if !was_live && self.has_match() {
+            if jump {
+                self.post_scene(0.0, &self.live_scene.encode_keyframe());
+            } else {
+                // The deltas played up to here skipped any pause or resume.
+                self.post_scene(0.0, &self.live_scene.encode_pause());
+            }
         }
         self.post_status();
     }
@@ -966,6 +981,7 @@ impl Playback {
                 .and_then(|messages| {
                     messages
                         .into_iter()
+                        .filter(|message| !stream::is_pause(message))
                         .map(|message| Ok((stream::message_turn(&message)?, message)))
                         .collect::<Result<Vec<_>, &'static str>>()
                         .map_err(String::from)
@@ -1044,7 +1060,9 @@ impl Playback {
             self.page_terrain
                 .set((page_id, page_revision.max(self.live_scene.terrain_revision)));
         }
-        if let Ok(turn) = stream::message_turn(message) {
+        if !stream::is_pause(message)
+            && let Ok(turn) = stream::message_turn(message)
+        {
             self.page_turn.set(turn);
         }
         let mut out = Vec::with_capacity(9 + message.len());

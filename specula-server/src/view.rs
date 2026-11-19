@@ -1,8 +1,8 @@
-//! The viewer stream, wire format v22: messages for each keyframe, turn or
+//! The viewer stream, wire format v23: messages for each keyframe, turn or
 //! match end, varints and zigzag as in `wire.rs`, positions and heights in
 //! 1/16 m, carried brotli-compressed as below.
 //!
-//! - kind 1 keyframe: varint turn, u8 wire version (22; a viewer stops
+//! - kind 1 keyframe: varint turn, u8 wire version (23; a viewer stops
 //!   at any other, since nothing after it would read right), u64 match id, f32 game speed (the
 //!   match's sim rate), varint delay in ms (how long after the game the
 //!   server shows it), varint first turn of the match's history, varint
@@ -15,7 +15,9 @@
 //!   table, varint n, n x economy (every player's, by index),
 //!   varint count, then count x {varint id delta, entity}, then the
 //!   projectiles in flight or lying on the ground: varint count, count x
-//!   {varint id delta, projectile, varint turns since the launch}.
+//!   {varint id delta, projectile, varint turns since the launch}, then
+//!   the players who have the game paused: varint n, n x varint player
+//!   index (v23).
 //! - kind 2 delta: varint turn, icons added to the table, u8 1 if a new
 //!   player table follows (it replaces the old one) else 0, u8 1 if a new
 //!   territory follows (likewise) else 0, u8 1 if LOS changes follow
@@ -48,6 +50,11 @@
 //!   turns of that match follow; the next keyframe with another id is the
 //!   next match. A viewer joining between matches gets the final keyframe
 //!   and then this message.
+//! - kind 4 pause (v23): varint turn (the last one played), varint n, n x
+//!   varint player index: the players who have the game paused from now on,
+//!   none for a resume. It sits in the frame between the deltas of the turns
+//!   around it, since the game plays no turn while paused, and applies at
+//!   its place in the frame.
 //!
 //! A delta moves the entities as a viewer would, and lists only the
 //! entities whose result would be wrong. A delta applies in this order:
@@ -350,6 +357,7 @@ use seat::SeatWater;
 const MESSAGE_KEYFRAME: u8 = 1;
 const MESSAGE_DELTA: u8 = 2;
 const MESSAGE_ENDED: u8 = 3;
+const MESSAGE_PAUSE: u8 = 4;
 const CHANGED_POSITION: u64 = 1;
 const CHANGED_COLOR: u64 = 2;
 const CHANGED_ICON: u64 = 4;
@@ -1069,6 +1077,8 @@ enum Release {
     },
     /// Queued like the turns around it, so `/` sees it `delay` late.
     Summary(Arc<SummaryEntry>),
+    /// A pause or resume, a message in the visual frame.
+    Pause(TrackOp),
     End {
         match_id: u64,
         visual_tail: Vec<u8>,
@@ -1137,6 +1147,14 @@ impl Shown {
                 // No receivers is not an error: nobody is watching yet.
                 let _ = self.visual.sender.send(visual);
                 let _ = self.detail.sender.send(detail);
+            }
+            Release::Pause(op) => {
+                // Before the match's first turn there is no frame to put it in.
+                if !self.has_turn || self.ended.is_some() {
+                    return;
+                }
+                let message = self.visual.apply(op, store(self.match_id, false));
+                let _ = self.visual.sender.send(message);
             }
             Release::Summary(entry) => {
                 if entry.match_id != self.match_id {
@@ -1248,6 +1266,8 @@ struct Stream {
     dot_starts: HashMap<u32, (u32, u32)>,
     /// A seat's additions to this turn's launches, by projectile id.
     launch_extras: HashMap<u32, LaunchExtra>,
+    /// The players who have the game paused, ascending.
+    paused: Vec<u32>,
 }
 
 /// LOS vertex states (`feed::LOS_EXPLORED`, `feed::LOS_VISIBLE`) by player
@@ -1294,6 +1314,7 @@ impl Stream {
             dot_choices: HashMap::new(),
             dot_starts: HashMap::new(),
             launch_extras: HashMap::new(),
+            paused: Vec::new(),
         }
     }
 
@@ -1486,6 +1507,8 @@ impl Stream {
             // A keyframe holds the whole revealed terrain, as a reveal
             // would bring it.
             self.reveal = None;
+            // Nothing is paused as a match starts.
+            self.paused.clear();
             let keyframe = encode_keyframe(common, self, turn, &self.tables(true), &shown, &shots);
             let visual = self.visual.restart(&keyframe);
             // The keyframe holds what the turn's delta would bring.
@@ -1583,8 +1606,28 @@ impl Stream {
         Ok(ops)
     }
 
+    /// Sets who has the game paused and returns the message that tells the
+    /// viewers, to go into the open frame after the last turn.
+    fn pause(&mut self, turn: u32, players: &[i8]) -> io::Result<TrackOp> {
+        self.paused = players
+            .iter()
+            .filter_map(|player| u32::try_from(*player).ok())
+            .collect();
+        self.paused.sort_unstable();
+        let mut out = Writer::default();
+        out.u8(MESSAGE_PAUSE);
+        out.varint(u64::from(turn));
+        out.varint(self.paused.len() as u64);
+        for player in &self.paused {
+            out.varint(u64::from(*player));
+        }
+        self.visual.push(&out.0, None)
+    }
+
     /// The final keyframes of an ending match, and the tails of its frames.
     fn finish(&mut self, common: &Common, turn: u32) -> (Ended, Vec<u8>, Vec<u8>) {
+        // A match that ends while paused is over, not paused.
+        self.paused.clear();
         let keyframe: Message = compress(&encode_keyframe(
             common,
             self,
@@ -1888,6 +1931,27 @@ impl Hub {
         state.observer.los = state.los.clone();
     }
 
+    /// The players who have the game paused, as a kind 26 record says;
+    /// `/` is shown it `delay` late, the seats at once.
+    pub fn set_pause(&self, players: &[i8]) {
+        let mut state = self.state.lock().unwrap();
+        // A resume starts the watchdog's count afresh.
+        state.feed_activity = Some(Instant::now());
+        if !state.has_turn || state.ended {
+            return;
+        }
+        let turn = state.turn;
+        for seat in &mut state.seats {
+            if let Err(error) = seat.pause(turn, players) {
+                eprintln!("cannot encode a pause: {error}");
+            }
+        }
+        match state.observer.pause(turn, players) {
+            Ok(op) => self.queue(&mut state, Release::Pause(op)),
+            Err(error) => eprintln!("cannot encode a pause: {error}"),
+        }
+    }
+
     pub fn set_template_icon(&self, template: u32, icon: Icon) {
         let observer = &mut self.state.lock().unwrap().observer;
         let index = observer.intern_icon(icon);
@@ -2079,6 +2143,11 @@ impl Hub {
                 history.write_data(match_id, *hash, json, protect)
             });
         }
+    }
+
+    /// A keepalive: the engine is up while the game is paused.
+    pub fn feed_alive(&self) {
+        self.state.lock().unwrap().feed_activity = Some(Instant::now());
     }
 
     pub fn feed_activity(&self) -> Option<Instant> {
@@ -2498,7 +2567,7 @@ fn ending(
             data_files,
             ..
         } => Some((terrain.as_ref(), data_files)),
-        Release::Turn { .. } | Release::Summary(_) => None,
+        Release::Turn { .. } | Release::Summary(_) | Release::Pause(_) => None,
     })
 }
 
@@ -2604,6 +2673,10 @@ fn encode_keyframe(
         last_id = *id;
         write_shot(&mut out, shot);
         out.varint(u64::from(turn - shot.launch_turn));
+    }
+    out.varint(stream.paused.len() as u64);
+    for player in &stream.paused {
+        out.varint(u64::from(*player));
     }
     out.0
 }

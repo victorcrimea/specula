@@ -1709,6 +1709,14 @@ impl Seat {
         self.stream.removals = removals;
     }
 
+    /// Tells the seat's viewers who has the game paused.
+    pub fn pause(&mut self, turn: u32, players: &[i8]) -> io::Result<()> {
+        let visual = self.stream.pause(turn, players)?;
+        self.shown
+            .apply(Release::Pause(visual), None, self.shown.match_id);
+        Ok(())
+    }
+
     pub fn end(&mut self, common: &Common, turn: u32) {
         let seat_common = Common {
             delay: Duration::ZERO,

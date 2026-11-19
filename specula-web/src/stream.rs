@@ -24,6 +24,7 @@ pub const ENVELOPE_STARTS: u8 = 5;
 const MESSAGE_KEYFRAME: u8 = 1;
 const MESSAGE_DELTA: u8 = 2;
 const MESSAGE_ENDED: u8 = 3;
+const MESSAGE_PAUSE: u8 = 4;
 const CHANGED_POSITION: u64 = 1;
 const CHANGED_COLOR: u64 = 2;
 const CHANGED_ICON: u64 = 4;
@@ -51,6 +52,8 @@ const OLDEST_WIRE: u8 = 19;
 /// From v22: two visibility bits per player, mirages, LOS, a seat's
 /// partial terrain, variant choices, projectiles' ages.
 const LOS_WIRE: u8 = 22;
+/// From v23: the keyframe ends with the players who have the game paused.
+const PAUSE_WIRE: u8 = 23;
 /// `LosVisibility` in a visibility mask's two bits.
 pub const HIDDEN: u32 = 0;
 pub const VISIBLE: u32 = 2;
@@ -547,6 +550,8 @@ pub struct Scene {
     /// Goes up whenever `los` changes.
     pub los_generation: u32,
     pub icons: Vec<Icon>,
+    /// The players who have the game paused, ascending; none before v23.
+    pub paused_by: Vec<u32>,
     /// Index 0 is gaia.
     pub players: Vec<Player>,
     /// When the ceasefire ends, in simulation ms (a turn is `TURN_MS`); 0
@@ -681,6 +686,7 @@ impl Scene {
         match kind {
             MESSAGE_KEYFRAME => self.apply_keyframe(&mut cursor)?,
             MESSAGE_DELTA => self.apply_delta(&mut cursor, progress)?,
+            MESSAGE_PAUSE => self.apply_pause(&mut cursor)?,
             _ => return Err("unknown message kind"),
         }
         if !cursor.0.is_empty() {
@@ -770,6 +776,23 @@ impl Scene {
                 .checked_sub(cursor.varint_u32()?)
                 .ok_or("projectile launched before the first turn")?;
             self.shots.insert(id, shot);
+        }
+        self.paused_by.clear();
+        if self.wire_version >= PAUSE_WIRE {
+            for _ in 0..cursor.varint_u32()? {
+                self.paused_by.push(cursor.varint_u32()?);
+            }
+        }
+        Ok(())
+    }
+
+    /// Nothing else moves: the game plays no turn while it is paused.
+    fn apply_pause(&mut self, cursor: &mut ByteReader) -> Result<(), &'static str> {
+        // The turn the pause comes before; only the stream's index needs it.
+        cursor.varint_u32()?;
+        self.paused_by.clear();
+        for _ in 0..cursor.varint_u32()? {
+            self.paused_by.push(cursor.varint_u32()?);
         }
         Ok(())
     }
@@ -1095,6 +1118,19 @@ impl Scene {
 
     /// A keyframe of the current state, as the server would send it, so a
     /// scene rebuilt from a segment can be handed on as one message.
+    /// Who has the game paused, as a pause message, for a page that caught
+    /// up with live through deltas, which carry none.
+    pub fn encode_pause(&self) -> Vec<u8> {
+        let mut out = Writer::default();
+        out.u8(MESSAGE_PAUSE);
+        out.varint(u64::from(self.turn));
+        out.varint(self.paused_by.len() as u64);
+        for player in &self.paused_by {
+            out.varint(u64::from(*player));
+        }
+        out.0
+    }
+
     pub fn encode_keyframe(&self) -> Vec<u8> {
         let mut out = Writer::default();
         out.u8(MESSAGE_KEYFRAME);
@@ -1343,6 +1379,10 @@ impl Scene {
             out.varint(u64::from(shot.impact_actor));
             out.varint(u64::from(shot.impact_lifetime));
             out.varint(u64::from(self.turn - shot.launch_turn));
+        }
+        out.varint(self.paused_by.len() as u64);
+        for player in &self.paused_by {
+            out.varint(u64::from(*player));
         }
         out.0
     }
@@ -1606,6 +1646,10 @@ fn read_reveal(cursor: &mut ByteReader) -> Result<Reveal, &'static str> {
 
 pub fn is_keyframe(message: &[u8]) -> bool {
     message.first() == Some(&MESSAGE_KEYFRAME)
+}
+
+pub fn is_pause(message: &[u8]) -> bool {
+    message.first() == Some(&MESSAGE_PAUSE)
 }
 
 pub fn is_ended(message: &[u8]) -> bool {

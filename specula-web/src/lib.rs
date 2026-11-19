@@ -25,6 +25,7 @@ mod orders;
 mod overlay;
 mod panel;
 mod particles;
+mod pause;
 mod pick;
 mod placement;
 mod pose;
@@ -105,6 +106,7 @@ use crate::minimap::Minimap;
 use crate::orders::Preselect;
 use crate::panel::DetailsPanel;
 use crate::panel::Request;
+use crate::pause::PauseOverlay;
 use crate::placement::Placement;
 use crate::postproc::Upscale;
 use crate::predict::Predictions;
@@ -625,6 +627,8 @@ struct App {
     message_box: Option<MessageBox>,
     /// On `/play`: Resign and Exit.
     game_menu: Option<GameMenu>,
+    /// Shown whenever a player has the game paused, on `/` and `/play`.
+    pause_overlay: Option<PauseOverlay>,
     /// On `/play`: the seat was reported resigned, beaten or victorious.
     finish_noticed: bool,
     /// Only the 3D page has the match summary.
@@ -1483,6 +1487,27 @@ impl App {
         }
     }
 
+    /// Whether the viewer's own seat has the game paused.
+    fn own_pause(&self) -> bool {
+        self.owner_seat
+            .is_some_and(|seat| self.scene.paused_by.contains(&(seat as u32)))
+    }
+
+    /// Shows the pause veil and the Menu's button as the scene has them.
+    fn sync_pause(&mut self) {
+        let own = self.owner_seat;
+        if let Some(overlay) = &mut self.pause_overlay {
+            overlay.update(&self.scene.paused_by, &self.scene.players, own);
+        }
+        if let Some(menu) = &self.game_menu {
+            menu.update(
+                !seated() || self.finish_noticed,
+                self.match_over.ended,
+                self.own_pause(),
+            );
+        }
+    }
+
     /// A message replaced the player table.
     fn players_changed(&mut self) {
         let players = &self.scene.players;
@@ -1863,6 +1888,16 @@ async fn run(
     } else {
         None
     };
+    // An older page has no overlay; the game then pauses without a sign.
+    let pause_overlay = if page == Page::Observer {
+        PauseOverlay::new(&document)
+            .inspect_err(|error| {
+                web_sys::console::error_1(&format!("pause overlay: {error}").into())
+            })
+            .ok()
+    } else {
+        None
+    };
     // An older page has no button; the hotkeys still work.
     let idle_worker = if seated {
         IdleWorker::new(&document)
@@ -1986,6 +2021,7 @@ async fn run(
         mass_barter: false,
         message_box,
         game_menu,
+        pause_overlay,
         finish_noticed: false,
         summary,
         owner_seat: status
@@ -2017,6 +2053,7 @@ async fn run(
     wire_trade_window(&app, &window);
     wire_message_box(&app, &window);
     wire_game_menu(&app);
+    wire_pause(&app, &window);
     wire_summary(&app, &window);
     wire_command_hotkeys(&app, &window);
     wire_idle(&app, &window);
@@ -2577,9 +2614,9 @@ fn on_shift_click(
 
 /// The Menu and its Resign and Exit, which ask first as the session's do.
 fn wire_game_menu(app: &Rc<RefCell<App>>) {
-    let Some((open, resign, exit)) = app.borrow().game_menu.as_ref().map(|menu| {
-        let (open, _, resign, exit) = menu.buttons();
-        (open.clone(), resign.clone(), exit.clone())
+    let Some((open, pause, resign, exit)) = app.borrow().game_menu.as_ref().map(|menu| {
+        let (open, _, pause, resign, exit) = menu.buttons();
+        (open.clone(), pause.clone(), resign.clone(), exit.clone())
     }) else {
         return;
     };
@@ -2607,6 +2644,13 @@ fn wire_game_menu(app: &Rc<RefCell<App>>) {
         );
     }
     on_press.forget();
+    let target = Rc::clone(app);
+    on_click(&pause, move || {
+        if let Some(menu) = &target.borrow().game_menu {
+            menu.close();
+        }
+        toggle_pause(&target);
+    });
     for (button, resign) in [(resign, true), (exit, false)] {
         let target = Rc::clone(app);
         on_click(&button, move || {
@@ -2627,6 +2671,90 @@ fn wire_game_menu(app: &Rc<RefCell<App>>) {
                 } else {
                     message_box.confirm_exit();
                 }
+            }
+        });
+    }
+}
+
+/// `PauseControl.setPaused(!explicitPause, true)`: asks the server to pause
+/// the game for the viewer's seat, or to resume it if the seat has paused it.
+fn toggle_pause(app: &Rc<RefCell<App>>) {
+    let Ok(app) = app.try_borrow() else {
+        return;
+    };
+    if app.owner_seat.is_none()
+        || !seated()
+        || app.finish_noticed
+        || app.match_over.ended
+        || app.game_menu.is_none()
+    {
+        return;
+    }
+    let action = if app.own_pause() { "resume" } else { "pause" };
+    wasm_bindgen_futures::spawn_local(async move {
+        if let Err(error) = game_menu::post(action).await {
+            web_sys::console::error_1(&error.into());
+        }
+    });
+}
+
+/// The Pause and Shift+Space hotkeys, and a press on the veil, which
+/// resumes a game the viewer's seat paused (`PauseOverlay.onPress`).
+fn wire_pause(app: &Rc<RefCell<App>>, window: &web_sys::Window) {
+    if app.borrow().game_menu.is_none() {
+        return;
+    }
+    let target = Rc::clone(app);
+    let on_key = Closure::<dyn FnMut(web_sys::Event)>::new(move |event: web_sys::Event| {
+        let text = |object: &JsValue, name: &str| {
+            js_sys::Reflect::get(object, &name.into())
+                .ok()
+                .and_then(|value| value.as_string())
+                .unwrap_or_default()
+        };
+        let flag = |name: &str| {
+            js_sys::Reflect::get(&event, &name.into()).is_ok_and(|value| value.is_truthy())
+        };
+        let tag = event
+            .target()
+            .map(|element| text(&element, "tagName"))
+            .unwrap_or_default();
+        if matches!(tag.as_str(), "INPUT" | "SELECT" | "TEXTAREA")
+            || flag("ctrlKey")
+            || flag("altKey")
+            || flag("metaKey")
+            || flag("repeat")
+        {
+            return;
+        }
+        let pressed = match text(&event, "code").as_str() {
+            "Pause" => !flag("shiftKey"),
+            "Space" => flag("shiftKey"),
+            _ => false,
+        };
+        if !pressed {
+            return;
+        }
+        // A focused button would also take the Space as a click.
+        let _ = js_sys::Reflect::get(&event, &"preventDefault".into())
+            .ok()
+            .and_then(|function| function.dyn_into::<js_sys::Function>().ok())
+            .map(|function| function.call0(&event));
+        toggle_pause(&target);
+    });
+    let _ = window.add_event_listener_with_callback("keydown", on_key.as_ref().unchecked_ref());
+    on_key.forget();
+    let root = app
+        .borrow()
+        .pause_overlay
+        .as_ref()
+        .map(|overlay| overlay.root().clone());
+    if let Some(root) = root {
+        let target = Rc::clone(app);
+        on_click(&root, move || {
+            let own = target.try_borrow().is_ok_and(|app| app.own_pause());
+            if own {
+                toggle_pause(&target);
             }
         });
     }
@@ -4174,7 +4302,11 @@ fn connect(app: &Rc<RefCell<App>>) {
                 {
                     let app = receiver.borrow();
                     if let Some(menu) = &app.game_menu {
-                        menu.update(!seated() || app.finish_noticed, app.match_over.ended);
+                        menu.update(
+                            !seated() || app.finish_noticed,
+                            app.match_over.ended,
+                            app.own_pause(),
+                        );
                     }
                 }
                 // The match over popup takes the offer's place, and the
@@ -4227,6 +4359,8 @@ fn receive_detail(app: &Rc<RefCell<App>>, message: &[u8]) {
 fn receive(app_rc: &Rc<RefCell<App>>, turn_ms: f64, message: &[u8]) {
     let app = &mut *app_rc.borrow_mut();
     match app.scene.apply(message, app.progress) {
+        // Not a turn: nothing moves, the veil only comes or goes.
+        Ok(()) if stream::is_pause(message) => app.sync_pause(),
         // The dots now start where they are drawn, so the new turn plays
         // from 0; a second turn before the next frame starts there too.
         Ok(()) => {
@@ -4260,6 +4394,7 @@ fn receive(app_rc: &Rc<RefCell<App>>, turn_ms: f64, message: &[u8]) {
             }
             app.show_clock();
             app.play_turn_sounds();
+            app.sync_pause();
             if app.scene.players_changed {
                 app.scene.players_changed = false;
                 app.players_changed();

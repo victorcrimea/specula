@@ -114,7 +114,7 @@ body { cursor: var(--gui-cursor-default, default); }
 #game-menu button:hover:not(:disabled) { background-image: var(--gui-stone-button-over); }
 #game-menu button:disabled { color: rgba(210, 210, 210, 0.627); filter: brightness(0.75); }
 #game-menu-open { left: 0; right: 8px; top: 4px; }
-#game-menu-panel { position: absolute; left: 0; right: 0; top: 0; height: 132px;
+#game-menu-panel { position: absolute; left: 0; right: 0; top: 0; height: 164px;
   box-sizing: border-box; background: rgba(15, 18, 20, 0.9); border: 1px solid #3a4248; }
 #game-menu-panel > button { left: 4px; right: 4px; }
 /* The open panel reaches over the clock and the HUD, and over the fold
@@ -122,8 +122,9 @@ body { cursor: var(--gui-cursor-default, default); }
 #top-panel:has(#game-menu-panel:not([hidden])) { z-index: 50; }
 #top-bar:has(#game-menu-panel:not([hidden])) { z-index: 1; }
 #game-menu-summary { top: 36px; }
-#game-menu-resign { top: 68px; }
-#game-menu-exit { top: 100px; }
+#game-menu-pause { top: 68px; }
+#game-menu-resign { top: 100px; }
+#game-menu-exit { top: 132px; }
 /* PanelEntities.xml: up to 19 iconButtons in a row, 50 px and a 1 px
    margin, under the controls rather than right under the bar. */
 #heroes { position: absolute; left: 2px; top: calc(var(--top-height) + 42px);
@@ -961,6 +962,19 @@ body:not([data-debug="storage"]) #stats-storage { display: none; }
   font-family: "0ad sans", "0ad sans fallback", sans-serif; color: white;
   line-height: 1.2; white-space: pre-wrap; overflow-wrap: break-word; }
 #tooltip[hidden] { display: none; }
+/* PauseOverlay.xml: sessionOverlayBackground (0 0 0 185) over the world,
+   in the page before the panels so they stay above it and usable; it eats
+   the world's pointer events. */
+#pause-overlay { position: fixed; left: 0; top: 0; right: 0; bottom: 0;
+  background: rgba(0, 0, 0, 0.725); color: white; font-weight: 700; text-align: center;
+  font-family: "0ad sans", "0ad sans fallback", sans-serif; }
+#pause-overlay[hidden] { display: none; }
+#pause-title { position: absolute; left: calc(50% - 128px); width: 256px; top: calc(40% - 20px);
+  height: 40px; line-height: 40px; font-size: 24px; }
+#pause-resume { position: absolute; left: calc(50% - 128px); width: 256px; top: calc(40% + 20px);
+  height: 20px; line-height: 20px; font-size: 12px; }
+#pause-resume[hidden] { display: none; }
+#pause-by { position: absolute; left: 30%; right: 30%; top: calc(40% + 50px); font-size: 16px; }
 /* informationTooltip (gui/session/styles.xml): BackgroundInformationTooltip,
    black at 192/255 with a 1 px white edge, buffer_zone 6, maxwidth 300. */
 #tooltip.information { max-width: 300px; padding: 6px;
@@ -973,6 +987,11 @@ body:not([data-debug="storage"]) #stats-storage { display: none; }
 <canvas id="view"></canvas>
 <div id="bandbox" hidden></div>
 <div id="tooltip" hidden></div>
+<div id="pause-overlay" hidden>
+<div id="pause-title" data-i18n>Game Paused</div>
+<div id="pause-resume" data-i18n>Click to Resume Game</div>
+<div id="pause-by"></div>
+</div>
 <div id="top-panel">
 <div id="top-bar">
 <span class="edge top"></span><span class="edge bottom"></span>
@@ -987,6 +1006,7 @@ body:not([data-debug="storage"]) #stats-storage { display: none; }
 <div id="game-menu" hidden>
 <div id="game-menu-panel" hidden>
 <button id="game-menu-summary" type="button" class="text center sans-bold-stroke-14"></button>
+<button id="game-menu-pause" type="button" class="text center sans-bold-stroke-14"></button>
 <button id="game-menu-resign" type="button" class="text center sans-bold-stroke-14"></button>
 <button id="game-menu-exit" type="button" class="text center sans-bold-stroke-14"></button>
 </div>

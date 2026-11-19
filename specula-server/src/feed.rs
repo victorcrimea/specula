@@ -39,6 +39,8 @@ const RECORD_FORMATION_DATA: u8 = 22;
 const RECORD_QUERY_REPLY: u8 = 23;
 const RECORD_LOS: u8 = 24;
 const RECORD_SUMMARY: u8 = 25;
+const RECORD_PAUSE: u8 = 26;
+const RECORD_KEEPALIVE: u8 = 27;
 const ENTITY_SIZE: usize = 84;
 const ENTITY_SIZE_V14: usize = 74;
 const SOUND_SIZE: usize = 29;
@@ -770,6 +772,10 @@ pub enum Record {
     },
     /// Kind 25: the statistics summary, whole and per seat.
     Summary(Summary),
+    /// The players who have the game paused; empty once resumed.
+    Pause(Vec<i8>),
+    /// Kind 27: the engine is running though paused, so no turns come.
+    KeepAlive,
 }
 
 /// The statistics summary of one capture, as JSON.
@@ -944,6 +950,16 @@ pub fn read_record(reader: &mut impl Read, version: u32) -> io::Result<Option<Re
                     json: cursor.0.to_vec(),
                 }));
             }
+            RECORD_PAUSE => {
+                let mut cursor = Cursor(&payload);
+                let count = cursor.u8()?;
+                let mut players = Vec::with_capacity(usize::from(count));
+                for _ in 0..count {
+                    players.push(cursor.u8()? as i8);
+                }
+                return Ok(Some(Record::Pause(players)));
+            }
+            RECORD_KEEPALIVE => return Ok(Some(Record::KeepAlive)),
             RECORD_QUERY_REPLY => {
                 let mut cursor = Cursor(&payload);
                 let id = cursor.u32()?;

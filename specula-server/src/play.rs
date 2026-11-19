@@ -38,6 +38,7 @@ const PLAY_SCRIPT: &str = "scripts/play.sh";
 pub const DEFAULT_PORT: u16 = 20777;
 const UPLINK_COMMAND: u8 = 1;
 const UPLINK_QUERY: u8 = 2;
+const UPLINK_PAUSE: u8 = 3;
 /// `SpeculaFeed.h`'s query methods.
 const QUERY_BUILDING_PREVIEW: u8 = 1;
 const QUERY_FOUNDATION_SNAP: u8 = 2;
@@ -459,6 +460,15 @@ impl Play {
     pub fn resign(&self, owner: &str) -> Result<(), &'static str> {
         let seat = self.running_seat(owner)?;
         self.send_json(seat, r#"{"type":"resign"}"#);
+        Ok(())
+    }
+
+    /// Pauses or resumes the game for `owner`'s seat, as the session's
+    /// PauseControl does; the engine holds it paused while any seat has.
+    pub fn set_paused(&self, owner: &str, paused: bool) -> Result<(), &'static str> {
+        let seat = self.running_seat(owner)?;
+        let record = [UPLINK_PAUSE, 2, 0, 0, 0, seat, u8::from(paused)];
+        self.write_uplink(&record);
         Ok(())
     }
 

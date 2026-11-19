@@ -24,6 +24,7 @@ pub struct GameMenu {
     open: HtmlButtonElement,
     panel: HtmlElement,
     summary: HtmlButtonElement,
+    pause: HtmlButtonElement,
     resign: HtmlButtonElement,
     exit: HtmlButtonElement,
 }
@@ -35,20 +36,36 @@ impl GameMenu {
             open: crate::element(document, "game-menu-open")?,
             panel: crate::element(document, "game-menu-panel")?,
             summary: crate::element(document, "game-menu-summary")?,
+            pause: crate::element(document, "game-menu-pause")?,
             resign: crate::element(document, "game-menu-resign")?,
             exit: crate::element(document, "game-menu-exit")?,
         };
         lang::set_text(&menu.open, "Menu");
         lang::set_text(&menu.summary, "Summary");
+        lang::set_text(&menu.pause, "Pause");
         lang::set_text(&menu.resign, "Resign");
         lang::set_text(&menu.exit, "Exit");
         menu.root.set_hidden(false);
         Ok(menu)
     }
 
-    /// Menu, Summary, Resign and Exit.
-    pub fn buttons(&self) -> (&HtmlElement, &HtmlElement, &HtmlElement, &HtmlElement) {
-        (&self.open, &self.summary, &self.resign, &self.exit)
+    /// Menu, Summary, Pause, Resign and Exit.
+    pub fn buttons(
+        &self,
+    ) -> (
+        &HtmlElement,
+        &HtmlElement,
+        &HtmlElement,
+        &HtmlElement,
+        &HtmlElement,
+    ) {
+        (
+            &self.open,
+            &self.summary,
+            &self.pause,
+            &self.resign,
+            &self.exit,
+        )
     }
 
     /// `Menu.toggle`.
@@ -77,8 +94,22 @@ impl GameMenu {
 
     /// Resign is for a player still in the game, as `!g_IsObserver`;
     /// neither is left to do once the game has ended.
-    pub fn update(&self, defeated: bool, ended: bool) {
+    /// `paused`: the visitor's seat has the game paused, which the button
+    /// then resumes. Pausing, like Resign, is for a player, as
+    /// `PauseControl.canPause` has it.
+    pub fn update(&self, defeated: bool, ended: bool, paused: bool) {
         let resign = !defeated && !ended;
+        lang::set_text(&self.pause, if paused { "Resume" } else { "Pause" });
+        let _ = self.pause.set_attribute(
+            crate::tooltip::ATTRIBUTE,
+            &lang::format(
+                &lang::translate("Press %(hotkey)s to pause or resume the game."),
+                &[("hotkey", &crate::command_row::hotkey_text("pause"))],
+            ),
+        );
+        if self.pause.disabled() == resign {
+            self.pause.set_disabled(!resign);
+        }
         if self.resign.disabled() == resign {
             self.resign.set_disabled(!resign);
         }

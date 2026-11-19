@@ -31,8 +31,8 @@ const OBSERVE_SCRIPT: &str = "scripts/observe.sh";
 /// the game state, so a long-running game does not need longer.
 const JOIN_LIMIT: Duration = Duration::from_secs(30);
 /// Between turns once the feed is up. Long enough to download and catch up
-/// on a game that has run for hours; longer than any pause the host's own
-/// clients would sit through.
+/// on a game that has run for hours; a game paused through the feed sends
+/// keepalives instead of turns.
 const SILENCE_LIMIT: Duration = Duration::from_secs(120);
 /// The restarted host refuses connections for a while; each failed join
 /// costs the engine's startup.

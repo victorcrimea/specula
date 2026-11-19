@@ -129,6 +129,7 @@ fn hotkey_keys(hotkey: &str) -> Option<&'static str> {
         "session.guard" => "G",
         "session.patrol" => "P",
         "session.gui.barter.toggle" => "Ctrl+B",
+        "pause" => "Pause, Shift+Space",
         "session.massbarter" | "session.fulltradeswap" => "Shift",
         // `GetScancodeKeyNames` gives SDL's names, "." and "Keypad .".
         "selection.idleworker" => "., Keypad .",

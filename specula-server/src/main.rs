@@ -346,6 +346,8 @@ fn play_action(
     let visitor = usage::visitor(cookies).ok_or(refuse("no visitor cookie"))?;
     match action {
         "resign" => play.resign(&visitor),
+        "pause" => play.set_paused(&visitor, true),
+        "resume" => play.set_paused(&visitor, false),
         "end" => play.end(&visitor),
         "rematch" => play.rematch(&visitor),
         _ => Err("unknown action"),
@@ -863,6 +865,8 @@ fn serve(
                     play.set_summary(generation, summary);
                 }
             }
+            Record::Pause(players) => hub.set_pause(&players),
+            Record::KeepAlive => hub.feed_alive(),
             Record::QueryReply { id, json } => {
                 if let Some(play) = play {
                     play.reply(id, &json);
