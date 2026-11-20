@@ -1,4 +1,5 @@
 mod actors;
+mod catalog;
 mod classify;
 mod config;
 mod delta;
@@ -145,6 +146,22 @@ async fn main() {
     }
     println!("engine logs and caches in {}", config.engine_dir.display());
 
+    // Only hosting sets games up; an observer needs none of it.
+    let catalog = if config.slots == 0 {
+        None
+    } else {
+        match catalog::data_dir().and_then(|root| Ok((catalog::Catalog::load(&root)?, root))) {
+            Ok((catalog, root)) => {
+                println!("{}", catalog.summary(&root));
+                Some(catalog)
+            }
+            Err(error) => {
+                eprintln!("cannot read the setup catalog: {error}");
+                std::process::exit(1);
+            }
+        }
+    };
+
     let supervised = observe.is_some();
     let broadcast = if config.slots == 0 {
         if let Err(error) = remove_stale_socket(&path) {
@@ -186,6 +203,7 @@ async fn main() {
         delay,
         history,
         broadcast,
+        catalog,
     ));
     if config.slots > 0 {
         let watcher = Arc::clone(&registry);

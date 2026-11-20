@@ -41,6 +41,7 @@ use std::time::Duration;
 use std::time::Instant;
 use std::time::SystemTime;
 
+use crate::catalog::Catalog;
 use crate::config::Config;
 use crate::history::History;
 use crate::observer;
@@ -286,6 +287,10 @@ pub struct Registry {
     history: Option<Arc<Mutex<History>>>,
     /// `--observe` or `--slots 0`: the one long-lived hub.
     broadcast: Option<(MatchId, Arc<Hub>)>,
+    /// Hosting only. Its readers come with the setup rules (M13) and
+    /// protocol (M15).
+    #[allow(dead_code)]
+    catalog: Option<Catalog>,
     inner: Mutex<Inner>,
 }
 
@@ -327,6 +332,7 @@ impl Registry {
         delay: Duration,
         history: Option<Arc<Mutex<History>>>,
         broadcast: Option<Arc<Hub>>,
+        catalog: Option<Catalog>,
     ) -> Self {
         let slots = vec![None; usize::from(config.slots)];
         Registry {
@@ -335,6 +341,7 @@ impl Registry {
             delay,
             history,
             broadcast: broadcast.map(|hub| (MatchId::new_v4(), hub)),
+            catalog,
             inner: Mutex::new(Inner {
                 matches: HashMap::new(),
                 ended: HashMap::new(),
