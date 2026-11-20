@@ -87,6 +87,7 @@
   "New match": "Partida nova",
   "Rematch": "Revenja",
   "Live stream starts in %(time)s": "La retransmissió en directe comença d'aquí a %(time)s",
+  "Time limit: this match ends in %(time)s.": "Límit de temps: aquesta partida acaba d'aquí a %(time)s.",
   "Default (browser: %(name)s)": "Per defecte (navegador: %(name)s)",
   "warming up": "escalfament",
   "measuring": "mesura",

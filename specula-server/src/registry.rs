@@ -15,6 +15,9 @@
 //!
 //! A stop (D22) waits until every hosted match has ended and its hub has
 //! released the end, so observers see it and the history holds all of it.
+//!
+//! `watch_limits` stops an engine at L1 or L2 (D18, D19), and logs the 15,
+//! 5 and 1 minute warnings the pages show from `limits` (D20).
 
 use std::collections::HashMap;
 use std::collections::hash_map::RandomState;
@@ -30,6 +33,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::thread::JoinHandle;
 use std::time::Duration;
+use std::time::Instant;
 use std::time::SystemTime;
 
 use crate::config::Config;
@@ -53,6 +57,16 @@ const ACCEPT_POLL: Duration = Duration::from_millis(100);
 const FEED_SOCKET_ERROR: &str = "cannot open the feed socket";
 const STOPPING_ERROR: &str = "the server is stopping";
 const STOP_POLL: Duration = Duration::from_secs(1);
+const LIMIT_POLL: Duration = Duration::from_secs(1);
+/// The time left at which everyone is warned (D20), longest first; the
+/// pages keep the same list.
+const LIMIT_WARNINGS: [Duration; 3] = [
+    Duration::from_secs(15 * 60),
+    Duration::from_secs(5 * 60),
+    Duration::from_secs(60),
+];
+/// `DEFAULT_TURN_LENGTH` (`TurnManager.h`), which a hosted game runs at.
+const TURN_LENGTH: Duration = Duration::from_millis(200);
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct MatchId([u8; 16]);
@@ -137,11 +151,30 @@ pub struct Match {
     /// The engine's runner thread, handed to a rematch in the same slot,
     /// which joins it first: the UDP port is the slot's.
     runner: Mutex<Option<JoinHandle<()>>>,
+    /// Taken as the engine's start for L1: the runner may first wait a
+    /// moment for the slot's previous engine, which only makes it stricter.
+    launched: Instant,
+    /// How many of `LIMIT_WARNINGS` were logged.
+    warned: Mutex<usize>,
 }
 
 impl Match {
     pub fn state(&self) -> MatchState {
         *self.state.lock().unwrap()
+    }
+
+    /// L2 counts this. Without save and restore it is the game clock; a
+    /// restored match will add what it played before the save (D19).
+    fn game_time(&self) -> Duration {
+        TURN_LENGTH * self.hub.turn()
+    }
+
+    /// The wall time and the game time left before a limit stops it.
+    fn limit_left(&self, config: &Config) -> (Duration, Duration) {
+        (
+            config.wall_limit.saturating_sub(self.launched.elapsed()),
+            config.game_limit.saturating_sub(self.game_time()),
+        )
     }
 }
 
@@ -456,6 +489,8 @@ impl Registry {
                 play,
                 state: Mutex::new(MatchState::Running),
                 runner: Mutex::new(Some(runner)),
+                launched: Instant::now(),
+                warned: Mutex::new(0),
             }),
         );
         inner.order.push(id);
@@ -490,6 +525,62 @@ impl Registry {
         // A rematch may already own the slot.
         if inner.slots[usize::from(found.slot)] == Some(id) {
             inner.slots[usize::from(found.slot)] = None;
+        }
+    }
+
+    /// A running hosted match's wall time left and its game limit as a
+    /// game time, which a page turns into its own countdown: the wall time
+    /// runs on while the game is paused, the game time follows the turns
+    /// the page is shown.
+    pub fn limits(&self, id: MatchId) -> Option<(Duration, Duration)> {
+        let found = self.hosted(id)?;
+        if found.state() != MatchState::Running {
+            return None;
+        }
+        let (wall, _) = found.limit_left(&self.config);
+        Some((wall, self.config.game_limit))
+    }
+
+    /// Never returns; one thread for every hosted match.
+    pub fn watch_limits(&self) {
+        loop {
+            let running: Vec<(MatchId, Arc<Match>)> = {
+                let inner = self.inner.lock().unwrap();
+                inner
+                    .matches
+                    .iter()
+                    .filter(|(_, found)| found.state() == MatchState::Running)
+                    .map(|(id, found)| (*id, Arc::clone(found)))
+                    .collect()
+            };
+            // Off the registry lock: stopping an engine runs `kill`.
+            for (id, found) in &running {
+                let (wall, game) = found.limit_left(&self.config);
+                let (left, limit) = if wall <= game {
+                    (wall, "wall")
+                } else {
+                    (game, "game")
+                };
+                {
+                    // A limit shorter than a warning passes it at once; one
+                    // line says the same.
+                    let crossed = LIMIT_WARNINGS.iter().filter(|&&at| left <= at).count();
+                    let mut warned = found.warned.lock().unwrap();
+                    if crossed > *warned {
+                        *warned = crossed;
+                        println!(
+                            "match {id}: {limit} time limit in {} min",
+                            left.as_secs().div_ceil(60)
+                        );
+                    }
+                }
+                if left.is_zero() && found.play.end_at_limit() {
+                    // D20's scoring goes before this stop (M30); until then
+                    // the match ends undecided.
+                    println!("match {id} reached the {limit} time limit, stopping its engine");
+                }
+            }
+            std::thread::sleep(LIMIT_POLL);
         }
     }
 

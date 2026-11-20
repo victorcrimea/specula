@@ -87,6 +87,7 @@
   "New match": "Yeni maç",
   "Rematch": "Rövanş",
   "Live stream starts in %(time)s": "Canlı yayın %(time)s sonra başlıyor",
+  "Time limit: this match ends in %(time)s.": "Süre sınırı: bu maç %(time)s sonra bitiyor.",
   "Default (browser: %(name)s)": "Varsayılan (tarayıcı: %(name)s)",
   "warming up": "ısınma",
   "measuring": "ölçüm",

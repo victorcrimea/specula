@@ -2,6 +2,7 @@
 //! their ports, and the limits shared by all of them.
 
 use std::path::PathBuf;
+use std::time::Duration;
 
 /// Relative to the working directory, as `WEB_ROOT`.
 pub const DEFAULT_ENGINE_DIR: &str = "engines";
@@ -9,6 +10,8 @@ pub const DEFAULT_ENGINE_DIR: &str = "engines";
 pub const DEFAULT_PORT_BASE: u16 = 20777;
 pub const DEFAULT_SLOTS: u16 = 1;
 pub const DEFAULT_MAX_OBSERVERS: u32 = 100;
+/// D18 and D19: 4 hours each.
+pub const DEFAULT_LIMIT_MINUTES: u32 = 240;
 
 pub struct Config {
     /// Matches hosted at once; 0 hosts none (`--observe`, or a feed
@@ -22,6 +25,10 @@ pub struct Config {
     /// Absolute: the engine reads a relative XDG path as relative to $HOME
     /// (`Paths::XDG_Path`).
     pub engine_dir: PathBuf,
+    /// L1 (D18): how long an engine may run, pauses included.
+    pub wall_limit: Duration,
+    /// L2 (D19): how much game time a match may play.
+    pub game_limit: Duration,
 }
 
 impl Config {
@@ -47,8 +54,10 @@ impl Config {
             "admin key off (no --admin-key)"
         };
         format!(
-            "{hosting}, at most {} observers, {admin}",
-            self.max_observers
+            "{hosting}, at most {} observers, {admin}, matches stop after {} min of wall time or {} min of game time",
+            self.max_observers,
+            self.wall_limit.as_secs() / 60,
+            self.game_limit.as_secs() / 60
         )
     }
 }

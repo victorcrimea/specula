@@ -605,6 +605,7 @@ struct App {
     stream_bytes: StreamBytes,
     match_over: MatchOver,
     stream_start: StreamStart,
+    time_limit: Option<TimeLimit>,
     /// Only the 3D page plays sound.
     sound: Option<SoundControls>,
     /// Only the 3D page has assets to warm up.
@@ -889,6 +890,62 @@ fn owner_buttons(document: &Document, status: Option<&game_menu::Status>) -> Opt
     })
 }
 
+/// The warnings of a hosted match's time limit (D18 to D20): a notice for
+/// a while at each of `WARNINGS` left, and a countdown in the last minute.
+/// The server stops the engine at the limit; the delay shows that later.
+struct TimeLimit {
+    element: HtmlElement,
+    /// When the wall time limit stops the engine, on the frame clock.
+    wall_at: f64,
+    /// The game clock at which the game time limit stops it.
+    game_limit_ms: f64,
+    shown: String,
+}
+
+impl TimeLimit {
+    /// The server's `LIMIT_WARNINGS`, in ms.
+    const WARNINGS: [f64; 3] = [15.0 * 60_000.0, 5.0 * 60_000.0, 60_000.0];
+    const NOTICE_MS: f64 = 15_000.0;
+
+    /// None for a match with no limit (the broadcast, a stored match), and
+    /// on an older cached page without the element.
+    fn new(document: &Document, status: Option<&game_menu::Status>, now: f64) -> Option<Self> {
+        let status = status?;
+        Some(TimeLimit {
+            element: element(document, "time-limit").ok()?,
+            wall_at: now + status.wall_left_ms?,
+            game_limit_ms: status.game_limit_ms?,
+            shown: String::new(),
+        })
+    }
+
+    /// `turn` is the one shown, which follows pauses and the delay, so the
+    /// game time needs no correction; the wall time does, as an observer's
+    /// view reaches the engine's end `delay_ms` later.
+    fn frame(&mut self, now: f64, turn: u32, delay_ms: u32, over: bool) {
+        let wall_left = self.wall_at + f64::from(delay_ms) - now;
+        let game_left = self.game_limit_ms - f64::from(turn) * TURN_MS;
+        let left = wall_left.min(game_left).max(0.0);
+        let warned = left <= Self::WARNINGS[2]
+            || Self::WARNINGS
+                .iter()
+                .any(|&at| left <= at && left > at - Self::NOTICE_MS);
+        let text = if over || !warned {
+            String::new()
+        } else {
+            lang::format(
+                &lang::translate("Time limit: this match ends in %(time)s."),
+                &[("time", &format_minutes((left / 1000.0).ceil() as u64))],
+            )
+        };
+        if text != self.shown {
+            self.element.set_hidden(text.is_empty());
+            self.element.set_text_content(Some(&text));
+            self.shown = text;
+        }
+    }
+}
+
 /// The countdown shown while the server holds back the match's first
 /// turns, so that a viewer joining then does not face an empty view.
 struct StreamStart {
@@ -1008,6 +1065,15 @@ impl App {
         }
         self.match_over.frame(now);
         self.stream_start.frame(now);
+        if let Some(time_limit) = &mut self.time_limit {
+            time_limit.frame(
+                now,
+                self.scene.turn,
+                // A seat's keyframes name the observers' delay too.
+                if seated() { 0 } else { self.scene.delay_ms },
+                self.match_over.ended || self.match_over.archived,
+            );
+        }
         if let Some(warmup) = &mut self.warmup {
             let index_loaded = self
                 .renderer
@@ -1859,10 +1925,11 @@ async fn run(
     // `/g/<uuid>` is the 3D page of a match; for the visitor who holds its
     // seat it is the player's page, the live stream and orders, unless
     // `?watch` asks for the observers' view (D24).
-    let candidate = page == Page::Observer
-        && !match_base().is_empty()
-        && query_param(&search, "watch").is_none();
-    let status = if candidate {
+    // Asked under `?watch` too, for the time limit every viewer is warned
+    // of (D20).
+    let asked = page == Page::Observer && !match_base().is_empty();
+    let watch = query_param(&search, "watch").is_some();
+    let mut status = if asked {
         game_menu::status()
             .await
             .inspect_err(|error| web_sys::console::error_1(&error.into()))
@@ -1870,6 +1937,10 @@ async fn run(
     } else {
         None
     };
+    let time_limit = TimeLimit::new(&document, status.as_ref(), page_now());
+    if watch {
+        status = None;
+    }
     let owner = status.as_ref().is_some_and(|status| status.seat != 0);
     // A player who resigned or was beaten watches the rest as the observers
     // do, with their delay, and gives no more orders.
@@ -2017,6 +2088,7 @@ async fn run(
             at: None,
             shown: String::new(),
         },
+        time_limit,
         sound,
         warmup,
         detail_wanted: false,
@@ -4623,6 +4695,11 @@ fn canvas_size(canvas: &HtmlCanvasElement, max: u32) -> (u32, u32, f32) {
 }
 
 /// Game time, `m:ss` or `h:mm:ss`.
+/// m:ss, as the engine's countdowns show a time left.
+fn format_minutes(seconds: u64) -> String {
+    format!("{}:{:02}", seconds / 60, seconds % 60)
+}
+
 fn format_clock(turn: u32) -> String {
     let seconds = (f64::from(turn) * TURN_MS / 1000.0) as u64;
     let (hours, minutes, seconds) = (seconds / 3600, seconds / 60 % 60, seconds % 60);

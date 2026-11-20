@@ -87,6 +87,7 @@
   "New match": "新しい試合",
   "Rematch": "再戦",
   "Live stream starts in %(time)s": "ライブ配信開始まで %(time)s",
+  "Time limit: this match ends in %(time)s.": "制限時間: この試合は %(time)s 後に終了します。",
   "Default (browser: %(name)s)": "既定 (ブラウザ: %(name)s)",
   "warming up": "ウォームアップ",
   "measuring": "計測",

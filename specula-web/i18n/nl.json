@@ -87,6 +87,7 @@
   "New match": "Nieuw spel",
   "Rematch": "Revanche",
   "Live stream starts in %(time)s": "Livestream begint over %(time)s",
+  "Time limit: this match ends in %(time)s.": "Tijdslimiet: dit spel eindigt over %(time)s.",
   "Default (browser: %(name)s)": "Standaard (browser: %(name)s)",
   "warming up": "opwarmen",
   "measuring": "meten",

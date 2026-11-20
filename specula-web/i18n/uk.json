@@ -87,6 +87,7 @@
   "New match": "Новий матч",
   "Rematch": "Реванш",
   "Live stream starts in %(time)s": "Трансляція почнеться через %(time)s",
+  "Time limit: this match ends in %(time)s.": "Ліміт часу: матч закінчиться через %(time)s.",
   "Default (browser: %(name)s)": "Типово (браузер: %(name)s)",
   "warming up": "прогрів",
   "measuring": "вимірювання",

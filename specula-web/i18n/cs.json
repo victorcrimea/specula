@@ -87,6 +87,7 @@
   "New match": "Nový zápas",
   "Rematch": "Odveta",
   "Live stream starts in %(time)s": "Živý přenos začne za %(time)s",
+  "Time limit: this match ends in %(time)s.": "Časový limit: tato hra skončí za %(time)s.",
   "Default (browser: %(name)s)": "Výchozí (prohlížeč: %(name)s)",
   "warming up": "zahřívání",
   "measuring": "měření",

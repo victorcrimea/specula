@@ -87,6 +87,7 @@
   "New match": "Ny match",
   "Rematch": "Returmatch",
   "Live stream starts in %(time)s": "Livesändningen börjar om %(time)s",
+  "Time limit: this match ends in %(time)s.": "Tidsgräns: den här matchen slutar om %(time)s.",
   "Default (browser: %(name)s)": "Standard (webbläsare: %(name)s)",
   "warming up": "uppvärmning",
   "measuring": "mätning",

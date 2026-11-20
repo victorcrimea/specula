@@ -87,6 +87,7 @@
   "New match": "新比赛",
   "Rematch": "再来一局",
   "Live stream starts in %(time)s": "直播将在 %(time)s 后开始",
+  "Time limit: this match ends in %(time)s.": "时间限制：本场比赛将在 %(time)s 后结束。",
   "Default (browser: %(name)s)": "默认（浏览器：%(name)s）",
   "warming up": "预热",
   "measuring": "测量",

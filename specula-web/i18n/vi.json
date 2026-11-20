@@ -87,6 +87,7 @@
   "New match": "Trận mới",
   "Rematch": "Tái đấu",
   "Live stream starts in %(time)s": "Phát trực tiếp bắt đầu sau %(time)s",
+  "Time limit: this match ends in %(time)s.": "Giới hạn thời gian: trận đấu này kết thúc sau %(time)s.",
   "Default (browser: %(name)s)": "Mặc định (trình duyệt: %(name)s)",
   "warming up": "khởi động",
   "measuring": "đo",

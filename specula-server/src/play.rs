@@ -18,6 +18,7 @@ use std::process::Command;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::thread::JoinHandle;
+use std::time::Duration;
 
 use specula_assets::command::ALLOW_CAPTURE;
 use specula_assets::command::Command as Order;
@@ -102,6 +103,10 @@ pub fn setup_json(status: &Status) -> String {
     json.boolean("defeated", status.defeated);
     json.boolean("rematch", status.rematch);
     json.raw("seat", &status.seat.unwrap_or(0).to_string());
+    if let Some((wall_left, game_limit)) = status.limits {
+        json.raw("wall_left_ms", &wall_left.as_millis().to_string());
+        json.raw("game_limit_ms", &game_limit.as_millis().to_string());
+    }
     json.raw("maps", &pairs(&mut MAPS.iter().copied()));
     json.raw("civs", &pairs(&mut civs()));
     json.finish()
@@ -160,6 +165,9 @@ pub struct Status {
     /// The visitor's seat while the game is theirs, running or not, which
     /// the summary reads after the engine has exited.
     pub seat: Option<u8>,
+    /// A running match's wall time left and game limit (`Registry::limits`),
+    /// for the pages' warnings; the registry fills it in.
+    pub limits: Option<(Duration, Duration)>,
 }
 
 /// What the setup page chose.
@@ -387,6 +395,7 @@ impl Play {
             defeated: running && owned && self.seat_defeated(seat),
             rematch: owned,
             seat: owned.then_some(seat).filter(|&seat| seat != 0),
+            limits: None,
         }
     }
 
@@ -500,13 +509,30 @@ impl Play {
         let mut inner = self.inner.lock().unwrap();
         match &mut inner.game {
             Some(game) if game.running && game.owner == owner => {
-                observer::kill_recorded(&self.socket);
-                // At once rather than once the runner has seen the engine
-                // exit, so the page reloaded after this shows the end.
-                game.running = false;
+                self.stop_engine(game);
                 Ok(())
             }
             _ => Err("no game of yours is running"),
+        }
+    }
+
+    fn stop_engine(&self, game: &mut Game) {
+        observer::kill_recorded(&self.socket);
+        // At once rather than once the runner has seen the engine exit, so
+        // the page reloaded after this shows the end.
+        game.running = false;
+    }
+
+    /// Stops the engine at a time limit (D18, D19). Returns whether it was
+    /// still running.
+    pub fn end_at_limit(&self) -> bool {
+        let mut inner = self.inner.lock().unwrap();
+        match &mut inner.game {
+            Some(game) if game.running => {
+                self.stop_engine(game);
+                true
+            }
+            _ => false,
         }
     }
 
@@ -518,8 +544,7 @@ impl Play {
         match &mut inner.game {
             Some(game) if game.running && self.seat_defeated(game.seat) => {
                 println!("game {} is decided, stopping its engine", self.generation);
-                observer::kill_recorded(&self.socket);
-                game.running = false;
+                self.stop_engine(game);
                 true
             }
             _ => false,

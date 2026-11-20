@@ -87,6 +87,7 @@
   "New match": "Uusi peli",
   "Rematch": "Uusintapeli",
   "Live stream starts in %(time)s": "Suora lähetys alkaa %(time)s kuluttua",
+  "Time limit: this match ends in %(time)s.": "Aikaraja: tämä peli päättyy %(time)s kuluttua.",
   "Default (browser: %(name)s)": "Oletus (selain: %(name)s)",
   "warming up": "lämmitys",
   "measuring": "mittaus",

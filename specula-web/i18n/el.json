@@ -87,6 +87,7 @@
   "New match": "Νέος αγώνας",
   "Rematch": "Ρεβάνς",
   "Live stream starts in %(time)s": "Η ζωντανή μετάδοση ξεκινά σε %(time)s",
+  "Time limit: this match ends in %(time)s.": "Χρονικό όριο: αυτό το παιχνίδι τελειώνει σε %(time)s.",
   "Default (browser: %(name)s)": "Προεπιλογή (πρόγραμμα περιήγησης: %(name)s)",
   "warming up": "προθέρμανση",
   "measuring": "μέτρηση",

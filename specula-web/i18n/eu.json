@@ -87,6 +87,7 @@
   "New match": "Partida berria",
   "Rematch": "Errebantxa",
   "Live stream starts in %(time)s": "Zuzeneko emanaldia %(time)s barru hasiko da",
+  "Time limit: this match ends in %(time)s.": "Denbora-muga: partida hau %(time)s barru amaituko da.",
   "Default (browser: %(name)s)": "Lehenetsia (nabigatzailea: %(name)s)",
   "warming up": "beroketa",
   "measuring": "neurketa",

@@ -1946,6 +1946,11 @@ impl Hub {
         self.state.lock().unwrap().observer.set_players(players);
     }
 
+    /// The latest turn the feed gave, which viewers may not see yet.
+    pub fn turn(&self) -> u32 {
+        self.state.lock().unwrap().turn
+    }
+
     /// The feed's latest state of `player`, as `feed::Player::state`.
     pub fn player_state(&self, player: u32) -> Option<u8> {
         let state = self.state.lock().unwrap();

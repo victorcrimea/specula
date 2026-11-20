@@ -127,6 +127,10 @@ pub struct Status {
     pub rematch: bool,
     /// The visitor's seat, 0 when the game is not theirs.
     pub seat: usize,
+    /// A running hosted match's wall time left before its time limit, in
+    /// ms as of the answer, and its game time limit in ms of the game clock.
+    pub wall_left_ms: Option<f64>,
+    pub game_limit_ms: Option<f64>,
 }
 
 pub async fn status() -> Result<Status, String> {
@@ -147,13 +151,17 @@ pub async fn status() -> Result<Status, String> {
         .map_err(|_| "the game's status is not JSON")?;
     let flag =
         |name: &str| js_sys::Reflect::get(&json, &name.into()).is_ok_and(|value| value.is_truthy());
+    let number = |name: &str| {
+        js_sys::Reflect::get(&json, &name.into())
+            .ok()
+            .and_then(|value| value.as_f64())
+    };
     Ok(Status {
         defeated: flag("defeated"),
         rematch: flag("rematch"),
-        seat: js_sys::Reflect::get(&json, &"seat".into())
-            .ok()
-            .and_then(|seat| seat.as_f64())
-            .unwrap_or(0.0) as usize,
+        seat: number("seat").unwrap_or(0.0) as usize,
+        wall_left_ms: number("wall_left_ms"),
+        game_limit_ms: number("game_limit_ms"),
     })
 }
 

@@ -87,6 +87,7 @@
   "New match": "새 경기",
   "Rematch": "재경기",
   "Live stream starts in %(time)s": "%(time)s 후 생중계 시작",
+  "Time limit: this match ends in %(time)s.": "시간 제한: 이 경기는 %(time)s 후에 종료됩니다.",
   "Default (browser: %(name)s)": "기본값 (브라우저: %(name)s)",
   "warming up": "워밍업",
   "measuring": "측정",

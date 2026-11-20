@@ -74,7 +74,8 @@ const DEFAULT_USAGE_DIR: &str = "usage";
 const USAGE: &str = "usage: specula-server [SOCKET] [--observe HOST:PORT | [--slots N] \
                      [--port-base PORT]] [--max-observers N] [--admin-key KEY] \
                      [--delay SECONDS] [--history DIR] [--history-limit SIZE] [--usage DIR] \
-                     [--engine-dir DIR] [--stats-key KEY]";
+                     [--engine-dir DIR] [--stats-key KEY] [--wall-limit MINUTES] \
+                     [--game-limit MINUTES]";
 /// Relative to the working directory, so the server runs from the repo root.
 pub const WEB_ROOT: &str = "specula-web";
 
@@ -184,6 +185,10 @@ async fn main() {
         history,
         broadcast,
     ));
+    if config.slots > 0 {
+        let watcher = Arc::clone(&registry);
+        std::thread::spawn(move || watcher.watch_limits());
+    }
 
     // Signals are `stop::watch`'s: Rocket's own handling would end the web
     // server, and with it every hosted match, on the first one.
@@ -395,8 +400,13 @@ fn play_status(
                 defeated: false,
                 rematch: false,
                 seat: None,
+                limits: None,
             }
         }
+    };
+    let status = play::Status {
+        limits: registry.limits(id),
+        ..status
     };
     Some(Json(
         play::setup_json(&status),
@@ -910,7 +920,8 @@ struct Args {
 
 /// `[SOCKET] [--observe HOST:PORT | [--slots N] [--port-base PORT]]
 /// [--max-observers N] [--admin-key KEY] [--delay SECONDS] [--history DIR]
-/// [--history-limit SIZE] [--usage DIR] [--engine-dir DIR] [--stats-key KEY]`, in any order.
+/// [--history-limit SIZE] [--usage DIR] [--engine-dir DIR] [--stats-key KEY]
+/// [--wall-limit MINUTES] [--game-limit MINUTES]`, in any order.
 fn parse_args() -> Result<Args, String> {
     let mut socket = None;
     let mut observe = None;
@@ -924,6 +935,8 @@ fn parse_args() -> Result<Args, String> {
     let mut usage_dir = PathBuf::from(DEFAULT_USAGE_DIR);
     let mut engine_dir = PathBuf::from(config::DEFAULT_ENGINE_DIR);
     let mut stats_key = None;
+    let mut wall_limit = config::DEFAULT_LIMIT_MINUTES;
+    let mut game_limit = config::DEFAULT_LIMIT_MINUTES;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         if arg == "--delay" {
@@ -932,6 +945,18 @@ fn parse_args() -> Result<Args, String> {
                 .parse::<u32>()
                 .map_err(|_| format!("--delay {seconds}: expected whole seconds"))?;
             delay = Duration::from_secs(u64::from(seconds));
+        } else if arg == "--wall-limit" || arg == "--game-limit" {
+            let minutes = args.next().ok_or_else(|| format!("{arg} needs MINUTES"))?;
+            let minutes = minutes
+                .parse::<u32>()
+                .ok()
+                .filter(|&minutes| minutes > 0)
+                .ok_or_else(|| format!("{arg} {minutes}: expected whole minutes, at least 1"))?;
+            if arg == "--wall-limit" {
+                wall_limit = minutes;
+            } else {
+                game_limit = minutes;
+            }
         } else if arg == "--history" {
             history_dir = args.next().ok_or("--history needs DIR")?.into();
         } else if arg == "--history-limit" {
@@ -1009,6 +1034,8 @@ fn parse_args() -> Result<Args, String> {
             max_observers,
             admin_key,
             engine_dir,
+            wall_limit: Duration::from_secs(u64::from(wall_limit) * 60),
+            game_limit: Duration::from_secs(u64::from(game_limit) * 60),
         },
         delay,
         history_dir,

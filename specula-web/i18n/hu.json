@@ -87,6 +87,7 @@
   "New match": "Új meccs",
   "Rematch": "Visszavágó",
   "Live stream starts in %(time)s": "Az élő közvetítés %(time)s múlva kezdődik",
+  "Time limit: this match ends in %(time)s.": "Időkorlát: ez a játék %(time)s múlva véget ér.",
   "Default (browser: %(name)s)": "Alapértelmezett (böngésző: %(name)s)",
   "warming up": "bemelegítés",
   "measuring": "mérés",

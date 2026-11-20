@@ -87,6 +87,7 @@
   "New match": "button on the player's page once their game has ended: opens the page that sets up a new game against the computer",
   "Rematch": "button on the player's page once their game has ended: starts a game again at once, with the same map, civilisations and opponents",
   "Live stream starts in %(time)s": "status text while the delayed broadcast has not started yet; the value is a countdown such as 1:42",
+  "Time limit: this match ends in %(time)s.": "on a match the server hosts: it stops every match after a fixed wall time or game time, and warns 15, 5 and 1 minute before; the value is a countdown such as 4:59",
   "Default (browser: %(name)s)": "first entry of the language list; the value is the language name the browser asks for",
   "warming up": "benchmark phase, lower case, used inside a status line",
   "measuring": "benchmark phase, lower case, used inside a status line",

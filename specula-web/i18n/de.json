@@ -87,6 +87,7 @@
   "New match": "Neues Spiel",
   "Rematch": "Revanche",
   "Live stream starts in %(time)s": "Live-Übertragung beginnt in %(time)s",
+  "Time limit: this match ends in %(time)s.": "Zeitlimit: Dieses Spiel endet in %(time)s.",
   "Default (browser: %(name)s)": "Standard (Browser: %(name)s)",
   "warming up": "Aufwärmen",
   "measuring": "Messen",
