@@ -132,10 +132,12 @@ pub fn form_json(
     mine: bool,
     own: Option<MatchId>,
     latest: Option<MatchId>,
+    stopping: bool,
 ) -> String {
     let mut json = Json::new();
     json.boolean("running", running);
     json.boolean("mine", mine);
+    json.boolean("stopping", stopping);
     json.text("match", &own.map(|id| id.to_string()).unwrap_or_default());
     json.text(
         "latest",
@@ -505,6 +507,22 @@ impl Play {
                 Ok(())
             }
             _ => Err("no game of yours is running"),
+        }
+    }
+
+    /// Stops the engine of a game nobody plays any more, as `end` does but
+    /// for no owner: a stopping server must not wait on a won game whose
+    /// engine stays in its session. Returns whether it stopped one.
+    pub fn end_decided(&self) -> bool {
+        let mut inner = self.inner.lock().unwrap();
+        match &mut inner.game {
+            Some(game) if game.running && self.seat_defeated(game.seat) => {
+                println!("game {} is decided, stopping its engine", self.generation);
+                observer::kill_recorded(&self.socket);
+                game.running = false;
+                true
+            }
+            _ => false,
         }
     }
 

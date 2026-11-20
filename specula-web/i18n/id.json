@@ -97,6 +97,7 @@
   "A game is in progress.": "Sebuah permainan sedang berlangsung.",
   "Watch it": "Tonton",
   "Back to your game": "Kembali ke permainan Anda",
+  "The server is shutting down. No new game can start; games in progress play on to their end.": "Server sedang dimatikan. Tidak ada permainan baru yang dapat dimulai; permainan yang sedang berlangsung tetap dimainkan sampai selesai.",
   "Players": "Pemain",
   "You": "Anda",
   "Cannot start the game: %(error)s": "Tidak dapat memulai permainan: %(error)s",

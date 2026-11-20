@@ -97,6 +97,7 @@
   "A game is in progress.": "Er is een spel bezig.",
   "Watch it": "Bekijken",
   "Back to your game": "Terug naar je spel",
+  "The server is shutting down. No new game can start; games in progress play on to their end.": "De server wordt afgesloten. Er kan geen nieuw spel starten; lopende spellen worden uitgespeeld.",
   "Players": "Spelers",
   "You": "Jij",
   "Cannot start the game: %(error)s": "Kan het spel niet starten: %(error)s",

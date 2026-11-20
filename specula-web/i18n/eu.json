@@ -97,6 +97,7 @@
   "A game is in progress.": "Partida bat abian da.",
   "Watch it": "Ikusi",
   "Back to your game": "Itzuli zure partidara",
+  "The server is shutting down. No new game can start; games in progress play on to their end.": "Zerbitzaria itzaltzen ari da. Ezin da partida berririk hasi; martxan dauden partidek amaierara arte jarraituko dute.",
   "Players": "Jokalariak",
   "You": "Zu",
   "Cannot start the game: %(error)s": "Ezin da partida hasi: %(error)s",

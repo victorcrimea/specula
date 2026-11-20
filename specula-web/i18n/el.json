@@ -97,6 +97,7 @@
   "A game is in progress.": "Ένα παιχνίδι βρίσκεται σε εξέλιξη.",
   "Watch it": "Παρακολούθησέ το",
   "Back to your game": "Πίσω στο παιχνίδι σου",
+  "The server is shutting down. No new game can start; games in progress play on to their end.": "Ο διακομιστής τερματίζεται. Δεν μπορεί να ξεκινήσει νέο παιχνίδι· τα παιχνίδια σε εξέλιξη συνεχίζονται μέχρι το τέλος τους.",
   "Players": "Παίκτες",
   "You": "Εσύ",
   "Cannot start the game: %(error)s": "Δεν είναι δυνατή η έναρξη του παιχνιδιού: %(error)s",

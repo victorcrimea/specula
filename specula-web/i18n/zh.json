@@ -97,6 +97,7 @@
   "A game is in progress.": "有一局游戏正在进行。",
   "Watch it": "观看",
   "Back to your game": "返回你的游戏",
+  "The server is shutting down. No new game can start; games in progress play on to their end.": "服务器正在关闭。无法开始新游戏；进行中的游戏将继续到结束。",
   "Players": "玩家",
   "You": "你",
   "Cannot start the game: %(error)s": "无法开始游戏：%(error)s",

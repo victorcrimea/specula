@@ -97,6 +97,7 @@
   "A game is in progress.": "게임이 진행 중입니다.",
   "Watch it": "관전하기",
   "Back to your game": "내 게임으로 돌아가기",
+  "The server is shutting down. No new game can start; games in progress play on to their end.": "서버가 종료되는 중입니다. 새 게임을 시작할 수 없으며, 진행 중인 게임은 끝까지 계속됩니다.",
   "Players": "플레이어",
   "You": "나",
   "Cannot start the game: %(error)s": "게임을 시작할 수 없습니다: %(error)s",

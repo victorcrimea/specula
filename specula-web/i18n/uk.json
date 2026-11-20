@@ -97,6 +97,7 @@
   "A game is in progress.": "Триває гра.",
   "Watch it": "Дивитися",
   "Back to your game": "Повернутися до своєї гри",
+  "The server is shutting down. No new game can start; games in progress play on to their end.": "Сервер завершує роботу. Нову гру розпочати не можна; поточні ігри тривають до кінця.",
   "Players": "Гравці",
   "You": "Ви",
   "Cannot start the game: %(error)s": "Не вдалося почати гру: %(error)s",

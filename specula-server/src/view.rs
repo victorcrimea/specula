@@ -2540,6 +2540,14 @@ impl Hub {
             .map(|(uuid, _)| *uuid)
     }
 
+    /// Whether nothing of the feed is left to show: the end, if there was a
+    /// match, has been released, so its history is complete. False while a
+    /// feed still has to deliver its end, which `end_match` queues.
+    pub fn settled(&self) -> bool {
+        let state = self.state.lock().unwrap();
+        state.pending.is_empty() && (state.ended || !state.has_turn)
+    }
+
     /// Whether observers have not yet reached the end of `match_id`. The
     /// second clause covers a broadcast match whose end is still in the
     /// delay after the encoder moved on.

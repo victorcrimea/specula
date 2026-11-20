@@ -97,6 +97,7 @@
   "A game is in progress.": "Probíhá hra.",
   "Watch it": "Sledovat",
   "Back to your game": "Zpět do vaší hry",
+  "The server is shutting down. No new game can start; games in progress play on to their end.": "Server se vypíná. Nelze začít žádnou novou hru; probíhající hry se dohrají do konce.",
   "Players": "Hráči",
   "You": "Vy",
   "Cannot start the game: %(error)s": "Hru nelze spustit: %(error)s",

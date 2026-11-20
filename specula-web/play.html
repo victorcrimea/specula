@@ -19,8 +19,8 @@ button { cursor: pointer; }
 #slots { display: grid; grid-template-columns: auto 1fr 1fr 1fr; gap: 8px; align-items: center;
   margin: 0 0 16px; }
 #slots .swatch { width: 14px; height: 14px; border-radius: 2px; }
-#status, #error { margin: 0 0 16px; }
-#status[hidden], #error[hidden] { display: none; }
+#status, #error, #stopping { margin: 0 0 16px; }
+#status[hidden], #error[hidden], #stopping[hidden] { display: none; }
 #error { color: #e8a0a0; }
 a { color: #8fc1e3; }
 @media (max-width: 480px) {
@@ -32,6 +32,7 @@ a { color: #8fc1e3; }
 <body>
 <main>
 <h1 data-i18n>New game</h1>
+<p id="stopping" hidden data-i18n>The server is shutting down. No new game can start; games in progress play on to their end.</p>
 <p id="status" hidden>
 <span data-i18n>A game is in progress.</span>
 <a id="watch" href="/" data-i18n>Watch it</a>
@@ -152,6 +153,7 @@ const buildResources = () => {
 };
 
 const showStatus = () => {
+  document.getElementById("stopping").hidden = !setup.stopping;
   document.getElementById("status").hidden = !setup.running;
   const watch = document.getElementById("watch");
   if (setup.latest) watch.href = "/g/" + setup.latest;
@@ -160,7 +162,7 @@ const showStatus = () => {
   if (setup.match) back.href = "/g/" + setup.match;
   back.hidden = !setup.mine;
   // Someone else's game is not this visitor's to end.
-  document.getElementById("start").disabled = setup.running && !setup.mine;
+  document.getElementById("start").disabled = (setup.running && !setup.mine) || setup.stopping;
 };
 
 // As the game setup's MapExploration: revealing explores, and an

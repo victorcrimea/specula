@@ -97,6 +97,7 @@
   "A game is in progress.": "Идёт игра.",
   "Watch it": "Смотреть",
   "Back to your game": "Вернуться к своей игре",
+  "The server is shutting down. No new game can start; games in progress play on to their end.": "Сервер завершает работу. Новую игру начать нельзя; идущие игры продолжатся до конца.",
   "Players": "Игроки",
   "You": "Вы",
   "Cannot start the game: %(error)s": "Не удалось начать игру: %(error)s",

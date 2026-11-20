@@ -97,6 +97,7 @@
   "A game is in progress.": "Một trò chơi đang diễn ra.",
   "Watch it": "Xem",
   "Back to your game": "Quay lại trò chơi của bạn",
+  "The server is shutting down. No new game can start; games in progress play on to their end.": "Máy chủ đang tắt. Không thể bắt đầu ván mới; các ván đang diễn ra sẽ tiếp tục đến hết.",
   "Players": "Người chơi",
   "You": "Bạn",
   "Cannot start the game: %(error)s": "Không thể bắt đầu trò chơi: %(error)s",

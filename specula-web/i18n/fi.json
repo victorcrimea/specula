@@ -97,6 +97,7 @@
   "A game is in progress.": "Peli on käynnissä.",
   "Watch it": "Katso sitä",
   "Back to your game": "Takaisin peliisi",
+  "The server is shutting down. No new game can start; games in progress play on to their end.": "Palvelin sammuu. Uutta peliä ei voi aloittaa; käynnissä olevat pelit pelataan loppuun.",
   "Players": "Pelaajat",
   "You": "Sinä",
   "Cannot start the game: %(error)s": "Peliä ei voi aloittaa: %(error)s",

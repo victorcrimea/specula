@@ -97,6 +97,7 @@
   "A game is in progress.": "Hay una partida en curso.",
   "Watch it": "Verla",
   "Back to your game": "Volver a tu partida",
+  "The server is shutting down. No new game can start; games in progress play on to their end.": "El servidor se está apagando. No se puede empezar ninguna partida nueva; las partidas en curso siguen hasta su final.",
   "Players": "Jugadores",
   "You": "Tú",
   "Cannot start the game: %(error)s": "No se puede iniciar la partida: %(error)s",

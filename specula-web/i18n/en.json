@@ -97,6 +97,7 @@
   "A game is in progress.": "on the game setup page: another game the server hosts is running",
   "Watch it": "link from the game setup page to watch the game in progress",
   "Back to your game": "link from the game setup page back to the visitor's own game in progress",
+  "The server is shutting down. No new game can start; games in progress play on to their end.": "on the game setup page: the server was asked to stop and waits for the running games to finish before it exits",
   "Players": "game setup: label of the list choosing how many players the game has",
   "You": "game setup: the visitor plays this slot",
   "Cannot start the game: %(error)s": "game setup error; %(error)s is the server's reason, in English",

@@ -97,6 +97,7 @@
   "A game is in progress.": "Ett spel pågår.",
   "Watch it": "Titta",
   "Back to your game": "Tillbaka till ditt spel",
+  "The server is shutting down. No new game can start; games in progress play on to their end.": "Servern stängs ner. Inget nytt spel kan startas; pågående spel spelas klart.",
   "Players": "Spelare",
   "You": "Du",
   "Cannot start the game: %(error)s": "Det går inte att starta spelet: %(error)s",

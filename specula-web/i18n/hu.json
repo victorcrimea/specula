@@ -97,6 +97,7 @@
   "A game is in progress.": "Egy játék folyamatban van.",
   "Watch it": "Megnézem",
   "Back to your game": "Vissza a játékodhoz",
+  "The server is shutting down. No new game can start; games in progress play on to their end.": "A szerver leáll. Új játék nem indítható; a folyamatban lévő játékok a végükig folytatódnak.",
   "Players": "Játékosok",
   "You": "Te",
   "Cannot start the game: %(error)s": "A játék nem indítható: %(error)s",

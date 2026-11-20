@@ -97,6 +97,7 @@
   "A game is in progress.": "ゲームが進行中です。",
   "Watch it": "観戦する",
   "Back to your game": "自分のゲームに戻る",
+  "The server is shutting down. No new game can start; games in progress play on to their end.": "サーバーは停止処理中です。新しいゲームは開始できません。進行中のゲームは最後まで続きます。",
   "Players": "プレイヤー数",
   "You": "あなた",
   "Cannot start the game: %(error)s": "ゲームを開始できません: %(error)s",

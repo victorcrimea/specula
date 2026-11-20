@@ -12,6 +12,9 @@
 //!
 //! An ended match stays here, with its hub and publisher thread, until the
 //! server exits; only its slot is freed.
+//!
+//! A stop (D22) waits until every hosted match has ended and its hub has
+//! released the end, so observers see it and the history holds all of it.
 
 use std::collections::HashMap;
 use std::collections::hash_map::RandomState;
@@ -48,6 +51,8 @@ use crate::view::stored_terrain;
 const SOCKET_PATH_LIMIT: usize = 108;
 const ACCEPT_POLL: Duration = Duration::from_millis(100);
 const FEED_SOCKET_ERROR: &str = "cannot open the feed socket";
+const STOPPING_ERROR: &str = "the server is stopping";
+const STOP_POLL: Duration = Duration::from_secs(1);
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct MatchId([u8; 16]);
@@ -245,6 +250,8 @@ struct Inner {
     /// `config.slots` entries; the match whose engine holds the slot's port.
     slots: Vec<Option<MatchId>>,
     generation: u64,
+    /// Here rather than in `Registry`, so `launch` and `stop` agree on it.
+    stopping: bool,
 }
 
 /// The publisher thread is never stopped; see the module doc.
@@ -279,6 +286,7 @@ impl Registry {
                 order: Vec::new(),
                 slots,
                 generation: 0,
+                stopping: false,
             }),
         }
     }
@@ -366,6 +374,9 @@ impl Registry {
         // A bad form costs nothing.
         Play::check(setup)?;
         let mut inner = self.inner.lock().unwrap();
+        if inner.stopping {
+            return Err(STOPPING_ERROR);
+        }
         let old = Self::own_slot_holder_in(&inner, owner);
         let slot = match &old {
             Some(old) => old.slot,
@@ -480,6 +491,63 @@ impl Registry {
         if inner.slots[usize::from(found.slot)] == Some(id) {
             inner.slots[usize::from(found.slot)] = None;
         }
+    }
+
+    pub fn stopping(&self) -> bool {
+        self.inner.lock().unwrap().stopping
+    }
+
+    /// Refuses new games and closes the open setups (D22); answers how many
+    /// matches are still running.
+    pub fn stop(&self) -> usize {
+        let inner = &mut *self.inner.lock().unwrap();
+        inner.stopping = true;
+        let mut running = 0;
+        for (id, found) in &inner.matches {
+            let mut state = found.state.lock().unwrap();
+            match *state {
+                MatchState::Setup => {
+                    *state = MatchState::Ended;
+                    if inner.slots[usize::from(found.slot)] == Some(*id) {
+                        inner.slots[usize::from(found.slot)] = None;
+                    }
+                }
+                MatchState::Running => running += 1,
+                MatchState::Ended => {}
+            }
+        }
+        running
+    }
+
+    /// Blocks until every hosted match has ended and been released.
+    pub fn wait_stopped(&self) {
+        loop {
+            let running: Vec<Arc<Match>> = {
+                let inner = self.inner.lock().unwrap();
+                inner
+                    .matches
+                    .values()
+                    .filter(|found| found.state() == MatchState::Running)
+                    .cloned()
+                    .collect()
+            };
+            // Off the registry lock: stopping an engine runs `kill`.
+            for found in &running {
+                found.play.end_decided();
+            }
+            if self.idle() {
+                return;
+            }
+            std::thread::sleep(STOP_POLL);
+        }
+    }
+
+    fn idle(&self) -> bool {
+        let inner = self.inner.lock().unwrap();
+        inner
+            .matches
+            .values()
+            .all(|found| found.state() == MatchState::Ended && found.hub.settled())
     }
 
     /// At exit: no engine may outlive the server.

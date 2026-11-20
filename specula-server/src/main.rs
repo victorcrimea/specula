@@ -8,6 +8,7 @@ mod history;
 mod observer;
 mod play;
 mod registry;
+mod stop;
 mod terrain;
 mod usage;
 mod view;
@@ -15,6 +16,7 @@ mod web;
 mod wire;
 
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::io;
 use std::io::BufReader;
 use std::io::ErrorKind;
@@ -27,6 +29,7 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use rocket::State;
+use rocket::config::Shutdown as ShutdownConfig;
 use rocket::fairing::AdHoc;
 use rocket::fs::FileServer;
 use rocket::futures::SinkExt;
@@ -182,7 +185,17 @@ async fn main() {
         broadcast,
     ));
 
-    let result = rocket::build()
+    // Signals are `stop::watch`'s: Rocket's own handling would end the web
+    // server, and with it every hosted match, on the first one.
+    let figment = rocket::Config::figment().merge((
+        "shutdown",
+        ShutdownConfig {
+            ctrlc: false,
+            signals: HashSet::new(),
+            ..ShutdownConfig::default()
+        },
+    ));
+    let ignited = rocket::custom(figment)
         .manage(Arc::clone(&registry))
         .manage(usage)
         .manage(config)
@@ -238,8 +251,20 @@ async fn main() {
                 }
             })
         }))
-        .launch()
+        .ignite()
         .await;
+    // Ignited first, so the handler is in place before the server listens.
+    let result = match ignited {
+        Ok(rocket) => {
+            rocket::tokio::spawn(stop::watch(
+                Arc::clone(&registry),
+                rocket.shutdown(),
+                supervised.then(|| path.clone()),
+            ));
+            rocket.launch().await
+        }
+        Err(error) => Err(error),
+    };
     if supervised {
         observer::kill_recorded(&path);
     }
@@ -398,6 +423,7 @@ fn new_status(registry: &State<Arc<Registry>>, cookies: &CookieJar<'_>) -> Optio
             mine,
             own,
             registry.latest_running(),
+            registry.stopping(),
         ),
         Header::new("Cache-Control", "no-store"),
     ))

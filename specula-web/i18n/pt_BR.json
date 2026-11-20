@@ -97,6 +97,7 @@
   "A game is in progress.": "Há um jogo em andamento.",
   "Watch it": "Assistir",
   "Back to your game": "Voltar ao seu jogo",
+  "The server is shutting down. No new game can start; games in progress play on to their end.": "O servidor está sendo desligado. Nenhum jogo novo pode começar; os jogos em andamento continuam até o fim.",
   "Players": "Jogadores",
   "You": "Você",
   "Cannot start the game: %(error)s": "Não foi possível iniciar o jogo: %(error)s",
