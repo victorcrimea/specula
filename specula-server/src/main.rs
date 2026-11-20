@@ -1,5 +1,6 @@
 mod actors;
 mod classify;
+mod config;
 mod delta;
 mod detail;
 mod feed;
@@ -41,6 +42,7 @@ use specula_assets::command::QUERY_TAG;
 use specula_assets::command::Query;
 
 use crate::classify::Classifier;
+use crate::config::Config;
 use crate::delta::DeltaMeter;
 use crate::feed::Record;
 use crate::history::History;
@@ -62,7 +64,8 @@ const DEFAULT_HISTORY_DIR: &str = "history";
 const DEFAULT_HISTORY_LIMIT: u64 = 1 << 30;
 /// Relative to the working directory, as `WEB_ROOT`.
 const DEFAULT_USAGE_DIR: &str = "usage";
-const USAGE: &str = "usage: specula-server [SOCKET] [--observe HOST:PORT | --play [--play-port PORT]] \
+const USAGE: &str = "usage: specula-server [SOCKET] [--observe HOST:PORT | [--slots N] \
+                     [--port-base PORT]] [--max-observers N] [--admin-key KEY] \
                      [--delay SECONDS] [--history DIR] [--history-limit SIZE] [--usage DIR] \
                      [--stats-key KEY]";
 /// Relative to the working directory, so the server runs from the repo root.
@@ -73,7 +76,7 @@ async fn main() {
     let Args {
         socket: path,
         observe,
-        play_port,
+        config,
         delay,
         history_dir,
         history_limit,
@@ -100,6 +103,8 @@ async fn main() {
     };
     println!("waiting for an observer on {path}");
     println!("viewers see the game {} s late", delay.as_secs());
+    println!("{}", config.summary());
+    let config = Arc::new(config);
     let history = if history_limit == 0 {
         println!("history off: only the current and the previous match are kept");
         None
@@ -136,11 +141,10 @@ async fn main() {
     let hub = Arc::new(Hub::new(delay, history));
     let publisher_hub = Arc::clone(&hub);
     std::thread::spawn(move || publisher_hub.run_publisher());
-    let play = play_port.map(|port| {
+    let play = (config.slots > 0).then(|| {
         // As `observer::supervise`: an engine a dead server left behind.
         observer::kill_recorded(&path);
-        println!("hosting games for /play on port {port}");
-        Arc::new(Play::new(path.clone(), port, Arc::clone(&hub)))
+        Arc::new(Play::new(path.clone(), config.port(0), Arc::clone(&hub)))
     });
     let feed_hub = Arc::clone(&hub);
     let feed_play = play.clone();
@@ -158,6 +162,7 @@ async fn main() {
         .manage(hub)
         .manage(play)
         .manage(usage)
+        .manage(config)
         .manage(web::Pkg::default())
         .manage(web::AssetsSize::default())
         .manage(web::AtlasVersions::default())
@@ -720,8 +725,7 @@ fn segment_bytes((bytes, closed): (Message, bool)) -> Option<SegmentBytes> {
 struct Args {
     socket: String,
     observe: Option<(String, String)>,
-    /// With `--play`: the port the hosted games listen on.
-    play_port: Option<u16>,
+    config: Config,
     delay: Duration,
     history_dir: PathBuf,
     /// 0: no history.
@@ -730,14 +734,16 @@ struct Args {
     stats_key: Option<String>,
 }
 
-/// `[SOCKET] [--observe HOST:PORT | --play [--play-port PORT]] [--delay
-/// SECONDS] [--history DIR] [--history-limit SIZE] [--usage DIR]
-/// [--stats-key KEY]`, in any order.
+/// `[SOCKET] [--observe HOST:PORT | [--slots N] [--port-base PORT]]
+/// [--max-observers N] [--admin-key KEY] [--delay SECONDS] [--history DIR]
+/// [--history-limit SIZE] [--usage DIR] [--stats-key KEY]`, in any order.
 fn parse_args() -> Result<Args, String> {
     let mut socket = None;
     let mut observe = None;
-    let mut play = false;
-    let mut play_port = play::DEFAULT_PORT;
+    let mut slots: Option<u16> = None;
+    let mut port_base: Option<u16> = None;
+    let mut max_observers = config::DEFAULT_MAX_OBSERVERS;
+    let mut admin_key = None;
     let mut delay = Duration::from_secs(DEFAULT_DELAY_SECS);
     let mut history_dir = PathBuf::from(DEFAULT_HISTORY_DIR);
     let mut history_limit = DEFAULT_HISTORY_LIMIT;
@@ -763,6 +769,26 @@ fn parse_args() -> Result<Args, String> {
         } else if arg == "--stats-key" {
             let key = args.next().filter(|key| !key.is_empty());
             stats_key = Some(key.ok_or("--stats-key needs KEY")?);
+        } else if arg == "--admin-key" {
+            let key = args.next().filter(|key| !key.is_empty());
+            admin_key = Some(key.ok_or("--admin-key needs KEY")?);
+        } else if arg == "--slots" {
+            let n = args.next().ok_or("--slots needs N")?;
+            slots = Some(
+                n.parse()
+                    .map_err(|_| format!("--slots {n}: expected a number of matches"))?,
+            );
+        } else if arg == "--port-base" {
+            let port = args.next().ok_or("--port-base needs PORT")?;
+            port_base = Some(
+                port.parse()
+                    .map_err(|_| format!("--port-base {port}: expected a port"))?,
+            );
+        } else if arg == "--max-observers" {
+            let n = args.next().ok_or("--max-observers needs N")?;
+            max_observers = n
+                .parse()
+                .map_err(|_| format!("--max-observers {n}: expected a number of observers"))?;
         } else if arg == "--observe" {
             let target = args.next().ok_or("--observe needs HOST:PORT")?;
             let (host, port) = target
@@ -770,13 +796,10 @@ fn parse_args() -> Result<Args, String> {
                 .filter(|(host, port)| !host.is_empty() && port.parse::<u16>().is_ok())
                 .ok_or_else(|| format!("--observe {target}: expected HOST:PORT"))?;
             observe = Some((host.to_string(), port.to_string()));
-        } else if arg == "--play" {
-            play = true;
-        } else if arg == "--play-port" {
-            let port = args.next().ok_or("--play-port needs PORT")?;
-            play_port = port
-                .parse()
-                .map_err(|_| format!("--play-port {port}: expected a port"))?;
+        } else if arg == "--play" || arg == "--play-port" {
+            return Err(format!(
+                "{arg} is gone: hosting is on by default, --slots 0 turns it off"
+            ));
         } else if socket.is_none() && !arg.starts_with("--") {
             socket = Some(arg);
         } else {
@@ -784,13 +807,29 @@ fn parse_args() -> Result<Args, String> {
         }
     }
     // Both would feed the one socket.
-    if play && observe.is_some() {
-        return Err("--play and --observe exclude each other".to_string());
+    if observe.is_some() && (slots.is_some() || port_base.is_some()) {
+        return Err("--observe excludes --slots and --port-base".to_string());
+    }
+    let slots = if observe.is_some() {
+        0
+    } else {
+        slots.unwrap_or(config::DEFAULT_SLOTS)
+    };
+    let port_base = port_base.unwrap_or(config::DEFAULT_PORT_BASE);
+    if slots > 0 && u32::from(port_base) + u32::from(slots) - 1 > u32::from(u16::MAX) {
+        return Err(format!(
+            "--slots {slots} from --port-base {port_base} runs past port 65535"
+        ));
     }
     Ok(Args {
         socket: socket.unwrap_or_else(|| DEFAULT_SOCKET.to_string()),
         observe,
-        play_port: play.then_some(play_port),
+        config: Config {
+            slots,
+            port_base,
+            max_observers,
+            admin_key,
+        },
         delay,
         history_dir,
         history_limit,

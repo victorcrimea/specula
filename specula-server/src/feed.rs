@@ -759,7 +759,7 @@ pub enum Record {
         index: u32,
         json: Vec<u8>,
     },
-    /// Kind 23: the answer to an uplink query of `--play`, UTF-8 JSON.
+    /// Kind 23: the answer to an uplink query of a hosted game, UTF-8 JSON.
     QueryReply {
         id: u32,
         json: Vec<u8>,

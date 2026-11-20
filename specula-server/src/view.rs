@@ -1669,7 +1669,7 @@ struct State {
     /// to what that player sees, shown at once and never stored, while
     /// `shown` keeps the delay for observers.
     seats: Vec<Seat>,
-    /// The players `--play` hosts seats for, set before the feed starts.
+    /// The players a hosted game has seats for, set before the feed starts.
     seat_players: Vec<u32>,
     /// What the seats' water derives from the whole heightmap, once the
     /// terrain is known.

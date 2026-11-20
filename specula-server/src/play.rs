@@ -1,4 +1,4 @@
-//! `--play`: the server hosts a game for a web player instead of observing
+//! Hosting: the server hosts a game for a web player instead of observing
 //! someone else's. A headless engine (`scripts/play.sh`) hosts it as an
 //! observer, with the player's slot left unassigned and without AI; the
 //! feed socket carries the match out as usual and the player's commands
@@ -34,8 +34,6 @@ use crate::view::SummaryBody;
 use crate::view::spawn_brotli;
 
 const PLAY_SCRIPT: &str = "scripts/play.sh";
-/// The engine's default port is taken by any 0 A.D. hosted on this machine.
-pub const DEFAULT_PORT: u16 = 20777;
 const UPLINK_COMMAND: u8 = 1;
 const UPLINK_QUERY: u8 = 2;
 const UPLINK_PAUSE: u8 = 3;
