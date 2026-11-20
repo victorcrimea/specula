@@ -551,6 +551,25 @@ impl Play {
         }
     }
 
+    /// Whether the game runs on with no seat left to play it (D17).
+    pub fn decided(&self) -> bool {
+        let seat = {
+            let inner = self.inner.lock().unwrap();
+            match &inner.game {
+                Some(game) if game.running => game.seat,
+                _ => return false,
+            }
+        };
+        self.seat_defeated(seat)
+    }
+
+    /// Who started the game and with what, which outlives the `Play`.
+    pub fn owner_setup(&self) -> Option<(String, Setup)> {
+        let inner = self.inner.lock().unwrap();
+        let game = inner.game.as_ref()?;
+        Some((game.owner.clone(), game.setup.clone()))
+    }
+
     /// The setup of the game `owner` started, which a rematch repeats.
     pub fn setup_of(&self, owner: &str) -> Option<Setup> {
         let inner = self.inner.lock().unwrap();

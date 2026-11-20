@@ -1709,6 +1709,9 @@ struct State {
     /// Every match this hub encoded, so `/g/<uuid>` finds it while the hub
     /// holds it.
     uuids: Vec<(MatchId, u64)>,
+    /// The registry dropped the hub; the publisher returns once nothing is
+    /// queued, so the hub is freed when its last viewer closes.
+    retired: bool,
 }
 
 impl State {
@@ -1828,6 +1831,7 @@ impl Hub {
                 feed_activity: None,
                 next_uuid: uuid,
                 uuids: Vec::new(),
+                retired: false,
             }),
         }
     }
@@ -2347,10 +2351,13 @@ impl Hub {
         self.queued.notify_one();
     }
 
-    /// Shows viewers what the encoder made once it is due; runs for good.
+    /// Shows viewers what the encoder made once it is due, until `retire`.
     pub fn run_publisher(&self) {
         let mut state = self.state.lock().unwrap();
         loop {
+            if state.retired && state.pending.is_empty() {
+                return;
+            }
             let now = Instant::now();
             while let Some((due, _)) = state.pending.front()
                 && *due <= now
@@ -2551,6 +2558,12 @@ impl Hub {
     pub fn settled(&self) -> bool {
         let state = self.state.lock().unwrap();
         state.pending.is_empty() && (state.ended || !state.has_turn)
+    }
+
+    /// Ends the publisher thread, which holds the hub alive.
+    pub fn retire(&self) {
+        self.state.lock().unwrap().retired = true;
+        self.queued.notify_one();
     }
 
     /// Whether observers have not yet reached the end of `match_id`. The

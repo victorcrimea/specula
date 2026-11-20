@@ -10,14 +10,18 @@
 //! Nothing called from inside a `Play` or `Hub` lock calls the registry;
 //! `Play::start`'s `on_exit` runs after its lock is released.
 //!
-//! An ended match stays here, with its hub and publisher thread, until the
-//! server exits; only its slot is freed.
+//! An ended match frees its slot when its engine exits, and leaves once its
+//! hub has released the end (M8): from then on `/g/<uuid>` is the history's,
+//! or gone with the history off. Only who started it and its setup stay, for
+//! a rematch.
 //!
 //! A stop (D22) waits until every hosted match has ended and its hub has
 //! released the end, so observers see it and the history holds all of it.
 //!
-//! `watch_limits` stops an engine at L1 or L2 (D18, D19), and logs the 15,
-//! 5 and 1 minute warnings the pages show from `limits` (D20).
+//! `watch_matches` stops an engine at L1 or L2 (D18, D19), and logs the 15,
+//! 5 and 1 minute warnings the pages show from `limits` (D20). It also stops
+//! a decided game's engine, which stays in its session otherwise, and drops
+//! the ended matches.
 
 use std::collections::HashMap;
 use std::collections::hash_map::RandomState;
@@ -57,7 +61,10 @@ const ACCEPT_POLL: Duration = Duration::from_millis(100);
 const FEED_SOCKET_ERROR: &str = "cannot open the feed socket";
 const STOPPING_ERROR: &str = "the server is stopping";
 const STOP_POLL: Duration = Duration::from_secs(1);
-const LIMIT_POLL: Duration = Duration::from_secs(1);
+const WATCH_POLL: Duration = Duration::from_secs(1);
+/// How long a decided game's engine runs on, so its final summary comes in
+/// and the seat's Continue watching shows a while of the rest.
+const DECIDED_GRACE: Duration = Duration::from_secs(60);
 /// The time left at which everyone is warned (D20), longest first; the
 /// pages keep the same list.
 const LIMIT_WARNINGS: [Duration; 3] = [
@@ -156,6 +163,8 @@ pub struct Match {
     launched: Instant,
     /// How many of `LIMIT_WARNINGS` were logged.
     warned: Mutex<usize>,
+    /// When the watcher first saw the game decided.
+    decided: Mutex<Option<Instant>>,
 }
 
 impl Match {
@@ -276,8 +285,15 @@ pub struct Registry {
     inner: Mutex<Inner>,
 }
 
+/// What an ended match leaves once it is dropped.
+struct Ended {
+    owner: String,
+    setup: Setup,
+}
+
 struct Inner {
     matches: HashMap<MatchId, Arc<Match>>,
+    ended: HashMap<MatchId, Ended>,
     /// Launch order, oldest first.
     order: Vec<MatchId>,
     /// `config.slots` entries; the match whose engine holds the slot's port.
@@ -287,7 +303,8 @@ struct Inner {
     stopping: bool,
 }
 
-/// The publisher thread is never stopped; see the module doc.
+/// The publisher thread runs until `Hub::retire`, which only a dropped
+/// match's hub gets.
 pub fn spawn_hub(
     delay: Duration,
     history: Option<Arc<Mutex<History>>>,
@@ -316,6 +333,7 @@ impl Registry {
             broadcast: broadcast.map(|hub| (MatchId::new_v4(), hub)),
             inner: Mutex::new(Inner {
                 matches: HashMap::new(),
+                ended: HashMap::new(),
                 order: Vec::new(),
                 slots,
                 generation: 0,
@@ -491,6 +509,7 @@ impl Registry {
                 runner: Mutex::new(Some(runner)),
                 launched: Instant::now(),
                 warned: Mutex::new(0),
+                decided: Mutex::new(None),
             }),
         );
         inner.order.push(id);
@@ -509,11 +528,50 @@ impl Registry {
 
     /// A new match with the setup of the one `owner` started in `id`.
     pub fn rematch(self: &Arc<Self>, owner: &str, id: MatchId) -> Result<MatchId, &'static str> {
-        let setup = self
-            .hosted(id)
-            .and_then(|found| found.play.setup_of(owner))
-            .ok_or("no game to repeat")?;
+        let setup = {
+            let inner = self.inner.lock().unwrap();
+            match inner.matches.get(&id) {
+                Some(found) => found.play.setup_of(owner),
+                None => inner
+                    .ended
+                    .get(&id)
+                    .filter(|ended| ended.owner == owner)
+                    .map(|ended| ended.setup.clone()),
+            }
+        }
+        .ok_or("no game to repeat")?;
         self.launch(owner, &setup)
+    }
+
+    /// Whether `visitor` started the dropped match `id`; None if it is not
+    /// one.
+    pub fn ended_owned(&self, id: MatchId, visitor: Option<&str>) -> Option<bool> {
+        let inner = self.inner.lock().unwrap();
+        let ended = inner.ended.get(&id)?;
+        Some(visitor == Some(ended.owner.as_str()))
+    }
+
+    /// Drops the ended matches whose hub has released the end, so the
+    /// history serves them and their hub is freed.
+    fn drop_settled(&self) {
+        let inner = &mut *self.inner.lock().unwrap();
+        let settled: Vec<MatchId> = inner
+            .matches
+            .iter()
+            .filter(|(_, found)| found.state() == MatchState::Ended && found.hub.settled())
+            .map(|(id, _)| *id)
+            .collect();
+        for id in settled {
+            let Some(found) = inner.matches.remove(&id) else {
+                continue;
+            };
+            inner.order.retain(|known| *known != id);
+            if let Some((owner, setup)) = found.play.owner_setup() {
+                inner.ended.insert(id, Ended { owner, setup });
+            }
+            found.hub.retire();
+            println!("match {id} dropped from memory");
+        }
     }
 
     fn finished(&self, id: MatchId) {
@@ -542,7 +600,7 @@ impl Registry {
     }
 
     /// Never returns; one thread for every hosted match.
-    pub fn watch_limits(&self) {
+    pub fn watch_matches(&self) {
         loop {
             let running: Vec<(MatchId, Arc<Match>)> = {
                 let inner = self.inner.lock().unwrap();
@@ -579,8 +637,19 @@ impl Registry {
                     // the match ends undecided.
                     println!("match {id} reached the {limit} time limit, stopping its engine");
                 }
+                if found.play.decided() {
+                    let since = *found
+                        .decided
+                        .lock()
+                        .unwrap()
+                        .get_or_insert_with(Instant::now);
+                    if since.elapsed() >= DECIDED_GRACE {
+                        found.play.end_decided();
+                    }
+                }
             }
-            std::thread::sleep(LIMIT_POLL);
+            self.drop_settled();
+            std::thread::sleep(WATCH_POLL);
         }
     }
 

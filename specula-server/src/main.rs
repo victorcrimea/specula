@@ -187,7 +187,7 @@ async fn main() {
     ));
     if config.slots > 0 {
         let watcher = Arc::clone(&registry);
-        std::thread::spawn(move || watcher.watch_limits());
+        std::thread::spawn(move || watcher.watch_matches());
     }
 
     // Signals are `stop::watch`'s: Rocket's own handling would end the web
@@ -389,16 +389,21 @@ fn play_status(
     registry: &State<Arc<Registry>>,
     cookies: &CookieJar<'_>,
 ) -> Option<Json> {
+    let visitor = usage::visitor(cookies);
     let status = match registry.hosted(id) {
-        Some(found) => found.play.status(usage::visitor(cookies).as_deref()),
-        // The broadcast has no seats, but the observer page still asks.
+        Some(found) => found.play.status(visitor.as_deref()),
+        // The broadcast has no seats, but the observer page still asks. A
+        // dropped match has no seat routes left, only its rematch.
         None => {
-            registry.resolve(id)?;
+            let rematch = registry.ended_owned(id, visitor.as_deref());
+            if rematch.is_none() {
+                registry.resolve(id)?;
+            }
             play::Status {
                 running: false,
                 mine: false,
                 defeated: false,
-                rematch: false,
+                rematch: rematch.unwrap_or(false),
                 seat: None,
                 limits: None,
             }
@@ -470,15 +475,21 @@ fn play_action(
     cookies: &CookieJar<'_>,
 ) -> Result<String, rocket::response::status::BadRequest<&'static str>> {
     let refuse = rocket::response::status::BadRequest;
+    let visitor = usage::visitor(cookies).ok_or(refuse("no visitor cookie"))?;
+    // Also once the match is dropped, from the end screen left open.
+    if action == "rematch" {
+        return registry
+            .rematch(&visitor, id)
+            .map(|new| new.to_string())
+            .map_err(refuse);
+    }
     let found = registry.hosted(id).ok_or(refuse("not in play mode"))?;
     let play = &found.play;
-    let visitor = usage::visitor(cookies).ok_or(refuse("no visitor cookie"))?;
     match action {
         "resign" => play.resign(&visitor).map(|()| String::new()),
         "pause" => play.set_paused(&visitor, true).map(|()| String::new()),
         "resume" => play.set_paused(&visitor, false).map(|()| String::new()),
         "end" => play.end(&visitor).map(|()| String::new()),
-        "rematch" => registry.rematch(&visitor, id).map(|new| new.to_string()),
         _ => Err("unknown action"),
     }
     .map_err(refuse)
