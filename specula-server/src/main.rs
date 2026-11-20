@@ -7,6 +7,7 @@ mod feed;
 mod history;
 mod observer;
 mod play;
+mod registry;
 mod terrain;
 mod usage;
 mod view;
@@ -22,6 +23,7 @@ use std::os::unix::net::UnixListener;
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::time::Duration;
 
 use rocket::State;
@@ -48,6 +50,8 @@ use crate::feed::Record;
 use crate::history::History;
 use crate::play::Play;
 use crate::play::Setup;
+use crate::registry::MatchId;
+use crate::registry::Registry;
 use crate::usage::Usage;
 use crate::view::Hub;
 use crate::view::Message;
@@ -90,18 +94,6 @@ async fn main() {
             std::process::exit(2);
         }
     };
-    if let Err(error) = remove_stale_socket(&path) {
-        eprintln!("cannot remove stale socket {path}: {error}");
-        std::process::exit(1);
-    }
-    let listener = match UnixListener::bind(&path) {
-        Ok(listener) => listener,
-        Err(error) => {
-            eprintln!("cannot listen on {path}: {error}");
-            std::process::exit(1);
-        }
-    };
-    println!("waiting for an observer on {path}");
     println!("viewers see the game {} s late", delay.as_secs());
     println!("{}", config.summary());
     let config = Arc::new(config);
@@ -112,7 +104,7 @@ async fn main() {
         match History::open(history_dir.clone(), history_limit) {
             Ok(history) => {
                 println!("{}", history.summary());
-                Some(history)
+                Some(Arc::new(Mutex::new(history)))
             }
             Err(error) => {
                 eprintln!(
@@ -138,29 +130,48 @@ async fn main() {
         }
     };
 
-    let hub = Arc::new(Hub::new(delay, history));
-    let publisher_hub = Arc::clone(&hub);
-    std::thread::spawn(move || publisher_hub.run_publisher());
-    let play = (config.slots > 0).then(|| {
-        // As `observer::supervise`: an engine a dead server left behind.
+    let supervised = observe.is_some();
+    let broadcast = if config.slots == 0 {
+        if let Err(error) = remove_stale_socket(&path) {
+            eprintln!("cannot remove stale socket {path}: {error}");
+            std::process::exit(1);
+        }
+        let listener = match UnixListener::bind(&path) {
+            Ok(listener) => listener,
+            Err(error) => {
+                eprintln!("cannot listen on {path}: {error}");
+                std::process::exit(1);
+            }
+        };
+        println!("waiting for an observer on {path}");
+        let hub = registry::spawn_hub(delay, history.clone());
+        let feed_hub = Arc::clone(&hub);
+        // The feed is blocking std I/O, so it gets its own thread rather
+        // than a slot in Rocket's async runtime.
+        std::thread::spawn(move || accept_observers(listener, &feed_hub));
+        if let Some((host, port)) = observe {
+            let supervisor_hub = Arc::clone(&hub);
+            let socket = path.clone();
+            std::thread::spawn(move || observer::supervise(&host, &port, &socket, &supervisor_hub));
+        }
+        Some(hub)
+    } else {
+        // As `observer::supervise`: an engine an older server left behind,
+        // and the matches' engines, which a dead server cannot list.
         observer::kill_recorded(&path);
-        Arc::new(Play::new(path.clone(), config.port(0), Arc::clone(&hub)))
-    });
-    let feed_hub = Arc::clone(&hub);
-    let feed_play = play.clone();
-    // The feed is blocking std I/O, so it gets its own thread rather than
-    // a slot in Rocket's async runtime.
-    std::thread::spawn(move || accept_observers(listener, &feed_hub, feed_play.as_ref()));
-    let supervised = observe.is_some() || play.is_some();
-    if let Some((host, port)) = observe {
-        let supervisor_hub = Arc::clone(&hub);
-        let socket = path.clone();
-        std::thread::spawn(move || observer::supervise(&host, &port, &socket, &supervisor_hub));
-    }
+        observer::kill_stale(&path);
+        None
+    };
+    let registry = Arc::new(Registry::new(
+        Arc::clone(&config),
+        path.clone(),
+        delay,
+        history,
+        broadcast,
+    ));
 
     let result = rocket::build()
-        .manage(hub)
-        .manage(play)
+        .manage(Arc::clone(&registry))
         .manage(usage)
         .manage(config)
         .manage(web::Pkg::default())
@@ -171,8 +182,10 @@ async fn main() {
             rocket::routes![
                 viewer,
                 detail_viewer,
-                play_page,
-                play_setup,
+                match_page,
+                match_map_page,
+                play_status,
+                new_status,
                 play_new,
                 play_action,
                 play_viewer,
@@ -217,31 +230,21 @@ async fn main() {
     if supervised {
         observer::kill_recorded(&path);
     }
+    registry.kill_all();
     if let Err(error) = result {
         eprintln!("web server failed: {error}");
         std::process::exit(1);
     }
 }
 
-/// `play`: in play mode, where the commands go back over the feed socket.
-fn accept_observers(listener: UnixListener, hub: &Arc<Hub>, play: Option<&Arc<Play>>) {
+fn accept_observers(listener: UnixListener, hub: &Arc<Hub>) {
     // One observer at a time: each one is a whole match.
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
                 println!("observer connected");
                 hub.start_feed();
-                if let Some(play) = play {
-                    play.set_uplink(stream.try_clone().ok());
-                }
-                // A feed that outlives its game must not write into the
-                // rematch's.
-                let generation = play.and_then(|play| play.current_generation());
-                let served = serve(stream, hub, play, generation);
-                if let Some(play) = play {
-                    play.set_uplink(None);
-                }
-                match served {
+                match serve(stream, hub, None) {
                     Ok(()) => println!("observer disconnected"),
                     Err(error) => eprintln!("observer feed failed: {error}"),
                 }
@@ -255,34 +258,41 @@ fn accept_observers(listener: UnixListener, hub: &Arc<Hub>, play: Option<&Arc<Pl
     }
 }
 
-#[rocket::get("/ws")]
+#[rocket::get("/g/<id>/ws")]
 fn viewer(
+    id: MatchId,
     socket: WebSocket,
-    hub: &State<Arc<Hub>>,
+    registry: &State<Arc<Registry>>,
     usage: &State<Arc<Usage>>,
     cookies: &CookieJar<'_>,
-) -> Channel<'static> {
-    let hub = Arc::clone(hub);
+) -> Option<Channel<'static>> {
+    let hub = registry.hub(id)?;
     let watch = usage.watch(cookies);
-    relay(socket, watch, move || hub.subscribe(View::Observer))
+    Some(relay(socket, watch, move || hub.subscribe(View::Observer)))
 }
 
 /// The detail stream, which viewers hold open only while they have
 /// something selected.
-#[rocket::get("/detail")]
-fn detail_viewer(socket: WebSocket, hub: &State<Arc<Hub>>) -> Channel<'static> {
-    let hub = Arc::clone(hub);
-    relay(socket, (), move || hub.subscribe_detail(View::Observer))
+#[rocket::get("/g/<id>/detail")]
+fn detail_viewer(
+    id: MatchId,
+    socket: WebSocket,
+    registry: &State<Arc<Registry>>,
+) -> Option<Channel<'static>> {
+    let hub = registry.hub(id)?;
+    Some(relay(socket, (), move || {
+        hub.subscribe_detail(View::Observer)
+    }))
 }
 
-/// In play mode: the player's page, the 3D page on the live stream, for
-/// the visitor who holds the seat; the setup page for anyone else, or with
-/// `?new`.
-#[rocket::get("/play?<new>")]
+/// The match's page: the 3D page on the live stream for the visitor who
+/// holds the seat, with the delay for anyone else; the client asks
+/// `play/status` which it is. The same HTML for every visitor.
+#[rocket::get("/g/<id>")]
 #[allow(clippy::too_many_arguments)]
-async fn play_page(
-    new: Option<&str>,
-    play: &State<Option<Arc<Play>>>,
+async fn match_page(
+    id: MatchId,
+    registry: &State<Arc<Registry>>,
     pkg: &State<web::Pkg>,
     assets: &State<web::AssetsSize>,
     atlases: &State<web::AtlasVersions>,
@@ -290,29 +300,47 @@ async fn play_page(
     cookies: &CookieJar<'_>,
     referrer: usage::Referrer,
 ) -> Option<rocket::response::content::RawHtml<String>> {
-    let play = play.as_ref()?;
-    let seated = play.seat(usage::visitor(cookies).as_deref()).is_some();
-    let page = if seated && new.is_none() {
-        "index.html"
-    } else {
-        "play.html"
-    };
-    web::page(
-        web::Page(page),
-        pkg,
-        assets,
-        atlases,
-        usage,
-        cookies,
-        referrer,
-    )
-    .await
+    registry.hub(id)?;
+    web::render("index.html", pkg, assets, atlases, usage, cookies, referrer).await
 }
 
-#[rocket::get("/play/setup")]
-fn play_setup(play: &State<Option<Arc<Play>>>, cookies: &CookieJar<'_>) -> Option<Json> {
-    let play = play.as_ref()?;
-    let status = play.status(usage::visitor(cookies).as_deref());
+#[rocket::get("/g/<id>/map")]
+#[allow(clippy::too_many_arguments)]
+async fn match_map_page(
+    id: MatchId,
+    registry: &State<Arc<Registry>>,
+    pkg: &State<web::Pkg>,
+    assets: &State<web::AssetsSize>,
+    atlases: &State<web::AtlasVersions>,
+    usage: &State<Arc<Usage>>,
+    cookies: &CookieJar<'_>,
+    referrer: usage::Referrer,
+) -> Option<rocket::response::content::RawHtml<String>> {
+    registry.hub(id)?;
+    web::render("map.html", pkg, assets, atlases, usage, cookies, referrer).await
+}
+
+/// What the page reads about the visitor's seat in the match.
+#[rocket::get("/g/<id>/play/status")]
+fn play_status(
+    id: MatchId,
+    registry: &State<Arc<Registry>>,
+    cookies: &CookieJar<'_>,
+) -> Option<Json> {
+    let status = match registry.hosted(id) {
+        Some(found) => found.play.status(usage::visitor(cookies).as_deref()),
+        // The broadcast has no seats, but the observer page still asks.
+        None => {
+            registry.hub(id)?;
+            play::Status {
+                running: false,
+                mine: false,
+                defeated: false,
+                rematch: false,
+                seat: None,
+            }
+        }
+    };
     Some(Json(
         play::setup_json(&status),
         Header::new("Cache-Control", "no-store"),
@@ -323,38 +351,66 @@ fn play_setup(play: &State<Option<Arc<Play>>>, cookies: &CookieJar<'_>) -> Optio
 #[response(content_type = "json")]
 struct Json(String, Header<'static>);
 
-/// Starts a game from the setup page's form; the text says why not.
-#[rocket::post("/play/new", data = "<form>")]
+/// The setup form's state: whether the server is full and which game, if
+/// any, is the visitor's.
+#[rocket::get("/new")]
+fn new_status(registry: &State<Arc<Registry>>, cookies: &CookieJar<'_>) -> Option<Json> {
+    if registry.broadcast().is_some() {
+        return None;
+    }
+    let own = usage::visitor(cookies).and_then(|visitor| registry.own_running(&visitor));
+    let mine = own.is_some();
+    Some(Json(
+        play::form_json(
+            mine || !registry.slot_free(),
+            mine,
+            own,
+            registry.latest_running(),
+        ),
+        Header::new("Cache-Control", "no-store"),
+    ))
+}
+
+/// Starts a game from the setup page's form and answers its UUID; the text
+/// says why not.
+#[rocket::post("/new", data = "<form>")]
 fn play_new(
     form: rocket::form::Form<HashMap<String, String>>,
-    play: &State<Option<Arc<Play>>>,
+    registry: &State<Arc<Registry>>,
     cookies: &CookieJar<'_>,
-) -> Result<(), rocket::response::status::BadRequest<&'static str>> {
+) -> Result<String, rocket::response::status::BadRequest<&'static str>> {
     let refuse = rocket::response::status::BadRequest;
-    let play = play.as_ref().ok_or(refuse("not in play mode"))?;
+    if registry.broadcast().is_some() {
+        return Err(refuse("not in play mode"));
+    }
     // The page set the cookie when it loaded.
     let visitor = usage::visitor(cookies).ok_or(refuse("no visitor cookie"))?;
     let setup = Setup::from_form(&form).map_err(refuse)?;
-    play.start(&visitor, &setup).map_err(refuse)
+    registry
+        .launch(&visitor, &setup)
+        .map(|id| id.to_string())
+        .map_err(refuse)
 }
 
-/// The player's page's Resign, Exit and Rematch, for the visitor's game;
-/// the text says why not.
-#[rocket::post("/play/<action>")]
+/// The player's page's Resign, Pause, Exit and Rematch, for the visitor's
+/// game; the text says why not. A rematch answers the new game's UUID.
+#[rocket::post("/g/<id>/play/<action>")]
 fn play_action(
+    id: MatchId,
     action: &str,
-    play: &State<Option<Arc<Play>>>,
+    registry: &State<Arc<Registry>>,
     cookies: &CookieJar<'_>,
-) -> Result<(), rocket::response::status::BadRequest<&'static str>> {
+) -> Result<String, rocket::response::status::BadRequest<&'static str>> {
     let refuse = rocket::response::status::BadRequest;
-    let play = play.as_ref().ok_or(refuse("not in play mode"))?;
+    let found = registry.hosted(id).ok_or(refuse("not in play mode"))?;
+    let play = &found.play;
     let visitor = usage::visitor(cookies).ok_or(refuse("no visitor cookie"))?;
     match action {
-        "resign" => play.resign(&visitor),
-        "pause" => play.set_paused(&visitor, true),
-        "resume" => play.set_paused(&visitor, false),
-        "end" => play.end(&visitor),
-        "rematch" => play.rematch(&visitor),
+        "resign" => play.resign(&visitor).map(|()| String::new()),
+        "pause" => play.set_paused(&visitor, true).map(|()| String::new()),
+        "resume" => play.set_paused(&visitor, false).map(|()| String::new()),
+        "end" => play.end(&visitor).map(|()| String::new()),
+        "rematch" => registry.rematch(&visitor, id).map(|new| new.to_string()),
         _ => Err("unknown action"),
     }
     .map_err(refuse)
@@ -362,87 +418,103 @@ fn play_action(
 
 /// The stream of the visitor's seat: undelayed, and only what its player
 /// sees. A visitor without a seat gets none.
-fn seat_view(play: &State<Option<Arc<Play>>>, cookies: &CookieJar<'_>) -> Option<View> {
-    let seat = play.as_ref()?.seat(usage::visitor(cookies).as_deref())?;
+fn seat_view(found: &registry::Match, cookies: &CookieJar<'_>) -> Option<View> {
+    let seat = found.play.seat(usage::visitor(cookies).as_deref())?;
     Some(View::Seat(u32::from(seat)))
 }
 
-#[rocket::get("/play/ws")]
+#[rocket::get("/g/<id>/play/ws")]
 fn play_viewer(
+    id: MatchId,
     socket: WebSocket,
-    hub: &State<Arc<Hub>>,
-    play: &State<Option<Arc<Play>>>,
+    registry: &State<Arc<Registry>>,
     cookies: &CookieJar<'_>,
 ) -> Option<Channel<'static>> {
-    let hub = Arc::clone(hub);
-    let view = seat_view(play, cookies)?;
+    let found = registry.hosted(id)?;
+    let view = seat_view(&found, cookies)?;
+    let hub = Arc::clone(&found.hub);
     Some(relay(socket, (), move || hub.subscribe(view)))
 }
 
-#[rocket::get("/play/detail")]
+#[rocket::get("/g/<id>/play/detail")]
 fn play_detail_viewer(
+    id: MatchId,
     socket: WebSocket,
-    hub: &State<Arc<Hub>>,
-    play: &State<Option<Arc<Play>>>,
+    registry: &State<Arc<Registry>>,
     cookies: &CookieJar<'_>,
 ) -> Option<Channel<'static>> {
-    let hub = Arc::clone(hub);
-    let view = seat_view(play, cookies)?;
+    let found = registry.hosted(id)?;
+    let view = seat_view(&found, cookies)?;
+    let hub = Arc::clone(&found.hub);
     Some(relay(socket, (), move || hub.subscribe_detail(view)))
 }
 
-#[rocket::get("/play/match/<id>/seg/<index>")]
+#[rocket::get("/g/<id>/play/match/<mid>/seg/<index>")]
 fn play_segment_file(
-    id: &str,
+    id: MatchId,
+    mid: &str,
     index: usize,
-    hub: &State<Arc<Hub>>,
-    play: &State<Option<Arc<Play>>>,
+    registry: &State<Arc<Registry>>,
     cookies: &CookieJar<'_>,
 ) -> Option<SegmentBytes> {
-    let view = seat_view(play, cookies)?;
-    segment_bytes(hub.segment(u64::from_str_radix(id, 16).ok()?, index, view)?)
+    let found = registry.hosted(id)?;
+    let view = seat_view(&found, cookies)?;
+    segment_bytes(
+        found
+            .hub
+            .segment(u64::from_str_radix(mid, 16).ok()?, index, view)?,
+        true,
+    )
 }
 
-#[rocket::get("/play/match/<id>/detail/<index>")]
+#[rocket::get("/g/<id>/play/match/<mid>/detail/<index>")]
 fn play_detail_segment_file(
-    id: &str,
+    id: MatchId,
+    mid: &str,
     index: usize,
-    hub: &State<Arc<Hub>>,
-    play: &State<Option<Arc<Play>>>,
+    registry: &State<Arc<Registry>>,
     cookies: &CookieJar<'_>,
 ) -> Option<SegmentBytes> {
-    let view = seat_view(play, cookies)?;
-    segment_bytes(hub.detail_segment(u64::from_str_radix(id, 16).ok()?, index, view)?)
+    let found = registry.hosted(id)?;
+    let view = seat_view(&found, cookies)?;
+    segment_bytes(
+        found
+            .hub
+            .detail_segment(u64::from_str_radix(mid, 16).ok()?, index, view)?,
+        true,
+    )
 }
 
 /// The seat's terrain as revealed so far (`terrain.rs`, kind 1); a later
 /// revision than the keyframe names is as good, since reveals only add.
-#[rocket::get("/play/terrain/<_id>")]
+#[rocket::get("/g/<id>/play/terrain/<_tid>")]
 fn play_terrain(
-    _id: &str,
-    hub: &State<Arc<Hub>>,
-    play: &State<Option<Arc<Play>>>,
+    id: MatchId,
+    _tid: &str,
+    registry: &State<Arc<Registry>>,
     cookies: &CookieJar<'_>,
 ) -> Option<SegmentBytes> {
-    let View::Seat(player) = seat_view(play, cookies)? else {
+    let found = registry.hosted(id)?;
+    let View::Seat(player) = seat_view(&found, cookies)? else {
         return None;
     };
     Some(SegmentBytes(
-        hub.seat_terrain(player)?,
+        found.hub.seat_terrain(player)?,
         Header::new("Cache-Control", "no-store"),
     ))
 }
 
 /// A `/data` file the seat's stream named.
-#[rocket::get("/play/data/<hash>")]
+#[rocket::get("/g/<id>/play/data/<hash>")]
 fn play_data(
+    id: MatchId,
     hash: &str,
-    hub: &State<Arc<Hub>>,
-    play: &State<Option<Arc<Play>>>,
+    registry: &State<Arc<Registry>>,
     cookies: &CookieJar<'_>,
 ) -> Option<Json> {
-    let view = seat_view(play, cookies)?;
-    let json = hub.data(u64::from_str_radix(hash, 16).ok()?, view)?;
+    let found = registry.hosted(id)?;
+    let view = seat_view(&found, cookies)?;
+    let json = found.hub.data(u64::from_str_radix(hash, 16).ok()?, view)?;
     Some(Json(
         String::from_utf8(json.to_vec()).ok()?,
         Header::new("Cache-Control", "no-store"),
@@ -453,15 +525,16 @@ fn play_data(
 /// the format version and the player number the visitor commands, 0 for
 /// none; orders from a visitor without the seat are dropped, as is the
 /// seat looked up again for each, since a new game may have replaced it.
-#[rocket::get("/play/command")]
+#[rocket::get("/g/<id>/play/command")]
 fn play_command(
+    id: MatchId,
     socket: WebSocket,
-    play: &State<Option<Arc<Play>>>,
-    hub: &State<Arc<Hub>>,
+    registry: &State<Arc<Registry>>,
     cookies: &CookieJar<'_>,
 ) -> Option<Channel<'static>> {
-    let play = Arc::clone(play.as_ref()?);
-    let hub = Arc::clone(hub);
+    let found = registry.hosted(id)?;
+    let play = Arc::clone(&found.play);
+    let hub = Arc::clone(&found.hub);
     let visitor = usage::visitor(cookies);
     Some(socket.channel(move |mut stream| {
         Box::pin(async move {
@@ -538,7 +611,7 @@ fn play_command(
 }
 
 /// `held` is dropped when the stream closes. `subscribe` gives None when
-/// there is nothing to follow (`/play/ws` outside play mode).
+/// there is nothing to follow (`play/ws` of a match without a seat).
 fn relay(
     socket: WebSocket,
     held: impl Send + 'static,
@@ -582,28 +655,47 @@ fn relay(
 #[response(content_type = "binary")]
 struct SegmentBytes(Vec<u8>, Header<'static>);
 
-#[rocket::get("/match/<id>/seg/<index>")]
-fn segment_file(id: &str, index: usize, hub: &State<Arc<Hub>>) -> Option<SegmentBytes> {
-    segment_bytes(hub.segment(u64::from_str_radix(id, 16).ok()?, index, View::Observer)?)
+#[rocket::get("/g/<id>/match/<mid>/seg/<index>")]
+fn segment_file(
+    id: MatchId,
+    mid: &str,
+    index: usize,
+    registry: &State<Arc<Registry>>,
+) -> Option<SegmentBytes> {
+    let hub = registry.hub(id)?;
+    segment_bytes(
+        hub.segment(u64::from_str_radix(mid, 16).ok()?, index, View::Observer)?,
+        false,
+    )
 }
 
-#[rocket::get("/match/<id>/detail/<index>")]
-fn detail_segment_file(id: &str, index: usize, hub: &State<Arc<Hub>>) -> Option<SegmentBytes> {
-    segment_bytes(hub.detail_segment(u64::from_str_radix(id, 16).ok()?, index, View::Observer)?)
+#[rocket::get("/g/<id>/match/<mid>/detail/<index>")]
+fn detail_segment_file(
+    id: MatchId,
+    mid: &str,
+    index: usize,
+    registry: &State<Arc<Registry>>,
+) -> Option<SegmentBytes> {
+    let hub = registry.hub(id)?;
+    segment_bytes(
+        hub.detail_segment(u64::from_str_radix(mid, 16).ok()?, index, View::Observer)?,
+        false,
+    )
 }
 
-/// "<segments> <live 0|1>", as `view.rs` describes.
-#[rocket::get("/match/<id>/info")]
+/// "<match hex> <segments> <live 0|1>" of the match the hub shows, as
+/// `view.rs` describes.
+#[rocket::get("/g/<id>/info")]
 fn match_info(
-    id: &str,
-    hub: &State<Arc<Hub>>,
+    id: MatchId,
+    registry: &State<Arc<Registry>>,
     usage: &State<Arc<Usage>>,
     cookies: &CookieJar<'_>,
 ) -> Option<MatchInfo> {
-    let (segments, live) = hub.match_info(u64::from_str_radix(id, 16).ok()?)?;
-    usage.replay(cookies, id);
+    let (shown, segments, live) = registry.hub(id)?.shown_info()?;
+    usage.replay(cookies, &id.to_string());
     Some(MatchInfo(
-        format!("{segments} {}", u8::from(live)),
+        format!("{shown:016x} {segments} {}", u8::from(live)),
         // The open match grows a segment every 30 s.
         Header::new("Cache-Control", "no-store"),
     ))
@@ -667,28 +759,33 @@ fn summary_response(body: SummaryBody, accepts: bool) -> Option<web::Encoded<Sha
 
 /// The statistics summary of a match as `/` may see it, which trails the
 /// game by `--delay` like the stream.
-#[rocket::get("/match/<id>/summary?<turn>")]
+#[rocket::get("/g/<id>/match/<mid>/summary?<turn>")]
 fn match_summary(
-    id: &str,
+    id: MatchId,
+    mid: &str,
     turn: Option<u32>,
     accepts: web::AcceptsBrotli,
-    hub: &State<Arc<Hub>>,
+    registry: &State<Arc<Registry>>,
 ) -> Option<web::Encoded<SharedBytes>> {
-    let summary = hub.summary(u64::from_str_radix(id, 16).ok()?, turn)?;
+    let summary = registry
+        .hub(id)?
+        .summary(u64::from_str_radix(mid, 16).ok()?, turn)?;
     summary_response(summary, accepts.accepts())
 }
 
 /// The statistics summary of the visitor's own seat, undelayed: only what
 /// the seat itself may see in the summary.
-#[rocket::get("/play/summary?<turn>")]
+#[rocket::get("/g/<id>/play/summary?<turn>")]
 fn play_summary(
+    id: MatchId,
     turn: Option<u32>,
-    play: &State<Option<Arc<Play>>>,
     accepts: web::AcceptsBrotli,
+    registry: &State<Arc<Registry>>,
     cookies: &CookieJar<'_>,
 ) -> Option<web::Encoded<SharedBytes>> {
-    let metadata = play
-        .as_ref()?
+    let metadata = registry
+        .hosted(id)?
+        .play
         .summary(usage::visitor(cookies).as_deref(), turn)?;
     summary_response(metadata, accepts.accepts())
 }
@@ -711,11 +808,17 @@ fn stats(key: Option<&str>, usage: &State<Arc<Usage>>) -> Option<MatchInfo> {
     })
 }
 
-fn segment_bytes((bytes, closed): (Message, bool)) -> Option<SegmentBytes> {
+/// `private`: a seat's segment depends on the cookie, which a shared cache
+/// must not hand on (D26).
+fn segment_bytes((bytes, closed): (Message, bool), private: bool) -> Option<SegmentBytes> {
     // The match id is in the URL, so a closed segment never changes; the
     // open one grows every turn.
     let cache = if closed {
-        Header::new("Cache-Control", "public, max-age=31536000, immutable")
+        let scope = if private { "private" } else { "public" };
+        Header::new(
+            "Cache-Control",
+            format!("{scope}, max-age=31536000, immutable"),
+        )
     } else {
         Header::new("Cache-Control", "no-store")
     };
@@ -839,7 +942,7 @@ fn parse_args() -> Result<Args, String> {
 }
 
 // Only a socket is removed, so a mistyped path cannot delete a real file.
-fn remove_stale_socket(path: &str) -> io::Result<()> {
+pub(crate) fn remove_stale_socket(path: &str) -> io::Result<()> {
     match std::fs::symlink_metadata(path) {
         Ok(metadata) if metadata.file_type().is_socket() => std::fs::remove_file(path),
         Ok(_) => Err(io::Error::new(
@@ -851,11 +954,10 @@ fn remove_stale_socket(path: &str) -> io::Result<()> {
     }
 }
 
-fn serve(
+pub(crate) fn serve(
     stream: UnixStream,
     hub: &Arc<Hub>,
     play: Option<&Arc<Play>>,
-    generation: Option<u64>,
 ) -> io::Result<()> {
     let mut reader = BufReader::new(stream);
     let version = feed::read_header(&mut reader)?;
@@ -901,8 +1003,8 @@ fn serve(
             Record::Los { side, players } => hub.set_los(side, players),
             Record::Summary(summary) => {
                 hub.set_summary(summary.turn, summary.is_final, Arc::clone(&summary.full));
-                if let (Some(play), Some(generation)) = (play, generation) {
-                    play.set_summary(generation, summary);
+                if let Some(play) = play {
+                    play.set_summary(summary);
                 }
             }
             Record::Pause(players) => hub.set_pause(&players),

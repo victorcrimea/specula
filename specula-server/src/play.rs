@@ -5,9 +5,11 @@
 //! back (`SpeculaFeed.h`, the uplink), which the engine posts for that
 //! slot as the game's controller.
 //!
-//! One game at a time. `/play` is the player's page on the live stream,
-//! `/` stays the observers' page with the delay; this split is a
-//! convenience, not a guard. The seat is the visitor's `sv` cookie.
+//! One game per `Play`, and one `Play` per match (`registry.rs`).
+//! `/g/<uuid>` is the player's page on the live stream for the visitor who
+//! holds the seat, and the observers' page with the delay for anyone else;
+//! this split is a convenience, not a guard. The seat is the visitor's `sv`
+//! cookie.
 
 use std::collections::HashMap;
 use std::io::Write;
@@ -28,6 +30,7 @@ use rocket::tokio::sync::broadcast;
 
 use crate::feed::Summary;
 use crate::observer;
+use crate::registry::MatchId;
 use crate::summary_envelope;
 use crate::view::Hub;
 use crate::view::SummaryBody;
@@ -92,27 +95,51 @@ pub fn civs() -> impl Iterator<Item = (&'static str, &'static str)> {
 /// visitor's last game can be repeated, and the maps and civs to choose
 /// from.
 pub fn setup_json(status: &Status) -> String {
-    let pairs = |items: &mut dyn Iterator<Item = (&str, &str)>| {
-        let mut out = String::from("[");
-        for (index, (code, name)) in items.enumerate() {
-            if index > 0 {
-                out.push(',');
-            }
-            out.push('[');
-            push_string(&mut out, code);
-            out.push(',');
-            push_string(&mut out, name);
-            out.push(']');
-        }
-        out.push(']');
-        out
-    };
     let mut json = Json::new();
     json.boolean("running", status.running);
     json.boolean("mine", status.mine);
     json.boolean("defeated", status.defeated);
     json.boolean("rematch", status.rematch);
     json.raw("seat", &status.seat.unwrap_or(0).to_string());
+    json.raw("maps", &pairs(&mut MAPS.iter().copied()));
+    json.raw("civs", &pairs(&mut civs()));
+    json.finish()
+}
+
+fn pairs(items: &mut dyn Iterator<Item = (&str, &str)>) -> String {
+    let mut out = String::from("[");
+    for (index, (code, name)) in items.enumerate() {
+        if index > 0 {
+            out.push(',');
+        }
+        out.push('[');
+        push_string(&mut out, code);
+        out.push(',');
+        push_string(&mut out, name);
+        out.push(']');
+    }
+    out.push(']');
+    out
+}
+
+/// What the setup form reads (`GET /new`): whether every slot is taken,
+/// whether the visitor has a game running and which, the newest running
+/// one, and the maps and civs to choose from. The ids are UUIDs, empty for
+/// none.
+pub fn form_json(
+    running: bool,
+    mine: bool,
+    own: Option<MatchId>,
+    latest: Option<MatchId>,
+) -> String {
+    let mut json = Json::new();
+    json.boolean("running", running);
+    json.boolean("mine", mine);
+    json.text("match", &own.map(|id| id.to_string()).unwrap_or_default());
+    json.text(
+        "latest",
+        &latest.map(|id| id.to_string()).unwrap_or_default(),
+    );
     json.raw("maps", &pairs(&mut MAPS.iter().copied()));
     json.raw("civs", &pairs(&mut civs()));
     json.finish()
@@ -207,6 +234,8 @@ pub enum SlotKind {
 pub struct Play {
     socket: String,
     port: u16,
+    /// Server-wide launch counter, for the log line only.
+    generation: u64,
     hub: Arc<Hub>,
     inner: Mutex<Inner>,
     /// The engine's answers to the queries, as the text message
@@ -219,10 +248,6 @@ struct Inner {
     game: Option<Game>,
     /// The engine's end of the feed socket while it is connected.
     uplink: Option<UnixStream>,
-    generation: u64,
-    /// The thread running the current engine, joined before the next one
-    /// starts, so the two never share the pid file.
-    runner: Option<JoinHandle<()>>,
 }
 
 struct Game {
@@ -230,7 +255,6 @@ struct Game {
     owner: String,
     /// Their player number.
     seat: u8,
-    generation: u64,
     running: bool,
     /// What it was started with, for a rematch.
     setup: Setup,
@@ -251,53 +275,54 @@ struct SeatBody {
 }
 
 impl Play {
-    pub fn new(socket: String, port: u16, hub: Arc<Hub>) -> Self {
+    pub fn new(socket: String, port: u16, hub: Arc<Hub>, generation: u64) -> Self {
         Play {
             socket,
             port,
+            generation,
             hub,
             inner: Mutex::new(Inner::default()),
             replies: broadcast::channel(REPLY_BACKLOG).0,
         }
     }
 
-    /// Starts a game for `owner`, ending the one running if it is theirs.
-    pub fn start(self: &Arc<Self>, owner: &str, setup: &Setup) -> Result<(), &'static str> {
+    /// The seat and the engine's arguments for `setup`, so a bad form is
+    /// refused before anything is spent on it.
+    pub fn check(setup: &Setup) -> Result<(u8, Vec<String>), &'static str> {
         let seat = setup
             .slots
             .iter()
             .position(|slot| slot.kind == SlotKind::You)
             .ok_or("no slot is yours")? as u8
             + 1;
-        let args = engine_args(setup)?;
-        let mut inner = self.inner.lock().unwrap();
-        if inner
-            .game
-            .as_ref()
-            .is_some_and(|game| game.running && game.owner != owner)
-        {
-            return Err("a game is in progress");
-        }
-        if inner.game.as_ref().is_some_and(|game| game.running) {
-            observer::kill_recorded(&self.socket);
-        }
-        inner.generation += 1;
-        let generation = inner.generation;
-        inner.game = Some(Game {
+        Ok((seat, engine_args(setup)?))
+    }
+
+    /// Starts the game for `owner` and gives the thread that runs its
+    /// engine. `previous` is the runner of the game this one replaces in
+    /// the slot, joined first: the UDP port is the slot's. `on_exit` runs
+    /// once the engine is gone and no lock of this is held.
+    pub fn start(
+        self: &Arc<Self>,
+        owner: &str,
+        setup: &Setup,
+        previous: Option<JoinHandle<()>>,
+        on_exit: impl FnOnce() + Send + 'static,
+    ) -> Result<JoinHandle<()>, &'static str> {
+        let (seat, args) = Self::check(setup)?;
+        self.inner.lock().unwrap().game = Some(Game {
             owner: owner.to_string(),
             seat,
-            generation,
             running: true,
             setup: setup.clone(),
             summaries: Vec::new(),
         });
-        println!("game {generation} for {owner}: {}", args.join(" "));
+        println!("game {} for {owner}: {}", self.generation, args.join(" "));
         // The engine connects the feed after this, so its first turn
         // already has the seat's stream.
         self.hub.set_seats(vec![u32::from(seat)]);
-        let previous = inner.runner.take();
         let play = Arc::clone(self);
-        inner.runner = Some(std::thread::spawn(move || {
+        Ok(std::thread::spawn(move || {
             if let Some(previous) = previous {
                 let _ = previous.join();
             }
@@ -310,16 +335,14 @@ impl Play {
                 Ok(outcome) => println!("play host {outcome}"),
                 Err(error) => eprintln!("cannot run the play host: {error}"),
             }
-            let mut inner = play.inner.lock().unwrap();
-            if let Some(game) = inner
-                .game
-                .as_mut()
-                .filter(|game| game.generation == generation)
             {
-                game.running = false;
+                let mut inner = play.inner.lock().unwrap();
+                if let Some(game) = inner.game.as_mut() {
+                    game.running = false;
+                }
             }
-        }));
-        Ok(())
+            on_exit();
+        }))
     }
 
     /// The player number `visitor` commands, if they hold the seat.
@@ -350,28 +373,12 @@ impl Play {
         }
     }
 
-    /// The generation of the game now current, which a feed connected for
-    /// it files its summaries under, so a closing feed cannot write into a
-    /// rematch.
-    pub fn current_generation(&self) -> Option<u64> {
-        self.inner
-            .lock()
-            .unwrap()
-            .game
-            .as_ref()
-            .map(|game| game.generation)
-    }
-
     /// Every capture is kept, but only the owner's seat: the other copies
-    /// are never served through `/play`.
-    pub fn set_summary(&self, generation: u64, summary: Summary) {
+    /// are never served through the seat's routes.
+    pub fn set_summary(&self, summary: Summary) {
         let (capture, raw) = {
             let mut inner = self.inner.lock().unwrap();
-            let Some(game) = inner
-                .game
-                .as_mut()
-                .filter(|game| game.generation == generation)
-            else {
+            let Some(game) = inner.game.as_mut() else {
                 return;
             };
             let Some(view) = summary
@@ -486,16 +493,11 @@ impl Play {
         }
     }
 
-    /// Starts `owner`'s last game again with the same setup.
-    pub fn rematch(self: &Arc<Self>, owner: &str) -> Result<(), &'static str> {
-        let setup = {
-            let inner = self.inner.lock().unwrap();
-            match &inner.game {
-                Some(game) if game.owner == owner => game.setup.clone(),
-                _ => return Err("no game to repeat"),
-            }
-        };
-        self.start(owner, &setup)
+    /// The setup of the game `owner` started, which a rematch repeats.
+    pub fn setup_of(&self, owner: &str) -> Option<Setup> {
+        let inner = self.inner.lock().unwrap();
+        let game = inner.game.as_ref()?;
+        (game.owner == owner).then(|| game.setup.clone())
     }
 
     pub fn set_uplink(&self, stream: Option<UnixStream>) {

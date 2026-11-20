@@ -29,10 +29,11 @@
 //! or u8 `POST_STARTS`, u32 ms until the server shows the match's first
 //! turn, while it holds them all back.
 //!
-//! A page opened with `?match=<id>&t=<seconds>` (a copied link) names a
-//! match and a moment of its clock, and the page passes both on in the
-//! worker's own URL. If `/match/<id>/info` says it is the match being
-//! shown, it is followed live as usual and seeks to the moment once joined.
+//! A page opened with `?t=<seconds>` (a copied link) names a moment of the
+//! clock of the match the hub shows, and the page passes it on in the
+//! worker's own URL, with `base=/g/<uuid>`. If `<base>/info` says that
+//! match is the one being shown, it is followed live as usual and seeks to
+//! the moment once joined.
 //! Otherwise it is a stored match: there is no WebSocket, its last segment
 //! is applied as live messages would be, which gives the scene its end, and
 //! playback seeks to the moment and pauses at the end. `STATUS_ARCHIVE`
@@ -144,9 +145,13 @@ enum Next {
 struct Playback {
     this: Weak<RefCell<Playback>>,
     scope: DedicatedWorkerGlobalScope,
-    /// Before every stream URL: "/play" for the player's page, which
-    /// follows the live stream, else empty.
-    prefix: &'static str,
+    /// The match's `/g/<uuid>`, which its terrain and info are under.
+    base: String,
+    /// Before every stream URL: `base` plus "/play" for the player's page,
+    /// which follows the live stream, else `base`.
+    prefix: String,
+    /// The player's page, whose next game is the one just started.
+    seated: bool,
     socket: Option<WebSocket>,
     /// The current socket's handlers, dropped with it.
     socket_handlers: Option<SocketHandlers>,
@@ -438,7 +443,7 @@ impl Playback {
         let url = if revision > 0 {
             format!("{}/terrain/{id:016x}", self.prefix)
         } else {
-            format!("/terrain/{id:016x}")
+            format!("{}/terrain/{id:016x}", self.base)
         };
         let this = self.this.clone();
         wasm_bindgen_futures::spawn_local(async move {
@@ -652,11 +657,7 @@ impl Playback {
 
     fn switch_deadline(&self) -> Option<f64> {
         // The player's next game is the one they just started.
-        let delay = if self.prefix.is_empty() {
-            SWITCH_DELAY_MS
-        } else {
-            0.0
-        };
+        let delay = if !self.seated { SWITCH_DELAY_MS } else { 0.0 };
         self.ended_at.map(|at| at + delay)
     }
 
@@ -1612,14 +1613,22 @@ fn start() -> Result<(), String> {
             .unchecked_ref::<js_sys::Function>()
             .clone();
         detail_linger_wake.forget();
+        let search = scope.location().search();
+        let seated = crate::query_param(&search, "play").is_some();
+        let base = crate::query_param(&search, "base")
+            .and_then(|base| js_sys::decode_uri_component(&base).ok())
+            .and_then(|base| base.as_string())
+            .unwrap_or_default();
         RefCell::new(Playback {
             this: this.clone(),
             scope: scope.clone(),
-            prefix: if crate::query_param(&scope.location().search(), "play").is_some() {
-                "/play"
+            seated,
+            prefix: if seated {
+                format!("{base}/play")
             } else {
-                ""
+                base.clone()
             },
+            base,
             socket: None,
             socket_handlers: None,
             frame: None,
@@ -1697,44 +1706,47 @@ fn start() -> Result<(), String> {
     Ok(())
 }
 
-/// Follows the live stream, unless the worker's URL names a match (from the
-/// page's link), which `/match/<id>/info` says how to open.
+/// Follows the live stream, unless the worker's URL names a moment (from
+/// the page's link), which `<base>/info` says how to open.
 fn open(playback: &Weak<RefCell<Playback>>) -> Result<(), String> {
     let Some(strong) = playback.upgrade() else {
         return Ok(());
     };
     let search = strong.borrow().scope.location().search();
-    let match_id = crate::query_param(&search, "match")
-        .and_then(|id| u64::from_str_radix(&id, 16).ok())
-        .filter(|id| *id != 0);
-    let Some(match_id) = match_id else {
-        return connect(playback);
-    };
-    let seconds = crate::query_param(&search, "t")
+    let Some(seconds) = crate::query_param(&search, "t")
         .and_then(|t| t.parse::<f64>().ok())
         .filter(|t| t.is_finite() && *t >= 0.0)
-        .unwrap_or(0.0);
+    else {
+        return connect(playback);
+    };
+    let base = strong.borrow().base.clone();
     let turn = (seconds * 1000.0 / TURN_MS) as u32;
     let playback = playback.clone();
     wasm_bindgen_futures::spawn_local(async move {
-        let info = fetch_bytes(&format!("/match/{match_id:016x}/info"))
+        let info = fetch_bytes(&format!("{base}/info"))
             .await
             .and_then(|bytes| {
                 let text = String::from_utf8(bytes).map_err(|_| "not text")?;
-                let (segments, live) = text.trim().split_once(' ').ok_or("no live flag")?;
+                let mut fields = text.split_whitespace();
+                let (Some(id), Some(segments), Some(live)) =
+                    (fields.next(), fields.next(), fields.next())
+                else {
+                    return Err("bad info".to_string());
+                };
+                let id = u64::from_str_radix(id, 16).map_err(|_| "bad match id")?;
                 let segments = segments.parse::<u32>().map_err(|_| "bad segment count")?;
-                Ok::<_, String>((segments, live == "1"))
+                Ok::<_, String>((id, segments, live == "1"))
             });
         let Some(strong) = playback.upgrade() else {
             return;
         };
         match info {
-            Ok((segments, false)) if segments > 0 => {
+            Ok((match_id, segments, false)) if segments > 0 => {
                 let mut strong = strong.borrow_mut();
                 strong.initial_seek = Some((match_id, turn));
                 strong.open_archive(match_id, segments);
             }
-            Ok(_) => {
+            Ok((match_id, _, _)) => {
                 strong.borrow_mut().initial_seek = Some((match_id, turn));
                 if let Err(error) = connect(&playback) {
                     web_sys::console::error_1(&error.into());
@@ -1743,7 +1755,7 @@ fn open(playback: &Weak<RefCell<Playback>>) -> Result<(), String> {
             // Gone from the history, or never stored: the live stream
             // rather than nothing.
             Err(error) => {
-                web_sys::console::error_1(&format!("match {match_id:016x}: {error}").into());
+                web_sys::console::error_1(&format!("match info: {error}").into());
                 if let Err(error) = connect(&playback) {
                     web_sys::console::error_1(&error.into());
                 }
@@ -1770,7 +1782,7 @@ fn connect(playback: &Weak<RefCell<Playback>>) -> Result<(), String> {
         "https:" => "wss",
         _ => "ws",
     };
-    let prefix = strong.borrow().prefix;
+    let prefix = strong.borrow().prefix.clone();
     let url = format!("{scheme}://{}{prefix}/ws", location.host());
     let socket = WebSocket::new(&url).map_err(|_| format!("cannot open {url}"))?;
     socket.set_binary_type(BinaryType::Arraybuffer);

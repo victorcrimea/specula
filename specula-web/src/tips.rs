@@ -97,9 +97,10 @@ impl DataFiles {
 async fn fetch_json(hash: u64) -> Option<JsValue> {
     let window = web_sys::window()?;
     // A seat gets only the files its own stream named.
+    let base = crate::match_base();
     let prefix = if crate::seated() { "/play" } else { "" };
     let response: web_sys::Response =
-        JsFuture::from(window.fetch_with_str(&format!("{prefix}/data/{hash:016x}")))
+        JsFuture::from(window.fetch_with_str(&format!("{base}{prefix}/data/{hash:016x}")))
             .await
             .ok()?
             .dyn_into()

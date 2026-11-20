@@ -119,7 +119,7 @@ impl GameMenu {
     }
 }
 
-/// What `/play/setup` says of the visitor's game.
+/// What `play/status` says of the visitor's game.
 pub struct Status {
     /// The visitor's seat resigned or was beaten while the game goes on.
     pub defeated: bool,
@@ -131,11 +131,12 @@ pub struct Status {
 
 pub async fn status() -> Result<Status, String> {
     let window = web_sys::window().ok_or("no window")?;
-    let response: Response = JsFuture::from(window.fetch_with_str("/play/setup"))
-        .await
-        .map_err(|_| "cannot ask for the game's status")?
-        .dyn_into()
-        .map_err(|_| "not a response")?;
+    let response: Response =
+        JsFuture::from(window.fetch_with_str(&format!("{}/play/status", crate::match_base())))
+            .await
+            .map_err(|_| "cannot ask for the game's status")?
+            .dyn_into()
+            .map_err(|_| "not a response")?;
     if !response.ok() {
         return Err(format!("the game's status: HTTP {}", response.status()));
     }
@@ -156,9 +157,9 @@ pub async fn status() -> Result<Status, String> {
     })
 }
 
-/// Posts `/play/<action>` (resign, end or rematch); the error is the
-/// server's reason.
-pub async fn post(action: &str) -> Result<(), String> {
+/// Posts `play/<action>` of the match (resign, end or rematch); the answer
+/// is the body, and the error the server's reason.
+pub async fn post(action: &str) -> Result<String, String> {
     let window = web_sys::window().ok_or("no window")?;
     // Through Reflect: RequestInit is not among web-sys's enabled features,
     // and it is one call.
@@ -168,7 +169,7 @@ pub async fn post(action: &str) -> Result<(), String> {
         .ok_or("no fetch")?;
     let init = js_sys::Object::new();
     let _ = js_sys::Reflect::set(&init, &"method".into(), &"POST".into());
-    let url = JsValue::from_str(&format!("/play/{action}"));
+    let url = JsValue::from_str(&format!("{}/play/{action}", crate::match_base()));
     let promise: js_sys::Promise = fetch
         .call2(&window, &url, &init)
         .map_err(|_| "cannot send the request")?
@@ -179,10 +180,7 @@ pub async fn post(action: &str) -> Result<(), String> {
         .map_err(|_| "the request failed")?
         .dyn_into()
         .map_err(|_| "not a response")?;
-    if response.ok() {
-        return Ok(());
-    }
-    let reason = match response.text() {
+    let body = match response.text() {
         Ok(text) => JsFuture::from(text)
             .await
             .ok()
@@ -190,13 +188,17 @@ pub async fn post(action: &str) -> Result<(), String> {
             .unwrap_or_default(),
         Err(_) => String::new(),
     };
-    Err(format!("{action}: {reason}"))
+    if response.ok() {
+        return Ok(body);
+    }
+    Err(format!("{action}: {body}"))
 }
 
-/// Opens `/play` again, which shows the visitor's game as it now is.
+/// Opens the match's page again, which shows it as it now is for the
+/// visitor.
 pub fn reload() {
     if let Some(window) = web_sys::window() {
-        let _ = window.location().set_href("/play");
+        let _ = window.location().set_href(&crate::match_base());
     }
 }
 
@@ -224,7 +226,11 @@ pub fn after_defeat() {
 pub fn rematch() {
     wasm_bindgen_futures::spawn_local(async {
         match post("rematch").await {
-            Ok(()) => reload(),
+            Ok(id) => {
+                if let Some(window) = web_sys::window() {
+                    let _ = window.location().set_href(&format!("/g/{id}"));
+                }
+            }
             Err(error) => web_sys::console::error_1(&error.into()),
         }
     });

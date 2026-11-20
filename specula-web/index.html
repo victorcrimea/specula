@@ -3,9 +3,9 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<script src="./i18n.js"></script>
+<script src="/i18n.js"></script>
 <title>Specula</title>
-<link rel="stylesheet" href="./gui/session.css?v=SESSION">
+<link rel="stylesheet" href="/gui/session.css?v=SESSION">
 <style>
 html, body { margin: 0; height: 100%; background: #0f1214; }
 /* The session GUI shows the engine's arrow everywhere, but for a right
@@ -1673,10 +1673,10 @@ for (const [id, foldLabel, unfoldLabel, folded] of [
 })();
 </script>
 <script type="module">
-const glue = "./pkg/specula_web.js?v=GLUE";
-const wasm = "./pkg/specula_web_bg.wasm?v=WASM";
-const selection = "./selection.bin?v=SELECTION";
-const icons = "./icons.bin?v=ICONS";
+const glue = "/pkg/specula_web.js?v=GLUE";
+const wasm = "/pkg/specula_web_bg.wasm?v=WASM";
+const selection = "/selection.bin?v=SELECTION";
+const icons = "/icons.bin?v=ICONS";
 const { default: init, observer_main } = await import(glue);
 await init({ module_or_path: wasm });
 observer_main(glue, wasm, selection, icons);

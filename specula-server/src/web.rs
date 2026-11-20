@@ -45,15 +45,17 @@ use rocket::request::FromParam;
 use rocket::request::FromRequest;
 use rocket::request::Outcome;
 use rocket::response;
+use rocket::response::Redirect;
 use rocket::response::Responder;
 use rocket::response::content::RawHtml;
 use specula_assets::files::file_list_name;
 use specula_assets::files::hash_of_name;
 
 use crate::WEB_ROOT;
+use crate::registry::MatchId;
+use crate::registry::Registry;
 use crate::usage::Referrer;
 use crate::usage::Usage;
-use crate::view::Hub;
 use crate::view::View;
 
 const IMMUTABLE: &str = "public, max-age=31536000, immutable";
@@ -115,7 +117,7 @@ impl<'r> FromParam<'r> for Page {
     type Error = &'r str;
 
     fn from_param(param: &'r str) -> Result<Self, Self::Error> {
-        ["index.html", "unit.html", "map.html"]
+        ["index.html", "unit.html", "map.html", "play.html"]
             .into_iter()
             .find(|page| *page == param)
             .map(Page)
@@ -365,27 +367,35 @@ fn format_size(bytes: u64) -> String {
     }
 }
 
+/// `/`: the setup form when this server hosts, else the broadcast.
+#[derive(rocket::Responder)]
+pub enum IndexPage {
+    Page(RawHtml<String>),
+    Redirect(Box<Redirect>),
+}
+
 #[rocket::get("/")]
 pub async fn index(
+    registry: &State<Arc<Registry>>,
     pkg: &State<Pkg>,
     assets: &State<AssetsSize>,
     atlases: &State<AtlasVersions>,
     usage: &State<Arc<Usage>>,
     cookies: &CookieJar<'_>,
     referrer: Referrer,
-) -> Option<RawHtml<String>> {
-    page(
-        Page("index.html"),
-        pkg,
-        assets,
-        atlases,
-        usage,
-        cookies,
-        referrer,
-    )
-    .await
+) -> Option<IndexPage> {
+    if let Some(id) = registry.broadcast() {
+        return Some(IndexPage::Redirect(Box::new(Redirect::to(format!(
+            "/g/{id}"
+        )))));
+    }
+    render("play.html", pkg, assets, atlases, usage, cookies, referrer)
+        .await
+        .map(IndexPage::Page)
 }
 
+/// The pages with placeholders are rendered by their own routes; the file
+/// server must not serve them raw.
 #[rocket::get("/<page>")]
 pub async fn page(
     page: Page,
@@ -396,9 +406,24 @@ pub async fn page(
     cookies: &CookieJar<'_>,
     referrer: Referrer,
 ) -> Option<RawHtml<String>> {
-    let path = Path::new(WEB_ROOT).join(page.0);
+    if page.0 != "unit.html" {
+        return None;
+    }
+    render(page.0, pkg, assets, atlases, usage, cookies, referrer).await
+}
+
+pub async fn render(
+    name: &'static str,
+    pkg: &Pkg,
+    assets: &AssetsSize,
+    atlases: &AtlasVersions,
+    usage: &Usage,
+    cookies: &CookieJar<'_>,
+    referrer: Referrer,
+) -> Option<RawHtml<String>> {
+    let path = Path::new(WEB_ROOT).join(name);
     let html = rocket::tokio::fs::read_to_string(path).await.ok()?;
-    usage.page(cookies, page.0, &referrer);
+    usage.page(cookies, name, &referrer);
     let glue = pkg.version(GLUE).await;
     let wasm = pkg.version(WASM).await;
     let mut html = html
@@ -455,13 +480,16 @@ pub async fn pkg_file(
     })
 }
 
-#[rocket::get("/terrain/<id>")]
+#[rocket::get("/g/<id>/terrain/<tid>")]
 pub fn terrain(
-    id: &str,
+    id: MatchId,
+    tid: &str,
     accepts: AcceptsBrotli,
-    hub: &State<Arc<Hub>>,
+    registry: &State<Arc<Registry>>,
 ) -> Option<Encoded<Vec<u8>>> {
-    let file = hub.terrain(u64::from_str_radix(id, 16).ok()?)?;
+    let file = registry
+        .hub(id)?
+        .terrain(u64::from_str_radix(tid, 16).ok()?)?;
     let brotli = accepts.0.then(|| file.brotli.get()).flatten();
     // The id is a hash of the content, so a copy never goes stale, but the
     // raw file sent while the brotli copy is still being made must not be
@@ -480,9 +508,11 @@ pub fn terrain(
 }
 
 /// A kind 18 or 19 JSON the detail stream names by its hash.
-#[rocket::get("/data/<id>")]
-pub fn data(id: &str, hub: &State<Arc<Hub>>) -> Option<Encoded<Vec<u8>>> {
-    let file = hub.data(u64::from_str_radix(id, 16).ok()?, View::Observer)?;
+#[rocket::get("/g/<id>/data/<hash>")]
+pub fn data(id: MatchId, hash: &str, registry: &State<Arc<Registry>>) -> Option<Encoded<Vec<u8>>> {
+    let file = registry
+        .hub(id)?
+        .data(u64::from_str_radix(hash, 16).ok()?, View::Observer)?;
     Some(Encoded {
         brotli: false,
         body: file.to_vec(),

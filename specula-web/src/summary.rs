@@ -75,9 +75,11 @@ pub enum Source {
 impl Source {
     fn url(&self) -> Option<String> {
         let base = match self {
-            Source::Play { .. } => "/play/summary".to_string(),
+            Source::Play { .. } => format!("{}/play/summary", crate::match_base()),
             Source::Stream { match_id: 0, .. } => return None,
-            Source::Stream { match_id, .. } => format!("/match/{match_id:016x}/summary"),
+            Source::Stream { match_id, .. } => {
+                format!("{}/match/{match_id:016x}/summary", crate::match_base())
+            }
         };
         Some(match self.turn() {
             Some(turn) => format!("{base}?turn={turn}"),

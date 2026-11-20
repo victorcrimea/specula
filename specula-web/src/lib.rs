@@ -1850,10 +1850,14 @@ async fn run(
         Page::Map => None,
         Page::Observer => Some(Warmup::new(element(&document, "warmup")?)),
     };
-    // `/play` is the 3D page for the player of a game the server hosts: the
-    // live stream, and orders. The server gives it only to that player.
-    let owner = page == Page::Observer && window.location().pathname().as_deref() == Ok("/play");
-    let status = if owner {
+    let search = window.location().search().unwrap_or_default();
+    // `/g/<uuid>` is the 3D page of a match; for the visitor who holds its
+    // seat it is the player's page, the live stream and orders, unless
+    // `?watch` asks for the observers' view (D24).
+    let candidate = page == Page::Observer
+        && !match_base().is_empty()
+        && query_param(&search, "watch").is_none();
+    let status = if candidate {
         game_menu::status()
             .await
             .inspect_err(|error| web_sys::console::error_1(&error.into()))
@@ -1861,6 +1865,7 @@ async fn run(
     } else {
         None
     };
+    let owner = status.as_ref().is_some_and(|status| status.seat != 0);
     // A player who resigned or was beaten watches the rest as the observers
     // do, with their delay, and gives no more orders.
     let seated = owner && !status.as_ref().is_some_and(|status| status.defeated);
@@ -1921,19 +1926,17 @@ async fn run(
     let options = WorkerOptions::new();
     options.set_type(WorkerType::Module);
     let mut worker_url = format!(
-        "worker.js?glue={}&wasm={}",
+        "/worker.js?glue={}&wasm={}&base={}",
         js_sys::encode_uri_component(&glue_url),
-        js_sys::encode_uri_component(&wasm_url)
+        js_sys::encode_uri_component(&wasm_url),
+        js_sys::encode_uri_component(&match_base())
     );
     if seated {
         worker_url.push_str("&play=1");
     }
     // A shared link names a match and a moment in it; the worker opens it.
-    let search = window.location().search().unwrap_or_default();
-    for name in ["match", "t"] {
-        if let Some(value) = query_param(&search, name) {
-            worker_url.push_str(&format!("&{name}={}", js_sys::encode_uri_component(&value)));
-        }
+    if let Some(value) = query_param(&search, "t") {
+        worker_url.push_str(&format!("&t={}", js_sys::encode_uri_component(&value)));
     }
     let worker = Worker::new_with_options(&worker_url, &options)
         .map_err(|_| "cannot start the stream worker")?;
@@ -4140,7 +4143,7 @@ fn wire_playback(app: &Rc<RefCell<App>>) {
 /// The setup page, for a new game in place of the player's.
 fn open_setup() {
     if let Some(window) = web_sys::window() {
-        let _ = window.location().set_href("/play?new");
+        let _ = window.location().set_href("/");
     }
 }
 
@@ -4159,9 +4162,9 @@ fn copy_match_link(app: &Rc<RefCell<App>>) {
     let location = window.location();
     let seconds = (f64::from(playhead) * TURN_MS / 1000.0) as u64;
     let link = format!(
-        "{}{}?match={match_id:016x}&t={seconds}",
+        "{}{}?t={seconds}",
         location.origin().unwrap_or_default(),
-        location.pathname().unwrap_or_default()
+        match_base()
     );
     // Through Reflect: the Clipboard API is not among web-sys's enabled
     // features, and it is one call.
@@ -4201,6 +4204,18 @@ fn copy_match_link(app: &Rc<RefCell<App>>) {
     app_ref.copy_link_timer = window
         .set_timeout_with_callback_and_timeout_and_arguments_0(restore.unchecked_ref(), COPIED_MS)
         .ok();
+}
+
+/// `/g/<uuid>` when the page is a match's, else empty: what every URL of
+/// the match's routes starts with.
+pub fn match_base() -> String {
+    let pathname = web_sys::window()
+        .and_then(|window| window.location().pathname().ok())
+        .unwrap_or_default();
+    match pathname.strip_prefix("/g/") {
+        Some(rest) => format!("/g/{}", rest.split('/').next().unwrap_or_default()),
+        None => String::new(),
+    }
 }
 
 /// The value of `name` in a `?a=1&b=2` query, undecoded; the values read

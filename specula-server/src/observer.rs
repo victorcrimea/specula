@@ -11,16 +11,19 @@
 //! That group outlives a server that dies without cleaning up, and the
 //! orphan would join the next game too and feed this server's socket, so
 //! the group is noted in `<socket>.observer` and killed on the next start.
-//! The play host (`play.rs`) is run and noted the same way.
+//! The play host (`play.rs`) is run and noted the same way, one pid file per
+//! match socket.
 
 use std::io;
 use std::io::Write;
+use std::os::unix::fs::FileTypeExt;
 use std::os::unix::process::CommandExt;
 use std::process::Command;
 use std::process::Stdio;
 use std::time::Duration;
 use std::time::Instant;
 
+use crate::registry::MatchId;
 use crate::view::Hub;
 
 /// Relative to the working directory, like the web root.
@@ -120,6 +123,43 @@ pub fn kill_recorded(socket: &str) {
         }
     }
     let _ = std::fs::remove_file(&path);
+}
+
+/// Kills the engines and removes the sockets of matches `<socket_base>.<uuid>`
+/// that a dead server left. They are named by UUIDs it can no longer list.
+pub fn kill_stale(socket_base: &str) {
+    let base = std::path::Path::new(socket_base);
+    let (Some(dir), Some(name)) = (base.parent(), base.file_name()) else {
+        return;
+    };
+    let dir = if dir.as_os_str().is_empty() {
+        std::path::Path::new(".")
+    } else {
+        dir
+    };
+    let prefix = format!("{}.", name.to_string_lossy());
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let file = entry.file_name().to_string_lossy().into_owned();
+        let Some(rest) = file.strip_prefix(&prefix) else {
+            continue;
+        };
+        let (id, pid_file) = match rest.strip_suffix(".observer") {
+            Some(id) => (id, true),
+            None => (rest, false),
+        };
+        if MatchId::parse(id).is_none() {
+            continue;
+        }
+        let path = entry.path();
+        if pid_file {
+            kill_recorded(path.to_string_lossy().trim_end_matches(".observer"));
+        } else if entry.file_type().is_ok_and(|kind| kind.is_socket()) {
+            let _ = std::fs::remove_file(path);
+        }
+    }
 }
 
 fn kill_group(group: u32) {

@@ -16,6 +16,7 @@
 
 use std::collections::BTreeMap;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::fs;
 use std::io;
 use std::path::Path;
@@ -49,6 +50,9 @@ pub struct History {
     /// recur across matches.
     terrains: HashMap<u64, Vec<u64>>,
     data: HashMap<u64, Vec<u64>>,
+    /// Matches still being written, by any hub: one hub's write must not
+    /// evict another's running match.
+    live: HashSet<u64>,
 }
 
 impl History {
@@ -61,6 +65,7 @@ impl History {
             matches: BTreeMap::new(),
             terrains: HashMap::new(),
             data: HashMap::new(),
+            live: HashSet::new(),
         };
         for entry in fs::read_dir(&history.dir)? {
             let entry = entry?;
@@ -75,6 +80,14 @@ impl History {
             history.add(match_id, stored);
         }
         Ok(history)
+    }
+
+    pub fn set_live(&mut self, match_id: u64, live: bool) {
+        if live {
+            self.live.insert(match_id);
+        } else {
+            self.live.remove(&match_id);
+        }
     }
 
     /// For the startup log.
@@ -255,7 +268,7 @@ impl History {
             .matches
             .keys()
             .copied()
-            .filter(|id| *id != writing && !protect.contains(id))
+            .filter(|id| *id != writing && !protect.contains(id) && !self.live.contains(id))
             .collect();
         for match_id in oldest {
             if self.total + incoming <= target {

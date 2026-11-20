@@ -114,8 +114,9 @@ fn connect(inner: &Weak<RefCell<Inner>>) {
         _ => "ws",
     };
     let url = format!(
-        "{scheme}://{}/play/command",
-        location.host().unwrap_or_default()
+        "{scheme}://{}{}/play/command",
+        location.host().unwrap_or_default(),
+        crate::match_base()
     );
     let Ok(socket) = WebSocket::new(&url) else {
         web_sys::console::error_1(&format!("cannot open {url}").into());

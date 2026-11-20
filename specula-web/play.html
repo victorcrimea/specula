@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<script src="./i18n.js"></script>
+<script src="/i18n.js"></script>
 <title data-i18n>New game</title>
 <style>
 html, body { margin: 0; min-height: 100%; background: #0f1214; color: #e6e9eb;
@@ -35,7 +35,7 @@ a { color: #8fc1e3; }
 <p id="status" hidden>
 <span data-i18n>A game is in progress.</span>
 <a id="watch" href="/" data-i18n>Watch it</a>
-<a id="back" href="/play" hidden data-i18n>Back to your game</a>
+<a id="back" href="/" hidden data-i18n>Back to your game</a>
 </p>
 <form id="setup">
 <div class="row">
@@ -153,8 +153,12 @@ const buildResources = () => {
 
 const showStatus = () => {
   document.getElementById("status").hidden = !setup.running;
-  document.getElementById("watch").hidden = setup.mine;
-  document.getElementById("back").hidden = !setup.mine;
+  const watch = document.getElementById("watch");
+  if (setup.latest) watch.href = "/g/" + setup.latest;
+  watch.hidden = setup.mine || !setup.latest;
+  const back = document.getElementById("back");
+  if (setup.match) back.href = "/g/" + setup.match;
+  back.hidden = !setup.mine;
   // Someone else's game is not this visitor's to end.
   document.getElementById("start").disabled = setup.running && !setup.mine;
 };
@@ -170,9 +174,9 @@ form.addEventListener("submit", async (event) => {
   event.preventDefault();
   error.hidden = true;
   const body = new URLSearchParams(new FormData(form));
-  const response = await fetch("/play/new", { method: "POST", body }).catch(() => null);
+  const response = await fetch("/new", { method: "POST", body }).catch(() => null);
   if (response?.ok) {
-    location.href = "/play";
+    location.href = "/g/" + (await response.text());
     return;
   }
   const reason = response ? await response.text() : "";
@@ -181,7 +185,7 @@ form.addEventListener("submit", async (event) => {
 });
 
 (async () => {
-  setup = await (await fetch("/play/setup")).json();
+  setup = await (await fetch("/new")).json();
   for (let count = 2; count <= 8; ++count) playersSelect.append(option(count, count));
   playersSelect.addEventListener("change", buildSlots);
   showStatus();
@@ -189,8 +193,8 @@ form.addEventListener("submit", async (event) => {
 })();
 </script>
 <script type="module">
-const glue = "./pkg/specula_web.js?v=GLUE";
-const wasm = "./pkg/specula_web_bg.wasm?v=WASM";
+const glue = "/pkg/specula_web.js?v=GLUE";
+const wasm = "/pkg/specula_web_bg.wasm?v=WASM";
 const { default: init, play_setup_main } = await import(glue);
 await init({ module_or_path: wasm });
 play_setup_main();

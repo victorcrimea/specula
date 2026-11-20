@@ -318,6 +318,8 @@ use std::sync::Arc;
 use std::sync::Condvar;
 use std::sync::Mutex;
 use std::sync::OnceLock;
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 use std::time::Instant;
 use std::time::SystemTime;
@@ -1189,6 +1191,9 @@ impl Shown {
                     .visual
                     .sender
                     .send(envelope_ended(&encode_ended(match_id, 0)).into());
+                if let Some(history) = history {
+                    history.lock().unwrap().set_live(match_id, false);
+                }
             }
         }
     }
@@ -1736,10 +1741,10 @@ pub enum View {
 }
 
 impl Hub {
-    pub fn new(delay: Duration, history: Option<History>) -> Self {
+    pub fn new(delay: Duration, history: Option<Arc<Mutex<History>>>) -> Self {
         Hub {
             queued: Condvar::new(),
-            history: history.map(|history| Arc::new(Mutex::new(history))),
+            history,
             state: Mutex::new(State {
                 turn: 0,
                 map_size: 0,
@@ -2331,7 +2336,13 @@ impl Hub {
         let state = &mut *self.state.lock().unwrap();
         let start = state.new_feed;
         if start {
-            state.match_id = new_match_id(state.match_id);
+            state.match_id = new_match_id();
+            // A running match is not complete on disk; once ended it is the
+            // newest stored match, so oldest-first eviction reaches it last
+            // anyway.
+            if let Some(history) = &self.history {
+                history.lock().unwrap().set_live(state.match_id, true);
+            }
             state.ended = false;
             state.first_turn = turn;
             let players = state.seat_players.clone();
@@ -2463,6 +2474,16 @@ impl Hub {
         }
     }
 
+    /// The match being shown as `(id, segments, live)`.
+    pub fn shown_info(&self) -> Option<(u64, usize, bool)> {
+        let id = self.state.lock().unwrap().shown.match_id;
+        if id == 0 {
+            return None;
+        }
+        self.match_info(id)
+            .map(|(segments, live)| (id, segments, live))
+    }
+
     /// For a page opening a match by its id: how many segments it has
     /// (the open one included), and whether it is the match being shown,
     /// which is followed over the WebSocket rather than played from its
@@ -2571,12 +2592,22 @@ fn ending(
     })
 }
 
-/// Distinct from the previous id even if the clock did not move.
-fn new_match_id(previous: u64) -> u64 {
+static LAST_MATCH_ID: AtomicU64 = AtomicU64::new(0);
+
+/// Distinct from every id of every hub even if the clock did not move, and
+/// ordered by time, which `history.rs` relies on.
+fn new_match_id() -> u64 {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |elapsed| elapsed.as_nanos() as u64);
-    if now == previous { now + 1 } else { now }
+    let mut last = LAST_MATCH_ID.load(Ordering::SeqCst);
+    loop {
+        let id = now.max(last + 1);
+        match LAST_MATCH_ID.compare_exchange(last, id, Ordering::SeqCst, Ordering::SeqCst) {
+            Ok(_) => return id,
+            Err(seen) => last = seen,
+        }
+    }
 }
 
 fn encode_ended(match_id: u64, since_ms: u64) -> Vec<u8> {
