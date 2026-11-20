@@ -276,11 +276,13 @@ impl Registry {
                 FEED_SOCKET_ERROR
             })?;
         let hub = spawn_hub(self.delay, self.history.clone());
+        let dirs = observer::EngineDirs::new(&self.config.engine_dir, id, &format!("slot-{slot}"));
         let play = Arc::new(Play::new(
             socket.clone(),
             self.config.port(slot),
             Arc::clone(&hub),
             generation,
+            dirs,
         ));
         let engine_done = Arc::new(AtomicBool::new(false));
         {
@@ -329,6 +331,15 @@ impl Registry {
         );
         inner.order.push(id);
         inner.slots[usize::from(slot)] = Some(id);
+        let live: Vec<MatchId> = inner
+            .matches
+            .iter()
+            .filter(|(_, found)| *found.state.lock().unwrap() == MatchState::Running)
+            .map(|(id, _)| *id)
+            .collect();
+        let root = self.config.engine_dir.clone();
+        // Off the registry lock: removing a log dir can take a while.
+        std::thread::spawn(move || observer::prune_logs(&root, &live));
         Ok(id)
     }
 

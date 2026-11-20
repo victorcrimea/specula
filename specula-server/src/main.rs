@@ -71,7 +71,7 @@ const DEFAULT_USAGE_DIR: &str = "usage";
 const USAGE: &str = "usage: specula-server [SOCKET] [--observe HOST:PORT | [--slots N] \
                      [--port-base PORT]] [--max-observers N] [--admin-key KEY] \
                      [--delay SECONDS] [--history DIR] [--history-limit SIZE] [--usage DIR] \
-                     [--stats-key KEY]";
+                     [--engine-dir DIR] [--stats-key KEY]";
 /// Relative to the working directory, so the server runs from the repo root.
 pub const WEB_ROOT: &str = "specula-web";
 
@@ -130,6 +130,15 @@ async fn main() {
         }
     };
 
+    if let Err(error) = std::fs::create_dir_all(&config.engine_dir) {
+        eprintln!(
+            "cannot create the engine dir {}: {error}",
+            config.engine_dir.display()
+        );
+        std::process::exit(1);
+    }
+    println!("engine logs and caches in {}", config.engine_dir.display());
+
     let supervised = observe.is_some();
     let broadcast = if config.slots == 0 {
         if let Err(error) = remove_stale_socket(&path) {
@@ -152,7 +161,10 @@ async fn main() {
         if let Some((host, port)) = observe {
             let supervisor_hub = Arc::clone(&hub);
             let socket = path.clone();
-            std::thread::spawn(move || observer::supervise(&host, &port, &socket, &supervisor_hub));
+            let engine_dir = config.engine_dir.clone();
+            std::thread::spawn(move || {
+                observer::supervise(&host, &port, &socket, &engine_dir, &supervisor_hub)
+            });
         }
         Some(hub)
     } else {
@@ -839,7 +851,7 @@ struct Args {
 
 /// `[SOCKET] [--observe HOST:PORT | [--slots N] [--port-base PORT]]
 /// [--max-observers N] [--admin-key KEY] [--delay SECONDS] [--history DIR]
-/// [--history-limit SIZE] [--usage DIR] [--stats-key KEY]`, in any order.
+/// [--history-limit SIZE] [--usage DIR] [--engine-dir DIR] [--stats-key KEY]`, in any order.
 fn parse_args() -> Result<Args, String> {
     let mut socket = None;
     let mut observe = None;
@@ -851,6 +863,7 @@ fn parse_args() -> Result<Args, String> {
     let mut history_dir = PathBuf::from(DEFAULT_HISTORY_DIR);
     let mut history_limit = DEFAULT_HISTORY_LIMIT;
     let mut usage_dir = PathBuf::from(DEFAULT_USAGE_DIR);
+    let mut engine_dir = PathBuf::from(config::DEFAULT_ENGINE_DIR);
     let mut stats_key = None;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -867,6 +880,8 @@ fn parse_args() -> Result<Args, String> {
             history_limit = history::parse_size(&size).ok_or_else(|| {
                 format!("--history-limit {size}: expected bytes or a size such as 500M or 1G")
             })?;
+        } else if arg == "--engine-dir" {
+            engine_dir = args.next().ok_or("--engine-dir needs DIR")?.into();
         } else if arg == "--usage" {
             usage_dir = args.next().ok_or("--usage needs DIR")?.into();
         } else if arg == "--stats-key" {
@@ -924,6 +939,8 @@ fn parse_args() -> Result<Args, String> {
             "--slots {slots} from --port-base {port_base} runs past port 65535"
         ));
     }
+    let engine_dir = std::path::absolute(&engine_dir)
+        .map_err(|error| format!("--engine-dir {}: {error}", engine_dir.display()))?;
     Ok(Args {
         socket: socket.unwrap_or_else(|| DEFAULT_SOCKET.to_string()),
         observe,
@@ -932,6 +949,7 @@ fn parse_args() -> Result<Args, String> {
             port_base,
             max_observers,
             admin_key,
+            engine_dir,
         },
         delay,
         history_dir,

@@ -13,11 +13,18 @@
 //! the group is noted in `<socket>.observer` and killed on the next start.
 //! The play host (`play.rs`) is run and noted the same way, one pid file per
 //! match socket.
+//!
+//! Each run writes its logs and cache under the engine dir (`EngineDirs`):
+//! the crash log and `system_info.txt` have fixed names, so engines sharing
+//! a log dir would overwrite each other's, and the engine rewrites cache
+//! files in place, so a second engine could read one half-written.
 
 use std::io;
 use std::io::Write;
 use std::os::unix::fs::FileTypeExt;
 use std::os::unix::process::CommandExt;
+use std::path::Path;
+use std::path::PathBuf;
 use std::process::Command;
 use std::process::Stdio;
 use std::time::Duration;
@@ -42,10 +49,67 @@ const SILENCE_LIMIT: Duration = Duration::from_secs(120);
 const RESTART_DELAY: Duration = Duration::from_secs(5);
 const POLL: Duration = Duration::from_secs(1);
 
-pub fn supervise(host: &str, port: &str, socket: &str, hub: &Hub) {
+/// Run log dirs kept under `<engine dir>/logs`, newest first.
+const KEEP_LOGS: usize = 20;
+
+/// Where one engine run writes. Each run has its own log dir, so a crash
+/// log or `system_info.txt` is never another engine's; each slot (and the
+/// observer) has its own cache, because the engine rewrites cache files in
+/// place and a second engine could read one half-written.
+pub struct EngineDirs {
+    state: PathBuf,
+    cache: PathBuf,
+}
+
+impl EngineDirs {
+    /// `root` is `Config::engine_dir`; `run` names the log dir and `cache`
+    /// the cache dir ("slot-0", "observe").
+    pub fn new(root: &Path, run: MatchId, cache: &str) -> Self {
+        EngineDirs {
+            state: root.join("logs").join(run.to_string()),
+            cache: root.join("cache").join(cache),
+        }
+    }
+
+    /// For the log line.
+    pub fn logs(&self) -> PathBuf {
+        self.state.join("0ad").join("log")
+    }
+}
+
+/// Deletes run log dirs beyond the newest `KEEP_LOGS`, never one in
+/// `live`. Only dirs named by a UUID are touched, so nothing else a user
+/// put there is lost.
+pub fn prune_logs(root: &Path, live: &[MatchId]) {
+    let Ok(entries) = std::fs::read_dir(root.join("logs")) else {
+        return;
+    };
+    let mut runs: Vec<(std::time::SystemTime, MatchId, PathBuf)> = entries
+        .flatten()
+        .filter_map(|entry| {
+            let id = MatchId::parse(entry.file_name().to_str()?)?;
+            if !entry.file_type().ok()?.is_dir() {
+                return None;
+            }
+            let modified = entry.metadata().ok()?.modified().ok()?;
+            Some((modified, id, entry.path()))
+        })
+        .collect();
+    runs.sort_by_key(|run| std::cmp::Reverse(run.0));
+    for (_, id, path) in runs.into_iter().skip(KEEP_LOGS) {
+        if live.contains(&id) {
+            continue;
+        }
+        if let Err(error) = std::fs::remove_dir_all(&path) {
+            eprintln!("cannot remove engine logs {}: {error}", path.display());
+        }
+    }
+}
+
+pub fn supervise(host: &str, port: &str, socket: &str, engine_dir: &Path, hub: &Hub) {
     kill_recorded(socket);
     loop {
-        match run(host, port, socket, hub) {
+        match run(host, port, socket, engine_dir, hub) {
             Ok(outcome) => println!("observer {outcome}"),
             Err(error) => eprintln!("cannot run the observer: {error}"),
         }
@@ -53,16 +117,36 @@ pub fn supervise(host: &str, port: &str, socket: &str, hub: &Hub) {
     }
 }
 
-fn run(host: &str, port: &str, socket: &str, hub: &Hub) -> io::Result<String> {
+fn run(host: &str, port: &str, socket: &str, engine_dir: &Path, hub: &Hub) -> io::Result<String> {
+    let run_id = MatchId::new_v4();
+    prune_logs(engine_dir, &[run_id]);
+    let dirs = EngineDirs::new(engine_dir, run_id, "observe");
     let mut command = Command::new(OBSERVE_SCRIPT);
     command.arg(host).arg(port).arg(socket);
-    run_engine(command, &format!("joining {host}:{port}"), socket, hub)
+    run_engine(
+        command,
+        &format!("joining {host}:{port}"),
+        socket,
+        &dirs,
+        hub,
+    )
 }
 
 /// Runs an engine script until it exits or its feed goes quiet, and kills
 /// its process group then; `what` names it in the log. The play host
 /// (`play.rs`) runs through here too.
-pub fn run_engine(mut command: Command, what: &str, socket: &str, hub: &Hub) -> io::Result<String> {
+pub fn run_engine(
+    mut command: Command,
+    what: &str,
+    socket: &str,
+    dirs: &EngineDirs,
+    hub: &Hub,
+) -> io::Result<String> {
+    std::fs::create_dir_all(&dirs.state)?;
+    std::fs::create_dir_all(&dirs.cache)?;
+    command
+        .env("XDG_STATE_HOME", &dirs.state)
+        .env("XDG_CACHE_HOME", &dirs.cache);
     let started = Instant::now();
     let mut child = command
         .stdin(Stdio::piped())
@@ -71,7 +155,11 @@ pub fn run_engine(mut command: Command, what: &str, socket: &str, hub: &Hub) -> 
         .stderr(Stdio::null())
         .process_group(0)
         .spawn()?;
-    println!("engine {} {what}", child.id());
+    println!(
+        "engine {} {what}, logs in {}",
+        child.id(),
+        dirs.logs().display()
+    );
     if let Err(error) = std::fs::write(pid_path(socket), child.id().to_string()) {
         eprintln!("cannot note the observer in {}: {error}", pid_path(socket));
     }

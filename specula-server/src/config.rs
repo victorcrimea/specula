@@ -1,6 +1,10 @@
 //! The hosting configuration: how many matches the server runs at once,
 //! their ports, and the limits shared by all of them.
 
+use std::path::PathBuf;
+
+/// Relative to the working directory, as `WEB_ROOT`.
+pub const DEFAULT_ENGINE_DIR: &str = "engines";
 /// The engine's default port is taken by any 0 A.D. hosted on this machine.
 pub const DEFAULT_PORT_BASE: u16 = 20777;
 pub const DEFAULT_SLOTS: u16 = 1;
@@ -15,6 +19,9 @@ pub struct Config {
     /// Observer connections summed over every match; 0 refuses them all.
     pub max_observers: u32,
     pub admin_key: Option<String>,
+    /// Absolute: the engine reads a relative XDG path as relative to $HOME
+    /// (`Paths::XDG_Path`).
+    pub engine_dir: PathBuf,
 }
 
 impl Config {

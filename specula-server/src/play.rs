@@ -30,6 +30,7 @@ use rocket::tokio::sync::broadcast;
 
 use crate::feed::Summary;
 use crate::observer;
+use crate::observer::EngineDirs;
 use crate::registry::MatchId;
 use crate::summary_envelope;
 use crate::view::Hub;
@@ -234,6 +235,7 @@ pub enum SlotKind {
 pub struct Play {
     socket: String,
     port: u16,
+    dirs: EngineDirs,
     /// Server-wide launch counter, for the log line only.
     generation: u64,
     hub: Arc<Hub>,
@@ -275,10 +277,17 @@ struct SeatBody {
 }
 
 impl Play {
-    pub fn new(socket: String, port: u16, hub: Arc<Hub>, generation: u64) -> Self {
+    pub fn new(
+        socket: String,
+        port: u16,
+        hub: Arc<Hub>,
+        generation: u64,
+        dirs: EngineDirs,
+    ) -> Self {
         Play {
             socket,
             port,
+            dirs,
             generation,
             hub,
             inner: Mutex::new(Inner::default()),
@@ -331,7 +340,13 @@ impl Play {
                 .arg(&play.socket)
                 .arg(play.port.to_string())
                 .args(&args);
-            match observer::run_engine(command, "hosting a game", &play.socket, &play.hub) {
+            match observer::run_engine(
+                command,
+                "hosting a game",
+                &play.socket,
+                &play.dirs,
+                &play.hub,
+            ) {
                 Ok(outcome) => println!("play host {outcome}"),
                 Err(error) => eprintln!("cannot run the play host: {error}"),
             }
