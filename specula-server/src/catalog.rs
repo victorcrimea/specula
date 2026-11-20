@@ -20,8 +20,26 @@ const BIOMES_DIR: &str = "maps/random/rmbiome";
 const DEFAULT_BIOME: &str = "defaultbiome";
 const SETTINGS_DIR: &str = "simulation/data/settings";
 const CIVS_DIR: &str = "simulation/data/civs";
+const PREVIEWS_DIR: &str = "art/textures/ui/session/icons/mappreview";
+const AIS_DIR: &str = "simulation/ai";
 
-// M12 to M14 read the catalog; until then only its counts are.
+/// `loadAIDifficulties`; the AI reads the index, not the name.
+pub const AI_DIFFICULTIES: [&str; 6] = [
+    "sandbox",
+    "very easy",
+    "easy",
+    "medium",
+    "hard",
+    "very hard",
+];
+/// `gui.gamesetup.aidifficulty` in default.cfg.
+pub const DEFAULT_AI_DIFFICULTY: u8 = 3;
+/// `loadAIBehaviors`.
+pub const AI_BEHAVIORS: [&str; 4] = ["random", "balanced", "defensive", "aggressive"];
+/// `gui.gamesetup.aibehavior` in default.cfg.
+pub const DEFAULT_AI_BEHAVIOR: &str = "random";
+
+// M15 reads the catalog; until then only its counts are.
 #[allow(dead_code)]
 pub struct Catalog {
     pub maps: Vec<Map>,
@@ -38,6 +56,23 @@ pub struct Catalog {
     pub trigger_difficulties: Vec<TriggerDifficulty>,
     /// In `loadVictoryConditions`' order: `GUIOrder`, then title.
     pub victory_conditions: Vec<VictoryCondition>,
+    /// File names, with suffix, in the map preview directory. Stands in for
+    /// `MapCache.previewExists` (`gui/maps/MapCache.js:72`), i.e.
+    /// `Engine.TextureExists`, which a loose mod's file existing satisfies.
+    pub previews: Vec<String>,
+    /// In `loadAIDescriptions`' order, by English name.
+    pub ais: Vec<AiBot>,
+}
+
+#[allow(dead_code)]
+pub struct AiBot {
+    /// The directory under `simulation/ai/`, which `PlayerData[i].AI` names.
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    /// `PlayerAssignment` offers only AIs without it; the AI config page
+    /// offers every AI.
+    pub hidden: bool,
 }
 
 /// `loadMapTypes`, in its order.
@@ -248,6 +283,8 @@ impl Catalog {
                 trigger_difficulty,
             )?,
             victory_conditions: read_victory_conditions(&settings.join("victory_conditions"))?,
+            previews: read_previews(root)?,
+            ais: read_ais(root)?,
         })
     }
 
@@ -255,7 +292,7 @@ impl Catalog {
     pub fn summary(&self, root: &Path) -> String {
         let count = |kind| self.maps.iter().filter(|map| map.kind == kind).count();
         format!(
-            "setup catalog from {}: {} random, {} skirmish and {} scenario maps, {} biomes, {} civs ({} selectable), {} victory conditions, {} game speeds, {} map sizes, {} placements, {} population modes, {} starting resources, {} trigger difficulties, {} player defaults",
+            "setup catalog from {}: {} random, {} skirmish and {} scenario maps, {} biomes, {} civs ({} selectable), {} victory conditions, {} game speeds, {} map sizes, {} placements, {} population modes, {} starting resources, {} trigger difficulties, {} player defaults, {} AIs, {} map previews",
             root.display(),
             count(MapType::Random),
             count(MapType::Skirmish),
@@ -271,6 +308,8 @@ impl Catalog {
             self.starting_resources.len(),
             self.trigger_difficulties.len(),
             self.player_defaults.len(),
+            self.ais.len(),
+            self.previews.len(),
         )
     }
 }
@@ -630,4 +669,63 @@ fn read_victory_conditions(dir: &Path) -> Result<Vec<VictoryCondition>, String> 
             .then_with(|| a.title.cmp(&b.title))
     });
     Ok(conditions)
+}
+
+fn read_previews(root: &Path) -> Result<Vec<String>, String> {
+    let dir = root.join(PREVIEWS_DIR);
+    let entries = std::fs::read_dir(&dir).map_err(|error| format!("{}: {error}", dir.display()))?;
+    let mut names = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|error| format!("{}: {error}", dir.display()))?;
+        if entry.file_type().is_ok_and(|kind| kind.is_file())
+            && let Some(name) = entry.file_name().to_str()
+        {
+            names.push(name.to_string());
+        }
+    }
+    names.sort();
+    Ok(names)
+}
+
+/// `ICmpAIManager::GetAIs`: every `*.json` below `simulation/ai/`.
+fn read_ais(root: &Path) -> Result<Vec<AiBot>, String> {
+    let dir = root.join(AIS_DIR);
+    let mut ais = Vec::new();
+    collect_ais(&dir, None, &mut ais)?;
+    ais.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(ais)
+}
+
+fn collect_ais(dir: &Path, id: Option<&str>, ais: &mut Vec<AiBot>) -> Result<(), String> {
+    let entries = std::fs::read_dir(dir).map_err(|error| format!("{}: {error}", dir.display()))?;
+    let mut paths = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|error| format!("{}: {error}", dir.display()))?;
+        let kind = entry
+            .file_type()
+            .map_err(|error| format!("{}: {error}", dir.display()))?;
+        paths.push((entry.path(), entry.file_name(), kind));
+    }
+    // The walk order is the file system's otherwise, and ties in the name
+    // sort would follow it.
+    paths.sort_by(|a, b| a.1.cmp(&b.1));
+    for (path, name, kind) in paths {
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if kind.is_dir() {
+            collect_ais(&path, Some(id.unwrap_or(name)), ais)?;
+        } else if name.ends_with(".json") {
+            // The engine names an AI by the path's third component, which
+            // for a file directly in `simulation/ai/` is the file itself.
+            let json = read_json(&path)?;
+            ais.push(AiBot {
+                id: id.unwrap_or(name).to_string(),
+                name: text(&json, "name").ok_or_else(|| format!("{}: no name", path.display()))?,
+                description: text_or_empty(&json, "description"),
+                hidden: flag(&json, "hidden"),
+            });
+        }
+    }
+    Ok(())
 }

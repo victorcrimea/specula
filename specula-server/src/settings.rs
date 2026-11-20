@@ -1,9 +1,11 @@
 //! The game setup's settings, one field group per class of the engine's
 //! `gamesettings/attributes/`, holding the state that class holds, and their
 //! serializer to `initAttributes` (`GameSettings.toInitAttributes`, then
-//! `launchGame`'s `onFinalizeAttributes`). The dependency rules between the
-//! classes (their `onMapChange` and `maybeUpdate` watchers) are M13's, and
-//! resolving the random choices (`pickRandomItems`) is M14's.
+//! `launchGame`'s `onFinalizeAttributes`). The classes' dependency rules
+//! (their `onMapChange` and `maybeUpdate` watchers) are in `rules`,
+//! `fromInitAttributes` in `from_init`, and vanilla's `gui/gamesetup` layer
+//! in `gamesetup`. Resolving the random choices (`pickRandomItems`) is
+//! M14's.
 //!
 //! Groups and the serializer follow the engine's class order, the VFS's
 //! byte order of the file names, since `GameSettings.init` runs each
@@ -18,6 +20,10 @@ use crate::catalog::Catalog;
 use crate::catalog::MapType;
 use crate::catalog::VictoryCondition;
 
+mod from_init;
+pub mod gamesetup;
+mod rules;
+
 /// `Seeds` and `PlayerCiv`'s civs, the map, the biome, the daytime and the
 /// placement may be left to chance until launch.
 #[derive(Clone, PartialEq)]
@@ -31,6 +37,17 @@ impl<T: Clone + Into<Value>> Choice<T> {
         match self {
             Choice::Random => Value::from(RANDOM),
             Choice::Fixed(value) => value.clone().into(),
+        }
+    }
+}
+
+impl Choice<String> {
+    /// `"random"` is the choice left to chance, anything else is itself.
+    fn from_name(name: &str) -> Choice<String> {
+        if name == RANDOM {
+            Choice::Random
+        } else {
+            Choice::Fixed(name.to_string())
         }
     }
 }
@@ -87,7 +104,7 @@ const DEFAULT_COLORS: [[u8; 3]; 16] = [
     [80, 80, 80],
 ];
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub struct Settings {
     pub biome: Biome,
     pub campaign_data: Option<Value>,
@@ -115,6 +132,9 @@ pub struct Settings {
     pub player_count: PlayerCount,
     pub player_name: Vec<Option<String>>,
     pub player_placement: PlayerPlacement,
+    /// Vanilla's gamesetup page adds it (`PlayerRemoved.js`), not
+    /// `gamesettings/attributes`.
+    pub player_removed: Vec<bool>,
     /// `-1` is no team.
     pub player_team: Locked<i32>,
     pub population: Population,
@@ -131,23 +151,38 @@ pub struct Settings {
     pub victory_conditions: VictoryConditions,
     pub water_level: WaterLevel,
     pub wonder: Wonder,
+    pub gui: GuiData,
 }
 
-#[derive(Clone)]
+/// What vanilla's setup page holds outside `GameSettings`.
+#[derive(Clone, PartialEq)]
+pub struct GuiData {
+    /// `GameSettingsGuiData.mapFilter.filter`.
+    pub map_filter: String,
+    /// `GameSpeed` control's `previousAllowFastForward`.
+    pub allow_fast_forward: Option<bool>,
+    /// Each `PlayerCiv` control's `wasLocked`, one per possible player.
+    pub civ_was_locked: [bool; MAX_PLAYERS],
+}
+
+#[derive(Clone, PartialEq)]
 pub struct Biome {
     pub biome: Option<Choice<String>>,
     /// Ids in the catalog's order; a map with none offers no biome.
     pub available: Vec<String>,
+    /// `cachedMapData`: the map's `SupportedBiomes`, and the map it came from,
+    /// since vanilla compares an array by identity and a string by value.
+    pub cached: Option<(String, Value)>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub struct Daytime {
     /// The map's `Daytime` options, passed through.
     pub data: Option<Value>,
     pub value: Option<Choice<String>>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub struct Landscape {
     /// The map's `Landscapes` groups, passed through.
     pub data: Option<Value>,
@@ -155,13 +190,13 @@ pub struct Landscape {
 }
 
 /// The classes that are on or off and may be unavailable.
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub struct Toggle {
     pub available: bool,
     pub enabled: bool,
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub struct MapChoice {
     pub kind: Option<MapType>,
     /// The map's path, such as `maps/random/mainland`.
@@ -171,21 +206,21 @@ pub struct MapChoice {
     pub random_options: Vec<String>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub struct MapExploration {
     pub explored: bool,
     pub revealed: bool,
     pub allied: bool,
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub struct MapSize {
     pub default: u32,
     pub size: u32,
     pub available: bool,
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub struct Ai {
     pub bot: String,
     pub difficulty: u8,
@@ -193,33 +228,33 @@ pub struct Ai {
 }
 
 /// A per-player list whose entries a map can fix.
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub struct Locked<T> {
     pub values: Vec<T>,
     pub locked: Vec<bool>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub struct PlayerColor {
     pub values: Vec<Option<[u8; 3]>>,
     pub locked: Vec<bool>,
     pub available: Vec<[u8; 3]>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub struct PlayerCount {
     pub players: usize,
     pub max: usize,
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub struct PlayerPlacement {
     /// The map's `PlayerPlacements`.
     pub available: Option<Vec<String>>,
     pub value: Option<Choice<String>>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub struct Population {
     /// `PopulationCapType`, a `population_capacities.json` name.
     pub cap_type: String,
@@ -228,7 +263,7 @@ pub struct Population {
     pub per_player: Option<Vec<Option<u32>>>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub struct Relic {
     pub available: bool,
     pub count: u32,
@@ -236,7 +271,7 @@ pub struct Relic {
     pub duration: u32,
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub struct SeaLevelRise {
     pub min: Option<i64>,
     pub max: Option<i64>,
@@ -244,21 +279,21 @@ pub struct SeaLevelRise {
     pub value: Option<i64>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub struct Seeds {
     pub seed: Choice<u32>,
     pub ai_seed: Choice<u32>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub struct StartingResources {
     pub default: u32,
     pub resources: u32,
     /// A scenario's per-player amounts, written next to `resources`.
-    pub per_player: Option<Vec<Option<u32>>>,
+    pub per_player: Option<Vec<Option<Value>>>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub struct TriggerDifficulty {
     /// The map's `SupportedTriggerDifficulties` names.
     pub available: Option<Vec<String>>,
@@ -266,7 +301,7 @@ pub struct TriggerDifficulty {
 }
 
 /// Each list is a set in insertion order, as the class's `Set`s.
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub struct TriggerScripts {
     pub custom: Vec<String>,
     pub victory: Vec<String>,
@@ -274,20 +309,20 @@ pub struct TriggerScripts {
 }
 
 /// Each list is a set in insertion order, as the class's `Set`s.
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub struct VictoryConditions {
     pub active: Vec<String>,
     pub disabled: Vec<String>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub struct WaterLevel {
     /// The map's `WaterLevels`, passed through.
     pub options: Option<Value>,
     pub value: Option<String>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub struct Wonder {
     pub available: bool,
     /// Minutes.
@@ -338,6 +373,7 @@ impl Settings {
             biome: Biome {
                 biome: None,
                 available: Vec::new(),
+                cached: None,
             },
             campaign_data: None,
             ceasefire: 0,
@@ -404,6 +440,7 @@ impl Settings {
                 available: None,
                 value: None,
             },
+            player_removed: Vec::new(),
             player_team: Locked {
                 values: Vec::new(),
                 locked: Vec::new(),
@@ -462,6 +499,11 @@ impl Settings {
             wonder: Wonder {
                 available: false,
                 duration: 0,
+            },
+            gui: GuiData {
+                map_filter: "default".into(),
+                allow_fast_forward: None,
+                civ_was_locked: [false; MAX_PLAYERS],
             },
         };
         // The watchers on `victoryConditions.active` registered before
@@ -609,7 +651,7 @@ impl Settings {
             }
         }
         if let Some(amounts) = &self.starting_resources.per_player {
-            per_player(&mut players, amounts, "Resources");
+            per_player_values(&mut players, amounts, "Resources");
         }
         settings.insert(
             "StartingResources".into(),
@@ -639,6 +681,9 @@ impl Settings {
         }
         if self.wonder.available {
             settings.insert("WonderDuration".into(), self.wonder.duration.into());
+        }
+        for (index, removed) in self.player_removed.iter().enumerate() {
+            player_data(&mut players, index).insert("Removed".into(), (*removed).into());
         }
 
         settings.insert(
@@ -699,6 +744,28 @@ impl VictoryConditions {
         }
         self.disabled = disabled(catalog, &active);
         self.active = active;
+    }
+
+    /// `VictoryConditions._delete`.
+    pub fn delete(&mut self, catalog: &Catalog, names: &[&str]) {
+        let mut active = self.active.clone();
+        active.retain(|name| !names.contains(&name.as_str()));
+        self.disabled = disabled(catalog, &active);
+        self.active = active;
+    }
+
+    /// `VictoryConditions.fromList`. An empty list really empties `active`,
+    /// as in vanilla, where `![]` is false.
+    #[allow(clippy::wrong_self_convention)] // vanilla's name, and it mutates
+    pub fn from_list(&mut self, catalog: &Catalog, names: &[&str]) {
+        let kept: Vec<&str> = names
+            .iter()
+            .copied()
+            .filter(|name| condition(catalog, name).is_some())
+            .collect();
+        self.active.clear();
+        self.disabled.clear();
+        self.add(catalog, &kept);
     }
 
     /// `TriggerScripts.updateVictoryScripts`: the active conditions' scripts.
@@ -762,6 +829,42 @@ fn per_player(players: &mut Vec<Object<String, Value>>, values: &[Option<u32>], 
             player.insert(key.into(), value.into());
         }
     }
+}
+
+fn per_player_values(
+    players: &mut Vec<Object<String, Value>>,
+    values: &[Option<Value>],
+    key: &str,
+) {
+    for (index, value) in values.iter().enumerate() {
+        let player = player_data(players, index);
+        if let Some(value) = value.as_ref().filter(|value| truthy(value)) {
+            player.insert(key.into(), value.clone());
+        }
+    }
+}
+
+/// JavaScript's unary `+`.
+fn js_number(value: &Value) -> f64 {
+    match value {
+        Value::Number(number) => number.as_f64().unwrap_or(f64::NAN),
+        Value::String(text) => {
+            let text = text.trim();
+            if text.is_empty() {
+                0.0
+            } else {
+                text.parse().unwrap_or(f64::NAN)
+            }
+        }
+        Value::Bool(value) => f64::from(u8::from(*value)),
+        Value::Null => 0.0,
+        Value::Array(_) | Value::Object(_) => f64::NAN,
+    }
+}
+
+/// `Math.round`, which differs from `f64::round` for negative halves.
+fn js_round(x: f64) -> f64 {
+    (x + 0.5).floor()
 }
 
 /// JavaScript's truthiness, which the classes test their passthrough values
