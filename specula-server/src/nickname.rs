@@ -28,9 +28,6 @@ impl Nickname {
 /// case, as the lobby's XMPP names are. A suffixed name may pass
 /// `MAX_LENGTH`: the limit is on what a visitor types, and cutting the
 /// name instead could make it another visitor's.
-// Its callers come with the seat table (M10); until then a match has one
-// human.
-#[allow(dead_code)]
 pub fn suffix_duplicates(names: &mut [Nickname]) {
     let taken = |names: &[Nickname], candidate: &str| {
         names

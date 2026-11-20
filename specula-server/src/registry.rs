@@ -6,7 +6,8 @@
 //! A match's UUID outlives its hub: once only the history holds it,
 //! `/g/<uuid>` replays it from there (`Registry::resolve`).
 //!
-//! Lock order: registry `inner`, then `Play`'s inner, then `Hub` state.
+//! Lock order: registry `inner`, then `Play`'s inner, then `Seats`, then
+//! `Hub` state.
 //! Nothing called from inside a `Play` or `Hub` lock calls the registry;
 //! `Play::start`'s `on_exit` runs after its lock is released.
 //!
@@ -45,6 +46,7 @@ use crate::history::History;
 use crate::observer;
 use crate::play::Play;
 use crate::play::Setup;
+use crate::seats::Seats;
 use crate::view::Hub;
 use crate::view::Message;
 use crate::view::SummaryBody;
@@ -154,6 +156,8 @@ pub struct Match {
     pub socket: String,
     pub hub: Arc<Hub>,
     pub play: Arc<Play>,
+    /// From the setup's opening on (D13); `play` shares it.
+    pub seats: Arc<Seats>,
     state: Mutex<MatchState>,
     /// The engine's runner thread, handed to a rematch in the same slot,
     /// which joins it first: the UDP port is the slot's.
@@ -393,15 +397,14 @@ impl Registry {
         })
     }
 
-    /// The newest match of `owner` whose engine still holds its slot,
+    /// The newest match `owner` hosts whose engine still holds its slot,
     /// running or not: after End the engine takes a moment to die, and a
     /// rematch started meanwhile must wait for it rather than be refused.
     fn own_slot_holder_in(inner: &Inner, owner: &str) -> Option<Arc<Match>> {
         inner.order.iter().rev().find_map(|id| {
             let found = inner.matches.get(id)?;
-            (inner.slots[usize::from(found.slot)] == Some(*id)
-                && found.play.seat(Some(owner)).is_some())
-            .then(|| Arc::clone(found))
+            (inner.slots[usize::from(found.slot)] == Some(*id) && found.seats.is_host(owner))
+                .then(|| Arc::clone(found))
         })
     }
 
@@ -419,11 +422,15 @@ impl Registry {
         self.inner.lock().unwrap().slots.iter().any(Option::is_none)
     }
 
-    /// Starts a match for `owner`. A new game ends the visitor's running
-    /// one (D14), in whose slot it then runs.
+    /// Starts a match for `owner`, its host and only human seat until
+    /// others can join (M15). A new game ends the one the visitor hosts
+    /// (D14), in whose slot it then runs.
     pub fn launch(self: &Arc<Self>, owner: &str, setup: &Setup) -> Result<MatchId, &'static str> {
         // A bad form costs nothing.
-        Play::check(setup)?;
+        let (seat, _) = Play::check(setup)?;
+        let seats = Arc::new(Seats::new());
+        let nickname = seats.join(owner, setup.nickname.clone());
+        seats.set_player(owner, Some(seat))?;
         let mut inner = self.inner.lock().unwrap();
         if inner.stopping {
             return Err(STOPPING_ERROR);
@@ -463,6 +470,7 @@ impl Registry {
             Arc::clone(&hub),
             generation,
             dirs,
+            Arc::clone(&seats),
         ));
         let engine_done = Arc::new(AtomicBool::new(false));
         {
@@ -486,7 +494,7 @@ impl Registry {
                 }
             }
         };
-        let runner = match play.start(owner, setup, previous, on_exit) {
+        let runner = match play.start(setup, previous, on_exit) {
             Ok(runner) => runner,
             Err(error) => {
                 engine_done.store(true, Ordering::SeqCst);
@@ -496,7 +504,7 @@ impl Registry {
         inner.generation = generation;
         println!(
             "match {id} (game {generation}) by {} in slot {slot}, port {}, feed {socket}",
-            setup.nickname.as_str(),
+            nickname.as_str(),
             self.config.port(slot)
         );
         inner.matches.insert(
@@ -506,6 +514,7 @@ impl Registry {
                 socket,
                 hub,
                 play,
+                seats,
                 state: Mutex::new(MatchState::Running),
                 runner: Mutex::new(Some(runner)),
                 launched: Instant::now(),

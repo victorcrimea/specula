@@ -6,9 +6,10 @@
 //! slot as the game's controller.
 //!
 //! One game per `Play`, and one `Play` per match (`registry.rs`).
-//! `/g/<uuid>` is the player's page on the live stream for the visitor who
-//! holds the seat, and the observers' page with the delay for anyone else;
-//! this split is a convenience, not a guard. The seat is the visitor's `sv`
+//! `/g/<uuid>` is the player's page on the live stream for a visitor who
+//! holds a seat, and the observers' page with the delay for anyone else;
+//! this split is a convenience, not a guard. Who holds which seat, and who
+//! hosts, is the match's seat table (`seats.rs`), by the visitor's `sv`
 //! cookie.
 
 use std::collections::HashMap;
@@ -34,6 +35,7 @@ use crate::nickname::Nickname;
 use crate::observer;
 use crate::observer::EngineDirs;
 use crate::registry::MatchId;
+use crate::seats::Seats;
 use crate::summary_envelope;
 use crate::view::Hub;
 use crate::view::SummaryBody;
@@ -161,7 +163,7 @@ pub struct Status {
     /// The visitor's seat is not active any more: they resigned or were
     /// beaten while the others play on.
     pub defeated: bool,
-    /// The visitor started the last game, which a rematch repeats.
+    /// The visitor hosts the last game, which a rematch repeats.
     pub rematch: bool,
     /// The visitor's seat while the game is theirs, running or not, which
     /// the summary reads after the engine has exited.
@@ -255,6 +257,7 @@ pub struct Play {
     /// Server-wide launch counter, for the log line only.
     generation: u64,
     hub: Arc<Hub>,
+    seats: Arc<Seats>,
     inner: Mutex<Inner>,
     /// The engine's answers to the queries, as the text message
     /// `{"id":..,"result":..}` the pages read.
@@ -269,19 +272,15 @@ struct Inner {
 }
 
 struct Game {
-    /// The visitor who started it, who holds the seat.
-    owner: String,
-    /// Their player number.
-    seat: u8,
     running: bool,
     /// What it was started with, for a rematch.
     setup: Setup,
-    /// Every statistics capture of the owner's seat, kept after the engine
-    /// exits.
-    summaries: Vec<Arc<SeatCapture>>,
+    /// Every statistics capture of each human seat, by player number, kept
+    /// after the engine exits.
+    summaries: HashMap<u8, Vec<Arc<SeatCapture>>>,
 }
 
-/// One capture of the owner's seat, and its envelope once compressed.
+/// One capture of a seat, and its envelope once compressed.
 struct SeatCapture {
     turn: u32,
     inner: Mutex<SeatBody>,
@@ -299,6 +298,7 @@ impl Play {
         hub: Arc<Hub>,
         generation: u64,
         dirs: EngineDirs,
+        seats: Arc<Seats>,
     ) -> Self {
         Play {
             socket,
@@ -306,6 +306,7 @@ impl Play {
             dirs,
             generation,
             hub,
+            seats,
             inner: Mutex::new(Inner::default()),
             replies: broadcast::channel(REPLY_BACKLOG).0,
         }
@@ -323,29 +324,28 @@ impl Play {
         Ok((seat, engine_args(setup)?))
     }
 
-    /// Starts the game for `owner` and gives the thread that runs its
-    /// engine. `previous` is the runner of the game this one replaces in
-    /// the slot, joined first: the UDP port is the slot's. `on_exit` runs
-    /// once the engine is gone and no lock of this is held.
+    /// Starts the game for the seats the table holds and gives the thread
+    /// that runs its engine. `previous` is the runner of the game this one
+    /// replaces in the slot, joined first: the UDP port is the slot's.
+    /// `on_exit` runs once the engine is gone and no lock of this is held.
     pub fn start(
         self: &Arc<Self>,
-        owner: &str,
         setup: &Setup,
         previous: Option<JoinHandle<()>>,
         on_exit: impl FnOnce() + Send + 'static,
     ) -> Result<JoinHandle<()>, &'static str> {
-        let (seat, args) = Self::check(setup)?;
+        let (_, args) = Self::check(setup)?;
         self.inner.lock().unwrap().game = Some(Game {
-            owner: owner.to_string(),
-            seat,
             running: true,
             setup: setup.clone(),
-            summaries: Vec::new(),
+            summaries: HashMap::new(),
         });
-        println!("game {} for {owner}: {}", self.generation, args.join(" "));
+        let host = self.seats.host().unwrap_or_default();
+        println!("game {} for {host}: {}", self.generation, args.join(" "));
         // The engine connects the feed after this, so its first turn
-        // already has the seat's stream.
-        self.hub.set_seats(vec![u32::from(seat)]);
+        // already has the seats' streams.
+        let players = self.seats.players().into_iter().map(u32::from).collect();
+        self.hub.set_seats(players);
         let play = Arc::clone(self);
         Ok(std::thread::spawn(move || {
             if let Some(previous) = previous {
@@ -376,89 +376,89 @@ impl Play {
         }))
     }
 
-    /// The player number `visitor` commands, if they hold the seat.
+    /// The player number `visitor` commands, if they hold a seat.
     pub fn seat(&self, visitor: Option<&str>) -> Option<u8> {
-        let inner = self.inner.lock().unwrap();
-        let game = inner.game.as_ref()?;
-        (Some(game.owner.as_str()) == visitor).then_some(game.seat)
+        self.seats.player_of(visitor?)
     }
 
     pub fn status(&self, visitor: Option<&str>) -> Status {
-        let (running, owned, seat) = {
-            let inner = self.inner.lock().unwrap();
-            match &inner.game {
-                Some(game) => (
-                    game.running,
-                    Some(game.owner.as_str()) == visitor,
-                    game.seat,
-                ),
-                None => (false, false, 0),
-            }
-        };
+        let running = self
+            .inner
+            .lock()
+            .unwrap()
+            .game
+            .as_ref()
+            .is_some_and(|game| game.running);
+        let seat = self.seat(visitor);
         Status {
             running,
-            mine: running && owned,
-            defeated: running && owned && self.seat_defeated(seat),
-            rematch: owned,
-            seat: owned.then_some(seat).filter(|&seat| seat != 0),
+            mine: running && seat.is_some(),
+            defeated: running && seat.is_some_and(|seat| self.seat_defeated(seat)),
+            rematch: visitor.is_some_and(|visitor| self.seats.is_host(visitor)),
+            seat: seat.filter(|&seat| seat != 0),
             limits: None,
         }
     }
 
-    /// Every capture is kept, but only the owner's seat: the other copies
-    /// are never served through the seat's routes.
+    /// Every capture is kept, but only the human seats' views: the full
+    /// copy is never served through the seats' routes.
     pub fn set_summary(&self, summary: Summary) {
-        let (capture, raw) = {
+        let players = self.seats.players();
+        let mut compress = Vec::with_capacity(players.len());
+        {
             let mut inner = self.inner.lock().unwrap();
             let Some(game) = inner.game.as_mut() else {
                 return;
             };
-            let Some(view) = summary
-                .seats
-                .get(usize::from(game.seat))
-                .and_then(|view| view.as_ref())
-            else {
-                return;
-            };
-            let Some(raw) = summary_envelope(summary.turn, summary.is_final, view) else {
-                return;
-            };
-            let raw: Arc<[u8]> = raw.into();
-            let capture = Arc::new(SeatCapture {
-                turn: summary.turn,
-                inner: Mutex::new(SeatBody {
-                    raw: Some(Arc::clone(&raw)),
-                    brotli: None,
-                }),
-            });
-            // A final capture on the turn of a periodic one replaces it.
-            if game
-                .summaries
-                .last()
-                .is_some_and(|last| last.turn == summary.turn)
-            {
-                game.summaries.pop();
+            for player in players {
+                let Some(view) = summary
+                    .seats
+                    .get(usize::from(player))
+                    .and_then(|view| view.as_ref())
+                else {
+                    continue;
+                };
+                let Some(raw) = summary_envelope(summary.turn, summary.is_final, view) else {
+                    continue;
+                };
+                let raw: Arc<[u8]> = raw.into();
+                let capture = Arc::new(SeatCapture {
+                    turn: summary.turn,
+                    inner: Mutex::new(SeatBody {
+                        raw: Some(Arc::clone(&raw)),
+                        brotli: None,
+                    }),
+                });
+                let captures = game.summaries.entry(player).or_default();
+                // A final capture on the turn of a periodic one replaces it.
+                if captures
+                    .last()
+                    .is_some_and(|last| last.turn == summary.turn)
+                {
+                    captures.pop();
+                }
+                captures.push(Arc::clone(&capture));
+                compress.push((capture, raw));
             }
-            game.summaries.push(Arc::clone(&capture));
-            (capture, raw)
-        };
-        spawn_brotli(raw, move |brotli| {
-            let mut inner = capture.inner.lock().unwrap();
-            inner.brotli = Some(brotli);
-            inner.raw = None;
-        });
+        }
+        for (capture, raw) in compress {
+            spawn_brotli(raw, move |brotli| {
+                let mut inner = capture.inner.lock().unwrap();
+                inner.brotli = Some(brotli);
+                inner.raw = None;
+            });
+        }
     }
 
-    /// The owner's seat view at or before `turn`, or the last one. Never
+    /// The visitor's seat view at or before `turn`, or the last one. Never
     /// the full copy: it holds the opponents' statistics.
     pub fn summary(&self, visitor: Option<&str>, turn: Option<u32>) -> Option<SummaryBody> {
+        let player = self.seat(visitor)?;
         let inner = self.inner.lock().unwrap();
         let game = inner.game.as_ref()?;
-        if Some(game.owner.as_str()) != visitor {
-            return None;
-        }
         let capture = game
             .summaries
+            .get(&player)?
             .iter()
             .rev()
             .find(|capture| turn.is_none_or(|turn| capture.turn <= turn))?;
@@ -483,13 +483,28 @@ impl Play {
             .is_some_and(|state| state != PLAYER_ACTIVE)
     }
 
-    /// The running game `owner` holds the seat of, as its seat number.
+    /// The seat `owner` holds in the running game.
     fn running_seat(&self, owner: &str) -> Result<u8, &'static str> {
-        let inner = self.inner.lock().unwrap();
-        match &inner.game {
-            Some(game) if game.running && game.owner == owner => Ok(game.seat),
+        let running = self
+            .inner
+            .lock()
+            .unwrap()
+            .game
+            .as_ref()
+            .is_some_and(|game| game.running);
+        match self.seats.player_of(owner) {
+            Some(seat) if running => Ok(seat),
             _ => Err("no game of yours is running"),
         }
+    }
+
+    /// Whether no human seat is still in the game (D17). Asked without
+    /// `inner` held, as `seat_defeated` is.
+    fn humans_out(&self) -> bool {
+        self.seats
+            .players()
+            .into_iter()
+            .all(|seat| self.seat_defeated(seat))
     }
 
     /// Resigns `owner`'s seat, as the session's Resign does
@@ -509,12 +524,14 @@ impl Play {
         Ok(())
     }
 
-    /// Ends `owner`'s game for everyone: the engine is stopped, and the
-    /// runner thread and the feed's end take it from there.
+    /// Ends the game for everyone if `owner` hosts it: the engine is
+    /// stopped, and the runner thread and the feed's end take it from
+    /// there.
     pub fn end(&self, owner: &str) -> Result<(), &'static str> {
+        let host = self.seats.is_host(owner);
         let mut inner = self.inner.lock().unwrap();
         match &mut inner.game {
-            Some(game) if game.running && game.owner == owner => {
+            Some(game) if game.running && host => {
                 self.stop_engine(game);
                 Ok(())
             }
@@ -543,12 +560,13 @@ impl Play {
     }
 
     /// Stops the engine of a game nobody plays any more, as `end` does but
-    /// for no owner: a stopping server must not wait on a won game whose
+    /// for no host: a stopping server must not wait on a won game whose
     /// engine stays in its session. Returns whether it stopped one.
     pub fn end_decided(&self) -> bool {
+        let out = self.humans_out();
         let mut inner = self.inner.lock().unwrap();
         match &mut inner.game {
-            Some(game) if game.running && self.seat_defeated(game.seat) => {
+            Some(game) if game.running && out => {
                 println!("game {} is decided, stopping its engine", self.generation);
                 self.stop_engine(game);
                 true
@@ -559,28 +577,32 @@ impl Play {
 
     /// Whether the game runs on with no seat left to play it (D17).
     pub fn decided(&self) -> bool {
-        let seat = {
-            let inner = self.inner.lock().unwrap();
-            match &inner.game {
-                Some(game) if game.running => game.seat,
-                _ => return false,
-            }
-        };
-        self.seat_defeated(seat)
+        let running = self
+            .inner
+            .lock()
+            .unwrap()
+            .game
+            .as_ref()
+            .is_some_and(|game| game.running);
+        running && self.humans_out()
     }
 
-    /// Who started the game and with what, which outlives the `Play`.
+    /// Who hosts the game and with what it started, which outlives the
+    /// `Play`. None once the host powers found nobody to pass to.
     pub fn owner_setup(&self) -> Option<(String, Setup)> {
+        let host = self.seats.host()?;
         let inner = self.inner.lock().unwrap();
         let game = inner.game.as_ref()?;
-        Some((game.owner.clone(), game.setup.clone()))
+        Some((host, game.setup.clone()))
     }
 
-    /// The setup of the game `owner` started, which a rematch repeats.
+    /// The setup of the game `owner` hosts, which a rematch repeats.
     pub fn setup_of(&self, owner: &str) -> Option<Setup> {
+        if !self.seats.is_host(owner) {
+            return None;
+        }
         let inner = self.inner.lock().unwrap();
-        let game = inner.game.as_ref()?;
-        (game.owner == owner).then(|| game.setup.clone())
+        Some(inner.game.as_ref()?.setup.clone())
     }
 
     pub fn set_uplink(&self, stream: Option<UnixStream>) {

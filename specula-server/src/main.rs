@@ -9,6 +9,7 @@ mod nickname;
 mod observer;
 mod play;
 mod registry;
+mod seats;
 mod stop;
 mod terrain;
 mod usage;
