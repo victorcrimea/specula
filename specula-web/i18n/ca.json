@@ -105,5 +105,7 @@
   "View summary": "Mostra el resum",
   "Continue watching": "Continua mirant",
   "Last recorded scores": "Darreres puntuacions registrades",
-  "Chart type": "Tipus de gràfic"
+  "Chart type": "Tipus de gràfic",
+  "Nickname": "Sobrenom",
+  "3 to 20 letters, digits, dots, hyphens or underscores, with at least one letter.": "De 3 a 20 lletres, xifres, punts, guions o guions baixos, amb almenys una lletra."
 }

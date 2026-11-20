@@ -5,6 +5,7 @@ mod delta;
 mod detail;
 mod feed;
 mod history;
+mod nickname;
 mod observer;
 mod play;
 mod registry;

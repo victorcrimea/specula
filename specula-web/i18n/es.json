@@ -105,5 +105,7 @@
   "View summary": "Ver resumen",
   "Continue watching": "Seguir mirando",
   "Last recorded scores": "Últimas puntuaciones registradas",
-  "Chart type": "Tipo de gráfico"
+  "Chart type": "Tipo de gráfico",
+  "Nickname": "Apodo",
+  "3 to 20 letters, digits, dots, hyphens or underscores, with at least one letter.": "De 3 a 20 letras, cifras, puntos, guiones o guiones bajos, con al menos una letra."
 }

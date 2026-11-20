@@ -105,5 +105,7 @@
   "View summary": "Zusammenfassung ansehen",
   "Continue watching": "Weiter zuschauen",
   "Last recorded scores": "Zuletzt erfasste Ergebnisse",
-  "Chart type": "Diagrammtyp"
+  "Chart type": "Diagrammtyp",
+  "Nickname": "Spitzname",
+  "3 to 20 letters, digits, dots, hyphens or underscores, with at least one letter.": "3 bis 20 Buchstaben, Ziffern, Punkte, Bindestriche oder Unterstriche, mindestens ein Buchstabe."
 }

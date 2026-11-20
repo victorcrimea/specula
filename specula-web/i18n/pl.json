@@ -105,5 +105,7 @@
   "View summary": "Zobacz podsumowanie",
   "Continue watching": "Oglądaj dalej",
   "Last recorded scores": "Ostatnio zapisane wyniki",
-  "Chart type": "Typ wykresu"
+  "Chart type": "Typ wykresu",
+  "Nickname": "Pseudonim",
+  "3 to 20 letters, digits, dots, hyphens or underscores, with at least one letter.": "Od 3 do 20 liter, cyfr, kropek, łączników lub podkreśleń, w tym co najmniej jedna litera."
 }

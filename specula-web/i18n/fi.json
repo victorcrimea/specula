@@ -105,5 +105,7 @@
   "View summary": "Näytä yhteenveto",
   "Continue watching": "Jatka katselua",
   "Last recorded scores": "Viimeksi tallennetut pisteet",
-  "Chart type": "Kaavion tyyppi"
+  "Chart type": "Kaavion tyyppi",
+  "Nickname": "Nimimerkki",
+  "3 to 20 letters, digits, dots, hyphens or underscores, with at least one letter.": "3-20 kirjainta, numeroa, pistettä, yhdysmerkkiä tai alaviivaa, vähintään yksi kirjain."
 }

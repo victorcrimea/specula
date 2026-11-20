@@ -105,5 +105,7 @@
   "View summary": "Voir le résumé",
   "Continue watching": "Continuer à regarder",
   "Last recorded scores": "Derniers scores enregistrés",
-  "Chart type": "Type de graphique"
+  "Chart type": "Type de graphique",
+  "Nickname": "Pseudo",
+  "3 to 20 letters, digits, dots, hyphens or underscores, with at least one letter.": "De 3 à 20 lettres, chiffres, points, tirets ou tirets bas, dont au moins une lettre."
 }

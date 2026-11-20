@@ -105,5 +105,7 @@
   "View summary": "檢視摘要",
   "Continue watching": "繼續觀戰",
   "Last recorded scores": "最後記錄的分數",
-  "Chart type": "圖表類型"
+  "Chart type": "圖表類型",
+  "Nickname": "暱稱",
+  "3 to 20 letters, digits, dots, hyphens or underscores, with at least one letter.": "3 到 20 個字母、數字、點、連字號或底線，至少包含一個字母。"
 }

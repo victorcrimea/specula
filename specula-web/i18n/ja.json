@@ -105,5 +105,7 @@
   "View summary": "概要を見る",
   "Continue watching": "観戦を続ける",
   "Last recorded scores": "最後に記録されたスコア",
-  "Chart type": "グラフの種類"
+  "Chart type": "グラフの種類",
+  "Nickname": "ニックネーム",
+  "3 to 20 letters, digits, dots, hyphens or underscores, with at least one letter.": "3〜20文字の英字、数字、ピリオド、ハイフン、アンダースコア（英字を1文字以上含む）。"
 }

@@ -105,5 +105,7 @@
   "View summary": "Προβολή σύνοψης",
   "Continue watching": "Συνέχεια παρακολούθησης",
   "Last recorded scores": "Τελευταίες καταγεγραμμένες βαθμολογίες",
-  "Chart type": "Τύπος γραφήματος"
+  "Chart type": "Τύπος γραφήματος",
+  "Nickname": "Ψευδώνυμο",
+  "3 to 20 letters, digits, dots, hyphens or underscores, with at least one letter.": "3 έως 20 γράμματα, ψηφία, τελείες, παύλες ή κάτω παύλες, με τουλάχιστον ένα γράμμα."
 }

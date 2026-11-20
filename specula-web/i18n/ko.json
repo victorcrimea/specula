@@ -105,5 +105,7 @@
   "View summary": "요약 보기",
   "Continue watching": "계속 관전",
   "Last recorded scores": "마지막으로 기록된 점수",
-  "Chart type": "차트 유형"
+  "Chart type": "차트 유형",
+  "Nickname": "닉네임",
+  "3 to 20 letters, digits, dots, hyphens or underscores, with at least one letter.": "영문자, 숫자, 마침표, 하이픈, 밑줄 3~20자 (영문자 1자 이상 포함)."
 }

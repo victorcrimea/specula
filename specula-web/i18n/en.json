@@ -105,5 +105,7 @@
   "View summary": "button of the defeat or victory popup that opens the match summary",
   "Continue watching": "button of the defeat popup that closes it, after which the player goes on watching the match as an observer",
   "Last recorded scores": "heading of the match summary when the game stopped before the final scores were taken; the numbers are the last ones recorded",
-  "Chart type": "label of a list in the match summary's charts that chooses which part of a value to draw (for example trained, killed or lost)"
+  "Chart type": "label of a list in the match summary's charts that chooses which part of a value to draw (for example trained, killed or lost)",
+  "Nickname": "label of the setup page's field for the name the visitor plays under; kept for the next game",
+  "3 to 20 letters, digits, dots, hyphens or underscores, with at least one letter.": "tooltip of the setup page's nickname field: the vanilla lobby's rule for a name"
 }

@@ -30,6 +30,7 @@ use specula_assets::command::QueryKind;
 use rocket::tokio::sync::broadcast;
 
 use crate::feed::Summary;
+use crate::nickname::Nickname;
 use crate::observer;
 use crate::observer::EngineDirs;
 use crate::registry::MatchId;
@@ -182,10 +183,13 @@ pub struct Setup {
     pub revealed: bool,
     /// The game setup's Starting Resources: each resource's amount.
     pub resources: u32,
+    /// The owner's, as they were at launch: nothing changes a launched
+    /// setup, so the name is locked with it (D10).
+    pub nickname: Nickname,
 }
 
 impl Setup {
-    /// From the setup page's form: `map`, `players`, `resources`,
+    /// From the setup page's form: `nickname`, `map`, `players`, `resources`,
     /// `explored` and `revealed` when checked, and for each player i from 1, `civ<i>`,
     /// `slot<i>` ("you", "petra" or "empty") and `difficulty<i>` for Petra.
     /// Checked when the game starts.
@@ -217,12 +221,14 @@ impl Setup {
             Some(resources) => resources.parse().map_err(|_| "bad starting resources")?,
             None => DEFAULT_STARTING_RESOURCES,
         };
+        let nickname = Nickname::parse(field("nickname")?).ok_or("bad nickname")?;
         Ok(Setup {
             map: field("map")?.to_string(),
             slots,
             explored: revealed || form.contains_key("explored"),
             revealed,
             resources,
+            nickname,
         })
     }
 }

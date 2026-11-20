@@ -11,7 +11,7 @@ html, body { margin: 0; min-height: 100%; background: #0f1214; color: #e6e9eb;
 main { max-width: 640px; margin: 0 auto; padding: 24px 16px; }
 h1 { font-size: 20px; font-weight: 600; margin: 0 0 16px; }
 label { display: inline-flex; align-items: center; gap: 6px; }
-select, button { font: inherit; color: #e6e9eb; background: rgba(15, 18, 20, 0.85);
+select, button, input[type=text] { font: inherit; color: #e6e9eb; background: rgba(15, 18, 20, 0.85);
   border: 1px solid #3a4248; border-radius: 4px; padding: 4px 8px; }
 button { cursor: pointer; }
 :disabled { opacity: 0.5; }
@@ -39,6 +39,9 @@ a { color: #8fc1e3; }
 <a id="back" href="/" hidden data-i18n>Back to your game</a>
 </p>
 <form id="setup">
+<div class="row">
+<label title="3 to 20 letters, digits, dots, hyphens or underscores, with at least one letter." data-i18n-attrs="title"><span data-i18n>Nickname</span> <input id="nickname" name="nickname" type="text" required minlength="3" maxlength="20" pattern="(?=.*[A-Za-z])[A-Za-z0-9._\-]+" autocomplete="nickname" spellcheck="false"></label>
+</div>
 <div class="row">
 <label><span data-i18n>Map</span> <select id="map" name="map"></select></label>
 <label><span data-i18n>Players</span> <select id="players" name="players"></select></label>
@@ -81,6 +84,11 @@ const playersSelect = document.getElementById("players");
 const resourcesSelect = document.getElementById("resources");
 const slots = document.getElementById("slots");
 const error = document.getElementById("error");
+const nickname = document.getElementById("nickname");
+// Kept from the last launch, and asked for only when there is none (D10).
+const NICKNAME_KEY = "specula.nickname";
+try { nickname.value = localStorage.getItem(NICKNAME_KEY) ?? ""; } catch {}
+if (!nickname.value) nickname.focus();
 let setup = null;
 
 const option = (value, text) => {
@@ -178,6 +186,7 @@ form.addEventListener("submit", async (event) => {
   const body = new URLSearchParams(new FormData(form));
   const response = await fetch("/new", { method: "POST", body }).catch(() => null);
   if (response?.ok) {
+    try { localStorage.setItem(NICKNAME_KEY, nickname.value); } catch {}
     location.href = "/g/" + (await response.text());
     return;
   }

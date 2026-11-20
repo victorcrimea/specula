@@ -105,5 +105,7 @@
   "View summary": "Visa sammanfattning",
   "Continue watching": "Fortsätt titta",
   "Last recorded scores": "Senast registrerade poäng",
-  "Chart type": "Diagramtyp"
+  "Chart type": "Diagramtyp",
+  "Nickname": "Smeknamn",
+  "3 to 20 letters, digits, dots, hyphens or underscores, with at least one letter.": "3 till 20 bokstäver, siffror, punkter, bindestreck eller understreck, minst en bokstav."
 }

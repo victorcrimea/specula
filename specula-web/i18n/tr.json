@@ -105,5 +105,7 @@
   "View summary": "Özeti görüntüle",
   "Continue watching": "İzlemeye devam et",
   "Last recorded scores": "Son kaydedilen puanlar",
-  "Chart type": "Grafik türü"
+  "Chart type": "Grafik türü",
+  "Nickname": "Takma ad",
+  "3 to 20 letters, digits, dots, hyphens or underscores, with at least one letter.": "En az bir harf içeren, 3 ile 20 arasında harf, rakam, nokta, tire veya alt çizgi."
 }

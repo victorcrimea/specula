@@ -105,5 +105,7 @@
   "View summary": "Samenvatting bekijken",
   "Continue watching": "Verder kijken",
   "Last recorded scores": "Laatst vastgelegde scores",
-  "Chart type": "Grafiektype"
+  "Chart type": "Grafiektype",
+  "Nickname": "Bijnaam",
+  "3 to 20 letters, digits, dots, hyphens or underscores, with at least one letter.": "3 tot 20 letters, cijfers, punten, koppeltekens of onderstrepingstekens, met minstens één letter."
 }

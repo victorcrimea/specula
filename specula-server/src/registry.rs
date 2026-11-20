@@ -495,7 +495,8 @@ impl Registry {
         };
         inner.generation = generation;
         println!(
-            "match {id} (game {generation}) in slot {slot}, port {}, feed {socket}",
+            "match {id} (game {generation}) by {} in slot {slot}, port {}, feed {socket}",
+            setup.nickname.as_str(),
             self.config.port(slot)
         );
         inner.matches.insert(

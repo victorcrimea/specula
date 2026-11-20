@@ -105,5 +105,7 @@
   "View summary": "Ver resumo",
   "Continue watching": "Continuar a assistir",
   "Last recorded scores": "Últimas pontuações registadas",
-  "Chart type": "Tipo de gráfico"
+  "Chart type": "Tipo de gráfico",
+  "Nickname": "Alcunha",
+  "3 to 20 letters, digits, dots, hyphens or underscores, with at least one letter.": "De 3 a 20 letras, algarismos, pontos, hífenes ou sublinhados, com pelo menos uma letra."
 }

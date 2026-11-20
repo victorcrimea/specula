@@ -105,5 +105,7 @@
   "View summary": "Zobrazit souhrn",
   "Continue watching": "Pokračovat ve sledování",
   "Last recorded scores": "Naposledy zaznamenané výsledky",
-  "Chart type": "Typ grafu"
+  "Chart type": "Typ grafu",
+  "Nickname": "Přezdívka",
+  "3 to 20 letters, digits, dots, hyphens or underscores, with at least one letter.": "3 až 20 písmen, číslic, teček, pomlček nebo podtržítek, alespoň jedno písmeno."
 }

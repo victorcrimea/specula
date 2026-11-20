@@ -105,5 +105,7 @@
   "View summary": "Переглянути підсумки",
   "Continue watching": "Продовжити спостереження",
   "Last recorded scores": "Останні записані результати",
-  "Chart type": "Тип"
+  "Chart type": "Тип",
+  "Nickname": "Нік",
+  "3 to 20 letters, digits, dots, hyphens or underscores, with at least one letter.": "Від 3 до 20 латинських літер, цифр, крапок, дефісів або підкреслень, хоча б одна літера."
 }
