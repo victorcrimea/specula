@@ -1,8 +1,10 @@
 //! The matches the server runs: each hosted match has its own `Hub`, its
 //! own `Play`, its own feed socket and the UDP port of its slot, and is
 //! addressed by a UUID (`/g/<uuid>`). The broadcast hub of `--observe` and
-//! `--slots 0` is one long-lived hub that many matches pass through, under
-//! a UUID of its own for the server's run.
+//! `--slots 0` is one long-lived hub that many matches pass through; its
+//! UUID is its live view, and each match it encodes gets a UUID of its own.
+//! A match's UUID outlives its hub: once only the history holds it,
+//! `/g/<uuid>` replays it from there (`Registry::resolve`).
 //!
 //! Lock order: registry `inner`, then `Play`'s inner, then `Hub` state.
 //! Nothing called from inside a `Play` or `Hub` lock calls the registry;
@@ -33,6 +35,14 @@ use crate::observer;
 use crate::play::Play;
 use crate::play::Setup;
 use crate::view::Hub;
+use crate::view::Message;
+use crate::view::SummaryBody;
+use crate::view::TerrainFile;
+use crate::view::View;
+use crate::view::stored_data;
+use crate::view::stored_segment;
+use crate::view::stored_summary;
+use crate::view::stored_terrain;
 
 /// `sockaddr_un.sun_path`, terminator included.
 const SOCKET_PATH_LIMIT: usize = 108;
@@ -130,6 +140,93 @@ impl Match {
     }
 }
 
+/// What a `/g/<uuid>` request reads.
+pub struct Source {
+    /// The hub still holding the match; None once only the history has it.
+    pub hub: Option<Arc<Hub>>,
+    /// The stream id of the match the UUID names; None for the broadcast's
+    /// own UUID, which follows whatever match its hub shows. 0 for a hosted
+    /// match before its first turn.
+    match_id: Option<u64>,
+    history: Option<Arc<Mutex<History>>>,
+}
+
+impl Source {
+    pub fn info(&self) -> Option<(u64, usize, bool)> {
+        match (self.match_id, &self.hub) {
+            (None, hub) => hub.as_ref()?.shown_info(),
+            (Some(id), Some(hub)) => hub
+                .match_info(id)
+                .map(|(segments, live)| (id, segments, live)),
+            (Some(id), None) => {
+                let count = self.history.as_ref()?.lock().unwrap().segment_count(id)?;
+                Some((id, count, false))
+            }
+        }
+    }
+
+    /// A match's URL never serves another match.
+    fn names(&self, mid: u64) -> bool {
+        self.match_id.is_none_or(|id| id == mid)
+    }
+
+    pub fn segment(&self, mid: u64, index: usize, detail: bool) -> Option<(Message, bool)> {
+        if !self.names(mid) {
+            return None;
+        }
+        match &self.hub {
+            Some(hub) if detail => hub.detail_segment(mid, index, View::Observer),
+            Some(hub) => hub.segment(mid, index, View::Observer),
+            None => stored_segment(self.history.as_deref()?, mid, detail, index),
+        }
+    }
+
+    pub fn summary(&self, mid: u64, turn: Option<u32>) -> Option<SummaryBody> {
+        if !self.names(mid) {
+            return None;
+        }
+        match &self.hub {
+            Some(hub) => hub.summary(mid, turn),
+            None => stored_summary(self.history.as_deref()?, mid, turn),
+        }
+    }
+
+    /// Content-addressed, so any match's URL may serve it.
+    pub fn terrain(&self, id: u64) -> Option<TerrainFile> {
+        match &self.hub {
+            Some(hub) => hub.terrain(id),
+            None => stored_terrain(self.history.as_deref()?, id),
+        }
+    }
+
+    pub fn data(&self, hash: u64) -> Option<Arc<[u8]>> {
+        match &self.hub {
+            Some(hub) => hub.data(hash, View::Observer),
+            None => stored_data(self.history.as_deref()?, hash),
+        }
+    }
+
+    /// Whether observers have already reached the match's end.
+    pub fn replay_only(&self) -> bool {
+        match (self.match_id, &self.hub) {
+            (None, _) => false,
+            (Some(id), Some(hub)) => !hub.observers_running(id),
+            (Some(_), None) => true,
+        }
+    }
+
+    pub fn uuid_of(&self, mid: u64, requested: MatchId) -> Option<MatchId> {
+        match self.match_id {
+            Some(id) => (mid == id).then_some(requested),
+            None => self
+                .hub
+                .as_ref()
+                .and_then(|hub| hub.uuid_of(mid))
+                .or_else(|| self.history.as_ref()?.lock().unwrap().uuid_of(mid)),
+        }
+    }
+}
+
 pub struct Registry {
     config: Arc<Config>,
     /// The SOCKET argument; match sockets are `<base>.<uuid>`.
@@ -151,8 +248,12 @@ struct Inner {
 }
 
 /// The publisher thread is never stopped; see the module doc.
-pub fn spawn_hub(delay: Duration, history: Option<Arc<Mutex<History>>>) -> Arc<Hub> {
-    let hub = Arc::new(Hub::new(delay, history));
+pub fn spawn_hub(
+    delay: Duration,
+    history: Option<Arc<Mutex<History>>>,
+    uuid: Option<MatchId>,
+) -> Arc<Hub> {
+    let hub = Arc::new(Hub::new(delay, history, uuid));
     let publisher = Arc::clone(&hub);
     std::thread::spawn(move || publisher.run_publisher());
     hub
@@ -186,15 +287,32 @@ impl Registry {
         self.broadcast.as_ref().map(|(id, _)| *id)
     }
 
-    /// The hub of the broadcast or of a hosted match, for the observers'
-    /// routes.
-    pub fn hub(&self, id: MatchId) -> Option<Arc<Hub>> {
+    /// What `/g/<id>` reads: a hub still holding the match, or else the
+    /// history.
+    pub fn resolve(&self, id: MatchId) -> Option<Source> {
+        let source = |hub: Option<Arc<Hub>>, match_id: Option<u64>| Source {
+            hub,
+            match_id,
+            history: self.history.clone(),
+        };
         if let Some((broadcast, hub)) = &self.broadcast
             && *broadcast == id
         {
-            return Some(Arc::clone(hub));
+            return Some(source(Some(Arc::clone(hub)), None));
         }
-        self.hosted(id).map(|found| Arc::clone(&found.hub))
+        if let Some(found) = self.hosted(id) {
+            let match_id = found.hub.match_of(id).unwrap_or(0);
+            return Some(source(Some(Arc::clone(&found.hub)), Some(match_id)));
+        }
+        if let Some((_, hub)) = &self.broadcast
+            && let Some(match_id) = hub.match_of(id)
+        {
+            return Some(source(Some(Arc::clone(hub)), Some(match_id)));
+        }
+        // After `hosted` released `inner`: no registry lock is taken under
+        // the history's.
+        let match_id = self.history.as_ref()?.lock().unwrap().match_of(id)?;
+        Some(source(None, Some(match_id)))
     }
 
     /// Hosted matches only, for the seats' routes.
@@ -275,7 +393,7 @@ impl Registry {
                 eprintln!("cannot open the feed socket {socket}: {error}");
                 FEED_SOCKET_ERROR
             })?;
-        let hub = spawn_hub(self.delay, self.history.clone());
+        let hub = spawn_hub(self.delay, self.history.clone(), Some(id));
         let dirs = observer::EngineDirs::new(&self.config.engine_dir, id, &format!("slot-{slot}"));
         let play = Arc::new(Play::new(
             socket.clone(),

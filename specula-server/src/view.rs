@@ -343,6 +343,7 @@ use crate::feed::TemplateDetails;
 use crate::feed::Terrain;
 use crate::feed::Territory;
 use crate::history::History;
+use crate::registry::MatchId;
 use crate::summary_envelope;
 use crate::terrain::Ground;
 use crate::web;
@@ -1702,6 +1703,12 @@ struct State {
     /// When the feed last connected or sent a turn, for the observer
     /// watchdog.
     feed_activity: Option<Instant>,
+    /// A hosted hub's first match takes its registry UUID; any other match
+    /// a new one.
+    next_uuid: Option<MatchId>,
+    /// Every match this hub encoded, so `/g/<uuid>` finds it while the hub
+    /// holds it.
+    uuids: Vec<(MatchId, u64)>,
 }
 
 impl State {
@@ -1740,8 +1747,59 @@ pub enum View {
     Seat(u32),
 }
 
+/// The history's copy of a closed segment, for a match no hub holds.
+pub(crate) fn stored_segment(
+    history: &Mutex<History>,
+    match_id: u64,
+    detail: bool,
+    index: usize,
+) -> Option<(Message, bool)> {
+    let path = history
+        .lock()
+        .unwrap()
+        .segment_path(match_id, detail, index)?;
+    // Only closed segments are stored. The match may have been deleted
+    // since the lookup; then the file is gone, as it would be after.
+    let bytes = std::fs::read(path).ok()?;
+    Some((bytes.into(), true))
+}
+
+pub(crate) fn stored_data(history: &Mutex<History>, hash: u64) -> Option<Arc<[u8]>> {
+    let path = history.lock().unwrap().data_path(hash)?;
+    Some(std::fs::read(path).ok()?.into())
+}
+
+pub(crate) fn stored_terrain(history: &Mutex<History>, id: u64) -> Option<TerrainFile> {
+    let (raw, brotli) = history.lock().unwrap().terrain_paths(id)?;
+    let file = TerrainFile {
+        raw: std::fs::read(raw).ok()?.into(),
+        brotli: Arc::new(OnceLock::new()),
+    };
+    if let Ok(bytes) = std::fs::read(brotli) {
+        let _ = file.brotli.set(bytes.into());
+    }
+    Some(file)
+}
+
+pub(crate) fn stored_summary(
+    history: &Mutex<History>,
+    match_id: u64,
+    turn: Option<u32>,
+) -> Option<SummaryBody> {
+    let path = history.lock().unwrap().summary_at(match_id, turn)?;
+    let bytes: Arc<[u8]> = std::fs::read(path).ok()?.into();
+    Some(SummaryBody {
+        bytes,
+        brotli: true,
+    })
+}
+
 impl Hub {
-    pub fn new(delay: Duration, history: Option<Arc<Mutex<History>>>) -> Self {
+    pub fn new(
+        delay: Duration,
+        history: Option<Arc<Mutex<History>>>,
+        uuid: Option<MatchId>,
+    ) -> Self {
         Hub {
             queued: Condvar::new(),
             history,
@@ -1768,6 +1826,8 @@ impl Hub {
                 new_feed: true,
                 ended: false,
                 feed_activity: None,
+                next_uuid: uuid,
+                uuids: Vec::new(),
             }),
         }
     }
@@ -2032,8 +2092,7 @@ impl Hub {
                 return Some(Arc::clone(file));
             }
         }
-        let path = self.history.as_ref()?.lock().unwrap().data_path(hash)?;
-        Some(std::fs::read(path).ok()?.into())
+        stored_data(self.history.as_deref()?, hash)
     }
 
     /// A seat's terrain as revealed so far.
@@ -2083,15 +2142,7 @@ impl Hub {
                 return Some(file.clone());
             }
         }
-        let (raw, brotli) = self.history.as_ref()?.lock().unwrap().terrain_paths(id)?;
-        let file = TerrainFile {
-            raw: std::fs::read(raw).ok()?.into(),
-            brotli: Arc::new(OnceLock::new()),
-        };
-        if let Ok(bytes) = std::fs::read(brotli) {
-            let _ = file.brotli.set(bytes.into());
-        }
-        Some(file)
+        stored_terrain(self.history.as_deref()?, id)
     }
 
     /// Writes a file of the match being encoded to the history; a failure
@@ -2250,17 +2301,7 @@ impl Hub {
                 return Some(body);
             }
         }
-        let path = self
-            .history
-            .as_ref()?
-            .lock()
-            .unwrap()
-            .summary_at(match_id, turn)?;
-        let bytes: Arc<[u8]> = std::fs::read(path).ok()?.into();
-        Some(SummaryBody {
-            bytes,
-            brotli: true,
-        })
+        stored_summary(self.history.as_deref()?, match_id, turn)
     }
 
     /// Called when the feed is gone. A feed that never sent a turn ends
@@ -2337,11 +2378,27 @@ impl Hub {
         let start = state.new_feed;
         if start {
             state.match_id = new_match_id();
+            let uuid = state.next_uuid.take().unwrap_or_else(MatchId::new_v4);
+            state.uuids.push((uuid, state.match_id));
+            println!("match {:016x} is {uuid}", state.match_id);
             // A running match is not complete on disk; once ended it is the
             // newest stored match, so oldest-first eviction reaches it last
             // anyway.
             if let Some(history) = &self.history {
-                history.lock().unwrap().set_live(state.match_id, true);
+                // As `store`: the matches viewers may still ask for.
+                let protect = [
+                    state.shown.match_id,
+                    state
+                        .shown
+                        .previous
+                        .as_ref()
+                        .map_or(0, |archive| archive.match_id),
+                ];
+                let mut history = history.lock().unwrap();
+                history.set_live(state.match_id, true);
+                if let Err(error) = history.start_match(state.match_id, uuid, &protect) {
+                    eprintln!("cannot store match {:016x}: {error}", state.match_id);
+                }
             }
             state.ended = false;
             state.first_turn = turn;
@@ -2429,16 +2486,7 @@ impl Hub {
             Lookup::OnDisk => {}
             Lookup::Missing => return None,
         }
-        let path = self
-            .history
-            .as_ref()?
-            .lock()
-            .unwrap()
-            .segment_path(match_id, detail, index)?;
-        // Only closed segments are stored. The match may have been deleted
-        // since the lookup; then the file is gone, as it would be after.
-        let bytes = std::fs::read(path).ok()?;
-        Some((bytes.into(), true))
+        stored_segment(self.history.as_deref()?, match_id, detail, index)
     }
 
     fn memory_segment(&self, match_id: u64, index: usize, detail: bool, view: View) -> Lookup {
@@ -2472,6 +2520,40 @@ impl Hub {
         } else {
             state.visual.segment(index)
         }
+    }
+
+    pub fn match_of(&self, uuid: MatchId) -> Option<u64> {
+        let state = self.state.lock().unwrap();
+        state
+            .uuids
+            .iter()
+            .find(|(known, _)| *known == uuid)
+            .map(|(_, match_id)| *match_id)
+    }
+
+    pub fn uuid_of(&self, match_id: u64) -> Option<MatchId> {
+        let state = self.state.lock().unwrap();
+        state
+            .uuids
+            .iter()
+            .find(|(_, known)| *known == match_id)
+            .map(|(uuid, _)| *uuid)
+    }
+
+    /// Whether observers have not yet reached the end of `match_id`. The
+    /// second clause covers a broadcast match whose end is still in the
+    /// delay after the encoder moved on.
+    pub fn observers_running(&self, match_id: u64) -> bool {
+        let state = self.state.lock().unwrap();
+        let previous = state
+            .shown
+            .previous
+            .as_ref()
+            .map(|archive| archive.match_id);
+        (state.match_id == match_id && previous != Some(match_id))
+            || (state.shown.match_id == match_id
+                && state.shown.has_turn
+                && state.shown.ended.is_none())
     }
 
     /// The match being shown as `(id, segments, live)`.

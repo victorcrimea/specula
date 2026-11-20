@@ -1,7 +1,8 @@
 //! Every match's history on disk, kept under a size limit by deleting the
-//! oldest matches. One directory per match, named by the match id as 16
-//! hex digits:
+//! oldest matches. One directory per match, named by its UUID
+//! (`/g/<uuid>`):
 //!
+//! - `id`: the stream's match id as 16 hex digits.
 //! - `seg/<n>`, `detail/<n>`: the closed segments, as served.
 //! - `terrain-<id>` and `terrain-<id>.br`: the terrain resource and its
 //!   brotli copy, by terrain id as 16 hex digits.
@@ -12,15 +13,19 @@
 //!
 //! Each file is written under a `.tmp` name and renamed, so a crash leaves
 //! no half file. Match ids are nanosecond timestamps, so the smallest is the
-//! oldest.
+//! oldest. A directory named by 16 hex digits is from before UUIDs and is
+//! given a new UUID at open.
 
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::fs;
 use std::io;
+use std::io::ErrorKind;
 use std::path::Path;
 use std::path::PathBuf;
+
+use crate::registry::MatchId;
 
 const TMP_SUFFIX: &str = ".tmp";
 const TERRAIN_PREFIX: &str = "terrain-";
@@ -29,9 +34,11 @@ const SEGMENTS_DIR: &str = "seg";
 const DETAIL_DIR: &str = "detail";
 const DATA_DIR: &str = "data";
 const SUMMARY_DIR: &str = "summary";
+const ID_FILE: &str = "id";
 
-#[derive(Default)]
 struct Stored {
+    /// Names the directory.
+    uuid: MatchId,
     bytes: u64,
     /// Visual segments; the detail stream is cut on the same turns.
     segments: usize,
@@ -41,11 +48,26 @@ struct Stored {
     summaries: Vec<u32>,
 }
 
+impl Stored {
+    fn new(uuid: MatchId) -> Self {
+        Stored {
+            uuid,
+            bytes: 0,
+            segments: 0,
+            terrains: Vec::new(),
+            data: Vec::new(),
+            summaries: Vec::new(),
+        }
+    }
+}
+
 pub struct History {
     dir: PathBuf,
     limit: u64,
     total: u64,
     matches: BTreeMap<u64, Stored>,
+    /// The stream id of each stored match, for `/g/<uuid>`.
+    by_uuid: HashMap<MatchId, u64>,
     /// By id and hash, the matches holding them: the same JSON and terrain
     /// recur across matches.
     terrains: HashMap<u64, Vec<u64>>,
@@ -63,20 +85,47 @@ impl History {
             limit,
             total: 0,
             matches: BTreeMap::new(),
+            by_uuid: HashMap::new(),
             terrains: HashMap::new(),
             data: HashMap::new(),
             live: HashSet::new(),
         };
-        for entry in fs::read_dir(&history.dir)? {
-            let entry = entry?;
-            let name = entry.file_name();
-            let Some(match_id) = name.to_str().and_then(parse_hex) else {
-                continue;
-            };
+        // Listed before any migration renames a directory: a directory
+        // renamed while it is read may be listed again under its new name.
+        let entries = fs::read_dir(&history.dir)?.collect::<io::Result<Vec<_>>>()?;
+        for entry in entries {
             if !entry.file_type()?.is_dir() {
                 continue;
             }
-            let stored = scan_match(&entry.path())?;
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else {
+                continue;
+            };
+            let path = entry.path();
+            let (uuid, match_id, dir) = if let Some(uuid) = MatchId::parse(name) {
+                let Some(match_id) = read_id(&path) else {
+                    eprintln!("history: {} has no id file, skipped", path.display());
+                    continue;
+                };
+                if history.matches.contains_key(&match_id) {
+                    eprintln!("history: {} is a duplicate id, skipped", path.display());
+                    continue;
+                }
+                (uuid, match_id, path)
+            } else if let Some(match_id) = parse_hex(name) {
+                let uuid = MatchId::new_v4();
+                let new = history.dir.join(uuid.to_string());
+                // One unmovable directory must not keep the server down.
+                if let Err(error) = migrate(&path, &new, match_id) {
+                    eprintln!("history: cannot migrate {}: {error}", path.display());
+                    continue;
+                }
+                println!("history: match {match_id:016x} is now {uuid}");
+                (uuid, match_id, new)
+            } else {
+                continue;
+            };
+            let stored = scan_match(&dir, uuid)?;
             history.add(match_id, stored);
         }
         Ok(history)
@@ -109,11 +158,41 @@ impl History {
         for hash in &stored.data {
             self.data.entry(*hash).or_default().push(match_id);
         }
+        self.by_uuid.insert(stored.uuid, match_id);
         self.matches.insert(match_id, stored);
     }
 
-    fn match_dir(&self, match_id: u64) -> PathBuf {
-        self.dir.join(format!("{match_id:016x}"))
+    fn match_dir(&self, match_id: u64) -> Option<PathBuf> {
+        self.matches
+            .get(&match_id)
+            .map(|stored| self.dir.join(stored.uuid.to_string()))
+    }
+
+    /// Names a new match's directory; every other write needs it first.
+    /// `protect` as for the other writes.
+    pub fn start_match(&mut self, match_id: u64, uuid: MatchId, protect: &[u64]) -> io::Result<()> {
+        if self.matches.contains_key(&match_id) {
+            return Ok(());
+        }
+        // Inserted before the write, so a failed id write still lets the
+        // segments be stored (the directory is then skipped at the next open).
+        self.matches.insert(match_id, Stored::new(uuid));
+        self.by_uuid.insert(uuid, match_id);
+        let path = self.dir.join(uuid.to_string()).join(ID_FILE);
+        self.write(
+            match_id,
+            &path,
+            format!("{match_id:016x}").as_bytes(),
+            protect,
+        )
+    }
+
+    pub fn match_of(&self, uuid: MatchId) -> Option<u64> {
+        self.by_uuid.get(&uuid).copied()
+    }
+
+    pub fn uuid_of(&self, match_id: u64) -> Option<MatchId> {
+        self.matches.get(&match_id).map(|stored| stored.uuid)
     }
 
     /// `protect`: matches that must stay, besides `match_id` itself.
@@ -126,10 +205,13 @@ impl History {
         protect: &[u64],
     ) -> io::Result<()> {
         let dir = if detail { DETAIL_DIR } else { SEGMENTS_DIR };
-        let path = self.match_dir(match_id).join(dir).join(index.to_string());
+        let path = self
+            .match_dir(match_id)
+            .ok_or_else(not_stored)?
+            .join(dir)
+            .join(index.to_string());
         self.write(match_id, &path, bytes, protect)?;
-        if !detail {
-            let stored = self.matches.entry(match_id).or_default();
+        if !detail && let Some(stored) = self.matches.get_mut(&match_id) {
             stored.segments = stored.segments.max(index + 1);
         }
         Ok(())
@@ -144,10 +226,12 @@ impl History {
     ) -> io::Result<()> {
         let path = self
             .match_dir(match_id)
+            .ok_or_else(not_stored)?
             .join(format!("{TERRAIN_PREFIX}{id:016x}"));
         self.write(match_id, &path, bytes, protect)?;
-        let stored = self.matches.entry(match_id).or_default();
-        if !stored.terrains.contains(&id) {
+        if let Some(stored) = self.matches.get_mut(&match_id)
+            && !stored.terrains.contains(&id)
+        {
             stored.terrains.push(id);
             self.terrains.entry(id).or_default().push(match_id);
         }
@@ -163,12 +247,10 @@ impl History {
         protect: &[u64],
     ) -> io::Result<()> {
         // The match may have been deleted while the copy was made.
-        if !self.matches.contains_key(&match_id) {
+        let Some(dir) = self.match_dir(match_id) else {
             return Ok(());
-        }
-        let path = self
-            .match_dir(match_id)
-            .join(format!("{TERRAIN_PREFIX}{id:016x}{BROTLI_SUFFIX}"));
+        };
+        let path = dir.join(format!("{TERRAIN_PREFIX}{id:016x}{BROTLI_SUFFIX}"));
         self.write(match_id, &path, bytes, protect)
     }
 
@@ -188,11 +270,14 @@ impl History {
         }
         let path = self
             .match_dir(match_id)
+            .ok_or_else(not_stored)?
             .join(DATA_DIR)
             .join(format!("{hash:016x}"));
         self.write(match_id, &path, bytes, protect)?;
-        self.matches.entry(match_id).or_default().data.push(hash);
-        self.data.entry(hash).or_default().push(match_id);
+        if let Some(stored) = self.matches.get_mut(&match_id) {
+            stored.data.push(hash);
+            self.data.entry(hash).or_default().push(match_id);
+        }
         Ok(())
     }
 
@@ -205,11 +290,13 @@ impl History {
     ) -> io::Result<()> {
         let path = self
             .match_dir(match_id)
+            .ok_or_else(not_stored)?
             .join(SUMMARY_DIR)
             .join(format!("{turn:08x}{BROTLI_SUFFIX}"));
         self.write(match_id, &path, brotli, protect)?;
-        let stored = self.matches.entry(match_id).or_default();
-        if let Err(index) = stored.summaries.binary_search(&turn) {
+        if let Some(stored) = self.matches.get_mut(&match_id)
+            && let Err(index) = stored.summaries.binary_search(&turn)
+        {
             stored.summaries.insert(index, turn);
         }
         Ok(())
@@ -227,7 +314,7 @@ impl History {
             None => *stored.summaries.last()?,
         };
         Some(
-            self.match_dir(match_id)
+            self.match_dir(match_id)?
                 .join(SUMMARY_DIR)
                 .join(format!("{turn:08x}{BROTLI_SUFFIX}")),
         )
@@ -253,8 +340,9 @@ impl History {
         let replaced = fs::metadata(path).map_or(0, |metadata| metadata.len());
         fs::write(&tmp, bytes)?;
         fs::rename(&tmp, path)?;
-        let stored = self.matches.entry(match_id).or_default();
-        stored.bytes = stored.bytes + incoming - replaced;
+        if let Some(stored) = self.matches.get_mut(&match_id) {
+            stored.bytes = stored.bytes + incoming - replaced;
+        }
         self.total = self.total + incoming - replaced;
         Ok(())
     }
@@ -289,7 +377,8 @@ impl History {
         let Some(stored) = self.matches.remove(&match_id) else {
             return;
         };
-        let path = self.match_dir(match_id);
+        let path = self.dir.join(stored.uuid.to_string());
+        self.by_uuid.remove(&stored.uuid);
         if let Err(error) = fs::remove_dir_all(&path) {
             eprintln!("cannot delete {}: {error}", path.display());
         }
@@ -314,14 +403,14 @@ impl History {
             return None;
         }
         let dir = if detail { DETAIL_DIR } else { SEGMENTS_DIR };
-        Some(self.match_dir(match_id).join(dir).join(index.to_string()))
+        Some(self.match_dir(match_id)?.join(dir).join(index.to_string()))
     }
 
     /// The raw file and the brotli copy's path, which may not exist yet.
     pub fn terrain_paths(&self, id: u64) -> Option<(PathBuf, PathBuf)> {
         let match_id = *self.terrains.get(&id)?.last()?;
         let raw = self
-            .match_dir(match_id)
+            .match_dir(match_id)?
             .join(format!("{TERRAIN_PREFIX}{id:016x}"));
         let mut brotli = raw.as_os_str().to_owned();
         brotli.push(BROTLI_SUFFIX);
@@ -331,7 +420,7 @@ impl History {
     pub fn data_path(&self, hash: u64) -> Option<PathBuf> {
         let match_id = *self.data.get(&hash)?.last()?;
         Some(
-            self.match_dir(match_id)
+            self.match_dir(match_id)?
                 .join(DATA_DIR)
                 .join(format!("{hash:016x}")),
         )
@@ -349,6 +438,25 @@ fn unindex(index: &mut HashMap<u64, Vec<u64>>, ids: &[u64], match_id: u64) {
     }
 }
 
+fn not_stored() -> io::Error {
+    io::Error::new(ErrorKind::NotFound, "match not started in the history")
+}
+
+fn read_id(dir: &Path) -> Option<u64> {
+    parse_hex(fs::read_to_string(dir.join(ID_FILE)).ok()?.trim())
+}
+
+/// The id file goes in first, so a crash between the two steps leaves a
+/// legacy directory that migrates again at the next start.
+fn migrate(old: &Path, new: &Path, match_id: u64) -> io::Result<()> {
+    let path = old.join(ID_FILE);
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(TMP_SUFFIX);
+    fs::write(&tmp, format!("{match_id:016x}"))?;
+    fs::rename(&tmp, &path)?;
+    fs::rename(old, new)
+}
+
 fn parse_hex(name: &str) -> Option<u64> {
     (name.len() == 16)
         .then(|| u64::from_str_radix(name, 16).ok())
@@ -363,8 +471,8 @@ fn parse_turn(name: &str) -> Option<u32> {
 
 /// Sizes and names one match directory; a `.tmp` file a crash left behind
 /// is deleted.
-fn scan_match(dir: &Path) -> io::Result<Stored> {
-    let mut stored = Stored::default();
+fn scan_match(dir: &Path, uuid: MatchId) -> io::Result<Stored> {
+    let mut stored = Stored::new(uuid);
     for entry in fs::read_dir(dir)? {
         let entry = entry?;
         let name = entry.file_name();

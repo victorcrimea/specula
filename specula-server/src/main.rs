@@ -153,7 +153,7 @@ async fn main() {
             }
         };
         println!("waiting for an observer on {path}");
-        let hub = registry::spawn_hub(delay, history.clone());
+        let hub = registry::spawn_hub(delay, history.clone(), None);
         let feed_hub = Arc::clone(&hub);
         // The feed is blocking std I/O, so it gets its own thread rather
         // than a slot in Rocket's async runtime.
@@ -213,6 +213,7 @@ async fn main() {
                 segment_file,
                 detail_segment_file,
                 match_info,
+                match_uuid,
                 match_summary,
                 beat,
                 stats,
@@ -278,7 +279,7 @@ fn viewer(
     usage: &State<Arc<Usage>>,
     cookies: &CookieJar<'_>,
 ) -> Option<Channel<'static>> {
-    let hub = registry.hub(id)?;
+    let hub = registry.resolve(id)?.hub?;
     let watch = usage.watch(cookies);
     Some(relay(socket, watch, move || hub.subscribe(View::Observer)))
 }
@@ -291,7 +292,7 @@ fn detail_viewer(
     socket: WebSocket,
     registry: &State<Arc<Registry>>,
 ) -> Option<Channel<'static>> {
-    let hub = registry.hub(id)?;
+    let hub = registry.resolve(id)?.hub?;
     Some(relay(socket, (), move || {
         hub.subscribe_detail(View::Observer)
     }))
@@ -300,9 +301,10 @@ fn detail_viewer(
 /// The match's page: the 3D page on the live stream for the visitor who
 /// holds the seat, with the delay for anyone else; the client asks
 /// `play/status` which it is. The same HTML for every visitor.
-#[rocket::get("/g/<id>")]
+#[rocket::get("/g/<id>?<t>")]
 #[allow(clippy::too_many_arguments)]
 async fn match_page(
+    t: Option<&str>,
     id: MatchId,
     registry: &State<Arc<Registry>>,
     pkg: &State<web::Pkg>,
@@ -311,14 +313,24 @@ async fn match_page(
     usage: &State<Arc<Usage>>,
     cookies: &CookieJar<'_>,
     referrer: usage::Referrer,
-) -> Option<rocket::response::content::RawHtml<String>> {
-    registry.hub(id)?;
-    web::render("index.html", pkg, assets, atlases, usage, cookies, referrer).await
+) -> Option<web::IndexPage> {
+    let source = registry.resolve(id)?;
+    // An ended match is its replay (D23), which the worker opens only from
+    // a moment.
+    if t.is_none() && source.replay_only() {
+        return Some(web::IndexPage::Redirect(Box::new(
+            rocket::response::Redirect::to(format!("/g/{id}?t=0")),
+        )));
+    }
+    web::render("index.html", pkg, assets, atlases, usage, cookies, referrer)
+        .await
+        .map(web::IndexPage::Page)
 }
 
-#[rocket::get("/g/<id>/map")]
+#[rocket::get("/g/<id>/map?<t>")]
 #[allow(clippy::too_many_arguments)]
 async fn match_map_page(
+    t: Option<&str>,
     id: MatchId,
     registry: &State<Arc<Registry>>,
     pkg: &State<web::Pkg>,
@@ -327,9 +339,17 @@ async fn match_map_page(
     usage: &State<Arc<Usage>>,
     cookies: &CookieJar<'_>,
     referrer: usage::Referrer,
-) -> Option<rocket::response::content::RawHtml<String>> {
-    registry.hub(id)?;
-    web::render("map.html", pkg, assets, atlases, usage, cookies, referrer).await
+) -> Option<web::IndexPage> {
+    let source = registry.resolve(id)?;
+    // As for `match_page`.
+    if t.is_none() && source.replay_only() {
+        return Some(web::IndexPage::Redirect(Box::new(
+            rocket::response::Redirect::to(format!("/g/{id}/map?t=0")),
+        )));
+    }
+    web::render("map.html", pkg, assets, atlases, usage, cookies, referrer)
+        .await
+        .map(web::IndexPage::Page)
 }
 
 /// What the page reads about the visitor's seat in the match.
@@ -343,7 +363,7 @@ fn play_status(
         Some(found) => found.play.status(usage::visitor(cookies).as_deref()),
         // The broadcast has no seats, but the observer page still asks.
         None => {
-            registry.hub(id)?;
+            registry.resolve(id)?;
             play::Status {
                 running: false,
                 mine: false,
@@ -674,9 +694,9 @@ fn segment_file(
     index: usize,
     registry: &State<Arc<Registry>>,
 ) -> Option<SegmentBytes> {
-    let hub = registry.hub(id)?;
+    let source = registry.resolve(id)?;
     segment_bytes(
-        hub.segment(u64::from_str_radix(mid, 16).ok()?, index, View::Observer)?,
+        source.segment(u64::from_str_radix(mid, 16).ok()?, index, false)?,
         false,
     )
 }
@@ -688,9 +708,9 @@ fn detail_segment_file(
     index: usize,
     registry: &State<Arc<Registry>>,
 ) -> Option<SegmentBytes> {
-    let hub = registry.hub(id)?;
+    let source = registry.resolve(id)?;
     segment_bytes(
-        hub.detail_segment(u64::from_str_radix(mid, 16).ok()?, index, View::Observer)?,
+        source.segment(u64::from_str_radix(mid, 16).ok()?, index, true)?,
         false,
     )
 }
@@ -704,12 +724,25 @@ fn match_info(
     usage: &State<Arc<Usage>>,
     cookies: &CookieJar<'_>,
 ) -> Option<MatchInfo> {
-    let (shown, segments, live) = registry.hub(id)?.shown_info()?;
+    let (shown, segments, live) = registry.resolve(id)?.info()?;
     usage.replay(cookies, &id.to_string());
     Some(MatchInfo(
         format!("{shown:016x} {segments} {}", u8::from(live)),
         // The open match grows a segment every 30 s.
         Header::new("Cache-Control", "no-store"),
+    ))
+}
+
+/// The UUID of match `mid` as shown under `id`, for the page's Copy link:
+/// the broadcast shows many matches under one UUID.
+#[rocket::get("/g/<id>/match/<mid>/uuid")]
+fn match_uuid(id: MatchId, mid: &str, registry: &State<Arc<Registry>>) -> Option<MatchInfo> {
+    let source = registry.resolve(id)?;
+    let uuid = source.uuid_of(u64::from_str_radix(mid, 16).ok()?, id)?;
+    Some(MatchInfo(
+        uuid.to_string(),
+        // The pair never changes.
+        Header::new("Cache-Control", "public, max-age=31536000, immutable"),
     ))
 }
 
@@ -780,7 +813,7 @@ fn match_summary(
     registry: &State<Arc<Registry>>,
 ) -> Option<web::Encoded<SharedBytes>> {
     let summary = registry
-        .hub(id)?
+        .resolve(id)?
         .summary(u64::from_str_radix(mid, 16).ok()?, turn)?;
     summary_response(summary, accepts.accepts())
 }

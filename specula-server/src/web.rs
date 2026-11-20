@@ -56,7 +56,6 @@ use crate::registry::MatchId;
 use crate::registry::Registry;
 use crate::usage::Referrer;
 use crate::usage::Usage;
-use crate::view::View;
 
 const IMMUTABLE: &str = "public, max-age=31536000, immutable";
 const REVALIDATE: &str = "no-cache";
@@ -488,7 +487,7 @@ pub fn terrain(
     registry: &State<Arc<Registry>>,
 ) -> Option<Encoded<Vec<u8>>> {
     let file = registry
-        .hub(id)?
+        .resolve(id)?
         .terrain(u64::from_str_radix(tid, 16).ok()?)?;
     let brotli = accepts.0.then(|| file.brotli.get()).flatten();
     // The id is a hash of the content, so a copy never goes stale, but the
@@ -511,8 +510,8 @@ pub fn terrain(
 #[rocket::get("/g/<id>/data/<hash>")]
 pub fn data(id: MatchId, hash: &str, registry: &State<Arc<Registry>>) -> Option<Encoded<Vec<u8>>> {
     let file = registry
-        .hub(id)?
-        .data(u64::from_str_radix(hash, 16).ok()?, View::Observer)?;
+        .resolve(id)?
+        .data(u64::from_str_radix(hash, 16).ok()?)?;
     Some(Encoded {
         brotli: false,
         body: file.to_vec(),

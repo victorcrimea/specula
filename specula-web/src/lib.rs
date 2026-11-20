@@ -597,6 +597,11 @@ struct App {
     copy_link: Option<HtmlButtonElement>,
     /// Puts the button's label back after "Link copied".
     copy_link_timer: Option<i32>,
+    /// The UUID the shown match's link names, once fetched: under the
+    /// broadcast's UUID each match has its own.
+    link_uuid: Option<(u64, String)>,
+    /// The match whose UUID was asked for, so it is asked once.
+    link_fetch: u64,
     stream_bytes: StreamBytes,
     match_over: MatchOver,
     stream_start: StreamStart,
@@ -1986,6 +1991,8 @@ async fn run(
             Page::Observer => element(&document, "copy-link").ok(),
         },
         copy_link_timer: None,
+        link_uuid: None,
+        link_fetch: 0,
         stream_bytes: StreamBytes::default(),
         match_over: MatchOver {
             button: element(&document, "current")?,
@@ -4115,10 +4122,10 @@ fn wire_playback(app: &Rc<RefCell<App>>) {
             return;
         }
         if app.match_over.archived {
-            // The live stream is a page without the match in its link.
+            // The pathname of a stored match redirects to its own replay;
+            // `/` leads to the broadcast or the setup form.
             if let Some(window) = web_sys::window() {
-                let path = window.location().pathname().unwrap_or_default();
-                let _ = window.location().set_href(&path);
+                let _ = window.location().set_href("/");
             }
             return;
         }
@@ -4152,9 +4159,13 @@ fn copy_match_link(app: &Rc<RefCell<App>>) {
     let Some(window) = web_sys::window() else {
         return;
     };
-    let (match_id, playhead) = {
+    let (match_id, playhead, path) = {
         let app = app.borrow();
-        (app.scene.match_id, app.playhead)
+        let path = match &app.link_uuid {
+            Some((id, uuid)) if *id == app.scene.match_id => format!("/g/{uuid}"),
+            _ => match_base(),
+        };
+        (app.scene.match_id, app.playhead, path)
     };
     if match_id == 0 {
         return;
@@ -4162,9 +4173,8 @@ fn copy_match_link(app: &Rc<RefCell<App>>) {
     let location = window.location();
     let seconds = (f64::from(playhead) * TURN_MS / 1000.0) as u64;
     let link = format!(
-        "{}{}?t={seconds}",
-        location.origin().unwrap_or_default(),
-        match_base()
+        "{}{path}?t={seconds}",
+        location.origin().unwrap_or_default()
     );
     // Through Reflect: the Clipboard API is not among web-sys's enabled
     // features, and it is one call.
@@ -4370,6 +4380,27 @@ fn receive_detail(app: &Rc<RefCell<App>>, message: &[u8]) {
     }
 }
 
+/// Asks for the UUID the Copy link of `match_id` names; once, and a failure
+/// leaves the link on the page's own path.
+fn fetch_link_uuid(app: std::rc::Weak<RefCell<App>>, match_id: u64) {
+    let url = format!("{}/match/{match_id:016x}/uuid", match_base());
+    wasm_bindgen_futures::spawn_local(async move {
+        let fetched = fetch_bytes(&url).await;
+        let Some(app) = app.upgrade() else {
+            return;
+        };
+        match fetched.map(String::from_utf8) {
+            Ok(Ok(text))
+                if text.len() == 36 && text.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-') =>
+            {
+                app.borrow_mut().link_uuid = Some((match_id, text));
+            }
+            Ok(_) => web_sys::console::error_1(&"bad match uuid".into()),
+            Err(error) => web_sys::console::error_1(&format!("match uuid: {error}").into()),
+        }
+    });
+}
+
 /// `turn_ms` is the real time per turn when played back, 0 when live.
 fn receive(app_rc: &Rc<RefCell<App>>, turn_ms: f64, message: &[u8]) {
     let app = &mut *app_rc.borrow_mut();
@@ -4382,6 +4413,11 @@ fn receive(app_rc: &Rc<RefCell<App>>, turn_ms: f64, message: &[u8]) {
             app.stream_start.at = None;
             app.progress = 0.0;
             app.turn_arrived = true;
+            let match_id = app.scene.match_id;
+            if app.copy_link.is_some() && match_id != 0 && app.link_fetch != match_id {
+                app.link_fetch = match_id;
+                fetch_link_uuid(Rc::downgrade(app_rc), match_id);
+            }
             app.scene_changed = true;
             app.renames.extend_from_slice(&app.scene.renames);
             for (revision, reveal) in std::mem::take(&mut app.scene.reveals) {
