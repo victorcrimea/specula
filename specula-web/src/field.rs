@@ -416,9 +416,9 @@ struct Camera {
     hover: Option<[f32; 2]>,
     /// The left button's drag past `DRAG_DELTA` while it is held.
     band: Option<Band>,
-    /// The right button's press, its client point and the canvas's client
-    /// offset then; a release near it gives an order.
-    order_press: Option<([f32; 2], [f32; 2])>,
+    /// The canvas's client offset at the right button's press; the release
+    /// gives an order, wherever it is, as the engine's does.
+    order_press: Option<[f32; 2]>,
     /// A lone finger's press, which ends as a tap, a pan or a bandbox.
     touch: Option<TouchPress>,
     /// The last tap's end time, client point and click count, so taps in
@@ -7485,7 +7485,7 @@ fn wire_camera(canvas: &HtmlCanvasElement, camera: &Rc<RefCell<Camera>>) -> Resu
                         at[0] - event.offset_x() as f32,
                         at[1] - event.offset_y() as f32,
                     ];
-                    camera.order_press = Some((at, offset));
+                    camera.order_press = Some(offset);
                 }
                 return;
             }
@@ -7509,19 +7509,17 @@ fn wire_camera(canvas: &HtmlCanvasElement, camera: &Rc<RefCell<Camera>>) -> Resu
                 return;
             }
             let camera = &mut *target.borrow_mut();
-            let Some((from, offset)) = camera.order_press.take() else {
+            let Some(offset) = camera.order_press.take() else {
                 return;
             };
             let at = [event.client_x() as f32, event.client_y() as f32];
-            if !dragged(from, at) {
-                let hotkeys = camera.hotkeys(event.ctrl_key());
-                camera.picks.push(PickInput::Order {
-                    at: on_canvas(&order_canvas, at, offset),
-                    queued: event.shift_key(),
-                    hotkeys,
-                    left: false,
-                });
-            }
+            let hotkeys = camera.hotkeys(event.ctrl_key());
+            camera.picks.push(PickInput::Order {
+                at: on_canvas(&order_canvas, at, offset),
+                queued: event.shift_key(),
+                hotkeys,
+                left: false,
+            });
         }),
     );
     for name in ["mouseup", "auxclick"] {
