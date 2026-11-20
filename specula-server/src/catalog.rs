@@ -52,8 +52,6 @@ impl MapType {
     pub const ALL: [MapType; 3] = [MapType::Skirmish, MapType::Random, MapType::Scenario];
 
     /// `initAttributes.mapType`.
-    // The settings serializer (M12) writes it.
-    #[allow(dead_code)]
     pub fn name(self) -> &'static str {
         match self {
             MapType::Skirmish => "skirmish",

@@ -11,6 +11,10 @@ mod observer;
 mod play;
 mod registry;
 mod seats;
+// Nothing builds the settings until the setup protocol (M15) and the engine's
+// settings file (M20).
+#[allow(dead_code)]
+mod settings;
 mod stop;
 mod terrain;
 mod usage;
