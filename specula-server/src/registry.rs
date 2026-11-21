@@ -50,6 +50,8 @@ use std::time::Duration;
 use std::time::Instant;
 use std::time::SystemTime;
 
+use serde_json::Value;
+
 use crate::catalog::Catalog;
 use crate::config::Config;
 use crate::history::History;
@@ -477,14 +479,16 @@ impl Registry {
 
     /// Opens a setup for `owner`, its host, seated as a player (vanilla's
     /// `onClientJoin` gives the host the first free slot). `from` is a
-    /// finished game's settings and the host's seat in it, for a rematch. A
-    /// new setup replaces the game the visitor hosts (D14), in whose slot it
-    /// then runs.
+    /// finished game's settings and the host's seat in it, for a rematch;
+    /// `batch` is the host's stored settings (D34), used only when `from` is
+    /// `None`. A new setup replaces the game the visitor hosts (D14), in
+    /// whose slot it then runs.
     pub fn open_setup(
         self: &Arc<Self>,
         owner: &str,
         nickname: Nickname,
         from: Option<(Settings, Option<u8>)>,
+        batch: Option<&Value>,
     ) -> Result<MatchId, &'static str> {
         let catalog = self.catalog.as_ref().ok_or("not hosting")?;
         let id = MatchId::new_v4();
@@ -522,7 +526,7 @@ impl Registry {
                 settings.on_seated(catalog, &[seat]);
                 settings
             }
-            None => Settings::open(catalog, None, &[seat]).map_err(|error| {
+            None => Settings::open(catalog, batch, &[seat]).map_err(|error| {
                 eprintln!("cannot open a setup: {error}");
                 "cannot open a setup"
             })?,
@@ -694,7 +698,8 @@ impl Registry {
             }
         }
         .ok_or("no game to repeat")?;
-        self.open_setup(owner, nickname, Some((settings, seat)))
+        // D62: a rematch repeats the old game, not the host's stored copy.
+        self.open_setup(owner, nickname, Some((settings, seat)), None)
     }
 
     /// Whether `id` is an open setup, or one that closed (its page says why).

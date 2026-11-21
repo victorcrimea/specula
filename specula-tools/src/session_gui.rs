@@ -14,9 +14,10 @@
 //! Most textures are copied as they are, since a browser decodes PNG. Only
 //! what the engine changes when it draws, or what a browser cannot read,
 //! is converted: civ emblems turned grey as `canvas2d.fs` does for a
-//! `grayscale:` sprite, the DDS portrait background as PNG, and the
-//! minimap's civ backgrounds, 512 px squares drawn in under 200 px, scaled
-//! to twice that as lossy WebP.
+//! `grayscale:` sprite, the DDS portrait background as PNG, the minimap's
+//! civ backgrounds, 512 px squares drawn in under 200 px, scaled to twice
+//! that as lossy WebP, and the map previews, cropped to 400x300, as lossy
+//! WebP.
 //!
 //! Old files are left in the output directory, so a page that still names
 //! them keeps working until the next deploy clears it.
@@ -51,6 +52,12 @@ const PLAYERS: &str = "simulation/templates/special/players";
 const CSS: &str = "session.css";
 /// Twice the minimap's 192 px background, for high density screens.
 const MINIMAP_BACKGROUND_SIDE: u32 = 384;
+/// `MapCache.PreviewWidth`/`PreviewHeight` (`gui/maps/MapCache.js`): vanilla
+/// draws the top-left 400/512 x 300/512 of a preview.
+const MAP_PREVIEW_WIDTH: u32 = 400;
+const MAP_PREVIEW_HEIGHT: u32 = 300;
+/// The stock map preview images, under `UI`.
+const MAP_PREVIEWS: &str = "session/icons/mappreview";
 const WEBP_QUALITY: f32 = 85.0;
 const BROTLI_QUALITY: u32 = 11;
 const BROTLI_WINDOW_BITS: u32 = 22;
@@ -401,6 +408,18 @@ fn run(mod_dir: &Path, output: &Path, civs_path: &Path) -> Result<(), String> {
         written += bytes.len();
         properties.push((key, name));
     }
+    for stem in map_previews(&ui)? {
+        let path = format!("{MAP_PREVIEWS}/{stem}.png");
+        let image =
+            decode_png(&read(&ui.join(&path))?).map_err(|error| format!("{path}: {error}"))?;
+        let width = image.width * MAP_PREVIEW_WIDTH / 512;
+        let height = image.height * MAP_PREVIEW_HEIGHT / 512;
+        let bytes = encode_webp(&resize(crop(image, width, height), MAP_PREVIEW_WIDTH)?)?;
+        let key = format!("mappreview-{stem}");
+        let name = put(output, &key, "webp", &bytes, false)?;
+        written += bytes.len();
+        properties.push((key, name));
+    }
     // The engine's own mod first, so a public cursor of the same name
     // wins, as the VFS mounts public over it.
     let mut cursors = BTreeMap::new();
@@ -623,6 +642,22 @@ fn minimap_backgrounds(ui: &Path) -> Result<Vec<(String, String)>, String> {
     Ok(backgrounds)
 }
 
+/// The stem of every map preview `*.png`, as `MapCache` names the file of a
+/// map's preview.
+fn map_previews(ui: &Path) -> Result<Vec<String>, String> {
+    let dir = ui.join(MAP_PREVIEWS);
+    let entries = fs::read_dir(&dir).map_err(|error| format!("{}: {error}", dir.display()))?;
+    let mut previews = Vec::new();
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if let Some(stem) = name.strip_suffix(".png") {
+            previews.push(stem.to_string());
+        }
+    }
+    previews.sort();
+    Ok(previews)
+}
+
 /// `canvas2d.fs` with a grayscale factor of 1, on the texture's values.
 fn grayscale(image: &mut Rgba) {
     for pixel in image.pixels.chunks_exact_mut(4) {
@@ -630,6 +665,21 @@ fn grayscale(image: &mut Rgba) {
             0.3 * f32::from(pixel[0]) + 0.59 * f32::from(pixel[1]) + 0.11 * f32::from(pixel[2]);
         let grey = grey.round().clamp(0.0, 255.0) as u8;
         pixel[..3].fill(grey);
+    }
+}
+
+/// The top-left `width` x `height` of `image`.
+fn crop(image: Rgba, width: u32, height: u32) -> Rgba {
+    let mut pixels = Vec::with_capacity((width * height * 4) as usize);
+    for row in 0..height {
+        let start = (row * image.width * 4) as usize;
+        let end = start + (width * 4) as usize;
+        pixels.extend_from_slice(&image.pixels[start..end]);
+    }
+    Rgba {
+        width,
+        height,
+        pixels,
     }
 }
 

@@ -35,6 +35,9 @@ use crate::lang::translate_context as tc;
 
 /// `localStorage` key of the nickname, which `play.html` keeps too.
 const NICKNAME_KEY: &str = "specula.nickname";
+/// The host's last settings, which `play.html` sends with `POST /new`; it is
+/// vanilla's `config/matchsettings.mp.json` (D34).
+const SETTINGS_KEY: &str = "specula.matchsettings";
 /// Reconnecting: first retry after this, doubling up to `RETRY_MAX_MS`.
 const RETRY_MS: i32 = 1000;
 const RETRY_MAX_MS: i32 = 5000;
@@ -294,6 +297,7 @@ struct Dom {
     connection: HtmlElement,
     countdown: HtmlElement,
     error: HtmlElement,
+    preview: HtmlElement,
     preview_title: HtmlElement,
     description: HtmlElement,
     copy_link: HtmlElement,
@@ -371,6 +375,7 @@ pub async fn run() -> Result<(), String> {
         connection: by_id(&document, "connection")?,
         countdown: by_id(&document, "countdown")?,
         error: by_id(&document, "error")?,
+        preview: by_id(&document, "preview")?,
         preview_title: by_id(&document, "preview-title")?,
         description: by_id(&document, "description")?,
         copy_link: by_id(&document, "copy-link")?,
@@ -721,12 +726,51 @@ fn connect(page: &Shared) {
     on_close.forget();
 }
 
+/// Stores the host's settings for the next setup, on every state while the
+/// viewer hosts (D34).
+fn save_settings(state: &JsValue) {
+    let you = get(state, "you").as_f64();
+    if you.is_none() || you != get(state, "host").as_f64() {
+        return;
+    }
+    let Some(json) = js_sys::JSON::stringify(&get(state, "attributes"))
+        .ok()
+        .and_then(|json| json.as_string())
+    else {
+        return;
+    };
+    let Ok(copy) = js_sys::JSON::parse(&json) else {
+        return;
+    };
+    let gui_data = js_sys::Object::new();
+    let filter = get(&get(state, "gui"), "map_filter");
+    if Reflect::set(&gui_data, &"mapFilter".into(), &filter).is_err() {
+        return;
+    }
+    // `Settings::open` reads the filter from `guiData`, as vanilla's
+    // `GameSettingsGUI.getSettings` writes it.
+    if Reflect::set(&copy, &"guiData".into(), &gui_data).is_err() {
+        return;
+    }
+    let Some(serialized) = js_sys::JSON::stringify(&copy)
+        .ok()
+        .and_then(|json| json.as_string())
+    else {
+        return;
+    };
+    let storage = web_sys::window().and_then(|window| window.local_storage().ok().flatten());
+    if let Some(storage) = storage {
+        let _ = storage.set_item(SETTINGS_KEY, &serialized);
+    }
+}
+
 fn on_message_value(page: &Shared, message: JsValue) {
     match text(&message, "type").as_str() {
         "catalog" => {
             page.borrow_mut().catalog = message;
         }
         "state" => {
+            save_settings(&message);
             {
                 let mut page = page.borrow_mut();
                 page.retry_ms = RETRY_MS;
@@ -1440,9 +1484,14 @@ fn render_chrome(page: &Page, view: &View) {
     let dom = &page.dom;
     show(&dom.join, view.you.is_none());
     show(&dom.countdown, true);
-    // `MapPreview`'s name (its image comes with M22).
+    // `MapPreview`'s name and the stock image `session-gui` wrote for it.
     dom.preview_title
         .set_text_content(Some(&map_name(view, &text(&view.attributes, "map"))));
+    let key = preview_key(&view.attributes);
+    let _ = dom.preview.style().set_property(
+        "background-image",
+        &format!("var(--gui-mappreview-{key}, var(--gui-mappreview-nopreview))"),
+    );
     render_description(dom, view);
 
     show(&dom.step_down, view.seated.is_some());
@@ -1478,6 +1527,23 @@ fn render_chrome(page: &Page, view: &View) {
             .start
             .set_attribute("aria-description", &translate(reason));
     }
+}
+
+/// The key `session-gui` writes for the map's stock preview, `nopreview`
+/// for none. A landscape preview is not existence-checked upstream and the
+/// value goes into CSS.
+fn preview_key(attributes: &JsValue) -> String {
+    let preview = text(&get(attributes, "settings"), "mapPreview");
+    let name = preview.rsplit('/').next().unwrap_or_default();
+    let stem = name.strip_suffix(".png").unwrap_or(name);
+    if stem.is_empty()
+        || !stem
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
+        return "nopreview".to_string();
+    }
+    stem.to_string()
 }
 
 /// `MapCache.translateMapName` of `path`'s map.

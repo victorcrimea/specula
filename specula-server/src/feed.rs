@@ -41,6 +41,7 @@ const RECORD_LOS: u8 = 24;
 const RECORD_SUMMARY: u8 = 25;
 const RECORD_PAUSE: u8 = 26;
 const RECORD_KEEPALIVE: u8 = 27;
+const RECORD_INIT_ATTRIBUTES: u8 = 28;
 const ENTITY_SIZE: usize = 84;
 const ENTITY_SIZE_V14: usize = 74;
 const SOUND_SIZE: usize = 29;
@@ -776,6 +777,8 @@ pub enum Record {
     Pause(Vec<i8>),
     /// Kind 27: the engine is running though paused, so no turns come.
     KeepAlive,
+    /// Kind 28: the simulation's init attributes as JSON, once at the start.
+    InitAttributes(Vec<u8>),
 }
 
 /// The statistics summary of one capture, as JSON.
@@ -960,6 +963,7 @@ pub fn read_record(reader: &mut impl Read, version: u32) -> io::Result<Option<Re
                 return Ok(Some(Record::Pause(players)));
             }
             RECORD_KEEPALIVE => return Ok(Some(Record::KeepAlive)),
+            RECORD_INIT_ATTRIBUTES => return Ok(Some(Record::InitAttributes(payload))),
             RECORD_QUERY_REPLY => {
                 let mut cursor = Cursor(&payload);
                 let id = cursor.u32()?;

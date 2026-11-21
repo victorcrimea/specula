@@ -47,6 +47,8 @@ const error = document.getElementById("error");
 const nickname = document.getElementById("nickname");
 // Kept from the last game, and asked for only when there is none (D10).
 const NICKNAME_KEY = "specula.nickname";
+// The host's last settings, which the server applies to a new setup (D34).
+const SETTINGS_KEY = "specula.matchsettings";
 try { nickname.value = localStorage.getItem(NICKNAME_KEY) ?? ""; } catch {}
 if (!nickname.value) nickname.focus();
 let setup = null;
@@ -69,6 +71,12 @@ form.addEventListener("submit", async (event) => {
   event.preventDefault();
   error.hidden = true;
   const body = new URLSearchParams(new FormData(form));
+  try {
+    const stored = localStorage.getItem(SETTINGS_KEY);
+    // Rocket's 32 KiB form limit counts the encoded body, and an over-long
+    // field would fail the whole request.
+    if (typeof stored === "string" && stored && encodeURIComponent(stored).length < 30000) body.append("settings", stored);
+  } catch {}
   const response = await fetch("/new", { method: "POST", body }).catch(() => null);
   if (response?.ok) {
     try { localStorage.setItem(NICKNAME_KEY, nickname.value); } catch {}

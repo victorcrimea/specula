@@ -23,6 +23,8 @@ use std::sync::atomic::Ordering;
 use std::thread::JoinHandle;
 use std::time::Duration;
 
+use serde_json::Value;
+
 use specula_assets::command::ALLOW_CAPTURE;
 use specula_assets::command::Command as Order;
 use specula_assets::command::PUSH_FRONT;
@@ -147,10 +149,8 @@ struct Game {
     /// rematch opens a new setup from.
     settings: Settings,
     /// What the engine started with: the resolved settings and the attributes
-    /// it was given.
-    // Read by the engine's report of its own attributes (M21) and the
-    // rematch's replay of the draw (M35).
-    #[allow(dead_code)]
+    /// it was given. Kept to compare with the engine's report (M21) and for
+    /// the rematch's replay of the draw (M35).
     launch: Launch,
     /// Every statistics capture of each human seat, by player number, kept
     /// after the engine exits.
@@ -267,6 +267,36 @@ impl Play {
             }
             on_exit();
         }))
+    }
+
+    /// Compares what the engine reports it launched with to what was sent,
+    /// and logs every difference (D29). It never changes the game.
+    pub fn check_attributes(&self, json: &[u8]) {
+        let launched: Value = match serde_json::from_slice(json) {
+            Ok(value) => value,
+            Err(error) => {
+                let generation = self.generation.load(Ordering::SeqCst);
+                eprintln!("game {generation}: the engine's attributes are not JSON: {error}");
+                return;
+            }
+        };
+        let sent = {
+            let inner = self.inner.lock().unwrap();
+            match inner.game.as_ref() {
+                Some(game) => game.launch.attributes.clone(),
+                None => return,
+            }
+        };
+        let generation = self.generation.load(Ordering::SeqCst);
+        let lines = crate::settings::differences(&sent, &launched);
+        if lines.is_empty() {
+            println!("game {generation}: the engine launched with the attributes sent");
+            return;
+        }
+        eprintln!("game {generation}: the engine launched with other attributes than sent (D29):");
+        for line in lines {
+            eprintln!("  {line}");
+        }
     }
 
     /// The player number `visitor` commands, if they hold a seat.

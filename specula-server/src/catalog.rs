@@ -134,7 +134,7 @@ pub struct Biome {
     pub id: String,
     pub title: String,
     pub description: String,
-    // Shown with the map previews (M22).
+    // Vanilla's biome list carries it but never draws it.
     #[allow(dead_code)]
     pub preview: Option<String>,
 }
@@ -419,7 +419,10 @@ fn read_maps(root: &Path, kind: MapType, maps: &mut Vec<Map>) -> Result<(), Stri
             path: format!("{}/{stem}", kind.dir()),
             name: text_or_empty(&settings, "Name"),
             description: text_or_empty(&settings, "Description"),
-            preview: text(&settings, "Preview"),
+            // Vanilla's `mapData.settings.Preview || DefaultPreview` takes
+            // an empty name as none (`MapCache.getMapPreview`); 12 maps have
+            // one.
+            preview: text(&settings, "Preview").filter(|file| !file.is_empty()),
             keywords: texts(&settings, "Keywords").unwrap_or_default(),
             settings,
         });

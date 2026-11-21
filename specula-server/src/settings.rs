@@ -21,10 +21,13 @@ use crate::catalog::Catalog;
 use crate::catalog::MapType;
 use crate::catalog::VictoryCondition;
 
+mod compare;
 mod from_init;
 pub mod gamesetup;
 mod random;
 mod rules;
+
+pub use compare::differences;
 
 /// `Seeds` and `PlayerCiv`'s civs, the map, the biome, the daytime and the
 /// placement may be left to chance until launch.

@@ -493,8 +493,14 @@ fn play_new(
         .get("nickname")
         .and_then(|name| nickname::Nickname::parse(name))
         .ok_or(refuse("bad nickname"))?;
+    // A stale batch is the browser's, so it only means defaults, never a
+    // refusal.
+    let batch = form
+        .get("settings")
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(text).ok())
+        .filter(serde_json::Value::is_object);
     registry
-        .open_setup(&visitor, nickname, None)
+        .open_setup(&visitor, nickname, None, batch.as_ref())
         .map(|id| id.to_string())
         .map_err(refuse)
 }
@@ -1288,6 +1294,12 @@ pub(crate) fn serve(
             }
             Record::Pause(players) => hub.set_pause(&players),
             Record::KeepAlive => hub.feed_alive(),
+            Record::InitAttributes(json) => {
+                // The broadcast has no game to compare with.
+                if let Some(play) = play {
+                    play.check_attributes(&json);
+                }
+            }
             Record::QueryReply { id, json } => {
                 if let Some(play) = play {
                     play.reply(id, &json);
