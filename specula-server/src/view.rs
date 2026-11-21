@@ -1962,6 +1962,13 @@ impl Hub {
         players.get(player as usize).map(|player| player.state)
     }
 
+    /// The player a defeated seat is shown the vision of (D47), from the
+    /// feed's latest players record.
+    pub fn team_eyes(&self, player: u32) -> Option<u32> {
+        let state = self.state.lock().unwrap();
+        seat::team_eyes(&state.observer.players, player as usize).map(|eyes| eyes as u32)
+    }
+
     pub fn set_economy(&self, economy: &[Economy]) {
         self.state.lock().unwrap().observer.economy = economy.iter().map(Funds::new).collect();
     }

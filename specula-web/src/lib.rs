@@ -114,10 +114,12 @@ use crate::predict::Predictions;
 use crate::render::Renderer;
 use crate::research::ResearchProgress;
 use crate::stream::Ground;
+use crate::stream::Player;
 use crate::stream::PlayerState;
 use crate::stream::Scene;
 use crate::stream::Sound;
 use crate::stream::SoundTarget;
+use crate::stream::Stance;
 use crate::summary::Source;
 use crate::summary::SummaryWindow;
 use crate::terrain::TerrainImage;
@@ -638,6 +640,10 @@ struct App {
     pause_overlay: Option<PauseOverlay>,
     /// On `/play`: the seat was reported resigned, beaten or victorious.
     finish_noticed: bool,
+    /// On `/play`: the observers' view is being checked for now that the
+    /// seat's last ally fell; cleared when the answer left the page on its
+    /// stream, so the check is asked again.
+    watch_asked: Rc<Cell<bool>>,
     /// Only the 3D page has the match summary.
     summary: Option<Rc<RefCell<SummaryWindow>>>,
     /// On `/play`: the visitor's seat while the game is theirs, running or
@@ -1185,30 +1191,28 @@ impl App {
             // The panels' buttons work for the seat's own from now on.
             self.details_dirty = true;
         }
-        // A player watches as its player until it has won or lost, when
-        // vanilla makes it an observer (`isPlayerObserver`); its stream
-        // carries no more than that.
-        let playing = usize::try_from(seat)
+        // The perspective stays on the seat until it has won, as the engine
+        // then reveals the whole map to a winner; a defeated seat sees as
+        // its team (D47), and its stream holds only that, so other
+        // perspectives would show nothing true.
+        let own_state = usize::try_from(seat)
             .ok()
             .and_then(|seat| self.scene.players.get(seat))
-            .is_some_and(|player| player.state == PlayerState::Active);
-        if self.perspective_select.disabled() != playing {
-            self.perspective_select.set_disabled(playing);
+            .map(|player| player.state);
+        let locked = own_state.is_some_and(|state| state != PlayerState::Won);
+        if self.perspective_select.disabled() != locked {
+            self.perspective_select.set_disabled(locked);
         }
-        let finished = usize::try_from(seat)
-            .ok()
-            .and_then(|seat| self.scene.players.get(seat))
-            .map(|player| player.state)
-            .filter(|state| *state != PlayerState::Active);
+        let summary_open = self
+            .summary
+            .as_ref()
+            .is_some_and(|summary| summary.try_borrow().is_ok_and(|summary| summary.is_open()));
+        let finished = own_state.filter(|state| *state != PlayerState::Active);
         if let Some(state) = finished
             && !self.finish_noticed
         {
             self.finish_noticed = true;
             let won = state == PlayerState::Won;
-            let summary_open = self
-                .summary
-                .as_ref()
-                .is_some_and(|summary| summary.try_borrow().is_ok_and(|summary| summary.is_open()));
             // Without the summary window there is nothing to offer, so the
             // page keeps its old behavior.
             let offer = self.summary.is_some() && !self.match_over.ended;
@@ -1224,7 +1228,18 @@ impl App {
                 game_menu::after_defeat();
             }
         }
-        if playing && self.perspective != Perspective::Player(seat as usize) {
+        if self.finish_noticed
+            && !self.watch_asked.get()
+            && own_state == Some(PlayerState::Defeated)
+            && !team_active(&self.scene.players, seat as usize)
+            && !self.message_box.as_ref().is_some_and(MessageBox::is_offer)
+            && !summary_open
+        {
+            self.watch_asked.set(true);
+            let watch_asked = Rc::clone(&self.watch_asked);
+            game_menu::after_defeat_with_retry(move || watch_asked.set(false));
+        }
+        if locked && self.perspective != Perspective::Player(seat as usize) {
             self.perspective = Perspective::Player(seat as usize);
             self.perspective_select.set_value(&seat.to_string());
             self.update_palette();
@@ -1955,13 +1970,15 @@ async fn run(
         status = None;
     }
     let owner = status.as_ref().is_some_and(|status| status.seat != 0);
-    // A player who resigned or was beaten watches the rest as the observers
-    // do, with their delay, and gives no more orders.
-    let seated = owner && !status.as_ref().is_some_and(|status| status.defeated);
+    // A player who resigned or was beaten keeps their team's vision on the
+    // seat's stream (D47), and watches as the observers do, with their
+    // delay, once no ally is left.
+    let seated = owner && !status.as_ref().is_some_and(|status| status.watch);
+    let commanding = seated && !status.as_ref().is_some_and(|status| status.defeated);
     SEATED.store(seated, Ordering::Relaxed);
     // Always there, even empty, so the tooltips follow the view from the
     // first move and show an action's text as soon as it has one.
-    if seated && page == Page::Observer {
+    if commanding && page == Page::Observer {
         let _ = canvas.set_attribute(tooltip::ATTRIBUTE, "");
         let _ = canvas.set_attribute(tooltip::STYLE_ATTRIBUTE, tooltip::INFORMATION);
     }
@@ -1993,7 +2010,7 @@ async fn run(
         None
     };
     // An older page has no button; the hotkeys still work.
-    let idle_worker = if seated {
+    let idle_worker = if commanding {
         IdleWorker::new(&document)
             .inspect_err(|error| web_sys::console::error_1(&format!("idle worker: {error}").into()))
             .ok()
@@ -2117,7 +2134,8 @@ async fn run(
         message_box,
         game_menu,
         pause_overlay,
-        finish_noticed: false,
+        finish_noticed: status.as_ref().is_some_and(|status| status.defeated),
+        watch_asked: Rc::new(Cell::new(false)),
         summary,
         owner_seat: status
             .as_ref()
@@ -4064,6 +4082,18 @@ fn save_sound_settings(settings: Settings) {
         );
         let _ = storage.set_item(SOUND_SETTINGS_KEY, &text);
     }
+}
+
+/// Whether a mutual ally of `seat` is still in the game, whose vision a
+/// defeated seat is shown (D47); the seat's stream has its own stances and
+/// the others' towards it, which is all this needs.
+fn team_active(players: &[Player], seat: usize) -> bool {
+    let ally = |from: usize, to: usize| {
+        players.get(from).and_then(|player| player.stances.get(to)) == Some(&Stance::Ally)
+    };
+    (1..players.len()).any(|p| {
+        p != seat && players[p].state == PlayerState::Active && ally(seat, p) && ally(p, seat)
+    })
 }
 
 /// `CCmpSoundManager::PlaySoundGroup`'s test for the displayed player:

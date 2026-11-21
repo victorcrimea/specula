@@ -436,6 +436,7 @@ fn play_status(
                 running: false,
                 mine: false,
                 defeated: false,
+                watch: false,
                 rematch: rematch.unwrap_or(false),
                 seat: None,
                 limits: None,
@@ -772,8 +773,9 @@ fn play_data(
 
 /// The player's orders (`specula_assets::command`). The server first sends
 /// the format version and the player number the visitor commands, 0 for
-/// none; orders from a visitor without the seat are dropped, as is the
-/// seat looked up again for each, since a new game may have replaced it.
+/// none. The seat is the one held when the socket opened: orders are
+/// dropped once the visitor no longer holds it. A query's reply goes only
+/// to the connection that asked.
 #[rocket::get("/g/<id>/play/command")]
 fn play_command(
     id: MatchId,
@@ -785,25 +787,28 @@ fn play_command(
     let play = Arc::clone(&found.play);
     let hub = Arc::clone(&found.hub);
     let visitor = usage::visitor(cookies);
+    let connection = play.connection();
     Some(socket.channel(move |mut stream| {
         Box::pin(async move {
-            let seat = play.seat(visitor.as_deref()).unwrap_or(0);
+            let bound = play.seat(visitor.as_deref());
             let mut replies = play.replies();
             stream
-                .send(rocket_ws::Message::binary(vec![COMMAND_VERSION, seat]))
+                .send(rocket_ws::Message::binary(vec![
+                    COMMAND_VERSION,
+                    bound.unwrap_or(0),
+                ]))
                 .await?;
             loop {
                 let message = rocket::tokio::select! {
                     reply = replies.recv() => match reply {
                         Ok(reply) => {
-                            // Every page of the seat asks with its own ids;
-                            // a reply to another's is ignored there.
-                            if let Some(seat) = play.seat(visitor.as_deref()) {
-                                let reply = play::map_reply_ids(&reply, |id| {
-                                    hub.seat_handle(u32::from(seat), id)
-                                });
-                                stream.send(rocket_ws::Message::text(reply)).await?;
+                            if reply.connection != connection {
+                                continue;
                             }
+                            let reply = play::map_reply_ids(&reply.text, |id| {
+                                hub.seat_handle(u32::from(reply.seat), id)
+                            });
+                            stream.send(rocket_ws::Message::text(reply)).await?;
                             continue;
                         }
                         // A dropped reply only leaves one preview untinted.
@@ -818,7 +823,8 @@ fn play_command(
                 let rocket_ws::Message::Binary(bytes) = message else {
                     continue;
                 };
-                let Some(seat) = play.seat(visitor.as_deref()) else {
+                let Some(seat) = bound.filter(|seat| play.seat(visitor.as_deref()) == Some(*seat))
+                else {
                     continue;
                 };
                 // The page names entities by the seat's handles. Each keeps
@@ -839,7 +845,7 @@ fn play_command(
                     match Query::decode(&bytes) {
                         Ok(mut query) => {
                             if to_feed(query.entity_ids_mut()) {
-                                play.query(seat, &query);
+                                play.query(connection, seat, &query);
                             }
                         }
                         Err(error) => eprintln!("bad query from the player: {error}"),

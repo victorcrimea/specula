@@ -123,6 +123,9 @@ impl GameMenu {
 pub struct Status {
     /// The visitor's seat resigned or was beaten while the game goes on.
     pub defeated: bool,
+    /// The visitor's seat is defeated with no mutual ally left in the game:
+    /// its page shows the observers' view (D47).
+    pub watch: bool,
     /// The visitor's last game can be started again.
     pub rematch: bool,
     /// The visitor's seat, 0 when the game is not theirs.
@@ -158,6 +161,7 @@ pub async fn status() -> Result<Status, String> {
     };
     Ok(Status {
         defeated: flag("defeated"),
+        watch: flag("watch"),
         rematch: flag("rematch"),
         seat: number("seat").unwrap_or(0.0) as usize,
         wall_left_ms: number("wall_left_ms"),
@@ -211,16 +215,25 @@ pub fn reload() {
 }
 
 /// The seat was just reported resigned or beaten: unless that ended the
-/// game, opens `/play` again, which then shows the match as the observers
-/// see it.
+/// game, opens the match's page again once the server says the seat has no
+/// team vision left, which then shows the match as the observers see it.
 pub fn after_defeat() {
+    after_defeat_with_retry(|| {});
+}
+
+/// The same, for a page that asks by itself: `retry` runs when the server
+/// has not said the seat is watching, so the caller may ask again.
+pub fn after_defeat_with_retry(retry: impl FnOnce() + 'static) {
     let Some(window) = web_sys::window() else {
+        retry();
         return;
     };
-    let check = Closure::once_into_js(|| {
-        wasm_bindgen_futures::spawn_local(async {
-            if status().await.is_ok_and(|status| status.defeated) {
+    let check = Closure::once_into_js(move || {
+        wasm_bindgen_futures::spawn_local(async move {
+            if status().await.is_ok_and(|status| status.watch) {
                 reload();
+            } else {
+                retry();
             }
         });
     });

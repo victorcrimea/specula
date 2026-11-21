@@ -14,7 +14,9 @@
 //! - the LOS of the player; the terrain, territory and shore waves where
 //!   the LOS texture is not black; sounds the player hears; projectiles
 //!   from when they come into sight;
-//! - a player who won or lost watches as an observer does, as in vanilla.
+//! - a player who won watches as an observer does, as in vanilla; a defeated
+//!   one sees as its lowest-numbered active mutual ally (D47), or only what
+//!   it explored once none is left.
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
@@ -73,6 +75,7 @@ const STANCE_ALLY: u8 = 1;
 pub const STANCE_UNKNOWN: u8 = 255;
 const PLAYER_ACTIVE: u8 = 0;
 const PLAYER_DEFEATED: u8 = 1;
+const PLAYER_WON: u8 = 2;
 /// A territory tile the seat has not been shown.
 pub const TERRITORY_UNKNOWN: u8 = 0x80;
 /// Territory tiles per side are this many terrain tiles.
@@ -142,8 +145,12 @@ pub(super) struct Seat {
     revealed: Revealed,
     /// The `/data` hashes the stream has named.
     named: HashSet<u64>,
-    /// Won or lost: from then on the seat watches as an observer.
-    finished: bool,
+    /// Won: from then on the seat watches as an observer, as the engine
+    /// reveals the map to a winner (`Player.SetState`'s `SetLosRevealAll`).
+    won: bool,
+    /// The player whose vision the seat is shown: its own, or a defeated
+    /// seat's team proxy (`team_eyes`).
+    eyes: u32,
     /// The seat's detail state as the detail encoder reads it: lists, data
     /// and the player table only grow.
     details: Details,
@@ -762,7 +769,8 @@ impl Seat {
             local: Local::default(),
             revealed: Revealed::new(),
             named: HashSet::new(),
-            finished: false,
+            won: false,
+            eyes: player,
             details: Details::default(),
             detailed: BTreeSet::new(),
             pending: BTreeMap::new(),
@@ -804,7 +812,7 @@ impl Seat {
     }
 
     fn sees_all(&self) -> bool {
-        self.finished
+        self.won
     }
 
     /// Whether the seat gets every group of an entity of `owner`: its own,
@@ -830,11 +838,15 @@ impl Seat {
     ) -> io::Result<()> {
         let feed = input.feed;
         let me = self.player as usize;
-        if let Some(player) = feed.players.players.get(me)
-            && player.state != PLAYER_ACTIVE
-        {
-            self.finished = true;
+        let state = feed.players.players.get(me).map(|player| player.state);
+        if state == Some(PLAYER_WON) {
+            self.won = true;
         }
+        self.eyes = match state {
+            Some(PLAYER_DEFEATED) => team_eyes(&feed.players, me).unwrap_or(me),
+            _ => me,
+        } as u32;
+        let eyes = self.eyes as usize;
         let all = self.sees_all();
 
         // Which of the feed's entities the seat is shown, and their handles.
@@ -842,9 +854,9 @@ impl Seat {
             if all {
                 return true;
             }
-            let state = visibility_of(entity.visibility, me);
+            let state = visibility_of(entity.visibility, eyes);
             match entity.mirage {
-                Some(mirage) => mirage.player == me as i32 && state != HIDDEN,
+                Some(mirage) => mirage.player == eyes as i32 && state != HIDDEN,
                 None => state != HIDDEN,
             }
         };
@@ -905,7 +917,7 @@ impl Seat {
             let visibility = if all {
                 entity.visibility
             } else {
-                visibility_of(entity.visibility, me) << (2 * me)
+                visibility_of(entity.visibility, eyes) << (2 * me)
             };
             let mirage = entity.mirage.map(|mirage| Mirage {
                 player: mirage.player,
@@ -943,7 +955,7 @@ impl Seat {
         self.los(input);
         if let (Some(terrain), Some(water)) = (input.terrain, input.water) {
             let los = (!all)
-                .then(|| input.los.players.get(&self.player))
+                .then(|| input.los.players.get(&self.eyes))
                 .flatten()
                 .map(Vec::as_slice);
             // Before the first LOS, nothing is revealed.
@@ -1496,7 +1508,7 @@ impl Seat {
             side: input.los.side,
             players: BTreeMap::new(),
         };
-        if let Some(grid) = input.los.players.get(&self.player) {
+        if let Some(grid) = input.los.players.get(&self.eyes) {
             los.players.insert(self.player, grid.clone());
         }
         self.stream.los = los;
@@ -1550,12 +1562,13 @@ impl Seat {
     /// position always, a player's when it is the seat's.
     fn sounds(&mut self, feed: &Stream) {
         let me = self.player as usize;
+        let eyes = self.eyes as usize;
         let all = self.sees_all();
         let mut sounds = Vec::new();
         for sound in &feed.sounds {
             let target = match sound.target {
                 SoundTarget::Entity { id, owner } => {
-                    if !all && visibility_of(sound.visibility, me) != VISIBLE {
+                    if !all && visibility_of(sound.visibility, eyes) != VISIBLE {
                         continue;
                     }
                     SoundTarget::Entity {
@@ -1577,7 +1590,7 @@ impl Seat {
                 visibility: if all {
                     sound.visibility
                 } else {
-                    visibility_of(sound.visibility, me) << (2 * me)
+                    visibility_of(sound.visibility, eyes) << (2 * me)
                 },
                 ..*sound
             });
@@ -1663,7 +1676,7 @@ impl Seat {
         }
         self.pending.retain(|_, pending| pending.last_turn >= turn);
         let all = self.sees_all();
-        let grid = input.los.players.get(&self.player);
+        let grid = input.los.players.get(&self.eyes);
         let side = input.los.side as usize;
         let mut launches = Vec::new();
         let ids: Vec<u32> = self.pending.keys().copied().collect();
@@ -1752,6 +1765,16 @@ fn mutual_ally(players: &Players, a: usize, b: usize) -> bool {
             .copied()
     };
     a != 0 && b != 0 && stance(a, b) == Some(STANCE_ALLY) && stance(b, a) == Some(STANCE_ALLY)
+}
+
+/// Whose vision a defeated `me` is shown (D47): its lowest-numbered mutual
+/// ally still in the game. None once none is.
+pub(super) fn team_eyes(players: &Players, me: usize) -> Option<usize> {
+    (1..players.players.len()).find(|&other| {
+        other != me
+            && players.players[other].state == PLAYER_ACTIVE
+            && mutual_ally(players, me, other)
+    })
 }
 
 /// The lower-case selections the client resolves an entity's look with:

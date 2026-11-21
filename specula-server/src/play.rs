@@ -13,11 +13,13 @@
 //! cookie.
 
 use std::collections::HashMap;
+use std::collections::VecDeque;
 use std::io::Write;
 use std::os::unix::net::UnixStream;
 use std::process::Command;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::atomic::AtomicU32;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use std::thread::JoinHandle;
@@ -60,12 +62,33 @@ const QUERY_WALL_PREVIEW: u8 = 3;
 /// Replies not yet sent to the pages; a placement asks at most a couple at
 /// a time.
 const REPLY_BACKLOG: usize = 64;
+/// How many unanswered queries are remembered: the engine never answers one
+/// whose uplink dropped mid-query, and they must not pile up.
+const ASKERS_KEPT: usize = 256;
 /// What every order the GUI gives but walk names, as
 /// `g_AutoFormation.getNull()` with `formationwalkonly`
 /// (`globalscripts/Formation.js`).
 const NULL_FORMATION: &str = "special/formations/null";
 /// `feed::Player::state`.
 const PLAYER_ACTIVE: u8 = 0;
+const PLAYER_DEFEATED: u8 = 1;
+
+/// A query's answer, for the one command connection that asked.
+#[derive(Clone)]
+pub struct Reply {
+    pub connection: u64,
+    pub seat: u8,
+    /// `{"id":<the page's id>,"result":<JSON>}`, as the page reads it.
+    pub text: String,
+}
+
+/// Who asked a query the uplink sent under `uplink_id`.
+struct Asker {
+    uplink_id: u32,
+    connection: u64,
+    seat: u8,
+    id: u32,
+}
 
 /// What the player's page reads: whether a game is running and is the
 /// visitor's, whether its seat is defeated and whether the visitor's last
@@ -75,6 +98,7 @@ pub fn setup_json(status: &Status) -> String {
     json.boolean("running", status.running);
     json.boolean("mine", status.mine);
     json.boolean("defeated", status.defeated);
+    json.boolean("watch", status.watch);
     json.boolean("rematch", status.rematch);
     json.raw("seat", &status.seat.unwrap_or(0).to_string());
     if let Some((wall_left, game_limit)) = status.limits {
@@ -112,6 +136,9 @@ pub struct Status {
     /// The visitor's seat is not active any more: they resigned or were
     /// beaten while the others play on.
     pub defeated: bool,
+    /// The visitor's seat is defeated with no mutual ally left in the game:
+    /// its page shows the observers' view (D47).
+    pub watch: bool,
     /// The visitor hosts the last game, which a rematch repeats.
     pub rematch: bool,
     /// The visitor's seat while the game is theirs, running or not, which
@@ -131,9 +158,16 @@ pub struct Play {
     hub: Arc<Hub>,
     seats: Arc<Seats>,
     inner: Mutex<Inner>,
-    /// The engine's answers to the queries, as the text message
-    /// `{"id":..,"result":..}` the pages read.
-    replies: broadcast::Sender<String>,
+    /// One id per command socket.
+    next_connection: AtomicU64,
+    /// The id the next query goes to the engine under.
+    next_query: AtomicU32,
+    /// Who asked each query the engine has not answered yet: a leaf lock,
+    /// never take `inner` while holding it.
+    askers: Mutex<VecDeque<Asker>>,
+    /// The engine's answers to the queries, each for the connection that
+    /// asked, as the text message `{"id":..,"result":..}` the page reads.
+    replies: broadcast::Sender<Reply>,
 }
 
 #[derive(Default)]
@@ -184,6 +218,9 @@ impl Play {
             hub,
             seats,
             inner: Mutex::new(Inner::default()),
+            next_connection: AtomicU64::new(0),
+            next_query: AtomicU32::new(1),
+            askers: Mutex::new(VecDeque::new()),
             replies: broadcast::channel(REPLY_BACKLOG).0,
         }
     }
@@ -304,6 +341,11 @@ impl Play {
         self.seats.player_of(visitor?)
     }
 
+    /// An id for one command socket.
+    pub fn connection(&self) -> u64 {
+        self.next_connection.fetch_add(1, Ordering::Relaxed)
+    }
+
     pub fn status(&self, visitor: Option<&str>) -> Status {
         let running = self
             .inner
@@ -317,6 +359,11 @@ impl Play {
             running,
             mine: running && seat.is_some(),
             defeated: running && seat.is_some_and(|seat| self.seat_defeated(seat)),
+            watch: running
+                && seat.is_some_and(|seat| {
+                    self.hub.player_state(u32::from(seat)) == Some(PLAYER_DEFEATED)
+                        && self.hub.team_eyes(u32::from(seat)).is_none()
+                }),
             rematch: visitor.is_some_and(|visitor| self.seats.is_host(visitor)),
             seat: seat.filter(|&seat| seat != 0),
             limits: None,
@@ -552,29 +599,53 @@ impl Play {
 
     /// Asks the engine `query` as `player` would; the answer comes back as
     /// a feed record, to `reply`.
-    pub fn query(&self, player: u8, query: &Query) {
+    pub fn query(&self, connection: u64, player: u8, query: &Query) {
+        let uplink_id = self.next_query.fetch_add(1, Ordering::Relaxed);
+        {
+            let mut askers = self.askers.lock().unwrap();
+            askers.push_back(Asker {
+                uplink_id,
+                connection,
+                seat: player,
+                id: query.id,
+            });
+            while askers.len() > ASKERS_KEPT {
+                askers.pop_front();
+            }
+        }
         let (method, json) = query_json(&query.kind);
         let mut record = Vec::with_capacity(json.len() + 11);
         record.push(UPLINK_QUERY);
         record.extend_from_slice(&(json.len() as u32 + 6).to_le_bytes());
-        record.extend_from_slice(&query.id.to_le_bytes());
+        record.extend_from_slice(&uplink_id.to_le_bytes());
         record.push(player);
         record.push(method);
         record.extend_from_slice(json.as_bytes());
         self.write_uplink(&record);
     }
 
+    /// `id` is the uplink id the query was sent under.
     pub fn reply(&self, id: u32, json: &[u8]) {
         let Ok(json) = std::str::from_utf8(json) else {
             return;
         };
+        let asker = {
+            let mut askers = self.askers.lock().unwrap();
+            let index = askers.iter().position(|asker| asker.uplink_id == id);
+            index.and_then(|index| askers.remove(index))
+        };
+        let Some(asker) = asker else {
+            return;
+        };
         // No receiver is no page to tell.
-        let _ = self
-            .replies
-            .send(format!(r#"{{"id":{id},"result":{json}}}"#));
+        let _ = self.replies.send(Reply {
+            connection: asker.connection,
+            seat: asker.seat,
+            text: format!(r#"{{"id":{},"result":{json}}}"#, asker.id),
+        });
     }
 
-    pub fn replies(&self) -> broadcast::Receiver<String> {
+    pub fn replies(&self) -> broadcast::Receiver<Reply> {
         self.replies.subscribe()
     }
 
