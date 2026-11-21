@@ -4,14 +4,15 @@
 //! `launchGame`'s `onFinalizeAttributes`). The classes' dependency rules
 //! (their `onMapChange` and `maybeUpdate` watchers) are in `rules`,
 //! `fromInitAttributes` in `from_init`, and vanilla's `gui/gamesetup` layer
-//! in `gamesetup`. Resolving the random choices (`pickRandomItems`) is
-//! M14's.
+//! in `gamesetup`. The random choices (`pickRandomItems`) are resolved in
+//! `random`.
 //!
 //! Groups and the serializer follow the engine's class order, the VFS's
 //! byte order of the file names, since `GameSettings.init` runs each
 //! `init()` in that order and the watchers an earlier class registered fire
 //! during a later one's.
 
+use rand::thread_rng;
 use serde_json::Map as Object;
 use serde_json::Value;
 use serde_json::json;
@@ -22,6 +23,7 @@ use crate::catalog::VictoryCondition;
 
 mod from_init;
 pub mod gamesetup;
+mod random;
 mod rules;
 
 /// `Seeds` and `PlayerCiv`'s civs, the map, the biome, the daytime and the
@@ -334,6 +336,15 @@ pub struct Assignment<'a> {
     /// 1 is the first player, as `playerAssignments` numbers them.
     pub player: u8,
     pub name: &'a str,
+}
+
+/// What a launch hands the engine and keeps for later.
+pub struct Launch {
+    /// Every random choice resolved. A rematch (D62) starts from these with
+    /// only the AI seed random again, so it replays the same draw.
+    pub settings: Settings,
+    /// `finalizedAttributes`, what the engine starts with and M21 compares.
+    pub attributes: Value,
 }
 
 impl Settings {
@@ -725,6 +736,24 @@ impl Settings {
         settings["TriggerScripts"] = scripts.into();
         attributes["matchID"] = match_id.into();
         attributes
+    }
+
+    /// `GameSettings.launchGame` up to the engine call. It resolves a clone
+    /// because the setup keeps its random choices for the next match, as
+    /// vanilla saves its settings before resolving them.
+    pub fn launch(
+        &self,
+        catalog: &Catalog,
+        assignments: &[Assignment],
+        match_id: &str,
+    ) -> Result<Launch, String> {
+        let mut settings = self.clone();
+        settings.pick_random_items(catalog, &mut thread_rng())?;
+        let attributes = settings.finalized(assignments, match_id);
+        Ok(Launch {
+            settings,
+            attributes,
+        })
     }
 }
 
