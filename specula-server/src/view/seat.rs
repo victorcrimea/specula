@@ -73,7 +73,7 @@ use crate::wire::Writer;
 const STANCE_ALLY: u8 = 1;
 /// A stance between two other players, which the seat is not told.
 pub const STANCE_UNKNOWN: u8 = 255;
-const PLAYER_ACTIVE: u8 = 0;
+pub(super) const PLAYER_ACTIVE: u8 = 0;
 const PLAYER_DEFEATED: u8 = 1;
 const PLAYER_WON: u8 = 2;
 /// A territory tile the seat has not been shown.
@@ -1742,6 +1742,15 @@ impl Seat {
         Ok(())
     }
 
+    /// Tells the seat's viewers its control (`Hub::set_control`).
+    pub fn control(&mut self, turn: u32, body: &[u8]) -> io::Result<()> {
+        if let Some(op) = self.stream.set_control(turn, body)? {
+            self.shown
+                .apply(Release::Detail(op), None, self.shown.match_id);
+        }
+        Ok(())
+    }
+
     pub fn end(&mut self, common: &Common, turn: u32) {
         let seat_common = Common {
             delay: Duration::ZERO,
@@ -1764,7 +1773,7 @@ impl Seat {
 }
 
 /// Both players are allies of each other (`Diplomacy.IsMutualAlly`).
-fn mutual_ally(players: &Players, a: usize, b: usize) -> bool {
+pub(super) fn mutual_ally(players: &Players, a: usize, b: usize) -> bool {
     let stance = |from: usize, to: usize| {
         players
             .players

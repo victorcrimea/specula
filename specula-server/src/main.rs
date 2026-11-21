@@ -241,6 +241,7 @@ async fn main() {
                 play_new,
                 setup_socket,
                 play_action,
+                play_kick,
                 play_viewer,
                 play_detail_viewer,
                 play_segment_file,
@@ -507,8 +508,9 @@ fn play_new(
         .map_err(refuse)
 }
 
-/// The player's page's Resign, Pause, Exit and Rematch, for the visitor's
-/// game; the text says why not. A rematch answers the new game's UUID.
+/// The player's page's Resign, Pause, Claim, End, Exit and Rematch, for the
+/// visitor's game; the text says why not. A rematch answers the new game's
+/// UUID.
 #[rocket::post("/g/<id>/play/<action>")]
 fn play_action(
     id: MatchId,
@@ -531,10 +533,29 @@ fn play_action(
         "resign" => play.resign(&visitor).map(|()| String::new()),
         "pause" => play.set_paused(&visitor, true).map(|()| String::new()),
         "resume" => play.set_paused(&visitor, false).map(|()| String::new()),
+        "claim" => play.claim(&visitor).map(|()| String::new()),
         "end" => play.end(&visitor).map(|()| String::new()),
         _ => Err("unknown action"),
     }
     .map_err(refuse)
+}
+
+/// The host's kick of a seat from the diplomacy window (M29).
+#[rocket::post("/g/<id>/play/kick/<player>")]
+fn play_kick(
+    id: MatchId,
+    player: u8,
+    registry: &State<Arc<Registry>>,
+    cookies: &CookieJar<'_>,
+) -> Result<String, rocket::response::status::BadRequest<&'static str>> {
+    let refuse = rocket::response::status::BadRequest;
+    let visitor = usage::visitor(cookies).ok_or(refuse("no visitor cookie"))?;
+    let found = registry.hosted(id).ok_or(refuse("not in play mode"))?;
+    found
+        .play
+        .kick(&visitor, player)
+        .map(|()| String::new())
+        .map_err(refuse)
 }
 
 /// Sent on a setup socket that closes as it opens, or for a match that is

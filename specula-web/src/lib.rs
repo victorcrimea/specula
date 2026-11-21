@@ -95,6 +95,7 @@ use crate::audio::Settings;
 use crate::bench::Bench;
 use crate::bench::BenchInfo;
 use crate::bench::CameraPose;
+use crate::detail::Control;
 use crate::detail::Details;
 use crate::diplomacy::Perspective;
 use crate::diplomacy_window::DiplomacyWindow;
@@ -643,6 +644,10 @@ struct App {
     pause_overlay: Option<PauseOverlay>,
     /// On `/play`: the seat was reported resigned, beaten or victorious.
     finish_noticed: bool,
+    /// On `/play`: the claim-victory popup was offered on this page.
+    claim_offered: bool,
+    /// On `/play`: the seat's kick was noticed, which its popup says once.
+    kicked_noticed: bool,
     /// On `/play`: the observers' view is being checked for now that the
     /// seat's last ally fell; cleared when the answer left the page on its
     /// stream, so the check is asked again.
@@ -1102,12 +1107,33 @@ impl App {
         }
         self.follow_selection();
         self.update_top(now);
+        // Field borrows only, as the window is borrowed mutably too.
+        let control = Some(&self.scene.details.control).filter(|control| !control.seats.is_empty());
+        let own = self.own_seat();
         if let Some(diplomacy_window) = &mut self.diplomacy_window {
             diplomacy_window.update(&diplomacy_window::View {
                 scene: &self.scene,
                 palette: &self.palette,
                 perspective: self.perspective,
+                control,
+                own,
             });
+        }
+        // A Kick asks once no other box is open, which it must not replace;
+        // until then the press waits in the window.
+        if let Some(message_box) = &mut self.message_box
+            && !message_box.is_open()
+            && let Some(player) = self
+                .diplomacy_window
+                .as_ref()
+                .and_then(DiplomacyWindow::take_kick)
+        {
+            let name = self
+                .scene
+                .players
+                .get(usize::from(player))
+                .map_or_else(String::new, |player| player.name.clone());
+            message_box.confirm_kick(player, &name);
         }
         if let Some(trade_window) = &mut self.trade_window {
             trade_window.update(&trade_window::View {
@@ -1616,13 +1642,101 @@ impl App {
                 elapsed,
             );
         }
+        self.update_menu();
+        self.sync_control_notices();
+    }
+
+    /// The seats' control, once the page has heard of a seat.
+    fn control(&self) -> Option<&Control> {
+        let control = &self.scene.details.control;
+        (!control.seats.is_empty()).then_some(control)
+    }
+
+    /// The visitor's own seat, as the control names it.
+    fn own_seat(&self) -> Option<u8> {
+        self.owner_seat.map(|seat| seat as u8)
+    }
+
+    /// Whether the visitor's seat is out of the game, by the feed or by the
+    /// server's report.
+    fn own_out(&self) -> bool {
+        self.finish_noticed
+            || self
+                .owner_seat
+                .and_then(|seat| self.scene.players.get(seat))
+                .is_some_and(|player| player.state != PlayerState::Active)
+    }
+
+    /// The Menu as the pause, the feed and the control have it.
+    fn update_menu(&self) {
         if let Some(menu) = &self.game_menu {
             menu.update(
                 !seated() || self.finish_noticed,
                 self.match_over.ended,
                 self.own_pause(),
                 self.own_pause_left(),
+                self.control(),
+                self.own_seat(),
             );
+        }
+    }
+
+    /// The names of the seats that have left and are still in the game, as
+    /// Claim victory names the seats it resigns.
+    fn left_names(&self) -> String {
+        let Some(control) = self.control() else {
+            return String::new();
+        };
+        let separator = lang::translate_context("Separator for a list of players", ", ");
+        let names: Vec<&str> = control
+            .seats
+            .iter()
+            .filter(|seat| seat.kicked || seat.absent)
+            .filter_map(|seat| self.scene.players.get(usize::from(seat.player)))
+            .filter(|player| player.state == PlayerState::Active)
+            .map(|player| player.name.as_str())
+            .collect();
+        names.join(&separator)
+    }
+
+    /// The control's two popups: the seat was kicked, once; a claim is
+    /// available, once per page. Each waits for no other box to be open,
+    /// and the kick closes the dialogs.
+    fn sync_control_notices(&mut self) {
+        let Some(own) = self.own_seat() else {
+            return;
+        };
+        let Some(control) = self.control() else {
+            return;
+        };
+        let kicked = control
+            .seats
+            .iter()
+            .any(|seat| seat.player == own && seat.kicked);
+        let claim = control.claim;
+        if kicked && !self.kicked_noticed {
+            self.kicked_noticed = true;
+            if let Some(diplomacy_window) = &mut self.diplomacy_window {
+                diplomacy_window.set_open(false);
+            }
+            if let Some(trade_window) = &mut self.trade_window {
+                trade_window.set_open(false, self.perspective);
+            }
+            if let Some(message_box) = &mut self.message_box {
+                message_box.notify_kicked();
+            }
+        } else if claim
+            && !self.claim_offered
+            && self
+                .message_box
+                .as_ref()
+                .is_none_or(|message_box| !message_box.is_open())
+        {
+            self.claim_offered = true;
+            let names = self.left_names();
+            if let Some(message_box) = &mut self.message_box {
+                message_box.offer_claim(&names);
+            }
         }
     }
 
@@ -2167,6 +2281,8 @@ async fn run(
         game_menu,
         pause_overlay,
         finish_noticed: status.as_ref().is_some_and(|status| status.defeated),
+        claim_offered: false,
+        kicked_noticed: false,
         watch_asked: Rc::new(Cell::new(false)),
         summary,
         owner_seat: status
@@ -2757,12 +2873,31 @@ fn on_shift_click(
     on_click.forget();
 }
 
-/// The Menu and its Resign and Exit, which ask first as the session's do.
+/// What a Menu button that closes the menu asks for.
+#[derive(Clone, Copy, PartialEq)]
+enum MenuAction {
+    Resign,
+    Claim,
+    End,
+    Exit,
+}
+
+/// The Menu and its Resign, Claim victory, End game and Exit, which ask
+/// first as the session's do.
 fn wire_game_menu(app: &Rc<RefCell<App>>) {
-    let Some((open, pause, resign, exit)) = app.borrow().game_menu.as_ref().map(|menu| {
-        let (open, _, pause, resign, exit) = menu.buttons();
-        (open.clone(), pause.clone(), resign.clone(), exit.clone())
-    }) else {
+    let Some((open, pause, resign, claim, end, exit)) =
+        app.borrow().game_menu.as_ref().map(|menu| {
+            let buttons = menu.buttons();
+            (
+                buttons.open.clone(),
+                buttons.pause.clone(),
+                buttons.resign.clone(),
+                buttons.claim.clone(),
+                buttons.end.clone(),
+                buttons.exit.clone(),
+            )
+        })
+    else {
         return;
     };
     let target = Rc::clone(app);
@@ -2796,7 +2931,12 @@ fn wire_game_menu(app: &Rc<RefCell<App>>) {
         }
         toggle_pause(&target);
     });
-    for (button, resign) in [(resign, true), (exit, false)] {
+    for (button, action) in [
+        (resign, MenuAction::Resign),
+        (claim, MenuAction::Claim),
+        (end, MenuAction::End),
+        (exit, MenuAction::Exit),
+    ] {
         let target = Rc::clone(app);
         on_click(&button, move || {
             let app = &mut *target.borrow_mut();
@@ -2810,11 +2950,22 @@ fn wire_game_menu(app: &Rc<RefCell<App>>) {
             if let Some(trade_window) = &mut app.trade_window {
                 trade_window.set_open(false, app.perspective);
             }
+            // A seat out of the game leaves at once, as an observer does.
+            if action == MenuAction::Exit && app.own_out() {
+                game_menu::watch();
+                return;
+            }
+            let names = if action == MenuAction::Claim {
+                app.left_names()
+            } else {
+                String::new()
+            };
             if let Some(message_box) = &mut app.message_box {
-                if resign {
-                    message_box.confirm_resign();
-                } else {
-                    message_box.confirm_exit();
+                match action {
+                    MenuAction::Resign => message_box.confirm_resign(),
+                    MenuAction::Claim => message_box.confirm_claim(&names),
+                    MenuAction::End => message_box.confirm_end_game(),
+                    MenuAction::Exit => message_box.confirm_exit(),
                 }
             }
         });
@@ -2991,7 +3142,7 @@ fn wire_summary(app: &Rc<RefCell<App>>, window: &web_sys::Window) {
         })
         .collect();
     if let Some(menu) = &app.borrow().game_menu {
-        buttons.push(menu.buttons().1.clone());
+        buttons.push(menu.buttons().summary.clone());
     }
     for button in buttons {
         let target = Rc::clone(app);
@@ -3027,16 +3178,19 @@ fn wire_summary(app: &Rc<RefCell<App>>, window: &web_sys::Window) {
     on_key.forget();
 }
 
-/// No, or Escape, on the open message box; Continue watching of the result
-/// offer goes on to the page a defeat leads to.
-fn cancel_message_box(app: &Rc<RefCell<App>>) {
+/// No, or Escape, on the open message box. Continue watching of the result
+/// offer goes on to the page a defeat leads to; I will return (No) to the
+/// observers' view, where Escape only closes the question; and a kick
+/// notice reloads the page on either.
+fn cancel_message_box(app: &Rc<RefCell<App>>, no_button: bool) {
     let Ok(mut app) = app.try_borrow_mut() else {
         return;
     };
-    if let Some(Pending::Result { won: false }) =
-        app.message_box.as_mut().and_then(MessageBox::cancel)
-    {
-        game_menu::after_defeat();
+    match app.message_box.as_mut().and_then(MessageBox::cancel) {
+        Some(Pending::Result { won: false }) => game_menu::after_defeat(),
+        Some(Pending::ReturnQuestion) if no_button => game_menu::watch(),
+        Some(Pending::Kicked) => game_menu::reload(),
+        _ => {}
     }
 }
 
@@ -3049,7 +3203,7 @@ fn wire_message_box(app: &Rc<RefCell<App>>, window: &web_sys::Window) {
         return;
     };
     let target = Rc::clone(app);
-    on_click(&no, move || cancel_message_box(&target));
+    on_click(&no, move || cancel_message_box(&target, true));
     let target = Rc::clone(app);
     on_click(&yes, move || {
         let mut app = target.borrow_mut();
@@ -3060,19 +3214,43 @@ fn wire_message_box(app: &Rc<RefCell<App>>, window: &web_sys::Window) {
                 }
             }
             // The stream reports the defeat, which moves the page on.
-            Some(Pending::Resign) => wasm_bindgen_futures::spawn_local(async {
-                if let Err(error) = game_menu::post("resign").await {
-                    web_sys::console::error_1(&error.into());
+            Some(Pending::Resign) | Some(Pending::ReturnQuestion) => {
+                wasm_bindgen_futures::spawn_local(async {
+                    if let Err(error) = game_menu::post("resign").await {
+                        web_sys::console::error_1(&error.into());
+                    }
+                })
+            }
+            // Vanilla's quit: the question whether the seat returns.
+            Some(Pending::Exit) => {
+                if let Some(message_box) = &mut app.message_box {
+                    message_box.confirm_return();
                 }
-            }),
+            }
             // Reloaded either way: a game that had already ended shows its
             // end on the seat's stream, sooner than the observers' delay.
-            Some(Pending::Exit) => wasm_bindgen_futures::spawn_local(async {
+            Some(Pending::EndGame) => wasm_bindgen_futures::spawn_local(async {
                 if let Err(error) = game_menu::post("end").await {
                     web_sys::console::error_1(&error.into());
                 }
                 game_menu::reload();
             }),
+            Some(Pending::Claim) | Some(Pending::ClaimOffer) => {
+                wasm_bindgen_futures::spawn_local(async {
+                    if let Err(error) = game_menu::post("claim").await {
+                        web_sys::console::error_1(&error.into());
+                    }
+                })
+            }
+            Some(Pending::Kick(player)) => {
+                let action = format!("kick/{player}");
+                wasm_bindgen_futures::spawn_local(async move {
+                    if let Err(error) = game_menu::post(&action).await {
+                        web_sys::console::error_1(&error.into());
+                    }
+                })
+            }
+            Some(Pending::Kicked) => game_menu::reload(),
             Some(Pending::Result { won }) => {
                 app.offer_return = Some(won);
                 let source = summary_source(&app);
@@ -3103,7 +3281,7 @@ fn wire_message_box(app: &Rc<RefCell<App>>, window: &web_sys::Window) {
             .try_borrow()
             .is_ok_and(|app| app.message_box.as_ref().is_some_and(MessageBox::is_open));
         if open {
-            cancel_message_box(&target);
+            cancel_message_box(&target, false);
         }
     });
     let _ = window.add_event_listener_with_callback("keydown", on_key.as_ref().unchecked_ref());
@@ -4484,17 +4662,7 @@ fn connect(app: &Rc<RefCell<App>>) {
                     .borrow_mut()
                     .match_over
                     .show_status(flags, u32_at(33).unwrap_or(0), now);
-                {
-                    let app = receiver.borrow();
-                    if let Some(menu) = &app.game_menu {
-                        menu.update(
-                            !seated() || app.finish_noticed,
-                            app.match_over.ended,
-                            app.own_pause(),
-                            app.own_pause_left(),
-                        );
-                    }
-                }
+                receiver.borrow().update_menu();
                 // The match over popup takes the offer's place, and the
                 // game has nothing left to reload for.
                 if let Ok(mut app) = receiver.try_borrow_mut()

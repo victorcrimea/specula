@@ -144,5 +144,18 @@
   "%(player)s (disconnected): %(time)s": "%(player)s (deskonektatuta): %(time)s",
   "%(player)s is out of pause time; their pause ends in %(time)s.": "%(player)s(e)k ez du pausa-denbora gehiagorik; bere pausa %(time)s barru amaituko da.",
   "Pause time left: %(time)s": "Geratzen den pausa-denbora: %(time)s",
-  "You have no pause time left.": "Ez zaizu pausa-denbora gehiagorik geratzen."
+  "You have no pause time left.": "Ez zaizu pausa-denbora gehiagorik geratzen.",
+  "Claim victory": "Eskatu garaipena",
+  "End game": "Amaitu partida",
+  "Kick": "Kanporatu",
+  "Kicked": "Kanporatua",
+  "Wait": "Itxaron",
+  "This player is out of the game.": "Jokalari hau ez dago jokoan dagoeneko.",
+  "Only the host can end the game.": "Ostalariak bakarrik amaitu dezake partida.",
+  "The host can end the game only in its first minute, or once every other player has left or resigned.": "Ostalariak lehen minutuan bakarrik amaitu dezake partida, edo beste jokalari guztiak joan edo errenditu direnean.",
+  "Available once every player still connected is an ally, and the others have been away for 5 minutes with no pause time left.": "Eskuragarri konektatuta dauden jokalari guztiak aliatuak direnean eta gainerakoak 5 minutuz kanpo egon direnean, pausa denborarik gabe.",
+  "Are you sure you want to end the game for every player?": "Ziur zaude partida jokalari guztientzat amaitu nahi duzula?",
+  "Claim victory? %(players)s will be resigned.": "Eskatu garaipena? %(players)s errendituko dira.",
+  "%(players)s left the game. Do you want to claim victory?": "%(players)s jokotik irten da. Garaipena eskatu nahi duzu?",
+  "Kick %(player)s? They cannot play this match again.": "%(player)s kanporatu? Ezin izango du partida hau berriro jokatu."
 }

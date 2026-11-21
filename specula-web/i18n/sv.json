@@ -144,5 +144,18 @@
   "%(player)s (disconnected): %(time)s": "%(player)s (frånkopplad): %(time)s",
   "%(player)s is out of pause time; their pause ends in %(time)s.": "%(player)s har slut på paustid; pausen slutar om %(time)s.",
   "Pause time left: %(time)s": "Återstående paustid: %(time)s",
-  "You have no pause time left.": "Du har ingen paustid kvar."
+  "You have no pause time left.": "Du har ingen paustid kvar.",
+  "Claim victory": "Kräv seger",
+  "End game": "Avsluta spelet",
+  "Kick": "Sparka",
+  "Kicked": "Utsparkad",
+  "Wait": "Vänta",
+  "This player is out of the game.": "Den här spelaren är inte längre med i spelet.",
+  "Only the host can end the game.": "Endast värden kan avsluta spelet.",
+  "The host can end the game only in its first minute, or once every other player has left or resigned.": "Värden kan bara avsluta spelet under den första minuten, eller när alla andra spelare har lämnat eller gett upp.",
+  "Available once every player still connected is an ally, and the others have been away for 5 minutes with no pause time left.": "Tillgänglig när alla spelare som fortfarande är anslutna är allierade och de andra har varit borta i 5 minuter utan kvarvarande paustid.",
+  "Are you sure you want to end the game for every player?": "Vill du verkligen avsluta spelet för alla spelare?",
+  "Claim victory? %(players)s will be resigned.": "Kräv seger? %(players)s kommer att ge upp.",
+  "%(players)s left the game. Do you want to claim victory?": "%(players)s har lämnat spelet. Vill du kräva seger?",
+  "Kick %(player)s? They cannot play this match again.": "Sparka %(player)s? Spelaren kan inte spela den här matchen igen."
 }

@@ -144,5 +144,18 @@
   "%(player)s (disconnected): %(time)s": "%(player)s（切断）: %(time)s",
   "%(player)s is out of pause time; their pause ends in %(time)s.": "%(player)s は一時停止時間を使い切りました。あと %(time)s で一時停止が終了します。",
   "Pause time left: %(time)s": "残りの一時停止時間: %(time)s",
-  "You have no pause time left.": "一時停止時間が残っていません。"
+  "You have no pause time left.": "一時停止時間が残っていません。",
+  "Claim victory": "勝利を主張",
+  "End game": "ゲームを終了",
+  "Kick": "キック",
+  "Kicked": "キック済み",
+  "Wait": "待つ",
+  "This player is out of the game.": "このプレイヤーはゲームから離脱しています。",
+  "Only the host can end the game.": "ゲームを終了できるのはホストだけです。",
+  "The host can end the game only in its first minute, or once every other player has left or resigned.": "ホストがゲームを終了できるのは、最初の1分間か、他のすべてのプレイヤーが離脱または降参した後だけです。",
+  "Available once every player still connected is an ally, and the others have been away for 5 minutes with no pause time left.": "接続中のすべてのプレイヤーが同盟国で、他のプレイヤーが5分間不在かつ残りの一時停止時間がない場合に利用できます。",
+  "Are you sure you want to end the game for every player?": "全プレイヤーのためにゲームを終了してもよろしいですか？",
+  "Claim victory? %(players)s will be resigned.": "勝利を主張しますか？ %(players)s は降参します。",
+  "%(players)s left the game. Do you want to claim victory?": "%(players)s がゲームから離脱しました。勝利を主張しますか？",
+  "Kick %(player)s? They cannot play this match again.": "%(player)s をキックしますか？ このプレイヤーはこの試合に再参加できなくなります。"
 }

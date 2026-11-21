@@ -2,8 +2,8 @@
 //! show beyond the status bars, for every entity, sent only to viewers that
 //! have something selected. Varints and zigzag as in `wire.rs`.
 //!
-//! - kind 1 keyframe: varint turn, u8 detail version (9; a viewer also
-//!   reads 8, which had no cleared masks, 7, which also had no stances,
+//! - kind 1 keyframe: varint turn, u8 detail version (13; a viewer also
+//!   reads 12, which had no control, 8, which had no cleared masks, 7, which also had no stances,
 //!   formations, commands or upgrades and no player table, 6, which had no buildable lists, 5, which also had no stats, 4,
 //!   which also had no data table, 3, which also had no rally points,
 //!   2, whose lists are also of names only, and 1, which also had no
@@ -16,7 +16,8 @@
 //!   cleared names the groups the entity lacks although its template's
 //!   defaults have them. The groups of
 //!   production queues, foundations and repairs are never defaults, and in
-//!   a keyframe each is followed by varint turns since it was sent.
+//!   a keyframe each is followed by varint turns since it was sent. From
+//!   version 13 the keyframe ends with the control (kind 3).
 //! - kind 2 delta: varint turn, the lists added to the table, the data
 //!   table's entries that are new or changed, u8 1 and the player table
 //!   when it changed (else 0), varint
@@ -25,6 +26,13 @@
 //!   has, varint count, count x id delta of the entities gone.
 //!   Every turn of the visual stream has one, empty or not, so the two
 //!   streams line up turn by turn.
+//! - kind 3 control: varint turn, then the control: u8 own flags (1 this
+//!   seat may end the game, 2 it may claim victory), varint n, n x {u8
+//!   player, u8 flags (1 host, 2 kicked, 4 absent)} for every human seat
+//!   at launch, by player number. Sent into the open frame whenever it
+//!   changes, paused or not. The observers' stream always carries the
+//!   empty control, `[0, 0]`, which a keyframe also has until a seat's
+//!   control is set.
 //!
 //! An entity's groups are kept until it is gone or a delta clears them; one
 //! a delta does not list is unchanged. A seat stops sending most groups of
@@ -139,6 +147,14 @@ use crate::wire::Writer;
 
 const MESSAGE_KEYFRAME: u8 = 1;
 const MESSAGE_DELTA: u8 = 2;
+const MESSAGE_CONTROL: u8 = 3;
+/// The control's own flags.
+pub const CONTROL_END_ALLOWED: u8 = 1;
+pub const CONTROL_CLAIM: u8 = 2;
+/// The control's per-seat flags.
+pub const CONTROL_HOST: u8 = 1;
+pub const CONTROL_KICKED: u8 = 2;
+pub const CONTROL_ABSENT: u8 = 4;
 const HEALTH: usize = 0;
 const CAPTURE: usize = 1;
 const SUPPLY: usize = 2;
@@ -476,6 +492,9 @@ pub struct DetailEncoder {
     data: BTreeMap<DataKey, u64>,
     /// The player table as viewers hold it.
     players: Vec<PlayerGui>,
+    /// The control as viewers hold it: the bytes after the turn, which a
+    /// keyframe ends with.
+    control: Vec<u8>,
 }
 
 impl DetailEncoder {
@@ -487,7 +506,22 @@ impl DetailEncoder {
             lists_sent: 0,
             data: BTreeMap::new(),
             players: Vec::new(),
+            control: vec![0, 0],
         }
+    }
+
+    /// The control of a seat, as the detail frame carries it. Answers the
+    /// kind 3 message when it changed, `None` when viewers hold it already.
+    pub fn control(&mut self, turn: u32, body: &[u8]) -> Option<Vec<u8>> {
+        if body == self.control.as_slice() {
+            return None;
+        }
+        self.control = body.to_vec();
+        let mut out = Writer::default();
+        out.u8(MESSAGE_CONTROL);
+        out.varint(u64::from(turn));
+        out.0.extend_from_slice(body);
+        Some(out.0)
     }
 
     /// A new feed numbers its entities and lists afresh.
@@ -747,6 +781,7 @@ impl DetailEncoder {
         }
         out.varint(count);
         out.0.extend_from_slice(&body.0);
+        out.0.extend_from_slice(&self.control);
         out.0
     }
 

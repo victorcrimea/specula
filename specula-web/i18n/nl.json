@@ -144,5 +144,18 @@
   "%(player)s (disconnected): %(time)s": "%(player)s (losgekoppeld): %(time)s",
   "%(player)s is out of pause time; their pause ends in %(time)s.": "%(player)s heeft geen pauzetijd meer; de pauze eindigt over %(time)s.",
   "Pause time left: %(time)s": "Resterende pauzetijd: %(time)s",
-  "You have no pause time left.": "Je hebt geen pauzetijd meer."
+  "You have no pause time left.": "Je hebt geen pauzetijd meer.",
+  "Claim victory": "Overwinning claimen",
+  "End game": "Spel beëindigen",
+  "Kick": "Verwijderen",
+  "Kicked": "Verwijderd",
+  "Wait": "Wachten",
+  "This player is out of the game.": "Deze speler is niet meer in het spel.",
+  "Only the host can end the game.": "Alleen de host kan het spel beëindigen.",
+  "The host can end the game only in its first minute, or once every other player has left or resigned.": "De host kan het spel alleen in de eerste minuut beëindigen, of zodra alle andere spelers zijn vertrokken of hebben opgegeven.",
+  "Available once every player still connected is an ally, and the others have been away for 5 minutes with no pause time left.": "Beschikbaar zodra alle nog verbonden spelers bondgenoten zijn en de anderen 5 minuten weg zijn zonder resterende pauzetijd.",
+  "Are you sure you want to end the game for every player?": "Weet je zeker dat je het spel voor alle spelers wilt beëindigen?",
+  "Claim victory? %(players)s will be resigned.": "Overwinning claimen? %(players)s geven zich over.",
+  "%(players)s left the game. Do you want to claim victory?": "%(players)s heeft het spel verlaten. Wil je de overwinning claimen?",
+  "Kick %(player)s? They cannot play this match again.": "%(player)s verwijderen? Deze speler kan dit spel niet meer spelen."
 }

@@ -144,5 +144,18 @@
   "%(player)s (disconnected): %(time)s": "%(player)s (odpojený): %(time)s",
   "%(player)s is out of pause time; their pause ends in %(time)s.": "%(player)s nemá čas pauzy; jeho pauza sa skončí o %(time)s.",
   "Pause time left: %(time)s": "Zostávajúci čas pauzy: %(time)s",
-  "You have no pause time left.": "Nemáš žiadny čas pauzy."
+  "You have no pause time left.": "Nemáš žiadny čas pauzy.",
+  "Claim victory": "Uplatniť víťazstvo",
+  "End game": "Ukončiť hru",
+  "Kick": "Vylúčiť",
+  "Kicked": "Vylúčený",
+  "Wait": "Počkať",
+  "This player is out of the game.": "Tento hráč už nie je v hre.",
+  "Only the host can end the game.": "Hru môže ukončiť iba hostiteľ.",
+  "The host can end the game only in its first minute, or once every other player has left or resigned.": "Hostiteľ môže hru ukončiť iba počas prvej minúty alebo keď všetci ostatní hráči odišli alebo sa vzdali.",
+  "Available once every player still connected is an ally, and the others have been away for 5 minutes with no pause time left.": "K dispozícii, keď sú všetci stále pripojení hráči spojenci a ostatní sú 5 minút preč bez zostávajúceho času pauzy.",
+  "Are you sure you want to end the game for every player?": "Naozaj chcete ukončiť hru pre všetkých hráčov?",
+  "Claim victory? %(players)s will be resigned.": "Uplatniť víťazstvo? %(players)s sa vzdajú.",
+  "%(players)s left the game. Do you want to claim victory?": "%(players)s opustil(i) hru. Chcete uplatniť víťazstvo?",
+  "Kick %(player)s? They cannot play this match again.": "Vylúčiť %(player)s? Nebude môcť znova hrať túto hru."
 }

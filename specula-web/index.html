@@ -114,7 +114,7 @@ body { cursor: var(--gui-cursor-default, default); }
 #game-menu button:hover:not(:disabled) { background-image: var(--gui-stone-button-over); }
 #game-menu button:disabled { color: rgba(210, 210, 210, 0.627); filter: brightness(0.75); }
 #game-menu-open { left: 0; right: 8px; top: 4px; }
-#game-menu-panel { position: absolute; left: 0; right: 0; top: 0; height: 164px;
+#game-menu-panel { position: absolute; left: 0; right: 0; top: 0; height: 228px;
   box-sizing: border-box; background: rgba(15, 18, 20, 0.9); border: 1px solid #3a4248; }
 #game-menu-panel > button { left: 4px; right: 4px; }
 /* The open panel reaches over the clock and the HUD, and over the fold
@@ -124,7 +124,9 @@ body { cursor: var(--gui-cursor-default, default); }
 #game-menu-summary { top: 36px; }
 #game-menu-pause { top: 68px; }
 #game-menu-resign { top: 100px; }
-#game-menu-exit { top: 132px; }
+#game-menu-claim { top: 132px; }
+#game-menu-end { top: 164px; }
+#game-menu-exit { top: 196px; }
 /* PanelEntities.xml: up to 19 iconButtons in a row, 50 px and a 1 px
    margin, under the controls rather than right under the bar. */
 #heroes { position: absolute; left: 2px; top: calc(var(--top-height) + 42px);
@@ -775,6 +777,9 @@ body:not([data-debug="storage"]) #stats-storage { display: none; }
 #diplomacy-rows .text { top: 0; height: 20px; align-items: flex-start; }
 #diplomacy-rows .outcome { position: absolute; left: 0; top: 0; width: 25px; height: 20px;
   background: center / contain no-repeat; }
+#diplomacy-rows > .row > button { position: absolute; top: 0; height: 20px; padding: 0; border: 0;
+  color: white; font-family: inherit; }
+#diplomacy-rows > .row > button:disabled { color: rgba(210, 210, 210, 0.627); filter: brightness(0.75); }
 #diplomacy-header .swatch { width: 12px; height: 12px; margin-top: 2px;
   box-shadow: 0 0 0 1px black; }
 #diplomacy-window .stone, #match-summary .stone { background: var(--gui-stone-button) 0 0 / 100% 100%; }
@@ -1021,6 +1026,8 @@ body:not([data-debug="storage"]) #stats-storage { display: none; }
 <button id="game-menu-summary" type="button" class="text center sans-bold-stroke-14"></button>
 <button id="game-menu-pause" type="button" class="text center sans-bold-stroke-14"></button>
 <button id="game-menu-resign" type="button" class="text center sans-bold-stroke-14"></button>
+<button id="game-menu-claim" type="button" class="text center sans-bold-stroke-14"></button>
+<button id="game-menu-end" type="button" class="text center sans-bold-stroke-14"></button>
 <button id="game-menu-exit" type="button" class="text center sans-bold-stroke-14"></button>
 </div>
 <button id="game-menu-open" type="button" class="text center sans-bold-stroke-14" aria-expanded="false" aria-controls="game-menu-panel"></button>

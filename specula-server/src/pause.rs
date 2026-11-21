@@ -177,6 +177,11 @@ impl Ledger {
         earliest.map(|(_, player)| player).into_iter().collect()
     }
 
+    /// The pause time a seat has left, None for a seat not in the ledger.
+    pub fn budget(&self, player: u8) -> Option<Duration> {
+        self.accounts.get(&player).map(|account| account.budget)
+    }
+
     /// Charges for `elapsed`, then applies what the seat table and the feed
     /// now say.
     pub fn advance(&mut self, now: Instant, inputs: &[Input]) -> Vec<Event> {

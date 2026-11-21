@@ -144,5 +144,18 @@
   "%(player)s (disconnected): %(time)s": "%(player)s（已斷線）：%(time)s",
   "%(player)s is out of pause time; their pause ends in %(time)s.": "%(player)s 的暫停時間已用完，其暫停將在 %(time)s 後結束。",
   "Pause time left: %(time)s": "剩餘暫停時間：%(time)s",
-  "You have no pause time left.": "你沒有剩餘暫停時間了。"
+  "You have no pause time left.": "你沒有剩餘暫停時間了。",
+  "Claim victory": "宣告勝利",
+  "End game": "結束遊戲",
+  "Kick": "踢出",
+  "Kicked": "已踢出",
+  "Wait": "等待",
+  "This player is out of the game.": "此玩家已退出遊戲。",
+  "Only the host can end the game.": "只有主機可以結束遊戲。",
+  "The host can end the game only in its first minute, or once every other player has left or resigned.": "主機只能在遊戲開始的第一分鐘結束遊戲，或在其他所有玩家都已離開或投降後結束。",
+  "Available once every player still connected is an ally, and the others have been away for 5 minutes with no pause time left.": "當所有仍在線上的玩家都是盟友，且其他玩家已離開 5 分鐘且沒有剩餘暫停時間時可用。",
+  "Are you sure you want to end the game for every player?": "確定要為所有玩家結束遊戲嗎？",
+  "Claim victory? %(players)s will be resigned.": "宣告勝利？%(players)s 將被投降。",
+  "%(players)s left the game. Do you want to claim victory?": "%(players)s 已離開遊戲。要宣告勝利嗎？",
+  "Kick %(player)s? They cannot play this match again.": "踢出 %(player)s？該玩家將無法再參加本局遊戲。"
 }

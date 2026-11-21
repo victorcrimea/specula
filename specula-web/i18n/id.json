@@ -144,5 +144,18 @@
   "%(player)s (disconnected): %(time)s": "%(player)s (terputus): %(time)s",
   "%(player)s is out of pause time; their pause ends in %(time)s.": "%(player)s kehabisan waktu jeda; jedanya berakhir dalam %(time)s.",
   "Pause time left: %(time)s": "Sisa waktu jeda: %(time)s",
-  "You have no pause time left.": "Kamu tidak punya sisa waktu jeda."
+  "You have no pause time left.": "Kamu tidak punya sisa waktu jeda.",
+  "Claim victory": "Klaim kemenangan",
+  "End game": "Akhiri permainan",
+  "Kick": "Keluarkan",
+  "Kicked": "Dikeluarkan",
+  "Wait": "Tunggu",
+  "This player is out of the game.": "Pemain ini sudah tidak ada dalam permainan.",
+  "Only the host can end the game.": "Hanya host yang dapat mengakhiri permainan.",
+  "The host can end the game only in its first minute, or once every other player has left or resigned.": "Host hanya dapat mengakhiri permainan pada menit pertama, atau setelah semua pemain lain keluar atau menyerah.",
+  "Available once every player still connected is an ally, and the others have been away for 5 minutes with no pause time left.": "Tersedia setelah semua pemain yang masih terhubung adalah sekutu dan pemain lain sudah tidak aktif selama 5 menit tanpa sisa waktu jeda.",
+  "Are you sure you want to end the game for every player?": "Yakin ingin mengakhiri permainan untuk semua pemain?",
+  "Claim victory? %(players)s will be resigned.": "Klaim kemenangan? %(players)s akan menyerah.",
+  "%(players)s left the game. Do you want to claim victory?": "%(players)s telah keluar dari permainan. Klaim kemenangan?",
+  "Kick %(player)s? They cannot play this match again.": "Keluarkan %(player)s? Pemain ini tidak dapat bermain lagi di permainan ini."
 }

@@ -6,13 +6,22 @@
 //! The engine does not open it for observers. Here the Observer
 //! perspective shows every player's stance towards every other as a
 //! matrix; a player perspective shows the engine's rows. Nothing in it
-//! can be pressed but Close: tribute, attack and spy requests and the
-//! stance buttons send commands, which a viewer cannot.
+//! can be pressed but Close, and, for the host of a game, the Kick on a
+//! human row (M29): tribute, attack and spy requests and the stance
+//! buttons send commands, which a viewer cannot.
 
+use std::cell::Cell;
+use std::rc::Rc;
+
+use wasm_bindgen::JsCast;
+use wasm_bindgen::closure::Closure;
 use web_sys::Document;
+use web_sys::HtmlButtonElement;
 use web_sys::HtmlElement;
 
 use crate::TURN_MS;
+use crate::detail::Control;
+use crate::detail::ControlSeat;
 use crate::diplomacy;
 use crate::diplomacy::Perspective;
 use crate::lang;
@@ -44,6 +53,9 @@ pub struct View<'a> {
     pub scene: &'a Scene,
     pub palette: &'a [u32],
     pub perspective: Perspective,
+    /// The seats' control, and the visitor's own seat on `/play`.
+    pub control: Option<&'a Control>,
+    pub own: Option<u8>,
 }
 
 /// `#diplomacy-window`.
@@ -57,6 +69,10 @@ pub struct DiplomacyWindow {
     close: HtmlElement,
     /// What the header and rows were built from; `None` to build again.
     built: Option<String>,
+    /// The player whose Kick was pressed, until `take_kick` takes it.
+    kick_request: Rc<Cell<Option<u8>>>,
+    /// The Kick buttons' handlers, which live as long as their buttons.
+    kick_handlers: Vec<Closure<dyn FnMut()>>,
 }
 
 impl DiplomacyWindow {
@@ -70,6 +86,8 @@ impl DiplomacyWindow {
             ceasefire: Out::find(document, "diplomacy-ceasefire")?,
             close: crate::element(document, "diplomacy-close")?,
             built: None,
+            kick_request: Rc::new(Cell::new(None)),
+            kick_handlers: Vec::new(),
         };
         window.panel.hidden(true);
         Ok(window)
@@ -90,6 +108,11 @@ impl DiplomacyWindow {
     /// The language changed, so every label is made again.
     pub fn invalidate(&mut self) {
         self.built = None;
+    }
+
+    /// The player whose Kick was pressed since the last call.
+    pub fn take_kick(&self) -> Option<u8> {
+        self.kick_request.take()
     }
 
     /// `updatePanels` while it is open: the rows when the players, the
@@ -127,6 +150,7 @@ impl DiplomacyWindow {
         lang::set_text(&self.close, "Close");
         self.header.set_text_content(None);
         self.rows.set_text_content(None);
+        self.kick_handlers.clear();
 
         let header = &self.header;
         self.cell(header, 0, 140, &lang::translate("Name"), "center")?;
@@ -258,7 +282,43 @@ impl DiplomacyWindow {
                     }
                 }
             }
+            if let Some(seat) = kick_row(view, id) {
+                self.kick_button(&row, player.state, seat)?;
+            }
         }
+        Ok(())
+    }
+
+    /// The host's Kick on the human row of `seat` (M29). A kicked seat and
+    /// one out of the game cannot be kicked again.
+    fn kick_button(
+        &mut self,
+        row: &HtmlElement,
+        state: PlayerState,
+        seat: ControlSeat,
+    ) -> Result<(), String> {
+        let button: HtmlButtonElement = create(&self.document, "button")?;
+        let _ = button.set_attribute("class", "text center sans-bold-stroke-14 stone");
+        let _ = button.set_attribute("style", &place(440, 80));
+        lang::set_text(&button, "Kick");
+        let out = seat.kicked || state != PlayerState::Active;
+        button.set_disabled(out);
+        if seat.kicked {
+            set_tooltip(&button, &lang::translate("Kicked"), "sessionToolTipBold");
+        } else if out {
+            set_tooltip(
+                &button,
+                &lang::translate("This player is out of the game."),
+                "sessionToolTipBold",
+            );
+        }
+        let request = Rc::clone(&self.kick_request);
+        let player = seat.player;
+        let handler = Closure::<dyn FnMut()>::new(move || request.set(Some(player)));
+        button.set_onclick(Some(handler.as_ref().unchecked_ref()));
+        self.kick_handlers.push(handler);
+        row.append_child(&button)
+            .map_err(|_| "cannot add a kick button")?;
         Ok(())
     }
 
@@ -347,6 +407,25 @@ fn place(left: i32, width: i32) -> String {
     format!("left: {left}px; width: {width}px")
 }
 
+/// The control seat whose row shows Kick to the viewer: the viewer is the
+/// host, and the row is another human seat.
+fn kick_row(view: &View, id: usize) -> Option<ControlSeat> {
+    let control = view.control?;
+    let own = view.own?;
+    let host = control
+        .seats
+        .iter()
+        .any(|seat| seat.player == own && seat.host);
+    if !host || usize::from(own) == id {
+        return None;
+    }
+    control
+        .seats
+        .iter()
+        .find(|seat| usize::from(seat.player) == id)
+        .copied()
+}
+
 fn set_tooltip(element: &HtmlElement, text: &str, style: &str) {
     let _ = element.set_attribute(tooltip::ATTRIBUTE, text);
     let _ = element.set_attribute(tooltip::STYLE_ATTRIBUTE, style);
@@ -410,6 +489,18 @@ fn build_key(view: &View) -> String {
     let mut key = format!("{:?}|{}|", view.palette, ceasefire_active(view.scene));
     if let Perspective::Player(id) = view.perspective {
         key.push_str(&id.to_string());
+    }
+    key.push_str(&format!("|own{:?}", view.own));
+    if let Some(control) = view.control {
+        for seat in &control.seats {
+            key.push_str(&format!(
+                "|{}:{}{}{}",
+                seat.player,
+                u8::from(seat.host),
+                u8::from(seat.kicked),
+                u8::from(seat.absent)
+            ));
+        }
     }
     for player in &view.scene.players {
         let stances: Vec<u8> = player.stances.iter().map(|&stance| stance as u8).collect();

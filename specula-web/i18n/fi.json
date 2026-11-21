@@ -144,5 +144,18 @@
   "%(player)s (disconnected): %(time)s": "%(player)s (yhteys katkaistu): %(time)s",
   "%(player)s is out of pause time; their pause ends in %(time)s.": "Pelaajalta %(player)s loppui taukoaika; hänen tauko päättyy %(time)s kuluttua.",
   "Pause time left: %(time)s": "Jäljellä oleva taukoaika: %(time)s",
-  "You have no pause time left.": "Sinulla ei ole enää taukoaikaa."
+  "You have no pause time left.": "Sinulla ei ole enää taukoaikaa.",
+  "Claim victory": "Vaadi voitto",
+  "End game": "Lopeta peli",
+  "Kick": "Poista",
+  "Kicked": "Poistettu",
+  "Wait": "Odota",
+  "This player is out of the game.": "Tämä pelaaja ei ole enää pelissä.",
+  "Only the host can end the game.": "Vain isäntä voi lopettaa pelin.",
+  "The host can end the game only in its first minute, or once every other player has left or resigned.": "Isäntä voi lopettaa pelin vain ensimmäisen minuutin aikana tai kun kaikki muut pelaajat ovat poistuneet tai luovuttaneet.",
+  "Available once every player still connected is an ally, and the others have been away for 5 minutes with no pause time left.": "Käytettävissä, kun kaikki yhä yhteydessä olevat pelaajat ovat liittolaisia ja muut ovat olleet poissa 5 minuuttia ilman jäljellä olevaa taukoaikaa.",
+  "Are you sure you want to end the game for every player?": "Haluatko varmasti lopettaa pelin kaikilta pelaajilta?",
+  "Claim victory? %(players)s will be resigned.": "Vaadi voitto? %(players)s luovuttavat.",
+  "%(players)s left the game. Do you want to claim victory?": "%(players)s poistui pelistä. Haluatko vaatia voiton?",
+  "Kick %(player)s? They cannot play this match again.": "Poistetaanko %(player)s? Hän ei voi enää pelata tätä peliä."
 }

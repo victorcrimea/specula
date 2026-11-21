@@ -144,5 +144,18 @@
   "%(player)s (disconnected): %(time)s": "%(player)s (rozłączony): %(time)s",
   "%(player)s is out of pause time; their pause ends in %(time)s.": "%(player)s nie ma już czasu pauzy; pauza zakończy się za %(time)s.",
   "Pause time left: %(time)s": "Pozostały czas pauzy: %(time)s",
-  "You have no pause time left.": "Nie masz już czasu pauzy."
+  "You have no pause time left.": "Nie masz już czasu pauzy.",
+  "Claim victory": "Zgłoś zwycięstwo",
+  "End game": "Zakończ grę",
+  "Kick": "Wyrzuć",
+  "Kicked": "Wyrzucony",
+  "Wait": "Poczekaj",
+  "This player is out of the game.": "Ten gracz nie jest już w grze.",
+  "Only the host can end the game.": "Tylko gospodarz może zakończyć grę.",
+  "The host can end the game only in its first minute, or once every other player has left or resigned.": "Gospodarz może zakończyć grę tylko w pierwszej minucie albo gdy wszyscy inni gracze odeszli lub się poddali.",
+  "Available once every player still connected is an ally, and the others have been away for 5 minutes with no pause time left.": "Dostępne, gdy wszyscy wciąż połączeni gracze są sojusznikami, a pozostali są nieobecni od 5 minut i nie mają czasu pauzy.",
+  "Are you sure you want to end the game for every player?": "Czy na pewno chcesz zakończyć grę dla wszystkich graczy?",
+  "Claim victory? %(players)s will be resigned.": "Zgłosić zwycięstwo? %(players)s się poddadzą.",
+  "%(players)s left the game. Do you want to claim victory?": "%(players)s opuścił(a) grę. Czy chcesz zgłosić zwycięstwo?",
+  "Kick %(player)s? They cannot play this match again.": "Wyrzucić %(player)s? Ten gracz nie będzie mógł ponownie grać w tę grę."
 }

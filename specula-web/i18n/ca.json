@@ -144,5 +144,18 @@
   "%(player)s (disconnected): %(time)s": "%(player)s (desconnectat): %(time)s",
   "%(player)s is out of pause time; their pause ends in %(time)s.": "%(player)s no te temps de pausa; la seva pausa acaba en %(time)s.",
   "Pause time left: %(time)s": "Temps de pausa restant: %(time)s",
-  "You have no pause time left.": "No et queda temps de pausa."
+  "You have no pause time left.": "No et queda temps de pausa.",
+  "Claim victory": "Reclamar la victòria",
+  "End game": "Acabar la partida",
+  "Kick": "Expulsar",
+  "Kicked": "Expulsat",
+  "Wait": "Esperar",
+  "This player is out of the game.": "Aquest jugador ja no és a la partida.",
+  "Only the host can end the game.": "Només l'amfitrió pot acabar la partida.",
+  "The host can end the game only in its first minute, or once every other player has left or resigned.": "L'amfitrió només pot acabar la partida durant el primer minut, o quan tots els altres jugadors hagin marxat o s'hagin rendit.",
+  "Available once every player still connected is an ally, and the others have been away for 5 minutes with no pause time left.": "Disponible quan tots els jugadors encara connectats siguin aliats, i la resta hagi estat fora 5 minuts sense temps de pausa.",
+  "Are you sure you want to end the game for every player?": "Segur que vols acabar la partida per a tots els jugadors?",
+  "Claim victory? %(players)s will be resigned.": "Reclamar la victòria? %(players)s es rendiran.",
+  "%(players)s left the game. Do you want to claim victory?": "%(players)s ha abandonat la partida. Vols reclamar la victòria?",
+  "Kick %(player)s? They cannot play this match again.": "Expulsar %(player)s? No podrà tornar a jugar aquesta partida."
 }

@@ -1,7 +1,7 @@
 //! The session's Menu (`top_panel/MenuButton.xml`, `Menu.xml`,
-//! `MenuButtons.js`) on `/play`, for the visitor who started the game, with
-//! only its Summary, Resign and Exit; and the requests they and the match over
-//! popup's Rematch make of the server.
+//! `MenuButtons.js`) on `/play`, for a visitor with a seat: its Summary,
+//! Pause, Resign, Claim victory, End game (the host's) and Exit; and the
+//! requests they and the match over popup's Rematch make of the server.
 
 use wasm_bindgen::JsCast;
 use wasm_bindgen::JsValue;
@@ -13,6 +13,7 @@ use web_sys::HtmlElement;
 use web_sys::Node;
 use web_sys::Response;
 
+use crate::detail::Control;
 use crate::lang;
 
 /// Long enough for an engine whose game the defeat finished to have quit,
@@ -26,7 +27,20 @@ pub struct GameMenu {
     summary: HtmlButtonElement,
     pause: HtmlButtonElement,
     resign: HtmlButtonElement,
+    claim: HtmlButtonElement,
+    end: HtmlButtonElement,
     exit: HtmlButtonElement,
+}
+
+/// The menu's buttons, which the page wires.
+pub struct Buttons<'a> {
+    pub open: &'a HtmlElement,
+    pub summary: &'a HtmlElement,
+    pub pause: &'a HtmlElement,
+    pub resign: &'a HtmlElement,
+    pub claim: &'a HtmlElement,
+    pub end: &'a HtmlElement,
+    pub exit: &'a HtmlElement,
 }
 
 impl GameMenu {
@@ -38,34 +52,31 @@ impl GameMenu {
             summary: crate::element(document, "game-menu-summary")?,
             pause: crate::element(document, "game-menu-pause")?,
             resign: crate::element(document, "game-menu-resign")?,
+            claim: crate::element(document, "game-menu-claim")?,
+            end: crate::element(document, "game-menu-end")?,
             exit: crate::element(document, "game-menu-exit")?,
         };
         lang::set_text(&menu.open, "Menu");
         lang::set_text(&menu.summary, "Summary");
         lang::set_text(&menu.pause, "Pause");
         lang::set_text(&menu.resign, "Resign");
+        lang::set_text(&menu.claim, "Claim victory");
+        lang::set_text(&menu.end, "End game");
         lang::set_text(&menu.exit, "Exit");
         menu.root.set_hidden(false);
         Ok(menu)
     }
 
-    /// Menu, Summary, Pause, Resign and Exit.
-    pub fn buttons(
-        &self,
-    ) -> (
-        &HtmlElement,
-        &HtmlElement,
-        &HtmlElement,
-        &HtmlElement,
-        &HtmlElement,
-    ) {
-        (
-            &self.open,
-            &self.summary,
-            &self.pause,
-            &self.resign,
-            &self.exit,
-        )
+    pub fn buttons(&self) -> Buttons<'_> {
+        Buttons {
+            open: &self.open,
+            summary: &self.summary,
+            pause: &self.pause,
+            resign: &self.resign,
+            claim: &self.claim,
+            end: &self.end,
+            exit: &self.exit,
+        }
     }
 
     /// `Menu.toggle`.
@@ -98,8 +109,17 @@ impl GameMenu {
     /// then resumes. Pausing, like Resign, is for a player, as
     /// `PauseControl.canPause` has it. `pause_left_ms`: the seat's pause
     /// time left, which the tooltip shows and which disables Pause at 0
-    /// (D41).
-    pub fn update(&self, defeated: bool, ended: bool, paused: bool, pause_left_ms: Option<f64>) {
+    /// (D41). `control` and `own` are the server's control (kind 3) and the
+    /// visitor's seat: Claim victory and End game follow it.
+    pub fn update(
+        &self,
+        defeated: bool,
+        ended: bool,
+        paused: bool,
+        pause_left_ms: Option<f64>,
+        control: Option<&Control>,
+        own: Option<u8>,
+    ) {
         let resign = !defeated && !ended;
         lang::set_text(&self.pause, if paused { "Resume" } else { "Pause" });
         let no_time_left = pause_left_ms.is_some_and(|left| left < 1000.0) && !paused;
@@ -140,6 +160,54 @@ impl GameMenu {
         if self.exit.disabled() != ended {
             self.exit.set_disabled(ended);
         }
+        let claim = !ended && control.is_some_and(|control| control.claim);
+        let end = !ended && control.is_some_and(|control| control.end_allowed);
+        let host = control
+            .zip(own)
+            .and_then(|(control, own)| control.seats.iter().find(|seat| seat.player == own))
+            .is_some_and(|seat| seat.host);
+        set_tooltip(
+            &self.claim,
+            if claim {
+                ""
+            } else {
+                "Available once every player still connected is an ally, and the others have been away for 5 minutes with no pause time left."
+            },
+        );
+        set_tooltip(
+            &self.end,
+            if end {
+                ""
+            } else if host {
+                "The host can end the game only in its first minute, or once every other player has left or resigned."
+            } else {
+                "Only the host can end the game."
+            },
+        );
+        if self.claim.disabled() == claim {
+            self.claim.set_disabled(!claim);
+        }
+        if self.end.disabled() == end {
+            self.end.set_disabled(!end);
+        }
+    }
+}
+
+/// The disabled button's reason, in the engine's tooltip markup; empty for
+/// none.
+fn set_tooltip(button: &HtmlElement, english: &str) {
+    let text = if english.is_empty() {
+        String::new()
+    } else {
+        lang::translate(english)
+    };
+    let current = button.get_attribute(crate::tooltip::ATTRIBUTE);
+    if text.is_empty() {
+        if current.is_some() {
+            let _ = button.remove_attribute(crate::tooltip::ATTRIBUTE);
+        }
+    } else if current.as_deref() != Some(text.as_str()) {
+        let _ = button.set_attribute(crate::tooltip::ATTRIBUTE, &text);
     }
 }
 
@@ -235,6 +303,16 @@ pub async fn post(action: &str) -> Result<String, String> {
 pub fn reload() {
     if let Some(window) = web_sys::window() {
         let _ = window.location().set_href(&crate::match_base());
+    }
+}
+
+/// Opens the match's observers' view, which a seat that is out of the game
+/// (or has said it will return) watches from.
+pub fn watch() {
+    if let Some(window) = web_sys::window() {
+        let _ = window
+            .location()
+            .set_href(&format!("{}?watch", crate::match_base()));
     }
 }
 

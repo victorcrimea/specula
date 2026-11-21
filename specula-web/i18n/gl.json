@@ -144,5 +144,18 @@
   "%(player)s (disconnected): %(time)s": "%(player)s (desconectado): %(time)s",
   "%(player)s is out of pause time; their pause ends in %(time)s.": "%(player)s non ten tempo de pausa; a súa pausa remata en %(time)s.",
   "Pause time left: %(time)s": "Tempo de pausa restante: %(time)s",
-  "You have no pause time left.": "Non che queda tempo de pausa."
+  "You have no pause time left.": "Non che queda tempo de pausa.",
+  "Claim victory": "Reclamar a vitoria",
+  "End game": "Rematar a partida",
+  "Kick": "Expulsar",
+  "Kicked": "Expulsado",
+  "Wait": "Agardar",
+  "This player is out of the game.": "Este xogador xa non está na partida.",
+  "Only the host can end the game.": "Só o anfitrión pode rematar a partida.",
+  "The host can end the game only in its first minute, or once every other player has left or resigned.": "O anfitrión só pode rematar a partida durante o primeiro minuto, ou cando todos os demais xogadores se foron ou se renderon.",
+  "Available once every player still connected is an ally, and the others have been away for 5 minutes with no pause time left.": "Dispoñible cando todos os xogadores aínda conectados sexan aliados e os demais leven 5 minutos fóra sen tempo de pausa.",
+  "Are you sure you want to end the game for every player?": "Seguro que queres rematar a partida para todos os xogadores?",
+  "Claim victory? %(players)s will be resigned.": "Reclamar a vitoria? %(players)s renderanse.",
+  "%(players)s left the game. Do you want to claim victory?": "%(players)s abandonou a partida. Queres reclamar a vitoria?",
+  "Kick %(player)s? They cannot play this match again.": "Expulsar a %(player)s? Non poderá volver xogar esta partida."
 }

@@ -144,5 +144,18 @@
   "%(player)s (disconnected): %(time)s": "%(player)s (mất kết nối): %(time)s",
   "%(player)s is out of pause time; their pause ends in %(time)s.": "%(player)s đã hết thời gian tạm dừng; tạm dừng của họ sẽ kết thúc sau %(time)s.",
   "Pause time left: %(time)s": "Thời gian tạm dừng còn lại: %(time)s",
-  "You have no pause time left.": "Bạn không còn thời gian tạm dừng."
+  "You have no pause time left.": "Bạn không còn thời gian tạm dừng.",
+  "Claim victory": "Yêu cầu chiến thắng",
+  "End game": "Kết thúc trận",
+  "Kick": "Đuổi",
+  "Kicked": "Đã bị đuổi",
+  "Wait": "Chờ",
+  "This player is out of the game.": "Người chơi này đã rời khỏi trận.",
+  "Only the host can end the game.": "Chỉ chủ phòng mới có thể kết thúc trận.",
+  "The host can end the game only in its first minute, or once every other player has left or resigned.": "Chủ phòng chỉ có thể kết thúc trận trong phút đầu tiên, hoặc khi mọi người chơi khác đã rời đi hoặc đầu hàng.",
+  "Available once every player still connected is an ally, and the others have been away for 5 minutes with no pause time left.": "Có thể dùng khi mọi người chơi còn kết nối đều là đồng minh và những người khác đã vắng mặt 5 phút mà không còn thời gian tạm dừng.",
+  "Are you sure you want to end the game for every player?": "Bạn có chắc muốn kết thúc trận cho mọi người chơi không?",
+  "Claim victory? %(players)s will be resigned.": "Yêu cầu chiến thắng? %(players)s sẽ đầu hàng.",
+  "%(players)s left the game. Do you want to claim victory?": "%(players)s đã rời trận. Bạn có muốn yêu cầu chiến thắng không?",
+  "Kick %(player)s? They cannot play this match again.": "Đuổi %(player)s? Người này sẽ không thể chơi trận này nữa."
 }

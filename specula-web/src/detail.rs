@@ -13,6 +13,17 @@ use crate::stream::Writer;
 
 const MESSAGE_KEYFRAME: u8 = 1;
 const MESSAGE_DELTA: u8 = 2;
+pub const MESSAGE_CONTROL: u8 = 3;
+/// The control's own flags.
+pub const CONTROL_END_ALLOWED: u8 = 1;
+pub const CONTROL_CLAIM: u8 = 2;
+/// The control's per-seat flags.
+pub const CONTROL_HOST: u8 = 1;
+pub const CONTROL_KICKED: u8 = 2;
+pub const CONTROL_ABSENT: u8 = 4;
+/// Archived matches keep it; it has no control, which a keyframe ends with
+/// from version 13.
+const DETAIL_VERSION_NO_CONTROL: u8 = 12;
 /// Archived matches keep it; it has no market or trade garrison group.
 const DETAIL_VERSION_NO_TRADE_GAIN: u8 = 11;
 /// Archived matches keep it; it also has no trade route group.
@@ -314,6 +325,60 @@ impl Building {
     }
 }
 
+/// Whether a detail message is a control, which the page takes at once
+/// rather than with the turn it came in.
+pub fn is_control(message: &[u8]) -> bool {
+    message.first() == Some(&MESSAGE_CONTROL)
+}
+
+/// The control's body after its turn (`detail.rs` on the server).
+fn read_control(cursor: &mut ByteReader) -> Result<Control, &'static str> {
+    let flags = cursor.u8()?;
+    let seats = (0..cursor.varint()?)
+        .map(|_| {
+            let player = cursor.u8()?;
+            let flags = cursor.u8()?;
+            Ok(ControlSeat {
+                player,
+                host: flags & CONTROL_HOST != 0,
+                kicked: flags & CONTROL_KICKED != 0,
+                absent: flags & CONTROL_ABSENT != 0,
+            })
+        })
+        .collect::<Result<_, &'static str>>()?;
+    Ok(Control {
+        end_allowed: flags & CONTROL_END_ALLOWED != 0,
+        claim: flags & CONTROL_CLAIM != 0,
+        seats,
+    })
+}
+
+fn write_control(out: &mut Writer, control: &Control) {
+    let mut flags = 0;
+    if control.end_allowed {
+        flags |= CONTROL_END_ALLOWED;
+    }
+    if control.claim {
+        flags |= CONTROL_CLAIM;
+    }
+    out.u8(flags);
+    out.varint(control.seats.len() as u64);
+    for seat in &control.seats {
+        let mut flags = 0;
+        if seat.host {
+            flags |= CONTROL_HOST;
+        }
+        if seat.kicked {
+            flags |= CONTROL_KICKED;
+        }
+        if seat.absent {
+            flags |= CONTROL_ABSENT;
+        }
+        out.u8(seat.player);
+        out.u8(flags);
+    }
+}
+
 fn is_reckoned(slot: usize) -> bool {
     matches!(slot, QUEUE | FOUNDATION | REPAIR)
 }
@@ -341,6 +406,27 @@ pub struct Details {
     /// player sees less of an enemy's entity than of its own of the same
     /// template. Every id here is in `entities`.
     pub cleared: BTreeMap<u32, u64>,
+    /// What this seat may do in the game and who has left it (kind 3).
+    pub control: Control,
+}
+
+/// A seat's in-game control: its own rights, and each human seat's row.
+#[derive(Clone, Default, PartialEq)]
+pub struct Control {
+    /// This seat is the host and may end the game now.
+    pub end_allowed: bool,
+    /// This seat may claim victory now.
+    pub claim: bool,
+    /// The human seats at launch, by player number.
+    pub seats: Vec<ControlSeat>,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+pub struct ControlSeat {
+    pub player: u8,
+    pub host: bool,
+    pub kicked: bool,
+    pub absent: bool,
 }
 
 impl Details {
@@ -350,6 +436,12 @@ impl Details {
         match kind {
             MESSAGE_KEYFRAME => self.apply_keyframe(&mut cursor)?,
             MESSAGE_DELTA => self.apply_delta(&mut cursor)?,
+            MESSAGE_CONTROL => {
+                // The turn is for the stream's own ordering; the control
+                // applies as it arrives.
+                let _turn = cursor.varint_u32()?;
+                self.control = read_control(&mut cursor)?;
+            }
             _ => return Err("unknown detail message kind"),
         }
         if !cursor.0.is_empty() {
@@ -364,6 +456,7 @@ impl Details {
         if !matches!(
             version,
             DETAIL_VERSION
+                | DETAIL_VERSION_NO_CONTROL
                 | DETAIL_VERSION_NO_TRADE_GAIN
                 | DETAIL_VERSION_NO_TRADE_ROUTE
                 | DETAIL_VERSION_NO_TRADE
@@ -403,6 +496,9 @@ impl Details {
             if cleared != 0 {
                 self.cleared.insert(id, cleared);
             }
+        }
+        if version >= DETAIL_VERSION {
+            self.control = read_control(cursor)?;
         }
         Ok(())
     }
@@ -650,6 +746,9 @@ impl Details {
                 out.varint(self.cleared.get(id).copied().unwrap_or(0));
             }
             write_groups(&mut out, groups, Some(self.turn), owners);
+        }
+        if self.version >= DETAIL_VERSION {
+            write_control(&mut out, &self.control);
         }
         out.0
     }

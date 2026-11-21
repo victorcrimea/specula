@@ -1734,15 +1734,20 @@ pub fn read_starts(body: &[u8]) -> Result<u32, &'static str> {
 }
 
 /// A join's messages, the keyframe first, and the decoder its frame goes
-/// on in.
-pub fn read_join(body: &[u8]) -> Result<(FrameDecoder, Vec<Vec<u8>>), &'static str> {
+/// on in. `keep` names the messages of the keyframe's own turn that the
+/// keyframe does not hold: those set after it was encoded, as a detail
+/// stream's controls are.
+pub fn read_join(
+    body: &[u8],
+    keep: impl Fn(&[u8]) -> bool,
+) -> Result<(FrameDecoder, Vec<Vec<u8>>), &'static str> {
     let (frame, mut messages) = read_keyframe_and_frame(body)?;
     let keyframe_turn = message_turn(&messages[0])?;
     // The delta into the keyframe's turn is in the frame for playback
     // crossing into the segment; the keyframe already holds it.
     let mut kept = vec![std::mem::take(&mut messages[0])];
     for message in messages.into_iter().skip(1) {
-        if message_turn(&message)? > keyframe_turn {
+        if message_turn(&message)? > keyframe_turn || keep(&message) {
             kept.push(message);
         }
     }

@@ -144,5 +144,18 @@
   "%(player)s (disconnected): %(time)s": "%(player)s (bağlantı kesildi): %(time)s",
   "%(player)s is out of pause time; their pause ends in %(time)s.": "%(player)s duraklatma süresini tüketti; duraklatması %(time)s içinde bitecek.",
   "Pause time left: %(time)s": "Kalan duraklatma süresi: %(time)s",
-  "You have no pause time left.": "Duraklatma süreniz kalmadı."
+  "You have no pause time left.": "Duraklatma süreniz kalmadı.",
+  "Claim victory": "Zafer talep et",
+  "End game": "Oyunu bitir",
+  "Kick": "At",
+  "Kicked": "Atıldı",
+  "Wait": "Bekle",
+  "This player is out of the game.": "Bu oyuncu artık oyunda değil.",
+  "Only the host can end the game.": "Oyunu yalnızca oda sahibi bitirebilir.",
+  "The host can end the game only in its first minute, or once every other player has left or resigned.": "Oda sahibi oyunu yalnızca ilk dakikada veya diğer tüm oyuncular ayrılıp teslim olduktan sonra bitirebilir.",
+  "Available once every player still connected is an ally, and the others have been away for 5 minutes with no pause time left.": "Hâlâ bağlı olan tüm oyuncular müttefikse ve diğerleri duraklatma süresi kalmadan 5 dakikadır uzaktaysa kullanılabilir.",
+  "Are you sure you want to end the game for every player?": "Oyunu tüm oyuncular için bitirmek istediğinizden emin misiniz?",
+  "Claim victory? %(players)s will be resigned.": "Zafer talep edilsin mi? %(players)s teslim olacak.",
+  "%(players)s left the game. Do you want to claim victory?": "%(players)s oyundan ayrıldı. Zafer talep etmek ister misiniz?",
+  "Kick %(player)s? They cannot play this match again.": "%(player)s atılsın mı? Bu oyuncu bu maçı bir daha oynayamayacak."
 }

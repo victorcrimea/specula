@@ -12,6 +12,7 @@
 //! hosts, is the match's seat table (`seats.rs`), by the visitor's `sv`
 //! cookie.
 
+use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::io::Write;
@@ -37,11 +38,18 @@ use specula_assets::command::QueryKind;
 
 use rocket::tokio::sync::broadcast;
 
+use crate::detail::CONTROL_ABSENT;
+use crate::detail::CONTROL_CLAIM;
+use crate::detail::CONTROL_END_ALLOWED;
+use crate::detail::CONTROL_HOST;
+use crate::detail::CONTROL_KICKED;
 use crate::feed::Summary;
 use crate::observer;
 use crate::observer::EngineDirs;
 use crate::pause;
 use crate::registry::MatchId;
+use crate::registry::TURN_LENGTH;
+use crate::seats::Phase;
 use crate::seats::Seats;
 use crate::settings::Choice;
 use crate::settings::Launch;
@@ -50,6 +58,7 @@ use crate::summary_envelope;
 use crate::view::Hub;
 use crate::view::SummaryBody;
 use crate::view::spawn_brotli;
+use crate::wire::Writer;
 
 const PLAY_SCRIPT: &str = "scripts/play.sh";
 /// Where the engine finds the settings file (`EngineDirs::settings_file`).
@@ -74,6 +83,14 @@ const NULL_FORMATION: &str = "special/formations/null";
 /// `feed::Player::state`.
 const PLAYER_ACTIVE: u8 = 0;
 const PLAYER_DEFEATED: u8 = 1;
+/// D44: away this long with no pause budget left, a seat has left.
+const ABSENT_AFTER: Duration = Duration::from_secs(5 * 60);
+/// D45: the host may end the game freely before this much game time.
+const END_FREE: Duration = Duration::from_secs(60);
+/// D17: with no human seat connected for this long the match ends.
+const NOBODY_CONNECTED_END: Duration = Duration::from_secs(5 * 60);
+/// The resign the engine takes as the seat's own (`Commands.js` `resign`).
+const RESIGN_JSON: &str = r#"{"type":"resign"}"#;
 
 /// A query's answer, for the one command connection that asked.
 #[derive(Clone)]
@@ -178,6 +195,80 @@ pub struct Play {
     /// The pause ledger (D41 to D43): a leaf lock, never take `seats`,
     /// `hub` or `inner` while holding it.
     ledger: Mutex<pause::Ledger>,
+    /// The human seats at launch, ascending.
+    humans: Mutex<Vec<u8>>,
+    /// The in-game control (D17, D44 to D46, D54): a leaf lock, never take
+    /// `seats`, `hub`, `ledger` or `inner` while holding it.
+    control: Mutex<ControlState>,
+}
+
+/// What the host and the rules of leaving have decided so far in this game.
+#[derive(Default)]
+struct ControlState {
+    /// Kicked by the host (V77); the seat is gone from the seat table.
+    kicked: BTreeSet<u8>,
+    /// Resigned by the server for a claim or by D17, so that a resign is
+    /// sent once.
+    server_resigned: BTreeSet<u8>,
+    /// When no human seat has been connected, from the first poll that saw
+    /// it.
+    nobody_since: Option<Instant>,
+}
+
+/// What the control rules read, taken once (`Play::facts`).
+struct Facts {
+    /// The human seats at launch, ascending.
+    humans: Vec<u8>,
+    host: Option<u8>,
+    /// Active in the engine.
+    active: BTreeSet<u8>,
+    /// Not disconnected for `DISCONNECT_GRACE` or longer.
+    connected: BTreeSet<u8>,
+    kicked: BTreeSet<u8>,
+    /// No pause time left and no `play/command` socket for `ABSENT_AFTER`.
+    absent: BTreeSet<u8>,
+    game_time: Duration,
+}
+
+impl Facts {
+    /// Kicked or absent: the seats that have left the game (D44).
+    fn has_left(&self, player: u8) -> bool {
+        self.kicked.contains(&player) || self.absent.contains(&player)
+    }
+
+    /// Active and not left: still in the game.
+    fn in_game(&self, player: u8) -> bool {
+        self.active.contains(&player) && !self.has_left(player)
+    }
+
+    /// The active human seats that have left, kicked ones included.
+    fn left_active(&self) -> Vec<u8> {
+        self.humans
+            .iter()
+            .copied()
+            .filter(|&player| self.active.contains(&player) && self.has_left(player))
+            .collect()
+    }
+
+    /// Whether `seat` may claim victory now (the user's decision 4).
+    fn may_claim(&self, seat: u8, allies: bool) -> bool {
+        self.humans.contains(&seat)
+            && self.active.contains(&seat)
+            && self.connected.contains(&seat)
+            && !self.has_left(seat)
+            && !self.left_active().is_empty()
+            && allies
+    }
+
+    /// Whether `seat` may end the game (D45).
+    fn may_end(&self, seat: u8) -> bool {
+        self.host == Some(seat)
+            && (self.game_time < END_FREE
+                || self
+                    .humans
+                    .iter()
+                    .all(|&human| human == seat || !self.in_game(human)))
+    }
 }
 
 #[derive(Default)]
@@ -234,6 +325,8 @@ impl Play {
             replies: broadcast::channel(REPLY_BACKLOG).0,
             pause_order: Mutex::new(()),
             ledger: Mutex::new(pause::Ledger::new(&[])),
+            humans: Mutex::new(Vec::new()),
+            control: Mutex::new(ControlState::default()),
         }
     }
 
@@ -288,12 +381,16 @@ impl Play {
         // already has the seats' streams.
         let player_list = self.seats.players();
         let players = player_list.iter().copied().map(u32::from).collect();
+        let mut humans = player_list.clone();
+        humans.sort_unstable();
+        *self.humans.lock().unwrap() = humans;
         self.hub.set_seats(players);
         self.seats.start_presence();
         {
             // A tick in progress must not finish against the fresh ledger.
             let _order = self.pause_order.lock().unwrap();
             *self.ledger.lock().unwrap() = pause::Ledger::new(&player_list);
+            *self.control.lock().unwrap() = ControlState::default();
         }
         let play = Arc::clone(self);
         Ok(std::thread::spawn(move || {
@@ -376,9 +473,20 @@ impl Play {
         }
     }
 
-    /// Whether the engine reported `PLAYER_ACTIVE` for `player`.
+    /// Whether the engine reported `PLAYER_ACTIVE` for `player`. A kicked
+    /// seat is out of the seat table, so it is told as away and inactive
+    /// here: its holds and its veil go (D54).
     fn pause_inputs(&self) -> Vec<pause::Input> {
-        self.seats
+        let kicked: Vec<u8> = self
+            .control
+            .lock()
+            .unwrap()
+            .kicked
+            .iter()
+            .copied()
+            .collect();
+        let mut inputs: Vec<pause::Input> = self
+            .seats
             .presence(crate::seats::DISCONNECT_GRACE)
             .into_iter()
             .map(|(player, connected)| pause::Input {
@@ -386,12 +494,18 @@ impl Play {
                 connected,
                 active: self.hub.player_state(u32::from(player)) == Some(PLAYER_ACTIVE),
             })
-            .collect()
+            .collect();
+        inputs.extend(kicked.into_iter().map(|player| pause::Input {
+            player,
+            connected: false,
+            active: false,
+        }));
+        inputs
     }
 
     /// The `inner.game.running` test of `status`, `running_seat` and
     /// `decided`.
-    fn game_running(&self) -> bool {
+    pub(crate) fn game_running(&self) -> bool {
         self.inner
             .lock()
             .unwrap()
@@ -608,14 +722,21 @@ impl Play {
         })
     }
 
-    /// Ends the game for everyone if `owner` hosts it: the engine is
-    /// stopped, and the runner thread and the feed's end take it from
-    /// there.
+    /// Ends the game for everyone if `owner` may end it (`may_end`): the
+    /// engine is stopped, and the runner thread and the feed's end take it
+    /// from there.
     pub fn end(&self, owner: &str) -> Result<(), &'static str> {
-        let host = self.seats.is_host(owner);
+        if !self.game_running() {
+            return Err("no game of yours is running");
+        }
+        if !self.may_end(owner) {
+            return Err(
+                "the host may end the game only in its first minute, or once every other player has left or resigned",
+            );
+        }
         let mut inner = self.inner.lock().unwrap();
         match &mut inner.game {
-            Some(game) if game.running && host => {
+            Some(game) if game.running => {
                 self.stop_engine(game);
                 Ok(())
             }
@@ -623,11 +744,265 @@ impl Play {
         }
     }
 
+    /// Whether `owner` may end the running game (D45): the host, and either
+    /// in the first minute or once every other human has left or resigned.
+    pub fn may_end(&self, owner: &str) -> bool {
+        if !self.game_running() {
+            return false;
+        }
+        let Some(seat) = self.seats.player_of(owner) else {
+            return false;
+        };
+        self.facts().may_end(seat)
+    }
+
+    /// The control rules' inputs, read one lock at a time in lock order: the
+    /// human seats, the seat table, the hub, then the two leaf locks.
+    fn facts(&self) -> Facts {
+        let humans = self.humans.lock().unwrap().clone();
+        let away = self.seats.away();
+        let host = self.seats.host_player();
+        let active: BTreeSet<u8> = humans
+            .iter()
+            .copied()
+            .filter(|&player| self.hub.player_state(u32::from(player)) == Some(PLAYER_ACTIVE))
+            .collect();
+        let kicked = self.control.lock().unwrap().kicked.clone();
+        let connected: BTreeSet<u8> = away
+            .iter()
+            .filter(|(_, away)| away.is_none_or(|away| away < crate::seats::DISCONNECT_GRACE))
+            .map(|(player, _)| *player)
+            .collect();
+        let absent: BTreeSet<u8> = {
+            let ledger = self.ledger.lock().unwrap();
+            away.iter()
+                .filter(|(player, away)| {
+                    !kicked.contains(player)
+                        && away.is_some_and(|away| away >= ABSENT_AFTER)
+                        && ledger
+                            .budget(*player)
+                            .is_some_and(|budget| budget.is_zero())
+                })
+                .map(|(player, _)| *player)
+                .collect()
+        };
+        Facts {
+            humans,
+            host,
+            active,
+            connected,
+            kicked,
+            absent,
+            game_time: TURN_LENGTH * self.hub.turn(),
+        }
+    }
+
+    /// Whether a claim against the left seats is allowed by the other
+    /// players' alliances (the claim rule, decision 4).
+    fn allies(&self, facts: &Facts) -> bool {
+        let left: Vec<u32> = facts.left_active().into_iter().map(u32::from).collect();
+        self.hub.claim_allies(&left)
+    }
+
+    /// The control a seat is sent: its own flags, then every human row
+    /// (the detail stream's kind 3).
+    fn control_body(facts: &Facts, seat: u8, allies: bool) -> Vec<u8> {
+        let mut own = 0;
+        if facts.may_end(seat) {
+            own |= CONTROL_END_ALLOWED;
+        }
+        if facts.may_claim(seat, allies) {
+            own |= CONTROL_CLAIM;
+        }
+        let mut body = Writer::default();
+        body.u8(own);
+        body.varint(facts.humans.len() as u64);
+        for &human in &facts.humans {
+            let mut flags = 0;
+            if facts.host == Some(human) {
+                flags |= CONTROL_HOST;
+            }
+            if facts.kicked.contains(&human) {
+                flags |= CONTROL_KICKED;
+            }
+            if facts.absent.contains(&human) {
+                flags |= CONTROL_ABSENT;
+            }
+            body.u8(human);
+            body.u8(flags);
+        }
+        body.0
+    }
+
+    /// The seats among `seats` not yet resigned by the server, which are
+    /// marked resigned so that a resign is sent once.
+    fn mark_resigned(&self, seats: impl Iterator<Item = u8>) -> Vec<u8> {
+        let mut control = self.control.lock().unwrap();
+        seats
+            .filter(|seat| control.server_resigned.insert(*seat))
+            .collect()
+    }
+
+    /// Runs the rules of leaving and sends every human seat its control
+    /// (`hub.set_control`). Called once a poll; the encoder sends only what
+    /// changed.
+    pub fn tick_control(&self) {
+        if !self.game_running() || !self.hub.has_turn() {
+            return;
+        }
+        let generation = self.generation.load(Ordering::SeqCst);
+        let mut facts = self.facts();
+        // D46: the host powers pass on when the host is no longer in the game.
+        // Only to someone still in it: at the decision nobody is, and the
+        // host keeps the powers, so the summary's Rematch stays theirs (D63).
+        if let Some(host) = facts.host
+            && !facts.in_game(host)
+            && facts
+                .humans
+                .iter()
+                .any(|&human| human != host && facts.in_game(human))
+            && let Some(cookie) = self.seats.host()
+        {
+            self.seats
+                .leave(&cookie, Phase::Running, |player| facts.in_game(player));
+            match self.seats.host_player() {
+                Some(next) => println!("game {generation}: host powers pass to player {next}"),
+                None => println!("game {generation}: host powers pass to nobody"),
+            }
+            facts = self.facts();
+        }
+        // D17: the game ends when nobody is connected for a while, or when
+        // every active human has left.
+        let nobody = !facts.humans.iter().any(|&human| {
+            facts.active.contains(&human)
+                && !facts.kicked.contains(&human)
+                && facts.connected.contains(&human)
+        });
+        let now = Instant::now();
+        let nobody_long = {
+            let mut control = self.control.lock().unwrap();
+            if nobody {
+                now.duration_since(*control.nobody_since.get_or_insert(now)) >= NOBODY_CONNECTED_END
+            } else {
+                control.nobody_since = None;
+                false
+            }
+        };
+        let all_left = facts.humans.iter().all(|&human| !facts.in_game(human))
+            && !facts.left_active().is_empty();
+        let reason = if nobody_long {
+            Some("nobody connected for 5 min, resigning every human seat")
+        } else if all_left {
+            Some("every player has left, resigning the seats left")
+        } else {
+            None
+        };
+        if let Some(reason) = reason {
+            let active: Vec<u8> = facts
+                .humans
+                .iter()
+                .copied()
+                .filter(|human| facts.active.contains(human))
+                .collect();
+            let resign = self.mark_resigned(active.into_iter());
+            if !resign.is_empty() {
+                println!("game {generation}: {reason}");
+                for player in resign {
+                    self.send_json(player, RESIGN_JSON);
+                }
+            }
+        }
+        let allies = self.allies(&facts);
+        let bodies: Vec<(u32, Vec<u8>)> = facts
+            .humans
+            .iter()
+            .copied()
+            .filter(|human| !facts.kicked.contains(human))
+            .map(|human| (u32::from(human), Self::control_body(&facts, human, allies)))
+            .collect();
+        self.hub.set_control(&bodies);
+    }
+
+    /// The seat `owner` holds claims victory (decision 4): every active seat
+    /// that has left is resigned, kicked ones included.
+    pub fn claim(&self, owner: &str) -> Result<(), &'static str> {
+        let seat = self.running_seat(owner)?;
+        let facts = self.facts();
+        let allies = self.allies(&facts);
+        if !facts.may_claim(seat, allies) {
+            return Err("there is no victory to claim");
+        }
+        let left = facts.left_active();
+        for player in self.mark_resigned(left.iter().copied()) {
+            self.send_json(player, RESIGN_JSON);
+        }
+        let names: Vec<String> = left.iter().map(u8::to_string).collect();
+        println!(
+            "game {}: player {seat} claimed victory, resigning {}",
+            self.generation.load(Ordering::SeqCst),
+            names.join(", ")
+        );
+        self.tick_control();
+        Ok(())
+    }
+
+    /// The host kicks a human seat out of the running game (M29, V77). The
+    /// seat is taken for good; its civ stays idle (D54).
+    pub fn kick(&self, owner: &str, player: u8) -> Result<(), &'static str> {
+        if !self.game_running() || !self.seats.is_host(owner) {
+            return Err("only the host can kick");
+        }
+        let humans = self.humans.lock().unwrap().clone();
+        if !humans.contains(&player) || self.seats.host_player() == Some(player) {
+            return Err("the host cannot be kicked");
+        }
+        if self.control.lock().unwrap().kicked.contains(&player) {
+            return Err("already kicked");
+        }
+        let cookie = self
+            .seats
+            .cookie_of_player(player)
+            .ok_or("not in this match")?;
+        self.seats.set_player(&cookie, None)?;
+        self.control.lock().unwrap().kicked.insert(player);
+        // The kicked seat's page gets its control before its stream is
+        // dropped, so it can say it was kicked.
+        let facts = self.facts();
+        let allies = self.allies(&facts);
+        let body = Self::control_body(&facts, player, allies);
+        self.hub.set_control(&[(u32::from(player), body)]);
+        let kicked = self.control.lock().unwrap().kicked.clone();
+        let remaining: Vec<u32> = humans
+            .iter()
+            .filter(|human| !kicked.contains(human))
+            .map(|&human| u32::from(human))
+            .collect();
+        self.hub.set_seats(remaining);
+        self.tick_pause();
+        self.tick_control();
+        println!(
+            "game {}: the host kicked player {player}",
+            self.generation.load(Ordering::SeqCst)
+        );
+        Ok(())
+    }
+
     fn stop_engine(&self, game: &mut Game) {
         observer::kill_recorded(&self.socket);
         // At once rather than once the runner has seen the engine exit, so
         // the page reloaded after this shows the end.
         game.running = false;
+    }
+
+    /// Stops the engine of the host's game that a new setup replaces (D14),
+    /// once `may_end` allowed it: asking `may_end` again could refuse after
+    /// minute 1 has passed since, and leave the engine in the new setup's
+    /// slot.
+    pub fn end_replaced(&self) {
+        let mut inner = self.inner.lock().unwrap();
+        if let Some(game) = inner.game.as_mut().filter(|game| game.running) {
+            self.stop_engine(game);
+        }
     }
 
     /// Stops the engine at a time limit (D18, D19). Returns whether it was

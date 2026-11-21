@@ -1090,6 +1090,8 @@ enum Release {
     Summary(Arc<SummaryEntry>),
     /// A pause or resume, a message in the visual frame.
     Pause(TrackOp),
+    /// A control message in the detail frame.
+    Detail(TrackOp),
     End {
         match_id: u64,
         visual_tail: Vec<u8>,
@@ -1166,6 +1168,13 @@ impl Shown {
                 }
                 let message = self.visual.apply(op, store(self.match_id, false));
                 let _ = self.visual.sender.send(message);
+            }
+            Release::Detail(op) => {
+                if !self.has_turn || self.ended.is_some() {
+                    return;
+                }
+                let message = self.detail.apply(op, store(self.match_id, true));
+                let _ = self.detail.sender.send(message);
             }
             Release::Summary(entry) => {
                 if entry.match_id != self.match_id {
@@ -1641,6 +1650,15 @@ impl Stream {
         self.pause_message(turn)
     }
 
+    /// Sets a seat's control and returns the message that tells the
+    /// viewers, if it changed.
+    fn set_control(&mut self, turn: u32, body: &[u8]) -> io::Result<Option<TrackOp>> {
+        match self.detail_encoder.control(turn, body) {
+            Some(message) => self.detail.push(&message, None).map(Some),
+            None => Ok(None),
+        }
+    }
+
     fn pause_message(&mut self, turn: u32) -> io::Result<TrackOp> {
         let mut out = Writer::default();
         out.u8(MESSAGE_PAUSE);
@@ -1858,6 +1876,44 @@ impl Hub {
                 retired: false,
             }),
         }
+    }
+
+    /// Tells the seats' viewers their control: the seat's own flags and the
+    /// human rows (`Play::tick_control`). A seat not in `bodies` keeps its
+    /// control; the observers' stream never gets one.
+    pub fn set_control(&self, bodies: &[(u32, Vec<u8>)]) {
+        let mut state = self.state.lock().unwrap();
+        if !state.has_turn || state.ended {
+            return;
+        }
+        let turn = state.turn;
+        for (player, body) in bodies {
+            let Some(seat) = state.seats.iter_mut().find(|seat| seat.player == *player) else {
+                continue;
+            };
+            if let Err(error) = seat.control(turn, body) {
+                eprintln!("cannot encode a control: {error}");
+            }
+        }
+    }
+
+    /// Whether every active player who is not in `left`, AIs included, is a
+    /// mutual ally of every other one (the claim-victory rule). Gaia is not
+    /// a player here.
+    pub fn claim_allies(&self, left: &[u32]) -> bool {
+        let state = self.state.lock().unwrap();
+        let players = &state.observer.players;
+        let active: Vec<usize> = (1..players.players.len())
+            .filter(|&index| {
+                players.players[index].state == seat::PLAYER_ACTIVE
+                    && !left.contains(&(index as u32))
+            })
+            .collect();
+        active.iter().all(|&a| {
+            active
+                .iter()
+                .all(|&b| a == b || seat::mutual_ally(players, a, b))
+        })
     }
 
     /// The players of the next feed that web visitors play. Their streams
@@ -2753,7 +2809,7 @@ fn ending(
             data_files,
             ..
         } => Some((terrain.as_ref(), data_files)),
-        Release::Turn { .. } | Release::Summary(_) | Release::Pause(_) => None,
+        Release::Turn { .. } | Release::Summary(_) | Release::Pause(_) | Release::Detail(_) => None,
     })
 }
 

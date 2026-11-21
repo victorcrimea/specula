@@ -144,5 +144,18 @@
   "%(player)s (disconnected): %(time)s": "%(player)s (від'єднано): %(time)s",
   "%(player)s is out of pause time; their pause ends in %(time)s.": "%(player)s вичерпав час паузи; пауза завершиться через %(time)s.",
   "Pause time left: %(time)s": "Залишився час паузи: %(time)s",
-  "You have no pause time left.": "У вас не залишилося часу паузи."
+  "You have no pause time left.": "У вас не залишилося часу паузи.",
+  "Claim victory": "Заявити про перемогу",
+  "End game": "Завершити гру",
+  "Kick": "Виключити",
+  "Kicked": "Виключено",
+  "Wait": "Почекати",
+  "This player is out of the game.": "Цей гравець уже вибув з гри.",
+  "Only the host can end the game.": "Завершити гру може лише ведучий.",
+  "The host can end the game only in its first minute, or once every other player has left or resigned.": "Ведучий може завершити гру лише в першу хвилину або коли всі інші гравці вийшли чи здалися.",
+  "Available once every player still connected is an ally, and the others have been away for 5 minutes with no pause time left.": "Доступно, коли всі гравці, що ще підключені, є союзниками, а інші відсутні 5 хвилин і в них не лишилося часу паузи.",
+  "Are you sure you want to end the game for every player?": "Ви впевнені, що хочете завершити гру для всіх гравців?",
+  "Claim victory? %(players)s will be resigned.": "Заявити про перемогу? %(players)s здадуться.",
+  "%(players)s left the game. Do you want to claim victory?": "%(players)s вийшов(ли) з гри. Заявити про перемогу?",
+  "Kick %(player)s? They cannot play this match again.": "Виключити %(player)s? Цей гравець більше не зможе грати в цю гру."
 }

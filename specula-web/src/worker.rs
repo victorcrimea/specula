@@ -241,6 +241,10 @@ struct Playback {
     /// since, without a gap.
     live_detail_keyframe: (u32, Vec<u8>),
     recent_details: VecDeque<(u32, Vec<u8>)>,
+    /// The last live control (kind 3) since the live keyframe. Controls are
+    /// not in `recent_details`, so a page that is caught up from segments
+    /// or deltas gets this one again after them, to be current.
+    live_control: Option<Vec<u8>>,
     /// Least recently used first, all of the shown match.
     detail_segments: Vec<Segment>,
     detail_fetching: Option<u32>,
@@ -378,7 +382,7 @@ impl Playback {
             return;
         }
         let messages = match envelope {
-            stream::ENVELOPE_JOIN => stream::read_join(body).map(|(frame, messages)| {
+            stream::ENVELOPE_JOIN => stream::read_join(body, |_| false).map(|(frame, messages)| {
                 self.frame = Some(frame);
                 messages
             }),
@@ -1167,6 +1171,7 @@ impl Playback {
         self.detail_frame = None;
         self.live_details = Details::default();
         self.recent_details.clear();
+        self.live_control = None;
         self.detail_segments.clear();
         self.page_details = None;
         self.post_detail(&[]);
@@ -1256,10 +1261,12 @@ impl Playback {
             return;
         };
         let messages = match envelope {
-            stream::ENVELOPE_JOIN => stream::read_join(body).map(|(frame, messages)| {
-                self.detail_frame = Some(frame);
-                messages
-            }),
+            stream::ENVELOPE_JOIN => {
+                stream::read_join(body, crate::detail::is_control).map(|(frame, messages)| {
+                    self.detail_frame = Some(frame);
+                    messages
+                })
+            }
             stream::ENVELOPE_FRAME => {
                 let frame = self.detail_frame.insert(FrameDecoder::new());
                 frame.feed(body)
@@ -1290,6 +1297,17 @@ impl Playback {
             self.live_detail_keyframe = (details.turn, message);
             self.live_details = details;
             self.recent_details.clear();
+            // The keyframe carries the control as of its turn, so an
+            // earlier live one must not be sent after it.
+            self.live_control = None;
+            return Ok(());
+        }
+        if crate::detail::is_control(&message) {
+            // Sent at once, even while paused when no turn moves; it is not
+            // a turn, so it stays out of `recent_details`.
+            self.live_details.apply(&message)?;
+            self.post_detail(&message);
+            self.live_control = Some(message);
             return Ok(());
         }
         self.live_details.apply(&message)?;
@@ -1307,6 +1325,7 @@ impl Playback {
         self.detail_frame = None;
         self.live_details = Details::default();
         self.recent_details.clear();
+        self.live_control = None;
         if let Some(socket) = &self.detail_socket {
             let _ = socket.close();
         }
@@ -1358,6 +1377,7 @@ impl Playback {
                     self.post_detail(&message);
                     reached = turn;
                 }
+                self.post_live_control();
                 self.page_details = Some((match_id, reached));
                 return;
             }
@@ -1389,7 +1409,16 @@ impl Playback {
         };
         if let Ok(turn) = stream::message_turn(&keyframe) {
             self.post_detail(&keyframe);
+            self.post_live_control();
             self.page_details = Some((match_id, turn));
+        }
+    }
+
+    /// Sends the page the live control again, after a keyframe or deltas
+    /// that may carry an older one.
+    fn post_live_control(&self) {
+        if let Some(control) = &self.live_control {
+            self.post_detail(control);
         }
     }
 
@@ -1429,7 +1458,10 @@ impl Playback {
             // Skipping the keyframe leaves the delta into its turn, as in
             // `next_message`.
             for (turn, message) in &self.detail_segments[position].messages[1..] {
-                if *turn > reached && *turn <= upto {
+                // A control of the turn already reached is set after the
+                // delta of that turn, so it still goes out.
+                let control = crate::detail::is_control(message);
+                if (*turn > reached || (control && *turn == reached)) && *turn <= upto {
                     deltas.push((*turn, message.clone()));
                     reached = *turn;
                 }
@@ -1459,7 +1491,8 @@ impl Playback {
             let keyframe_turn = messages[0].0;
             details.apply(&messages[0].1)?;
             for (message_turn, message) in &messages[1..] {
-                if *message_turn == keyframe_turn {
+                // A control of the keyframe's turn is set after the keyframe.
+                if *message_turn == keyframe_turn && !crate::detail::is_control(message) {
                     continue;
                 }
                 if *message_turn > turn {
@@ -1680,6 +1713,7 @@ fn start() -> Result<(), String> {
             live_details: Details::default(),
             live_detail_keyframe: (0, Vec::new()),
             recent_details: VecDeque::new(),
+            live_control: None,
             detail_segments: Vec::new(),
             detail_fetching: None,
             page_details: None,

@@ -144,5 +144,18 @@
   "%(player)s (disconnected): %(time)s": "%(player)s (leválasztva): %(time)s",
   "%(player)s is out of pause time; their pause ends in %(time)s.": "%(player)s szünetideje elfogyott; a szünete %(time)s múlva véget ér.",
   "Pause time left: %(time)s": "Hátralévő szünetidő: %(time)s",
-  "You have no pause time left.": "Nem maradt szünetidőd."
+  "You have no pause time left.": "Nem maradt szünetidőd.",
+  "Claim victory": "Győzelem igénylése",
+  "End game": "Játék befejezése",
+  "Kick": "Kirúgás",
+  "Kicked": "Kirúgva",
+  "Wait": "Várakozás",
+  "This player is out of the game.": "Ez a játékos már nincs a játékban.",
+  "Only the host can end the game.": "Csak a házigazda fejezheti be a játékot.",
+  "The host can end the game only in its first minute, or once every other player has left or resigned.": "A házigazda csak az első percben fejezheti be a játékot, vagy amikor minden más játékos távozott vagy feladta.",
+  "Available once every player still connected is an ally, and the others have been away for 5 minutes with no pause time left.": "Akkor érhető el, ha az összes még csatlakozott játékos szövetséges, a többiek pedig 5 perce távol vannak, és nincs hátralévő szünetidejük.",
+  "Are you sure you want to end the game for every player?": "Biztosan befejezi a játékot minden játékos számára?",
+  "Claim victory? %(players)s will be resigned.": "Győzelem igénylése? %(players)s fel fogja adni.",
+  "%(players)s left the game. Do you want to claim victory?": "%(players)s kilépett a játékból. Szeretné igényelni a győzelmet?",
+  "Kick %(player)s? They cannot play this match again.": "Kirúgja %(player)s játékost? Nem játszhat többet ebben a játékban."
 }

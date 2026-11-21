@@ -144,5 +144,18 @@
   "%(player)s (disconnected): %(time)s": "the same for a player who lost their connection; their absence pauses the game at their cost",
   "%(player)s is out of pause time; their pause ends in %(time)s.": "countdown on the pause veil; %(time)s is like 0:05",
   "Pause time left: %(time)s": "second line of the Menu's Pause button tooltip",
-  "You have no pause time left.": "the same tooltip when the player's 5 minute pause budget is spent and the button is disabled"
+  "You have no pause time left.": "the same tooltip when the player's 5 minute pause budget is spent and the button is disabled",
+  "Claim victory": "button in the Menu, and the title of the claim question: the visitor claims the victory the seats that have left leave them",
+  "End game": "Menu button that ends the game for every player; enabled for the host only",
+  "Kick": "button on a player's row in the diplomacy window: the host removes that human player from the game",
+  "Kicked": "tooltip of a Kick button for a player the host has already kicked",
+  "Wait": "button of the claim offer popup: closes it without claiming",
+  "This player is out of the game.": "tooltip of a disabled Kick button: the player was defeated or resigned",
+  "Only the host can end the game.": "tooltip of the disabled End game button for a player who is not the host",
+  "The host can end the game only in its first minute, or once every other player has left or resigned.": "tooltip of the disabled End game button for the host",
+  "Available once every player still connected is an ally, and the others have been away for 5 minutes with no pause time left.": "tooltip of the disabled Claim victory button",
+  "Are you sure you want to end the game for every player?": "question before End game; Yes ends the game for everyone",
+  "Claim victory? %(players)s will be resigned.": "question before Claim victory; %(players)s is a list of player names, such as Alice, Bob",
+  "%(players)s left the game. Do you want to claim victory?": "popup offering Claim victory once the others have left; %(players)s is a list of player names",
+  "Kick %(player)s? They cannot play this match again.": "question before a kick; %(player)s is the player's name"
 }

@@ -94,8 +94,6 @@ pub enum Phase {
     Setup,
     /// The earliest joiner still here who holds a seat still in the game
     /// (D46): a resigned or defeated player is out of it.
-    // Built by in-game presence (M25).
-    #[allow(dead_code)]
     Running,
 }
 
@@ -313,6 +311,35 @@ impl Seats {
                 member.play_away_since = Some(Instant::now());
             }
         }
+    }
+
+    /// Every seated member and how long their `play/command` sockets have
+    /// been closed: None while one is open (M25).
+    pub fn away(&self) -> Vec<(u8, Option<Duration>)> {
+        let table = self.inner.lock().unwrap();
+        table
+            .members
+            .iter()
+            .filter_map(|member| {
+                let player = member.player?;
+                let away = if member.play_sockets > 0 {
+                    None
+                } else {
+                    Some(
+                        member
+                            .play_away_since
+                            .map_or(Duration::ZERO, |since| since.elapsed()),
+                    )
+                };
+                Some((player, away))
+            })
+            .collect()
+    }
+
+    /// The player number the host holds, if the host is seated.
+    pub fn host_player(&self) -> Option<u8> {
+        let table = self.inner.lock().unwrap();
+        table.members[table.host?].player
     }
 
     /// Every seated member, and whether they are connected (D43): a socket

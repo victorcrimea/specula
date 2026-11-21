@@ -144,5 +144,18 @@
   "%(player)s (disconnected): %(time)s": "%(player)s（已断开连接）：%(time)s",
   "%(player)s is out of pause time; their pause ends in %(time)s.": "%(player)s 的暂停时间已用完，其暂停将在 %(time)s 后结束。",
   "Pause time left: %(time)s": "剩余暂停时间：%(time)s",
-  "You have no pause time left.": "你没有剩余暂停时间了。"
+  "You have no pause time left.": "你没有剩余暂停时间了。",
+  "Claim victory": "宣布胜利",
+  "End game": "结束游戏",
+  "Kick": "踢出",
+  "Kicked": "已踢出",
+  "Wait": "等待",
+  "This player is out of the game.": "该玩家已退出游戏。",
+  "Only the host can end the game.": "只有房主可以结束游戏。",
+  "The host can end the game only in its first minute, or once every other player has left or resigned.": "房主只能在游戏开始的第一分钟结束游戏，或在其他所有玩家都已离开或投降之后结束。",
+  "Available once every player still connected is an ally, and the others have been away for 5 minutes with no pause time left.": "当所有仍在线的玩家都是盟友，且其他玩家已离开 5 分钟且没有剩余暂停时间时可用。",
+  "Are you sure you want to end the game for every player?": "确定要为所有玩家结束游戏吗？",
+  "Claim victory? %(players)s will be resigned.": "宣布胜利？%(players)s 将被投降。",
+  "%(players)s left the game. Do you want to claim victory?": "%(players)s 已离开游戏。是否宣布胜利？",
+  "Kick %(player)s? They cannot play this match again.": "踢出 %(player)s？该玩家将无法再参加本局游戏。"
 }

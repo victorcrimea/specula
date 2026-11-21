@@ -94,7 +94,7 @@ const LIMIT_WARNINGS: [Duration; 3] = [
     Duration::from_secs(60),
 ];
 /// `DEFAULT_TURN_LENGTH` (`TurnManager.h`), which a hosted game runs at.
-const TURN_LENGTH: Duration = Duration::from_millis(200);
+pub(crate) const TURN_LENGTH: Duration = Duration::from_millis(200);
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct MatchId([u8; 16]);
@@ -505,6 +505,15 @@ impl Registry {
             return Err(STOPPING_ERROR);
         }
         let old = Self::own_slot_holder_in(&inner, owner);
+        // A running game is replaced only if its host may end it (D14, D45);
+        // one whose engine is already stopped is waited for, as before.
+        if let Some((_, old)) = &old
+            && old.state() == MatchState::Running
+            && old.play.game_running()
+            && !old.play.may_end(owner)
+        {
+            return Err("your game is still running");
+        }
         let slot = match &old {
             Some((_, old)) => old.slot,
             None => inner
@@ -537,9 +546,7 @@ impl Registry {
         if let Some((old_id, old)) = &old {
             match old.state() {
                 MatchState::Setup => Self::close_in(&mut inner, *old_id, CloseReason::Replaced),
-                MatchState::Running => {
-                    let _ = old.play.end(owner);
-                }
+                MatchState::Running => old.play.end_replaced(),
                 MatchState::Ended => {}
             }
         }
@@ -880,6 +887,7 @@ impl Registry {
             // Off the registry lock: stopping an engine runs `kill`.
             for (id, found) in &running {
                 found.play.tick_pause();
+                found.play.tick_control();
                 let (wall, game) = found.limit_left(&self.config);
                 let (left, limit) = if wall <= game {
                     (wall, "wall")
