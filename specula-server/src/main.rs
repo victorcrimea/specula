@@ -8,6 +8,7 @@ mod feed;
 mod history;
 mod nickname;
 mod observer;
+mod pause;
 mod play;
 mod registry;
 mod seats;
@@ -791,6 +792,11 @@ fn play_command(
     Some(socket.channel(move |mut stream| {
         Box::pin(async move {
             let bound = play.seat(visitor.as_deref());
+            // Only a socket bound to a seat counts against presence, and it
+            // counts for as long as the loop below runs (M25).
+            let _presence = bound
+                .and(visitor.as_deref())
+                .map(|cookie| play.present(cookie));
             let mut replies = play.replies();
             stream
                 .send(rocket_ws::Message::binary(vec![

@@ -594,6 +594,9 @@ struct App {
     live_button: HtmlButtonElement,
     live: bool,
     paused: bool,
+    /// When the scene's ledger last came in, on the frame clock; charged
+    /// budgets and countdowns run down from it.
+    ledger_at: f64,
     /// The turn the timeline shows, for the copied link.
     playhead: u32,
     /// `/` only.
@@ -1071,6 +1074,7 @@ impl App {
             minimap.frame(progress, self.renderer.view_outline());
         }
         self.match_over.frame(now);
+        self.sync_pause();
         self.stream_start.frame(now);
         if let Some(time_limit) = &mut self.time_limit {
             time_limit.frame(
@@ -1576,21 +1580,48 @@ impl App {
 
     /// Whether the viewer's own seat has the game paused.
     fn own_pause(&self) -> bool {
-        self.owner_seat
-            .is_some_and(|seat| self.scene.paused_by.contains(&(seat as u32)))
+        let Some(seat) = self.owner_seat else {
+            return false;
+        };
+        if self.scene.ledger.is_empty() {
+            return self.scene.paused_by.contains(&(seat as u32));
+        }
+        self.scene
+            .ledger
+            .iter()
+            .any(|entry| entry.player == seat as u32 && entry.flags & stream::LEDGER_HOLDS != 0)
+    }
+
+    /// The viewer's own pause time left, in ms, as of the last ledger.
+    fn own_pause_left(&self) -> Option<f64> {
+        let seat = self.owner_seat? as u32;
+        let entry = self
+            .scene
+            .ledger
+            .iter()
+            .find(|entry| entry.player == seat)?;
+        Some(ledger_left(entry, page_now() - self.ledger_at).0)
     }
 
     /// Shows the pause veil and the Menu's button as the scene has them.
     fn sync_pause(&mut self) {
         let own = self.owner_seat;
+        let elapsed = page_now() - self.ledger_at;
         if let Some(overlay) = &mut self.pause_overlay {
-            overlay.update(&self.scene.paused_by, &self.scene.players, own);
+            overlay.update(
+                &self.scene.paused_by,
+                &self.scene.players,
+                own,
+                &self.scene.ledger,
+                elapsed,
+            );
         }
         if let Some(menu) = &self.game_menu {
             menu.update(
                 !seated() || self.finish_noticed,
                 self.match_over.ended,
                 self.own_pause(),
+                self.own_pause_left(),
             );
         }
     }
@@ -2086,6 +2117,7 @@ async fn run(
         live_button: element(&document, "live")?,
         live: true,
         paused: false,
+        ledger_at: 0.0,
         playhead: 0,
         copy_link: match page {
             Page::Map => None,
@@ -2801,6 +2833,11 @@ fn toggle_pause(app: &Rc<RefCell<App>>) {
         || app.match_over.ended
         || app.game_menu.is_none()
     {
+        return;
+    }
+    // A seat that spent its budget cannot pause again; it can still resume
+    // its own pause (D41).
+    if !app.own_pause() && app.own_pause_left().is_some_and(|left| left < 1000.0) {
         return;
     }
     let action = if app.own_pause() { "resume" } else { "pause" };
@@ -4454,6 +4491,7 @@ fn connect(app: &Rc<RefCell<App>>) {
                             !seated() || app.finish_noticed,
                             app.match_over.ended,
                             app.own_pause(),
+                            app.own_pause_left(),
                         );
                     }
                 }
@@ -4529,10 +4567,16 @@ fn receive(app_rc: &Rc<RefCell<App>>, turn_ms: f64, message: &[u8]) {
     let app = &mut *app_rc.borrow_mut();
     match app.scene.apply(message, app.progress) {
         // Not a turn: nothing moves, the veil only comes or goes.
-        Ok(()) if stream::is_pause(message) => app.sync_pause(),
+        Ok(()) if stream::is_pause(message) => {
+            app.ledger_at = page_now();
+            app.sync_pause()
+        }
         // The dots now start where they are drawn, so the new turn plays
         // from 0; a second turn before the next frame starts there too.
         Ok(()) => {
+            if stream::is_keyframe(message) {
+                app.ledger_at = page_now();
+            }
             app.stream_start.at = None;
             app.progress = 0.0;
             app.turn_arrived = true;
@@ -4745,9 +4789,26 @@ fn canvas_size(canvas: &HtmlCanvasElement, max: u32) -> (u32, u32, f32) {
     )
 }
 
+/// A ledger line's pause time and countdown left, in ms, at `elapsed_ms`
+/// after the ledger. A charged budget, and a running countdown, advance in
+/// real time; both stop at 0.
+fn ledger_left(entry: &stream::LedgerEntry, elapsed_ms: f64) -> (f64, f64) {
+    let budget = if entry.flags & stream::LEDGER_CHARGED != 0 {
+        f64::from(entry.budget_ms) - elapsed_ms
+    } else {
+        f64::from(entry.budget_ms)
+    };
+    let countdown = if entry.countdown_ms != 0 {
+        f64::from(entry.countdown_ms) - elapsed_ms
+    } else {
+        0.0
+    };
+    (budget.max(0.0), countdown.max(0.0))
+}
+
 /// Game time, `m:ss` or `h:mm:ss`.
 /// m:ss, as the engine's countdowns show a time left.
-fn format_minutes(seconds: u64) -> String {
+pub(crate) fn format_minutes(seconds: u64) -> String {
     format!("{}:{:02}", seconds / 60, seconds % 60)
 }
 

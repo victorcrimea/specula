@@ -138,5 +138,11 @@
   "cannot open a setup": "δεν είναι δυνατό να ανοίξει η ρύθμιση του παιχνιδιού",
   "bad nickname": "μη έγκυρο ψευδώνυμο",
   "no visitor cookie": "δεν υπάρχει cookie επισκέπτη",
-  "not in play mode": "ο διακομιστής δεν είναι σε λειτουργία παιχνιδιού"
+  "not in play mode": "ο διακομιστής δεν είναι σε λειτουργία παιχνιδιού",
+  "Pause time left": "Υπόλοιπος χρόνος παύσης",
+  "%(player)s: %(time)s": "%(player)s: %(time)s",
+  "%(player)s (disconnected): %(time)s": "%(player)s (αποσυνδεδεμένος): %(time)s",
+  "%(player)s is out of pause time; their pause ends in %(time)s.": "Ο/Η %(player)s δεν έχει χρόνο παύσης· η παύση του/της τελειώνει σε %(time)s.",
+  "Pause time left: %(time)s": "Υπόλοιπος χρόνος παύσης: %(time)s",
+  "You have no pause time left.": "Δεν σου απομένει χρόνος παύσης."
 }

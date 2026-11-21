@@ -138,5 +138,11 @@
   "cannot open a setup": "nelze otevřít nastavení hry",
   "bad nickname": "neplatná přezdívka",
   "no visitor cookie": "chybí cookie návštěvníka",
-  "not in play mode": "server není v herním režimu"
+  "not in play mode": "server není v herním režimu",
+  "Pause time left": "Zbývající čas pauzy",
+  "%(player)s: %(time)s": "%(player)s: %(time)s",
+  "%(player)s (disconnected): %(time)s": "%(player)s (odpojen): %(time)s",
+  "%(player)s is out of pause time; their pause ends in %(time)s.": "%(player)s nemá čas pauzy; jeho pauza skončí za %(time)s.",
+  "Pause time left: %(time)s": "Zbývající čas pauzy: %(time)s",
+  "You have no pause time left.": "Nemáš žádný čas pauzy."
 }

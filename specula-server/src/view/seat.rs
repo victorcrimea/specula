@@ -1734,6 +1734,14 @@ impl Seat {
         Ok(())
     }
 
+    /// Tells the seat's viewers the pause ledger.
+    pub fn ledger(&mut self, turn: u32, entries: &[crate::pause::Entry]) -> io::Result<()> {
+        let visual = self.stream.set_ledger(turn, entries)?;
+        self.shown
+            .apply(Release::Pause(visual), None, self.shown.match_id);
+        Ok(())
+    }
+
     pub fn end(&mut self, common: &Common, turn: u32) {
         let seat_common = Common {
             delay: Duration::ZERO,

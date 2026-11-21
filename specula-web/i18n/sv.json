@@ -138,5 +138,11 @@
   "cannot open a setup": "speluppsättningen kan inte öppnas",
   "bad nickname": "ogiltigt smeknamn",
   "no visitor cookie": "ingen besökarcookie",
-  "not in play mode": "servern är inte i spelläge"
+  "not in play mode": "servern är inte i spelläge",
+  "Pause time left": "Återstående paustid",
+  "%(player)s: %(time)s": "%(player)s: %(time)s",
+  "%(player)s (disconnected): %(time)s": "%(player)s (frånkopplad): %(time)s",
+  "%(player)s is out of pause time; their pause ends in %(time)s.": "%(player)s har slut på paustid; pausen slutar om %(time)s.",
+  "Pause time left: %(time)s": "Återstående paustid: %(time)s",
+  "You have no pause time left.": "Du har ingen paustid kvar."
 }

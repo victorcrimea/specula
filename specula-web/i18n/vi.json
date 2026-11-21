@@ -138,5 +138,11 @@
   "cannot open a setup": "không thể mở thiết lập trận",
   "bad nickname": "biệt danh không hợp lệ",
   "no visitor cookie": "không có cookie khách truy cập",
-  "not in play mode": "máy chủ không ở chế độ chơi"
+  "not in play mode": "máy chủ không ở chế độ chơi",
+  "Pause time left": "Thời gian tạm dừng còn lại",
+  "%(player)s: %(time)s": "%(player)s: %(time)s",
+  "%(player)s (disconnected): %(time)s": "%(player)s (mất kết nối): %(time)s",
+  "%(player)s is out of pause time; their pause ends in %(time)s.": "%(player)s đã hết thời gian tạm dừng; tạm dừng của họ sẽ kết thúc sau %(time)s.",
+  "Pause time left: %(time)s": "Thời gian tạm dừng còn lại: %(time)s",
+  "You have no pause time left.": "Bạn không còn thời gian tạm dừng."
 }

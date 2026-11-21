@@ -138,5 +138,11 @@
   "cannot open a setup": "не удалось открыть настройку игры",
   "bad nickname": "недопустимое имя",
   "no visitor cookie": "нет cookie посетителя",
-  "not in play mode": "сервер не в режиме игры"
+  "not in play mode": "сервер не в режиме игры",
+  "Pause time left": "Оставшееся время паузы",
+  "%(player)s: %(time)s": "%(player)s: %(time)s",
+  "%(player)s (disconnected): %(time)s": "%(player)s (отключён): %(time)s",
+  "%(player)s is out of pause time; their pause ends in %(time)s.": "%(player)s израсходовал время паузы; пауза закончится через %(time)s.",
+  "Pause time left: %(time)s": "Оставшееся время паузы: %(time)s",
+  "You have no pause time left.": "У вас не осталось времени паузы."
 }

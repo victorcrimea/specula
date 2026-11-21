@@ -24,6 +24,7 @@ use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use std::thread::JoinHandle;
 use std::time::Duration;
+use std::time::Instant;
 
 use serde_json::Value;
 
@@ -39,6 +40,7 @@ use rocket::tokio::sync::broadcast;
 use crate::feed::Summary;
 use crate::observer;
 use crate::observer::EngineDirs;
+use crate::pause;
 use crate::registry::MatchId;
 use crate::seats::Seats;
 use crate::settings::Choice;
@@ -168,6 +170,14 @@ pub struct Play {
     /// The engine's answers to the queries, each for the connection that
     /// asked, as the text message `{"id":..,"result":..}` the page reads.
     replies: broadcast::Sender<Reply>,
+    /// Held for a whole pause update, so the engine and the pages get the
+    /// ledger's decisions in the order the ledger made them. After the
+    /// registry lock (`start` runs under it), before every lock of this,
+    /// `Seats` and `Hub`, and never while one of those is held.
+    pause_order: Mutex<()>,
+    /// The pause ledger (D41 to D43): a leaf lock, never take `seats`,
+    /// `hub` or `inner` while holding it.
+    ledger: Mutex<pause::Ledger>,
 }
 
 #[derive(Default)]
@@ -222,6 +232,8 @@ impl Play {
             next_query: AtomicU32::new(1),
             askers: Mutex::new(VecDeque::new()),
             replies: broadcast::channel(REPLY_BACKLOG).0,
+            pause_order: Mutex::new(()),
+            ledger: Mutex::new(pause::Ledger::new(&[])),
         }
     }
 
@@ -274,8 +286,15 @@ impl Play {
         println!("game {generation} for {host}: {}", args.join(" "));
         // The engine connects the feed after this, so its first turn
         // already has the seats' streams.
-        let players = self.seats.players().into_iter().map(u32::from).collect();
+        let player_list = self.seats.players();
+        let players = player_list.iter().copied().map(u32::from).collect();
         self.hub.set_seats(players);
+        self.seats.start_presence();
+        {
+            // A tick in progress must not finish against the fresh ledger.
+            let _order = self.pause_order.lock().unwrap();
+            *self.ledger.lock().unwrap() = pause::Ledger::new(&player_list);
+        }
         let play = Arc::clone(self);
         Ok(std::thread::spawn(move || {
             if let Some(previous) = previous {
@@ -344,6 +363,93 @@ impl Play {
     /// An id for one command socket.
     pub fn connection(&self) -> u64 {
         self.next_connection.fetch_add(1, Ordering::Relaxed)
+    }
+
+    /// Counts a seated page's `play/command` socket while the guard lives;
+    /// a returning seat lifts its automatic pause at once (M25).
+    pub fn present(self: &Arc<Self>, cookie: &str) -> Presence {
+        self.seats.connect_play(cookie);
+        self.tick_pause();
+        Presence {
+            play: Arc::clone(self),
+            cookie: cookie.to_string(),
+        }
+    }
+
+    /// Whether the engine reported `PLAYER_ACTIVE` for `player`.
+    fn pause_inputs(&self) -> Vec<pause::Input> {
+        self.seats
+            .presence(crate::seats::DISCONNECT_GRACE)
+            .into_iter()
+            .map(|(player, connected)| pause::Input {
+                player,
+                connected,
+                active: self.hub.player_state(u32::from(player)) == Some(PLAYER_ACTIVE),
+            })
+            .collect()
+    }
+
+    /// The `inner.game.running` test of `status`, `running_seat` and
+    /// `decided`.
+    fn game_running(&self) -> bool {
+        self.inner
+            .lock()
+            .unwrap()
+            .game
+            .as_ref()
+            .is_some_and(|game| game.running)
+    }
+
+    /// Charges the ledger, applies `change`, and tells the engine and the
+    /// pages what it decided. `pause_order` is held for the whole update,
+    /// so concurrent updates reach the engine and the pages in the order
+    /// the ledger made them; the ledger lock is held only around the ledger
+    /// calls. Callers hold no lock of `Play`, `Seats` or `Hub`.
+    fn apply_pause(
+        &self,
+        change: impl FnOnce(&mut pause::Ledger) -> Result<(), &'static str>,
+    ) -> Result<(), &'static str> {
+        let _order = self.pause_order.lock().unwrap();
+        let inputs = self.pause_inputs();
+        let now = Instant::now();
+        let (events, result, changes, report) = {
+            let mut ledger = self.ledger.lock().unwrap();
+            let events = ledger.advance(now, &inputs);
+            let result = change(&mut ledger);
+            let changes = ledger.engine_changes();
+            let report = ledger.report(now);
+            (events, result, changes, report)
+        };
+        let generation = self.generation.load(Ordering::SeqCst);
+        for event in events {
+            match event {
+                pause::Event::Disconnected(player) => {
+                    println!("game {generation}: player {player} disconnected");
+                }
+                pause::Event::Reconnected(player) => {
+                    println!("game {generation}: player {player} reconnected");
+                }
+                pause::Event::Spent(player) => {
+                    println!("game {generation}: player {player} ran out of pause time");
+                }
+            }
+        }
+        for (player, on) in changes {
+            let record = [UPLINK_PAUSE, 2, 0, 0, 0, player, u8::from(on)];
+            self.write_uplink(&record);
+        }
+        if let Some(entries) = report {
+            self.hub.set_ledger(&entries);
+        }
+        result
+    }
+
+    /// Advances the ledger once a poll while a game can be paused.
+    pub fn tick_pause(&self) {
+        if !self.game_running() || !self.hub.has_turn() {
+            return;
+        }
+        let _ = self.apply_pause(|_| Ok(()));
     }
 
     pub fn status(&self, visitor: Option<&str>) -> Status {
@@ -485,13 +591,21 @@ impl Play {
         Ok(())
     }
 
-    /// Pauses or resumes the game for `owner`'s seat, as the session's
-    /// PauseControl does; the engine holds it paused while any seat has.
+    /// Pauses or resumes the game for `owner`'s seat through the ledger, as
+    /// the session's PauseControl does. A seat out of pause time is refused.
     pub fn set_paused(&self, owner: &str, paused: bool) -> Result<(), &'static str> {
         let seat = self.running_seat(owner)?;
-        let record = [UPLINK_PAUSE, 2, 0, 0, 0, seat, u8::from(paused)];
-        self.write_uplink(&record);
-        Ok(())
+        if !self.hub.has_turn() {
+            return Err("the game has not started");
+        }
+        self.apply_pause(|ledger| {
+            if paused {
+                ledger.hold(seat)
+            } else {
+                ledger.release(seat);
+                Ok(())
+            }
+        })
     }
 
     /// Ends the game for everyone if `owner` hosts it: the engine is
@@ -658,6 +772,18 @@ impl Play {
             eprintln!("cannot send a command to the engine: {error}");
             inner.uplink = None;
         }
+    }
+}
+
+/// Counts a seated page's `play/command` socket while it lives (M25).
+pub struct Presence {
+    play: Arc<Play>,
+    cookie: String,
+}
+
+impl Drop for Presence {
+    fn drop(&mut self) {
+        self.play.seats.disconnect_play(&self.cookie);
     }
 }
 

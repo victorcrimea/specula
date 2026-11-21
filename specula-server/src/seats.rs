@@ -2,7 +2,9 @@
 //! order, with the name they go by and the player number they hold, if any.
 //! A spectator in setup (D35) is a member without a player. The table is
 //! the match's from the moment its setup opens (D13), so it is its own lock
-//! rather than `Play`'s: lock order registry, `Play`, `Seats`, `Hub`.
+//! rather than `Play`'s: lock order registry, `Play`'s pause order,
+//! `Play`, `Seats`, `Hub`, with the pause ledger a leaf taken after it
+//! (`play.rs`).
 //!
 //! A member who leaves keeps their entry, so the same cookie coming back is
 //! the same member, keeps their place in the join order and their name, and
@@ -14,6 +16,10 @@ use std::time::Instant;
 
 use crate::nickname::Nickname;
 use crate::nickname::suffix_duplicates;
+
+/// A seat with no game connection for this long counts as disconnected
+/// (D43); the setup gives a refresh longer (`setup::LEAVE_GRACE`).
+pub const DISCONNECT_GRACE: Duration = Duration::from_secs(5);
 
 pub struct Seats {
     inner: Mutex<Table>,
@@ -41,6 +47,11 @@ struct Member {
     away_since: Option<Instant>,
     /// The seat held when they left the setup, for D37.
     last_player: Option<u8>,
+    /// Open `play/command` sockets of this cookie; presence counts only
+    /// these (M25).
+    play_sockets: u32,
+    /// When the last one closed, or the launch if none was open then.
+    play_away_since: Option<Instant>,
 }
 
 /// Vanilla's ready states (`ReadyController.js`).
@@ -124,6 +135,8 @@ impl Seats {
                     sockets: 0,
                     away_since: None,
                     last_player: None,
+                    play_sockets: 0,
+                    play_away_since: None,
                 });
                 table.members.len() - 1
             }
@@ -267,6 +280,57 @@ impl Seats {
                 member.away_since = Some(Instant::now());
             }
         }
+    }
+
+    /// Marks every member with no game socket away at the launch, so a seat
+    /// whose page never opens counts as disconnected after the grace.
+    pub fn start_presence(&self) {
+        let now = Instant::now();
+        let table = &mut *self.inner.lock().unwrap();
+        for member in &mut table.members {
+            if member.play_sockets == 0 {
+                member.play_away_since = Some(now);
+            }
+        }
+    }
+
+    /// A `play/command` socket of `cookie` opened.
+    pub fn connect_play(&self, cookie: &str) {
+        let table = &mut *self.inner.lock().unwrap();
+        if let Some(index) = table.index_of(cookie) {
+            let member = &mut table.members[index];
+            member.play_sockets += 1;
+            member.play_away_since = None;
+        }
+    }
+
+    pub fn disconnect_play(&self, cookie: &str) {
+        let table = &mut *self.inner.lock().unwrap();
+        if let Some(index) = table.index_of(cookie) {
+            let member = &mut table.members[index];
+            member.play_sockets = member.play_sockets.saturating_sub(1);
+            if member.play_sockets == 0 {
+                member.play_away_since = Some(Instant::now());
+            }
+        }
+    }
+
+    /// Every seated member, and whether they are connected (D43): a socket
+    /// is open, or the last one closed less than `grace` ago.
+    pub fn presence(&self, grace: Duration) -> Vec<(u8, bool)> {
+        let table = self.inner.lock().unwrap();
+        table
+            .members
+            .iter()
+            .filter_map(|member| {
+                let player = member.player?;
+                let connected = member.play_sockets > 0
+                    || member
+                        .play_away_since
+                        .is_none_or(|since| since.elapsed() < grace);
+                Some((player, connected))
+            })
+            .collect()
     }
 
     /// Members present with no setup socket for longer than `grace` (U2).

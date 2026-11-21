@@ -879,6 +879,7 @@ impl Registry {
             };
             // Off the registry lock: stopping an engine runs `kill`.
             for (id, found) in &running {
+                found.play.tick_pause();
                 let (wall, game) = found.limit_left(&self.config);
                 let (left, limit) = if wall <= game {
                     (wall, "wall")

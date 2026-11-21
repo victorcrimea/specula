@@ -981,6 +981,11 @@ body:not([data-debug="storage"]) #stats-storage { display: none; }
   height: 20px; line-height: 20px; font-size: 12px; }
 #pause-resume[hidden] { display: none; }
 #pause-by { position: absolute; left: 30%; right: 30%; top: calc(40% + 50px); font-size: 16px; }
+#pause-countdown { position: absolute; left: 30%; right: 30%; top: calc(40% - 60px); font-size: 16px; }
+#pause-countdown[hidden] { display: none; }
+#pause-budgets { position: absolute; left: 30%; right: 30%; top: calc(40% + 80px); font-size: 14px; font-weight: 400; }
+#pause-budgets[hidden] { display: none; }
+#pause-budgets .charged { color: rgb(255, 215, 0); font-weight: 700; }
 /* informationTooltip (gui/session/styles.xml): BackgroundInformationTooltip,
    black at 192/255 with a 1 px white edge, buffer_zone 6, maxwidth 300. */
 #tooltip.information { max-width: 300px; padding: 6px;
@@ -997,6 +1002,8 @@ body:not([data-debug="storage"]) #stats-storage { display: none; }
 <div id="pause-title" data-i18n>Game Paused</div>
 <div id="pause-resume" data-i18n>Click to Resume Game</div>
 <div id="pause-by"></div>
+<div id="pause-countdown" hidden></div>
+<div id="pause-budgets" hidden></div>
 </div>
 <div id="top-panel">
 <div id="top-bar">

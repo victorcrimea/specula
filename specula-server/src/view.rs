@@ -1,8 +1,8 @@
-//! The viewer stream, wire format v23: messages for each keyframe, turn or
+//! The viewer stream, wire format v24: messages for each keyframe, turn or
 //! match end, varints and zigzag as in `wire.rs`, positions and heights in
 //! 1/16 m, carried brotli-compressed as below.
 //!
-//! - kind 1 keyframe: varint turn, u8 wire version (23; a viewer stops
+//! - kind 1 keyframe: varint turn, u8 wire version (24; a viewer stops
 //!   at any other, since nothing after it would read right), u64 match id, f32 game speed (the
 //!   match's sim rate), varint delay in ms (how long after the game the
 //!   server shows it), varint first turn of the match's history, varint
@@ -17,7 +17,10 @@
 //!   projectiles in flight or lying on the ground: varint count, count x
 //!   {varint id delta, projectile, varint turns since the launch}, then
 //!   the players who have the game paused: varint n, n x varint player
-//!   index (v23).
+//!   index (v23), then the pause ledger (v24): varint m, m x {varint
+//!   player, varint ms of pause time left, u8 flags (1 holds a pause, 2
+//!   disconnected, 4 charged now), varint ms until the seat's pause ends
+//!   after its budget ran out (0: none)}.
 //! - kind 2 delta: varint turn, icons added to the table, u8 1 if a new
 //!   player table follows (it replaces the old one) else 0, u8 1 if a new
 //!   territory follows (likewise) else 0, u8 1 if LOS changes follow
@@ -50,11 +53,15 @@
 //!   turns of that match follow; the next keyframe with another id is the
 //!   next match. A viewer joining between matches gets the final keyframe
 //!   and then this message.
-//! - kind 4 pause (v23): varint turn (the last one played), varint n, n x
-//!   varint player index: the players who have the game paused from now on,
-//!   none for a resume. It sits in the frame between the deltas of the turns
+//! - kind 4 pause (v23, with the ledger from v24): varint turn (the last
+//!   one played), varint n, n x varint player index: the players who have
+//!   the game paused from now on, none for a resume, then the ledger (as a
+//!   keyframe's). It sits in the frame between the deltas of the turns
 //!   around it, since the game plays no turn while paused, and applies at
-//!   its place in the frame.
+//!   its place in the frame. It is sent whenever the engine's pauser set
+//!   changes or the ledger's shape changes, and once a second while a
+//!   budget is charged or a countdown runs. Budgets are as of the message;
+//!   a charged one runs down in real time after it.
 //!
 //! A delta moves the entities as a viewer would, and lists only the
 //! entities whose result would be wrong. A delta applies in this order:
@@ -343,6 +350,7 @@ use crate::feed::TemplateDetails;
 use crate::feed::Terrain;
 use crate::feed::Territory;
 use crate::history::History;
+use crate::pause;
 use crate::registry::MatchId;
 use crate::summary_envelope;
 use crate::terrain::Ground;
@@ -1274,6 +1282,8 @@ struct Stream {
     launch_extras: HashMap<u32, LaunchExtra>,
     /// The players who have the game paused, ascending.
     paused: Vec<u32>,
+    /// The pause ledger the stream last sent (D41).
+    ledger: Vec<pause::Entry>,
 }
 
 /// LOS vertex states (`feed::LOS_EXPLORED`, `feed::LOS_VISIBLE`) by player
@@ -1321,6 +1331,7 @@ impl Stream {
             dot_starts: HashMap::new(),
             launch_extras: HashMap::new(),
             paused: Vec::new(),
+            ledger: Vec::new(),
         }
     }
 
@@ -1620,6 +1631,17 @@ impl Stream {
             .filter_map(|player| u32::try_from(*player).ok())
             .collect();
         self.paused.sort_unstable();
+        self.pause_message(turn)
+    }
+
+    /// Sets the pause ledger and returns the message that tells the
+    /// viewers, as a pause message does.
+    fn set_ledger(&mut self, turn: u32, entries: &[pause::Entry]) -> io::Result<TrackOp> {
+        self.ledger = entries.to_vec();
+        self.pause_message(turn)
+    }
+
+    fn pause_message(&mut self, turn: u32) -> io::Result<TrackOp> {
         let mut out = Writer::default();
         out.u8(MESSAGE_PAUSE);
         out.varint(u64::from(turn));
@@ -1627,6 +1649,7 @@ impl Stream {
         for player in &self.paused {
             out.varint(u64::from(*player));
         }
+        write_ledger(&mut out, &self.ledger);
         self.visual.push(&out.0, None)
     }
 
@@ -1634,6 +1657,7 @@ impl Stream {
     fn finish(&mut self, common: &Common, turn: u32) -> (Ended, Vec<u8>, Vec<u8>) {
         // A match that ends while paused is over, not paused.
         self.paused.clear();
+        self.ledger.clear();
         let keyframe: Message = compress(&encode_keyframe(
             common,
             self,
@@ -1955,6 +1979,13 @@ impl Hub {
         self.state.lock().unwrap().turn
     }
 
+    /// Whether a turn of a running match has been encoded: before it there
+    /// is no frame for a pause, after the end none.
+    pub fn has_turn(&self) -> bool {
+        let state = self.state.lock().unwrap();
+        state.has_turn && !state.ended
+    }
+
     /// The feed's latest state of `player`, as `feed::Player::state`.
     pub fn player_state(&self, player: u32) -> Option<u8> {
         let state = self.state.lock().unwrap();
@@ -2030,6 +2061,25 @@ impl Hub {
         match state.observer.pause(turn, players) {
             Ok(op) => self.queue(&mut state, Release::Pause(op)),
             Err(error) => eprintln!("cannot encode a pause: {error}"),
+        }
+    }
+
+    /// The pause ledger, as `Play`'s ledger reports it. Unlike `set_pause`
+    /// it leaves `feed_activity` alone: no engine pauser changed.
+    pub fn set_ledger(&self, entries: &[pause::Entry]) {
+        let mut state = self.state.lock().unwrap();
+        if !state.has_turn || state.ended {
+            return;
+        }
+        let turn = state.turn;
+        for seat in &mut state.seats {
+            if let Err(error) = seat.ledger(turn, entries) {
+                eprintln!("cannot encode a ledger: {error}");
+            }
+        }
+        match state.observer.set_ledger(turn, entries) {
+            Ok(op) => self.queue(&mut state, Release::Pause(op)),
+            Err(error) => eprintln!("cannot encode a ledger: {error}"),
         }
     }
 
@@ -2824,7 +2874,18 @@ fn encode_keyframe(
     for player in &stream.paused {
         out.varint(u64::from(*player));
     }
+    write_ledger(&mut out, &stream.ledger);
     out.0
+}
+
+fn write_ledger(out: &mut Writer, entries: &[pause::Entry]) {
+    out.varint(entries.len() as u64);
+    for entry in entries {
+        out.varint(u64::from(entry.player));
+        out.varint(u64::from(entry.budget_ms));
+        out.u8(entry.flags);
+        out.varint(u64::from(entry.countdown_ms));
+    }
 }
 
 #[allow(clippy::too_many_arguments)]

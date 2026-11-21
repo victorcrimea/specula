@@ -138,5 +138,11 @@
   "cannot open a setup": "无法打开游戏设置",
   "bad nickname": "昵称无效",
   "no visitor cookie": "没有访客 Cookie",
-  "not in play mode": "服务器不处于游戏模式"
+  "not in play mode": "服务器不处于游戏模式",
+  "Pause time left": "剩余暂停时间",
+  "%(player)s: %(time)s": "%(player)s: %(time)s",
+  "%(player)s (disconnected): %(time)s": "%(player)s（已断开连接）：%(time)s",
+  "%(player)s is out of pause time; their pause ends in %(time)s.": "%(player)s 的暂停时间已用完，其暂停将在 %(time)s 后结束。",
+  "Pause time left: %(time)s": "剩余暂停时间：%(time)s",
+  "You have no pause time left.": "你没有剩余暂停时间了。"
 }

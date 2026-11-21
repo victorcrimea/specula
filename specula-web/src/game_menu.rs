@@ -96,19 +96,43 @@ impl GameMenu {
     /// neither is left to do once the game has ended.
     /// `paused`: the visitor's seat has the game paused, which the button
     /// then resumes. Pausing, like Resign, is for a player, as
-    /// `PauseControl.canPause` has it.
-    pub fn update(&self, defeated: bool, ended: bool, paused: bool) {
+    /// `PauseControl.canPause` has it. `pause_left_ms`: the seat's pause
+    /// time left, which the tooltip shows and which disables Pause at 0
+    /// (D41).
+    pub fn update(&self, defeated: bool, ended: bool, paused: bool, pause_left_ms: Option<f64>) {
         let resign = !defeated && !ended;
         lang::set_text(&self.pause, if paused { "Resume" } else { "Pause" });
-        let _ = self.pause.set_attribute(
-            crate::tooltip::ATTRIBUTE,
-            &lang::format(
-                &lang::translate("Press %(hotkey)s to pause or resume the game."),
-                &[("hotkey", &crate::command_row::hotkey_text("pause"))],
-            ),
+        let no_time_left = pause_left_ms.is_some_and(|left| left < 1000.0) && !paused;
+        let mut tooltip = lang::format(
+            &lang::translate("Press %(hotkey)s to pause or resume the game."),
+            &[("hotkey", &crate::command_row::hotkey_text("pause"))],
         );
-        if self.pause.disabled() == resign {
-            self.pause.set_disabled(!resign);
+        if no_time_left {
+            tooltip.push('\n');
+            tooltip.push_str(&lang::translate("You have no pause time left."));
+        } else if let Some(left) = pause_left_ms {
+            tooltip.push('\n');
+            tooltip.push_str(&lang::format(
+                &lang::translate("Pause time left: %(time)s"),
+                &[(
+                    "time",
+                    &crate::format_minutes((left / 1000.0).ceil() as u64),
+                )],
+            ));
+        }
+        if self
+            .pause
+            .get_attribute(crate::tooltip::ATTRIBUTE)
+            .as_deref()
+            != Some(tooltip.as_str())
+        {
+            let _ = self
+                .pause
+                .set_attribute(crate::tooltip::ATTRIBUTE, &tooltip);
+        }
+        let disabled = !resign || no_time_left;
+        if self.pause.disabled() != disabled {
+            self.pause.set_disabled(disabled);
         }
         if self.resign.disabled() == resign {
             self.resign.set_disabled(!resign);

@@ -1,5 +1,5 @@
 //! Decoder for specula-server's viewer stream and match segments, wire
-//! format v22 (and v19 to v21 of stored matches); the layout is documented
+//! format v24 (and v19 to v23 of stored matches); the layout is documented
 //! in `specula-server/src/view.rs`.
 
 use std::collections::BTreeMap;
@@ -54,6 +54,14 @@ const OLDEST_WIRE: u8 = 19;
 const LOS_WIRE: u8 = 22;
 /// From v23: the keyframe ends with the players who have the game paused.
 const PAUSE_WIRE: u8 = 23;
+/// From v24: a keyframe and a pause message end with the pause ledger.
+const LEDGER_WIRE: u8 = 24;
+/// A ledger line's seat holds a voluntary pause.
+pub const LEDGER_HOLDS: u8 = 1;
+/// Its seat is disconnected.
+pub const LEDGER_AWAY: u8 = 2;
+/// Its budget is being spent now.
+pub const LEDGER_CHARGED: u8 = 4;
 /// `LosVisibility` in a visibility mask's two bits.
 pub const HIDDEN: u32 = 0;
 pub const VISIBLE: u32 = 2;
@@ -552,6 +560,8 @@ pub struct Scene {
     pub icons: Vec<Icon>,
     /// The players who have the game paused, ascending; none before v23.
     pub paused_by: Vec<u32>,
+    /// Each human seat's pause budget and state; none before v24.
+    pub ledger: Vec<LedgerEntry>,
     /// Index 0 is gaia.
     pub players: Vec<Player>,
     /// When the ceasefire ends, in simulation ms (a turn is `TURN_MS`); 0
@@ -627,6 +637,19 @@ pub struct Territory {
     /// Row-major, x fastest: owner in `territory::OWNER_MASK`, plus the
     /// connected and blinking bits.
     pub tiles: Vec<u8>,
+}
+
+/// One seat's pause ledger line, as the server sent it.
+#[derive(Clone, Default)]
+pub struct LedgerEntry {
+    pub player: u32,
+    /// Pause time left as of the message; a charged one runs down after it.
+    pub budget_ms: u32,
+    /// `LEDGER_HOLDS`, `LEDGER_AWAY` and `LEDGER_CHARGED`.
+    pub flags: u8,
+    /// How long until the seat's pause ends after its budget ran out, 0 for
+    /// none.
+    pub countdown_ms: u32,
 }
 
 pub struct Icon {
@@ -783,6 +806,10 @@ impl Scene {
                 self.paused_by.push(cursor.varint_u32()?);
             }
         }
+        self.ledger.clear();
+        if self.wire_version >= LEDGER_WIRE {
+            self.read_ledger(cursor)?;
+        }
         Ok(())
     }
 
@@ -793,6 +820,22 @@ impl Scene {
         self.paused_by.clear();
         for _ in 0..cursor.varint_u32()? {
             self.paused_by.push(cursor.varint_u32()?);
+        }
+        self.ledger.clear();
+        if self.wire_version >= LEDGER_WIRE {
+            self.read_ledger(cursor)?;
+        }
+        Ok(())
+    }
+
+    fn read_ledger(&mut self, cursor: &mut ByteReader) -> Result<(), &'static str> {
+        for _ in 0..cursor.varint_u32()? {
+            self.ledger.push(LedgerEntry {
+                player: cursor.varint_u32()?,
+                budget_ms: cursor.varint_u32()?,
+                flags: cursor.u8()?,
+                countdown_ms: cursor.varint_u32()?,
+            });
         }
         Ok(())
     }
@@ -1128,7 +1171,18 @@ impl Scene {
         for player in &self.paused_by {
             out.varint(u64::from(*player));
         }
+        self.write_ledger(&mut out);
         out.0
+    }
+
+    fn write_ledger(&self, out: &mut Writer) {
+        out.varint(self.ledger.len() as u64);
+        for entry in &self.ledger {
+            out.varint(u64::from(entry.player));
+            out.varint(u64::from(entry.budget_ms));
+            out.u8(entry.flags);
+            out.varint(u64::from(entry.countdown_ms));
+        }
     }
 
     pub fn encode_keyframe(&self) -> Vec<u8> {
@@ -1384,6 +1438,7 @@ impl Scene {
         for player in &self.paused_by {
             out.varint(u64::from(*player));
         }
+        self.write_ledger(&mut out);
         out.0
     }
 }

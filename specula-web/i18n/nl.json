@@ -138,5 +138,11 @@
   "cannot open a setup": "de spelopzet kan niet worden geopend",
   "bad nickname": "ongeldige bijnaam",
   "no visitor cookie": "geen bezoekerscookie",
-  "not in play mode": "de server staat niet in spelmodus"
+  "not in play mode": "de server staat niet in spelmodus",
+  "Pause time left": "Resterende pauzetijd",
+  "%(player)s: %(time)s": "%(player)s: %(time)s",
+  "%(player)s (disconnected): %(time)s": "%(player)s (losgekoppeld): %(time)s",
+  "%(player)s is out of pause time; their pause ends in %(time)s.": "%(player)s heeft geen pauzetijd meer; de pauze eindigt over %(time)s.",
+  "Pause time left: %(time)s": "Resterende pauzetijd: %(time)s",
+  "You have no pause time left.": "Je hebt geen pauzetijd meer."
 }

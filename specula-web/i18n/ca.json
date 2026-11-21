@@ -138,5 +138,11 @@
   "cannot open a setup": "no es pot obrir la configuració de la partida",
   "bad nickname": "sobrenom no vàlid",
   "no visitor cookie": "no hi ha galeta de visitant",
-  "not in play mode": "el servidor no és en mode de joc"
+  "not in play mode": "el servidor no és en mode de joc",
+  "Pause time left": "Temps de pausa restant",
+  "%(player)s: %(time)s": "%(player)s: %(time)s",
+  "%(player)s (disconnected): %(time)s": "%(player)s (desconnectat): %(time)s",
+  "%(player)s is out of pause time; their pause ends in %(time)s.": "%(player)s no te temps de pausa; la seva pausa acaba en %(time)s.",
+  "Pause time left: %(time)s": "Temps de pausa restant: %(time)s",
+  "You have no pause time left.": "No et queda temps de pausa."
 }
