@@ -65,6 +65,16 @@ pub fn translate_plural(singular: &str, plural: &str, count: f64) -> String {
     plural_form(singular, plural, count, singular)
 }
 
+/// The engine's `translatePluralWithContext`.
+pub fn translate_plural_context(context: &str, singular: &str, plural: &str, count: f64) -> String {
+    plural_form(
+        &format!("{context}{CONTEXT_SEPARATOR}{singular}"),
+        plural,
+        count,
+        singular,
+    )
+}
+
 /// English picks its form by `count != 1`, which is also what a table that
 /// has no entry falls back to.
 fn plural_form(key: &str, plural: &str, count: f64, singular: &str) -> String {

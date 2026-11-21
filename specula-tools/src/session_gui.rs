@@ -56,7 +56,7 @@ const BROTLI_QUALITY: u32 = 11;
 const BROTLI_WINDOW_BITS: u32 = 22;
 
 /// (custom property key, path under `UI`), copied as they are.
-const TEXTURES: [(&str, &str); 114] = [
+const TEXTURES: [(&str, &str); 115] = [
     ("hud-panels", "session/hud_panels.png"),
     ("line-horiz", "global/border/line_horiz.png"),
     ("line-vert", "global/border/line_vert.png"),
@@ -248,12 +248,21 @@ const TEXTURES: [(&str, &str); 114] = [
     ("arrow-down", "global/button/arrowbox_dn.dds"),
     ("arrow-down-over", "global/button/arrowbox_dn_over.dds"),
     ("info", "global/icon/info.png"),
+    ("reset", "global/icon/reset.png"),
 ];
-/// The `ModernDialog`, `ModernButtonRed` and `ModernGoldLine` sprites' textures
+/// The `ModernDialog`, `ModernWindow`, `ModernButtonRed`, `ModernGoldLine`,
+/// `ModernDropDown`, `ModernTickBox` and `ModernGear` sprites' textures
 /// (`gui/common/modern/sprites.xml`),
 /// which only the engine's own `mod` holds, under the same `UI` path.
-const MOD_TEXTURES: [(&str, &str); 17] = [
+const MOD_TEXTURES: [(&str, &str); 24] = [
     ("dialog-background", "global/modern/background.png"),
+    ("window-shadow", "global/modern/shadow-high.png"),
+    ("dropdown-arrow", "global/modern/dropdown-arrow.png"),
+    ("tick-on", "global/modern/tick-on.png"),
+    ("tick-off", "global/modern/tick-off.png"),
+    ("gear", "global/modern/gear.png"),
+    ("gear-hover", "global/modern/gear-hover.png"),
+    ("gear-press", "global/modern/gear-press.png"),
     ("gold-line", "global/modern/gold-separator.png"),
     ("dialog-shadow", "global/modern/shadow-low.png"),
     ("dialog-border", "global/modern/border.png"),

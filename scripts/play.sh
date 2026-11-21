@@ -3,7 +3,7 @@
 # specula-server's feed socket, which writes the players' commands back.
 # The host only observes; the web players' slots stay unassigned.
 #
-# usage: scripts/play.sh SOCKET PORT [-autostart-... options]
+# usage: scripts/play.sh SOCKET PORT -autostart=MAP -autostart-specula-settings=VFSPATH
 # PYROGENESIS overrides the engine binary.
 
 set -eu

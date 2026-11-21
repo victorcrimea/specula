@@ -16,17 +16,10 @@ select, button, input[type=text] { font: inherit; color: #e6e9eb; background: rg
 button { cursor: pointer; }
 :disabled { opacity: 0.5; }
 .row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin: 0 0 12px; }
-#slots { display: grid; grid-template-columns: auto 1fr 1fr 1fr; gap: 8px; align-items: center;
-  margin: 0 0 16px; }
-#slots .swatch { width: 14px; height: 14px; border-radius: 2px; }
 #status, #error, #stopping { margin: 0 0 16px; }
 #status[hidden], #error[hidden], #stopping[hidden] { display: none; }
 #error { color: #e8a0a0; }
 a { color: #8fc1e3; }
-@media (max-width: 480px) {
-  #slots { grid-template-columns: auto 1fr; }
-  #slots .civ, #slots .difficulty { grid-column: 2; }
-}
 </style>
 </head>
 <body>
@@ -42,123 +35,21 @@ a { color: #8fc1e3; }
 <div class="row">
 <label title="3 to 20 letters, digits, dots, hyphens or underscores, with at least one letter." data-i18n-attrs="title"><span data-i18n>Nickname</span> <input id="nickname" name="nickname" type="text" required minlength="3" maxlength="20" pattern="(?=.*[A-Za-z])[A-Za-z0-9._\-]+" autocomplete="nickname" spellcheck="false"></label>
 </div>
-<div class="row">
-<label><span data-i18n>Map</span> <select id="map" name="map"></select></label>
-<label><span data-i18n>Players</span> <select id="players" name="players"></select></label>
-<label title="Select the game's starting resources." data-i18n-attrs="title"><span data-i18n>Starting Resources</span> <select id="resources" name="resources"></select></label>
-</div>
-<div class="row">
-<label title="Toggle explored map (see initial map)." data-i18n-attrs="title"><input id="explored" name="explored" type="checkbox"> <span data-i18n>Explored Map</span></label>
-<label title="Toggle revealed map (see everything)." data-i18n-attrs="title"><input id="revealed" name="revealed" type="checkbox"> <span data-i18n>Revealed Map</span></label>
-</div>
-<div id="slots"></div>
 <p id="error" hidden></p>
-<button id="start" type="submit" data-i18n>Start Game!</button>
+<button id="start" type="submit" data-i18n>New game</button>
 </form>
 </main>
 <script>
-// The engine's default player colours (simulation/data/settings/
-// player_defaults.json), so the rows read as in the game setup.
-const COLORS = ["#153795", "#961414", "#56b41f", "#e7c805", "#32aaaa", "#a050c8", "#dc7310",
-  "#404040"];
-// Petra's difficulties, 0 to 5, as the game setup names them.
-const DIFFICULTIES = ["Sandbox", "Very Easy", "Easy", "Medium", "Hard", "Very Hard"];
-const DEFAULT_DIFFICULTY = 3;
-// simulation/data/settings/starting_resources.json; the server takes only
-// these amounts.
-const STARTING_RESOURCES = [[100, "Very Low"], [300, "Low"], [500, "Medium"], [1000, "High"],
-  [3000, "Very High"], [50000, "Deathmatch"]];
-const DEFAULT_RESOURCES = 300;
 const T = (text) => window.speculaT(text);
-// `translateWithContext`: the lookup key is the context and the msgid
-// joined by EOT, and a miss hands the key back.
-const TC = (context, text) => {
-  const key = `${context}\u0004${text}`;
-  const translated = T(key);
-  return translated === key ? text : translated;
-};
 
 const form = document.getElementById("setup");
-const mapSelect = document.getElementById("map");
-const playersSelect = document.getElementById("players");
-const resourcesSelect = document.getElementById("resources");
-const slots = document.getElementById("slots");
 const error = document.getElementById("error");
 const nickname = document.getElementById("nickname");
-// Kept from the last launch, and asked for only when there is none (D10).
+// Kept from the last game, and asked for only when there is none (D10).
 const NICKNAME_KEY = "specula.nickname";
 try { nickname.value = localStorage.getItem(NICKNAME_KEY) ?? ""; } catch {}
 if (!nickname.value) nickname.focus();
 let setup = null;
-
-const option = (value, text) => {
-  const element = document.createElement("option");
-  element.value = value;
-  element.textContent = text;
-  return element;
-};
-
-// Keeps what was chosen in each row when the count or the language
-// changes.
-const buildSlots = () => {
-  const kept = new FormData(form);
-  slots.replaceChildren();
-  const count = +playersSelect.value;
-  for (let player = 1; player <= count; ++player) {
-    const swatch = document.createElement("span");
-    swatch.className = "swatch";
-    swatch.style.background = COLORS[player - 1];
-    const slot = document.createElement("select");
-    slot.name = `slot${player}`;
-    slot.append(option("you", T("You")), option("petra", T("Petra Bot")),
-      option("empty", T("Unassigned")));
-    slot.value = kept.get(slot.name) ?? (player === 1 ? "you" : "petra");
-    const civ = document.createElement("select");
-    civ.name = `civ${player}`;
-    civ.className = "civ";
-    civ.setAttribute("aria-label", T("Civilization"));
-    civ.append(option("random", T("Random")),
-      ...setup.civs.map(([code, name]) => option(code, T(name))));
-    civ.value = kept.get(civ.name) ?? "random";
-    const difficulty = document.createElement("select");
-    difficulty.name = `difficulty${player}`;
-    difficulty.className = "difficulty";
-    difficulty.setAttribute("aria-label", T("Difficulty"));
-    difficulty.append(...DIFFICULTIES.map((name, index) => option(index, T(name))));
-    difficulty.value = kept.get(difficulty.name) ?? DEFAULT_DIFFICULTY;
-    const showDifficulty = () => { difficulty.style.visibility = slot.value === "petra" ? "" : "hidden"; };
-    // One seat is the player's: choosing "You" elsewhere gives this one to
-    // Petra.
-    slot.addEventListener("change", () => {
-      if (slot.value === "you")
-        for (const other of slots.querySelectorAll("select[name^=slot]"))
-          if (other !== slot && other.value === "you") {
-            other.value = "petra";
-            other.dispatchEvent(new Event("change"));
-          }
-      showDifficulty();
-    });
-    showDifficulty();
-    slots.append(swatch, slot, civ, difficulty);
-  }
-};
-
-const buildMaps = () => {
-  const chosen = mapSelect.value;
-  mapSelect.replaceChildren(...setup.maps.map(([code, name]) => option(code, T(name))));
-  if (chosen) mapSelect.value = chosen;
-};
-
-const buildResources = () => {
-  const chosen = resourcesSelect.value || DEFAULT_RESOURCES;
-  resourcesSelect.replaceChildren(...STARTING_RESOURCES.map(([amount, title]) => {
-    const element = option(amount, TC("startingResources", title));
-    element.title = T("Initial amount of each resource: %(resources)s.")
-      .replace("%(resources)s", amount);
-    return element;
-  }));
-  resourcesSelect.value = chosen;
-};
 
 const showStatus = () => {
   document.getElementById("stopping").hidden = !setup.stopping;
@@ -173,13 +64,7 @@ const showStatus = () => {
   document.getElementById("start").disabled = (setup.running && !setup.mine) || setup.stopping;
 };
 
-// As the game setup's MapExploration: revealing explores, and an
-// unexplored map is not revealed.
-const explored = document.getElementById("explored");
-const revealed = document.getElementById("revealed");
-revealed.addEventListener("change", () => { if (revealed.checked) explored.checked = true; });
-explored.addEventListener("change", () => { if (!explored.checked) revealed.checked = false; });
-
+// Opens a setup, which the page then goes to (D13).
 form.addEventListener("submit", async (event) => {
   event.preventDefault();
   error.hidden = true;
@@ -191,16 +76,13 @@ form.addEventListener("submit", async (event) => {
     return;
   }
   const reason = response ? await response.text() : "";
-  error.textContent = T("Cannot start the game: %(error)s").replace("%(error)s", reason);
+  error.textContent = T("Cannot start the game: %(error)s").replace("%(error)s", T(reason));
   error.hidden = false;
 });
 
 (async () => {
   setup = await (await fetch("/new")).json();
-  for (let count = 2; count <= 8; ++count) playersSelect.append(option(count, count));
-  playersSelect.addEventListener("change", buildSlots);
   showStatus();
-  window.speculaOnLanguage(() => { buildMaps(); buildResources(); buildSlots(); });
 })();
 </script>
 <script type="module">

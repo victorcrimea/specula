@@ -1,0 +1,304 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="/i18n.js"></script>
+<link rel="stylesheet" href="/gui/session.css?v=SESSION">
+<title data-i18n>Match Setup</title>
+<style>
+/* Vanilla's game setup page (gui/gamesetup/gamesetup.xml,
+   Pages/GameSetupPage/GameSetupPage.xml) with the sprites of
+   gui/common/modern/sprites.xml, whose textures session.css names. */
+:root { --gold: rgb(255, 215, 0); --dark: rgba(12, 12, 12, 0.39); --label: white;
+  --disabled: rgb(140, 140, 140); --highlight: orange; }
+html, body { margin: 0; height: 100%; background: rgb(12, 12, 12); color: white;
+  font: 700 14px/1.25 "0ad sans", "0ad sans fallback", sans-serif; }
+button, select, input { font: inherit; color: inherit; }
+[hidden] { display: none !important; }
+/* ModernWindow: the background, its shading mirrored at the top and the
+   bottom, the two edges and the title frame. */
+/* The page fits the window, as vanilla's does; below 600 px it scrolls. */
+#window { position: relative; height: 100%; min-height: 600px; box-sizing: border-box;
+  padding: 40px 24px 22px; display: flex; flex-direction: column; }
+#window > .frame { position: absolute; pointer-events: none; }
+#window > .background { inset: 22px 12px 12px;
+  background: var(--gui-dialog-background) 0 0 / 1024px 1024px repeat; }
+#window > .shade { left: 12px; right: 12px; height: 256px;
+  background: var(--gui-window-shadow) 0 0 / 100% 100% no-repeat; }
+#window > .shade.top { top: 22px; scale: -1 -1; }
+#window > .shade.bottom { bottom: 12px; }
+#window > .edge { left: 10px; right: 10px; height: 8px;
+  background: var(--gui-dialog-border) 0 0 / 2048px 8px repeat-x; }
+#window > .edge.top { top: 18px; }
+#window > .edge.bottom { bottom: 8px; }
+#window > .titlebar { top: 4px; height: 33px; background-size: 100% 100%; }
+#window > .titlebar.middle { left: calc(50% - 128px); width: 256px;
+  background: var(--gui-dialog-titlebar-middle) 0 0 / 128px 100% repeat-x; }
+#window > .titlebar.left { left: calc(50% - 154px); width: 32px;
+  background-image: var(--gui-dialog-titlebar-left); }
+#window > .titlebar.right { left: calc(50% + 122px); width: 32px;
+  background-image: var(--gui-dialog-titlebar-left); scale: -1 -1; }
+#title { position: absolute; left: calc(50% - 128px); width: 256px; top: 4px;
+  height: 32px; margin: 0; font-size: 16px; line-height: 32px; text-align: center;
+  text-shadow: 0 0 2px black, 0 0 2px black; }
+#page { position: relative; flex: 1; display: grid; gap: 10px 14px; min-height: 0;
+  grid-template-columns: minmax(0, 1fr) minmax(320px, 0.62fr) 315px;
+  grid-template-rows: 296px minmax(0, 1fr) 32px;
+  grid-template-areas: "players players preview" "left settings right" "bottom bottom bottom"; }
+/* ModernDarkBoxGold: a dark box between two gold lines. */
+.gold-box { background: var(--gui-gold-line) 0 0 / 100% 1px no-repeat,
+  var(--gui-gold-line) 0 100% / 100% 1px no-repeat, var(--dark); }
+/* ModernDarkBox with ModernDarkBoxGoldBorder over it. */
+.dark-box { background: var(--gui-gold-line) 0 0 / 100% 1px no-repeat,
+  var(--gui-gold-line) 0 100% / 100% 1px no-repeat, var(--dark); }
+/* ModernDropDown; a disabled one reads as the label vanilla's clients see. */
+select { appearance: none; -webkit-appearance: none; height: 28px; min-width: 0;
+  padding: 0 24px 0 8px; border: 0; border-radius: 0; color: white; cursor: pointer;
+  background: var(--gui-dropdown-arrow) right 4px top 6px / 16px 16px no-repeat,
+    var(--gui-gold-line) 0 0 / 100% 1px no-repeat,
+    var(--gui-gold-line) 0 100% / 100% 1px no-repeat, var(--dark); }
+select:hover:enabled { filter: brightness(1.2); }
+select:disabled { background: none; cursor: default; opacity: 1; color: white; padding-right: 0; }
+select option { background: rgb(40, 40, 40); color: white; }
+/* ModernTickBox. */
+input[type=checkbox] { appearance: none; -webkit-appearance: none; margin: 0;
+  width: 22px; height: 22px; cursor: pointer;
+  background: var(--gui-tick-off) 0 0 / 100% 100% no-repeat; }
+input[type=checkbox]:checked { background-image: var(--gui-tick-on); }
+input[type=checkbox]:disabled { cursor: default; opacity: 0.6; }
+/* ModernSlider. */
+input[type=range] { appearance: none; -webkit-appearance: none; margin: 0; height: 22px;
+  background: var(--gui-gold-line) 0 50% / 100% 2px no-repeat; cursor: pointer; }
+input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; width: 21px; height: 21px;
+  border: 0; background: var(--gui-tick-on) 0 0 / 100% 100%; }
+input[type=range]::-moz-range-thumb { width: 21px; height: 21px; border: 0; border-radius: 0;
+  background: var(--gui-tick-on) 0 0 / 100% 100%; }
+input[type=range]:disabled { cursor: default; opacity: 0.6; }
+/* ModernInput. */
+input[type=text] { height: 26px; box-sizing: border-box; padding: 0 6px; border: 0;
+  background: var(--gui-gold-line) 0 100% / 100% 1px no-repeat, var(--dark); color: white; }
+/* StoneButton. */
+.stone { height: 32px; width: 140px; padding: 0 6px; border: 0; cursor: pointer;
+  background: var(--gui-stone-button) 0 0 / 100% 100%; color: white; }
+.stone:hover:enabled { background-image: var(--gui-stone-button-over); }
+.stone:disabled { color: rgb(210, 210, 210); opacity: 0.6; cursor: default; }
+/* ModernButtonRed, its nine slices as layers: corners over edges over
+   the centre. */
+.red { height: 28px; padding: 0 14px; border: 0; cursor: pointer; color: white;
+  text-shadow: 0 0 2px black;
+  background:
+    var(--gui-red-button-left-top) 0 0 / 8px 8px no-repeat,
+    var(--gui-red-button-right-top) 100% 0 / 8px 8px no-repeat,
+    var(--gui-red-button-left-bottom) 0 100% / 8px 8px no-repeat,
+    var(--gui-red-button-right-bottom) 100% 100% / 8px 8px no-repeat,
+    var(--gui-red-button-center-top) 0 0 / 128px 8px repeat-x,
+    var(--gui-red-button-center-bottom) 0 100% / 128px 8px repeat-x,
+    var(--gui-red-button-left-center) 0 0 / 8px 16px repeat-y,
+    var(--gui-red-button-right-center) 100% 0 / 8px 16px repeat-y,
+    var(--gui-red-button-center-center) 0 0 / 128px 16px repeat; }
+.red:hover:enabled { filter: brightness(1.25); }
+.red:disabled { opacity: 0.6; cursor: default; }
+.icon { width: 16px; height: 16px; padding: 0; border: 0; cursor: pointer; vertical-align: -2px;
+  background: rgb(237, 227, 167); }
+.icon:hover { background: white; }
+.icon.reset { -webkit-mask: var(--gui-reset) 0 0 / 100% 100%; mask: var(--gui-reset) 0 0 / 100% 100%; }
+
+/* Players: PlayersPanel.xml's columns. */
+#players-panel { grid-area: players; display: flex; flex-direction: column; min-width: 0;
+  padding: 6px 0 0; overflow: auto; }
+.slot-grid { display: grid; align-items: center; column-gap: 5px; padding: 0 5px 0 0;
+  grid-template-columns: minmax(0, 22%) 28px minmax(0, 28%) 24px minmax(0, 1fr) minmax(0, 15%); }
+#players-head { height: 24px; margin-bottom: 6px; text-align: center; }
+#players-head > div { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* Vanilla's heading is wider than its 28 px column and spills both ways. */
+#players-head > .color-head { overflow: visible; display: flex; justify-content: center; }
+#players { display: flex; flex-direction: column; padding: 0 1px; }
+.slot { height: 32px; }
+.slot > * { min-width: 0; }
+.slot .name { text-align: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  text-shadow: 0 0 2px black, 0 0 2px black; }
+.slot select { width: 100%; }
+.slot .color { width: 28px; padding: 0; background: none; color: transparent; }
+.slot .color:enabled { cursor: pointer; }
+.slot .who-text { padding: 0 8px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.slot .take { height: 24px; }
+.slot .gear { width: 24px; height: 24px; padding: 0; border: 0; cursor: pointer;
+  background: var(--gui-gear) 0 0 / 100% 100%; }
+.slot .gear:hover { background-image: var(--gui-gear-hover); }
+.slot .gear:active { background-image: var(--gui-gear-press); }
+/* MapPreview.xml. */
+#preview { grid-area: preview; position: relative; overflow: hidden; }
+#preview-title { position: absolute; left: 5px; right: 5px; bottom: 2px;
+  text-shadow: 0 0 2px black, 0 0 2px black; }
+
+#left { grid-area: left; display: flex; flex-direction: column; gap: 10px; min-height: 0; min-width: 0; }
+#right, #settings-panel { min-height: 0; }
+#spectators-box { padding: 6px 10px 10px; max-height: 40%; overflow: auto; }
+#spectators-box h2 { margin: 0 0 6px; font-size: 14px; }
+#join { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; margin: 0 0 8px; }
+#spectators { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 4px; }
+#spectators li { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; min-height: 28px; }
+#spectators .host { color: rgb(150, 150, 250); }
+/* ChatPanel.xml, empty until the setup has a chat (M31, M32). */
+#chat { flex: 1; min-height: 60px; display: flex; flex-direction: column; justify-content: flex-end; padding: 4px; }
+#chat .input { display: flex; gap: 6px; }
+#chat .input input { flex: 1; min-width: 0; }
+
+/* GameSettingsPanel.xml: a label right of centre and its control. */
+#settings-panel { grid-area: settings; overflow: auto; padding: 10px 12px; min-width: 0; }
+.tab { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr); gap: 12px 10px; align-items: center; }
+.tab > .setting { display: contents; }
+.tab .name { text-align: right; }
+.tab .value { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.tab .value select { flex: 1; }
+.tab .value input[type=range] { flex: 1; min-width: 80px; }
+/* GameSettingsTabs.xml and GameDescription.xml. */
+#right { grid-area: right; display: flex; flex-direction: column; gap: 10px; min-height: 0; }
+#tabs { display: flex; flex-direction: column; gap: 4px; padding: 4px 0; }
+#tabs button { height: 34px; border: 1px solid var(--gold); cursor: pointer;
+  background: rgba(50, 35, 0, 0.47); color: white; }
+#tabs button[aria-selected=true] { border-width: 2px; background: rgba(255, 255, 255, 0.16); }
+#description { flex: 1; overflow: auto; padding: 4px 6px; font-weight: 400; white-space: pre-wrap; }
+#description .label { color: var(--highlight); }
+
+#bottom { grid-area: bottom; display: flex; align-items: center; gap: 10px; min-width: 0; }
+#bottom .spacer { flex: 1; }
+#status { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; min-width: 0; font-weight: 400; }
+#error { color: rgb(255, 120, 120); margin: 0; }
+#connection { margin: 0; color: orange; }
+
+#closed { position: relative; flex: 1; display: flex; flex-direction: column; align-items: center;
+  justify-content: center; gap: 12px; text-align: center; }
+#closed h2 { margin: 0; font-size: 18px; }
+
+/* AIConfigPage.xml: ModernFade under a ModernDialog. */
+#ai-config { position: fixed; inset: 0; z-index: 10; background: rgba(0, 0, 0, 0.6);
+  display: flex; align-items: center; justify-content: center; }
+#ai-dialog { position: relative; width: 580px; max-width: calc(100vw - 32px); min-height: 300px;
+  padding: 32px 24px 64px; box-sizing: border-box;
+  background: var(--gui-dialog-background) 0 0 / 512px 512px repeat; }
+#ai-dialog > .edge { position: absolute; left: 0; right: 0; height: 8px;
+  background: var(--gui-dialog-border) 0 0 / 2048px 8px repeat-x; }
+#ai-dialog > .edge.top { top: -4px; }
+#ai-dialog > .edge.bottom { bottom: 0; }
+#ai-dialog h2 { position: absolute; left: calc(50% - 128px); width: 256px; top: -18px; height: 33px;
+  margin: 0; font-size: 14px; line-height: 33px; text-align: center;
+  background: var(--gui-dialog-titlebar-middle) 0 0 / 128px 100% repeat-x; }
+#ai-dialog .rows { display: grid; grid-template-columns: minmax(0, 1fr) 190px; gap: 8px 12px; align-items: center; }
+#ai-dialog .rows label { text-align: right; }
+#ai-description { margin: 16px 8% 0; text-align: center; font-weight: 400; }
+#ai-ok { position: absolute; right: 20px; bottom: 17px; width: 200px; }
+
+/* Vanilla is a desktop page; a narrow screen gets its panels in one column. */
+@media (max-width: 1000px) {
+  #window { height: auto; min-height: 100%; padding: 40px 16px 22px; }
+  #page { display: flex; flex-direction: column; }
+  /* Each slot on two lines: name, color, assignment and gear, then civ
+     and team under them. */
+  .slot-grid { grid-template-columns: minmax(0, 1fr) 28px minmax(0, 1.6fr) 24px; row-gap: 2px; }
+  .slot-grid > :nth-child(5) { grid-column: 1 / 3; }
+  .slot-grid > :nth-child(6) { grid-column: 3 / 5; }
+  #players-head { height: auto; }
+  .slot { height: auto; padding: 2px 5px 2px 0; }
+  #preview { min-height: 120px; }
+  #settings-panel, #description { overflow: visible; }
+  #chat { min-height: 80px; }
+  #bottom { flex-wrap: wrap; }
+}
+</style>
+</head>
+<body>
+<div id="window">
+<div class="frame background"></div>
+<div class="frame shade top"></div>
+<div class="frame shade bottom"></div>
+<div class="frame edge top"></div>
+<div class="frame edge bottom"></div>
+<div class="frame titlebar middle"></div>
+<div class="frame titlebar left"></div>
+<div class="frame titlebar right"></div>
+<h1 id="title" data-i18n>Match Setup</h1>
+
+<div id="page">
+<section id="players-panel" class="gold-box">
+<div id="players-head" class="slot-grid">
+<div data-i18n>Player Name</div>
+<div class="color-head"><span data-i18n>Color</span></div>
+<div data-i18n>Player Placement</div>
+<div></div>
+<div><span data-i18n>Civilization</span> <button id="reset-civs" class="icon reset" type="button" hidden title="Reset any civilizations that have been selected to the default (random)." data-i18n-attrs="title"></button></div>
+<div><span data-i18n>Team</span> <button id="reset-teams" class="icon reset" type="button" hidden title="Reset all teams to the default." data-i18n-attrs="title"></button></div>
+</div>
+<div id="players"></div>
+</section>
+
+<section id="preview" class="gold-box"><div id="preview-title"></div></section>
+
+<section id="left">
+<div id="spectators-box" class="gold-box">
+<h2 data-i18n>Spectators</h2>
+<form id="join" hidden>
+<label title="3 to 20 letters, digits, dots, hyphens or underscores, with at least one letter." data-i18n-attrs="title"><span data-i18n>Nickname</span> <input id="nickname" type="text" required minlength="3" maxlength="20" pattern="(?=.*[A-Za-z])[A-Za-z0-9._\-]+" autocomplete="nickname" spellcheck="false"></label>
+<button id="join-button" class="red" type="submit" data-i18n>Join</button>
+</form>
+<ul id="spectators"></ul>
+</div>
+<div id="chat" class="gold-box">
+<div class="input"><input type="text" disabled><button class="red" type="button" disabled data-i18n>Send</button></div>
+</div>
+</section>
+
+<section id="settings-panel" class="gold-box"><div id="settings"></div></section>
+
+<section id="right">
+<div id="tabs" role="tablist"></div>
+<div id="description" class="dark-box"></div>
+</section>
+
+<footer id="bottom">
+<div id="status">
+<span id="countdown"></span>
+<button id="copy-link" class="red" type="button" data-i18n>Copy link</button>
+<p id="connection" hidden data-i18n>Connection lost. Reconnecting...</p>
+<p id="error" hidden></p>
+</div>
+<span class="spacer"></span>
+<button id="step-down" class="stone" type="button" hidden data-i18n>Step down</button>
+<button id="back" class="stone" type="button" title="Return to the main menu." data-i18n data-i18n-attrs="title">Back</button>
+<button id="ready" class="stone" type="button" hidden></button>
+<button id="start" class="stone" type="button" hidden data-i18n>Start Game!</button>
+</footer>
+</div>
+
+<div id="closed" hidden>
+<h2 data-i18n>This setup closed.</h2>
+<p id="closed-reason"></p>
+<a class="stone" href="/" style="display: inline-flex; align-items: center; justify-content: center; text-decoration: none" data-i18n>New game</a>
+</div>
+</div>
+
+<div id="ai-config" hidden>
+<div id="ai-dialog">
+<div class="edge top"></div>
+<div class="edge bottom"></div>
+<h2 data-i18n>AI Configuration</h2>
+<div class="rows">
+<label for="ai-bot" data-i18n>AI Player</label><select id="ai-bot"></select>
+<label for="ai-difficulty" data-i18n>AI Difficulty</label><select id="ai-difficulty"></select>
+<label for="ai-behavior" data-i18n>AI Behavior</label><select id="ai-behavior"></select>
+</div>
+<p id="ai-description"></p>
+<button id="ai-ok" class="red" type="button" data-i18n>OK</button>
+</div>
+</div>
+
+<script type="module">
+const glue = "/pkg/specula_web.js?v=GLUE";
+const wasm = "/pkg/specula_web_bg.wasm?v=WASM";
+const { default: init, setup_main } = await import(glue);
+await init({ module_or_path: wasm });
+setup_main();
+</script>
+</body>
+</html>

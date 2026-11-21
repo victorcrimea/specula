@@ -59,6 +59,8 @@ const KEEP_LOGS: usize = 20;
 pub struct EngineDirs {
     state: PathBuf,
     cache: PathBuf,
+    /// Set for a hosted match, whose settings file lives here.
+    config: Option<PathBuf>,
 }
 
 impl EngineDirs {
@@ -68,7 +70,30 @@ impl EngineDirs {
         EngineDirs {
             state: root.join("logs").join(run.to_string()),
             cache: root.join("cache").join(cache),
+            config: None,
         }
+    }
+
+    /// Gives the run a config dir of its own, which the engine reads the
+    /// setup's settings from (M20); the `--observe` engine keeps the user's.
+    /// It is under the run's log dir, so `prune_logs` removes it with them.
+    pub fn with_settings(mut self) -> Self {
+        self.config = Some(self.state.join("config"));
+        self
+    }
+
+    /// Where the engine finds the settings as `config/matchsettings.mp.json`
+    /// in its VFS: `XDG_CONFIG_HOME/0ad/config/` is mounted there
+    /// (`Paths.cpp`, `GameSetup.cpp`), and it is one of the few files the
+    /// GUI compartment may read (`JSInterface_VFS.cpp`).
+    pub fn settings_file(&self) -> Option<PathBuf> {
+        Some(
+            self.config
+                .as_ref()?
+                .join("0ad")
+                .join("config")
+                .join("matchsettings.mp.json"),
+        )
     }
 
     /// For the log line.
@@ -147,6 +172,11 @@ pub fn run_engine(
     command
         .env("XDG_STATE_HOME", &dirs.state)
         .env("XDG_CACHE_HOME", &dirs.cache);
+    if let Some(config) = &dirs.config {
+        // A per-run config dir, as the file's only reader is the engine.
+        std::fs::create_dir_all(config)?;
+        command.env("XDG_CONFIG_HOME", config);
+    }
     let started = Instant::now();
     let mut child = command
         .stdin(Stdio::piped())

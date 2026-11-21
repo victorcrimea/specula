@@ -118,7 +118,7 @@ impl Settings {
         self.map_players(catalog)?.get(index)?.as_object()?.get(key)
     }
 
-    pub(super) fn is_scenario(&self) -> bool {
+    pub fn is_scenario(&self) -> bool {
         self.map.kind == Some(MapType::Scenario)
     }
 
@@ -1149,6 +1149,9 @@ impl Settings {
     }
 
     /// `PlayerRemoved.swap`.
+    // `swap_slots` clears the target's Removed instead, as vanilla's
+    // assignment handler does.
+    #[allow(dead_code)]
     pub fn swap_removed(&mut self, a: usize, b: usize) {
         if a < self.player_removed.len() && b < self.player_removed.len() {
             self.player_removed.swap(a, b);

@@ -6,10 +6,18 @@
 //! A match's UUID outlives its hub: once only the history holds it,
 //! `/g/<uuid>` replays it from there (`Registry::resolve`).
 //!
-//! Lock order: registry `inner`, then `Play`'s inner, then `Seats`, then
-//! `Hub` state.
-//! Nothing called from inside a `Play` or `Hub` lock calls the registry;
-//! `Play::start`'s `on_exit` runs after its lock is released.
+//! A match opens as a setup (D13): its seats, hub, play and `SetupRoom` exist
+//! from `open_setup` on, the visitors join over the room's websocket, and
+//! the host's launch (`launch_setup`) starts the engine. A setup closes on
+//! its own (`tick_setups`, D15, D16) or when it is replaced or the server
+//! stops; the ids of closed ones are kept (`closed`) so their page says why.
+//!
+//! Lock order: registry `inner`, then the `SetupRoom`, then `Play`'s inner,
+//! then `Seats`, then `Hub` state.
+//! Nothing called from inside a `SetupRoom`, `Play`, `Seats` or `Hub` lock
+//! calls the registry; `Play::start`'s `on_exit` runs after its lock is
+//! released. `launch_setup` resolves the settings under the room's lock and
+//! releases it before it takes the registry's.
 //!
 //! An ended match frees its slot when its engine exits, and leaves once its
 //! hub has released the end (M8): from then on `/g/<uuid>` is the history's,
@@ -25,6 +33,7 @@
 //! the ended matches.
 
 use std::collections::HashMap;
+use std::collections::VecDeque;
 use std::collections::hash_map::RandomState;
 use std::fs::File;
 use std::hash::BuildHasher;
@@ -44,10 +53,17 @@ use std::time::SystemTime;
 use crate::catalog::Catalog;
 use crate::config::Config;
 use crate::history::History;
+use crate::nickname::Nickname;
 use crate::observer;
 use crate::play::Play;
-use crate::play::Setup;
 use crate::seats::Seats;
+use crate::settings::Settings;
+use crate::setup::CLOSED_KEEP;
+use crate::setup::CloseReason;
+use crate::setup::LEAVE_GRACE;
+use crate::setup::Request;
+use crate::setup::SetupRoom;
+use crate::setup::catalog_json;
 use crate::view::Hub;
 use crate::view::Message;
 use crate::view::SummaryBody;
@@ -144,8 +160,7 @@ impl<'r> rocket::request::FromParam<'r> for MatchId {
 
 #[derive(Clone, Copy, PartialEq)]
 pub enum MatchState {
-    /// Setup opens before the launch (D13, M15); nothing enters it yet.
-    #[allow(dead_code)]
+    /// Open for visitors to join, before the host's launch (D13).
     Setup,
     Running,
     Ended,
@@ -159,13 +174,17 @@ pub struct Match {
     pub play: Arc<Play>,
     /// From the setup's opening on (D13); `play` shares it.
     pub seats: Arc<Seats>,
+    pub room: Arc<SetupRoom>,
     state: Mutex<MatchState>,
     /// The engine's runner thread, handed to a rematch in the same slot,
     /// which joins it first: the UDP port is the slot's.
     runner: Mutex<Option<JoinHandle<()>>>,
+    /// The runner of the game this setup replaced, which the launch joins
+    /// first for the same reason.
+    previous: Mutex<Option<JoinHandle<()>>>,
     /// Taken as the engine's start for L1: the runner may first wait a
     /// moment for the slot's previous engine, which only makes it stricter.
-    launched: Instant,
+    launched: Mutex<Option<Instant>>,
     /// How many of `LIMIT_WARNINGS` were logged.
     warned: Mutex<usize>,
     /// When the watcher first saw the game decided.
@@ -186,7 +205,13 @@ impl Match {
     /// The wall time and the game time left before a limit stops it.
     fn limit_left(&self, config: &Config) -> (Duration, Duration) {
         (
-            config.wall_limit.saturating_sub(self.launched.elapsed()),
+            config.wall_limit.saturating_sub(
+                self.launched
+                    .lock()
+                    .unwrap()
+                    .unwrap_or_else(Instant::now)
+                    .elapsed(),
+            ),
             config.game_limit.saturating_sub(self.game_time()),
         )
     }
@@ -287,16 +312,21 @@ pub struct Registry {
     history: Option<Arc<Mutex<History>>>,
     /// `--observe` or `--slots 0`: the one long-lived hub.
     broadcast: Option<(MatchId, Arc<Hub>)>,
-    /// Hosting only. Its reader comes with the setup protocol (M15).
-    #[allow(dead_code)]
+    /// Hosting only.
     catalog: Option<Catalog>,
+    /// What every setup socket is sent first.
+    catalog_json: Option<String>,
     inner: Mutex<Inner>,
 }
 
 /// What an ended match leaves once it is dropped.
 struct Ended {
     owner: String,
-    setup: Setup,
+    settings: Settings,
+    nickname: Nickname,
+    /// The owner's player number, which a rematch keeps if it is still a
+    /// slot.
+    seat: Option<u8>,
 }
 
 struct Inner {
@@ -307,8 +337,25 @@ struct Inner {
     /// `config.slots` entries; the match whose engine holds the slot's port.
     slots: Vec<Option<MatchId>>,
     generation: u64,
-    /// Here rather than in `Registry`, so `launch` and `stop` agree on it.
+    /// Here rather than in `Registry`, so `launch_setup` and `stop` agree on
+    /// it.
     stopping: bool,
+    /// The newest closed setups, oldest first.
+    closed: VecDeque<(MatchId, CloseReason)>,
+    /// A closed setup's predecessor engine, by slot, which the next game of
+    /// the slot joins first.
+    pending: HashMap<u16, JoinHandle<()>>,
+}
+
+/// One handle that joins both.
+fn chain(first: Option<JoinHandle<()>>, second: Option<JoinHandle<()>>) -> Option<JoinHandle<()>> {
+    match (first, second) {
+        (Some(first), Some(second)) => Some(std::thread::spawn(move || {
+            let _ = first.join();
+            let _ = second.join();
+        })),
+        (first, second) => first.or(second),
+    }
 }
 
 /// The publisher thread runs until `Hub::retire`, which only a dropped
@@ -334,6 +381,7 @@ impl Registry {
         catalog: Option<Catalog>,
     ) -> Self {
         let slots = vec![None; usize::from(config.slots)];
+        let catalog_json = catalog.as_ref().map(catalog_json);
         Registry {
             config,
             socket_base,
@@ -341,6 +389,7 @@ impl Registry {
             history,
             broadcast: broadcast.map(|hub| (MatchId::new_v4(), hub)),
             catalog,
+            catalog_json,
             inner: Mutex::new(Inner {
                 matches: HashMap::new(),
                 ended: HashMap::new(),
@@ -348,6 +397,8 @@ impl Registry {
                 slots,
                 generation: 0,
                 stopping: false,
+                closed: VecDeque::new(),
+                pending: HashMap::new(),
             }),
         }
     }
@@ -389,16 +440,12 @@ impl Registry {
         self.inner.lock().unwrap().matches.get(&id).cloned()
     }
 
-    /// The newest running match `visitor` holds the seat of.
-    pub fn own_running(&self, visitor: &str) -> Option<MatchId> {
+    /// The newest setup or running match `visitor` hosts.
+    pub fn own_hosted(&self, visitor: &str) -> Option<MatchId> {
         let inner = self.inner.lock().unwrap();
-        Self::own_running_in(&inner, visitor)
-    }
-
-    fn own_running_in(inner: &Inner, visitor: &str) -> Option<MatchId> {
         inner.order.iter().rev().copied().find(|id| {
             inner.matches.get(id).is_some_and(|found| {
-                found.state() == MatchState::Running && found.play.status(Some(visitor)).mine
+                found.state() != MatchState::Ended && found.seats.is_host(visitor)
             })
         })
     }
@@ -406,11 +453,11 @@ impl Registry {
     /// The newest match `owner` hosts whose engine still holds its slot,
     /// running or not: after End the engine takes a moment to die, and a
     /// rematch started meanwhile must wait for it rather than be refused.
-    fn own_slot_holder_in(inner: &Inner, owner: &str) -> Option<Arc<Match>> {
+    fn own_slot_holder_in(inner: &Inner, owner: &str) -> Option<(MatchId, Arc<Match>)> {
         inner.order.iter().rev().find_map(|id| {
             let found = inner.matches.get(id)?;
             (inner.slots[usize::from(found.slot)] == Some(*id) && found.seats.is_host(owner))
-                .then(|| Arc::clone(found))
+                .then(|| (*id, Arc::clone(found)))
         })
     }
 
@@ -428,31 +475,19 @@ impl Registry {
         self.inner.lock().unwrap().slots.iter().any(Option::is_none)
     }
 
-    /// Starts a match for `owner`, its host and only human seat until
-    /// others can join (M15). A new game ends the one the visitor hosts
-    /// (D14), in whose slot it then runs.
-    pub fn launch(self: &Arc<Self>, owner: &str, setup: &Setup) -> Result<MatchId, &'static str> {
-        // A bad form costs nothing.
-        let (seat, _) = Play::check(setup)?;
-        let seats = Arc::new(Seats::new());
-        let nickname = seats.join(owner, setup.nickname.clone());
-        seats.set_player(owner, Some(seat))?;
-        let mut inner = self.inner.lock().unwrap();
-        if inner.stopping {
-            return Err(STOPPING_ERROR);
-        }
-        let old = Self::own_slot_holder_in(&inner, owner);
-        let slot = match &old {
-            Some(old) => old.slot,
-            None => inner
-                .slots
-                .iter()
-                .position(Option::is_none)
-                .ok_or("a game is in progress")? as u16,
-        };
+    /// Opens a setup for `owner`, its host, seated as a player (vanilla's
+    /// `onClientJoin` gives the host the first free slot). `from` is a
+    /// finished game's settings and the host's seat in it, for a rematch. A
+    /// new setup replaces the game the visitor hosts (D14), in whose slot it
+    /// then runs.
+    pub fn open_setup(
+        self: &Arc<Self>,
+        owner: &str,
+        nickname: Nickname,
+        from: Option<(Settings, Option<u8>)>,
+    ) -> Result<MatchId, &'static str> {
+        let catalog = self.catalog.as_ref().ok_or("not hosting")?;
         let id = MatchId::new_v4();
-        // Stored only once the launch succeeds, so the log numbers games.
-        let generation = inner.generation + 1;
         let socket = format!("{}.{id}", self.socket_base);
         if socket.len() >= SOCKET_PATH_LIMIT {
             eprintln!(
@@ -461,6 +496,125 @@ impl Registry {
             );
             return Err(FEED_SOCKET_ERROR);
         }
+        let mut inner = self.inner.lock().unwrap();
+        if inner.stopping {
+            return Err(STOPPING_ERROR);
+        }
+        let old = Self::own_slot_holder_in(&inner, owner);
+        let slot = match &old {
+            Some((_, old)) => old.slot,
+            None => inner
+                .slots
+                .iter()
+                .position(Option::is_none)
+                .ok_or("every match slot is in use")? as u16,
+        };
+        let seats = Arc::new(Seats::new());
+        let nickname = seats.join(owner, nickname);
+        let seat = from
+            .as_ref()
+            .and_then(|(settings, seat)| {
+                seat.filter(|seat| usize::from(*seat) <= settings.player_count.players)
+            })
+            .unwrap_or(1);
+        let settings = match from {
+            Some((mut settings, _)) => {
+                settings.on_seated(catalog, &[seat]);
+                settings
+            }
+            None => Settings::open(catalog, None, &[seat]).map_err(|error| {
+                eprintln!("cannot open a setup: {error}");
+                "cannot open a setup"
+            })?,
+        };
+        seats.set_player(owner, Some(seat))?;
+        seats.force_host_stay();
+        // Only now: nothing above can fail after the old game was ended.
+        if let Some((old_id, old)) = &old {
+            match old.state() {
+                MatchState::Setup => Self::close_in(&mut inner, *old_id, CloseReason::Replaced),
+                MatchState::Running => {
+                    let _ = old.play.end(owner);
+                }
+                MatchState::Ended => {}
+            }
+        }
+        let mut previous = inner.pending.remove(&slot);
+        if let Some((_, old)) = &old {
+            previous = chain(old.runner.lock().unwrap().take(), previous);
+        }
+        let hub = spawn_hub(self.delay, self.history.clone(), Some(id));
+        let dirs = observer::EngineDirs::new(&self.config.engine_dir, id, &format!("slot-{slot}"))
+            .with_settings();
+        let play = Arc::new(Play::new(
+            socket.clone(),
+            self.config.port(slot),
+            Arc::clone(&hub),
+            dirs,
+            Arc::clone(&seats),
+        ));
+        inner.matches.insert(
+            id,
+            Arc::new(Match {
+                slot,
+                socket,
+                hub,
+                play,
+                seats,
+                room: Arc::new(SetupRoom::new(settings)),
+                state: Mutex::new(MatchState::Setup),
+                runner: Mutex::new(None),
+                previous: Mutex::new(previous),
+                launched: Mutex::new(None),
+                warned: Mutex::new(0),
+                decided: Mutex::new(None),
+            }),
+        );
+        inner.order.push(id);
+        inner.slots[usize::from(slot)] = Some(id);
+        println!(
+            "match {id} setup opened by {} in slot {slot}",
+            nickname.as_str()
+        );
+        Ok(id)
+    }
+
+    /// The host's Start (M16): the engine starts with the resolved
+    /// settings and the match runs.
+    pub fn launch_setup(self: &Arc<Self>, id: MatchId, cookie: &str) -> Result<(), &'static str> {
+        let catalog = self.catalog.as_ref().ok_or("not hosting")?;
+        let found = self
+            .hosted(id)
+            .filter(|found| found.state() == MatchState::Setup)
+            .ok_or("no such setup")?;
+        let (launch, settings) =
+            found
+                .room
+                .begin_launch(catalog, &found.seats, cookie, &id.to_string())?;
+        let started = self.start_engine(id, &found, launch, settings);
+        found.room.finish_launch(started.is_ok());
+        started
+    }
+
+    fn start_engine(
+        self: &Arc<Self>,
+        id: MatchId,
+        found: &Arc<Match>,
+        launch: crate::settings::Launch,
+        settings: Settings,
+    ) -> Result<(), &'static str> {
+        let mut inner = self.inner.lock().unwrap();
+        // A stop or a replacement may have closed it since the room's check.
+        if inner.stopping {
+            return Err(STOPPING_ERROR);
+        }
+        if !inner.matches.contains_key(&id) {
+            return Err("the setup is closed");
+        }
+        let slot = found.slot;
+        // Stored only once the launch succeeds, so the log numbers games.
+        let generation = inner.generation + 1;
+        let socket = found.socket.clone();
         let listener = crate::remove_stale_socket(&socket)
             .and_then(|()| UnixListener::bind(&socket))
             .and_then(|listener| listener.set_nonblocking(true).map(|()| listener))
@@ -468,28 +622,12 @@ impl Registry {
                 eprintln!("cannot open the feed socket {socket}: {error}");
                 FEED_SOCKET_ERROR
             })?;
-        let hub = spawn_hub(self.delay, self.history.clone(), Some(id));
-        let dirs = observer::EngineDirs::new(&self.config.engine_dir, id, &format!("slot-{slot}"));
-        let play = Arc::new(Play::new(
-            socket.clone(),
-            self.config.port(slot),
-            Arc::clone(&hub),
-            generation,
-            dirs,
-            Arc::clone(&seats),
-        ));
         let engine_done = Arc::new(AtomicBool::new(false));
         {
-            let (hub, play) = (Arc::clone(&hub), Arc::clone(&play));
+            let (hub, play) = (Arc::clone(&found.hub), Arc::clone(&found.play));
             let (engine_done, socket) = (Arc::clone(&engine_done), socket.clone());
             std::thread::spawn(move || feed_match(listener, &hub, &play, &engine_done, &socket));
         }
-        // Only now: nothing above can fail the launch after the old game
-        // was ended.
-        let previous = old.as_ref().and_then(|old| {
-            let _ = old.play.end(owner);
-            old.runner.lock().unwrap().take()
-        });
         let on_exit = {
             let registry: Weak<Registry> = Arc::downgrade(self);
             let engine_done = Arc::clone(&engine_done);
@@ -500,7 +638,10 @@ impl Registry {
                 }
             }
         };
-        let runner = match play.start(setup, previous, on_exit) {
+        let runner = match found
+            .play
+            .start(launch, settings, &found.previous, generation, on_exit)
+        {
             Ok(runner) => runner,
             Err(error) => {
                 engine_done.store(true, Ordering::SeqCst);
@@ -508,28 +649,19 @@ impl Registry {
             }
         };
         inner.generation = generation;
+        *found.runner.lock().unwrap() = Some(runner);
+        *found.launched.lock().unwrap() = Some(Instant::now());
+        *found.state.lock().unwrap() = MatchState::Running;
         println!(
             "match {id} (game {generation}) by {} in slot {slot}, port {}, feed {socket}",
-            nickname.as_str(),
+            found
+                .seats
+                .host()
+                .and_then(|host| found.seats.nickname_of(&host))
+                .map(|nickname| nickname.as_str().to_string())
+                .unwrap_or_default(),
             self.config.port(slot)
         );
-        inner.matches.insert(
-            id,
-            Arc::new(Match {
-                slot,
-                socket,
-                hub,
-                play,
-                seats,
-                state: Mutex::new(MatchState::Running),
-                runner: Mutex::new(Some(runner)),
-                launched: Instant::now(),
-                warned: Mutex::new(0),
-                decided: Mutex::new(None),
-            }),
-        );
-        inner.order.push(id);
-        inner.slots[usize::from(slot)] = Some(id);
         let live: Vec<MatchId> = inner
             .matches
             .iter()
@@ -539,24 +671,126 @@ impl Registry {
         let root = self.config.engine_dir.clone();
         // Off the registry lock: removing a log dir can take a while.
         std::thread::spawn(move || observer::prune_logs(&root, &live));
-        Ok(id)
+        Ok(())
     }
 
-    /// A new match with the setup of the one `owner` started in `id`.
+    /// A new setup from the settings of the game `owner` hosts in `id`.
     pub fn rematch(self: &Arc<Self>, owner: &str, id: MatchId) -> Result<MatchId, &'static str> {
-        let setup = {
+        let (settings, seat, nickname) = {
             let inner = self.inner.lock().unwrap();
             match inner.matches.get(&id) {
-                Some(found) => found.play.setup_of(owner),
+                Some(found) => found.play.settings_of(owner).and_then(|settings| {
+                    Some((
+                        settings,
+                        found.seats.player_of(owner),
+                        found.seats.nickname_of(owner)?,
+                    ))
+                }),
                 None => inner
                     .ended
                     .get(&id)
                     .filter(|ended| ended.owner == owner)
-                    .map(|ended| ended.setup.clone()),
+                    .map(|ended| (ended.settings.clone(), ended.seat, ended.nickname.clone())),
             }
         }
         .ok_or("no game to repeat")?;
-        self.launch(owner, &setup)
+        self.open_setup(owner, nickname, Some((settings, seat)))
+    }
+
+    /// Whether `id` is an open setup, or one that closed (its page says why).
+    pub fn setup_page(&self, id: MatchId) -> bool {
+        let inner = self.inner.lock().unwrap();
+        inner
+            .matches
+            .get(&id)
+            .is_some_and(|found| found.state() == MatchState::Setup)
+            || inner.closed.iter().any(|(closed, _)| *closed == id)
+    }
+
+    pub fn closed_reason(&self, id: MatchId) -> Option<CloseReason> {
+        let inner = self.inner.lock().unwrap();
+        inner
+            .closed
+            .iter()
+            .find(|(closed, _)| *closed == id)
+            .map(|(_, reason)| *reason)
+    }
+
+    /// What a setup socket is sent first, and the catalog the room's rules
+    /// read.
+    pub fn catalog(&self) -> Option<(&Catalog, &str)> {
+        Some((self.catalog.as_ref()?, self.catalog_json.as_deref()?))
+    }
+
+    /// A visitor's request in a setup; the reason is for the visitor only
+    /// when it is a launch.
+    pub fn setup_request(
+        self: &Arc<Self>,
+        id: MatchId,
+        cookie: &str,
+        request: Request,
+    ) -> Result<(), &'static str> {
+        if matches!(request, Request::Launch) {
+            return self.launch_setup(id, cookie);
+        }
+        let catalog = self.catalog.as_ref().ok_or("not hosting")?;
+        let found = self.hosted(id).ok_or("no such setup")?;
+        found.room.handle(catalog, &found.seats, cookie, request)
+    }
+
+    /// Removes a setup and tells its sockets why (D15, D16, D22).
+    fn close_in(inner: &mut Inner, id: MatchId, reason: CloseReason) {
+        let Some(found) = inner.matches.remove(&id) else {
+            return;
+        };
+        inner.order.retain(|known| *known != id);
+        if inner.slots[usize::from(found.slot)] == Some(id) {
+            inner.slots[usize::from(found.slot)] = None;
+        }
+        *found.state.lock().unwrap() = MatchState::Ended;
+        found.room.close(reason);
+        found.hub.retire();
+        // Its predecessor's engine may still hold the slot's port.
+        if let Some(previous) = found.previous.lock().unwrap().take() {
+            let waiting = inner.pending.remove(&found.slot);
+            if let Some(joined) = chain(waiting, Some(previous)) {
+                inner.pending.insert(found.slot, joined);
+            }
+        }
+        inner.closed.push_back((id, reason));
+        while inner.closed.len() > CLOSED_KEEP {
+            inner.closed.pop_front();
+        }
+        println!("match {id} setup closed: {}", reason.name());
+    }
+
+    /// Members whose last setup socket is gone leave (U2), and the setups
+    /// nobody started or nobody is in close (D15, D16).
+    fn tick_setups(&self) {
+        let Some(catalog) = &self.catalog else {
+            return;
+        };
+        let setups: Vec<(MatchId, Arc<Match>)> = {
+            let inner = self.inner.lock().unwrap();
+            inner
+                .matches
+                .iter()
+                .filter(|(_, found)| found.state() == MatchState::Setup)
+                .map(|(id, found)| (*id, Arc::clone(found)))
+                .collect()
+        };
+        for (id, found) in &setups {
+            for cookie in found.seats.due_to_leave(LEAVE_GRACE) {
+                let was_seated = found.seats.leave_setup(&cookie);
+                found.room.after_leave(catalog, &found.seats, was_seated);
+            }
+            if let Some(reason) = found.room.due() {
+                let inner = &mut *self.inner.lock().unwrap();
+                if found.state() == MatchState::Setup {
+                    Self::close_in(inner, *id, reason);
+                }
+            }
+        }
     }
 
     /// Whether `visitor` started the dropped match `id`; None if it is not
@@ -582,8 +816,19 @@ impl Registry {
                 continue;
             };
             inner.order.retain(|known| *known != id);
-            if let Some((owner, setup)) = found.play.owner_setup() {
-                inner.ended.insert(id, Ended { owner, setup });
+            if let Some((owner, settings)) = found.play.owner_settings()
+                && let Some(nickname) = found.seats.nickname_of(&owner)
+            {
+                let seat = found.seats.player_of(&owner);
+                inner.ended.insert(
+                    id,
+                    Ended {
+                        owner,
+                        settings,
+                        nickname,
+                        seat,
+                    },
+                );
             }
             found.hub.retire();
             println!("match {id} dropped from memory");
@@ -664,6 +909,7 @@ impl Registry {
                     }
                 }
             }
+            self.tick_setups();
             self.drop_settled();
             std::thread::sleep(WATCH_POLL);
         }
@@ -679,18 +925,16 @@ impl Registry {
         let inner = &mut *self.inner.lock().unwrap();
         inner.stopping = true;
         let mut running = 0;
+        let mut setups = Vec::new();
         for (id, found) in &inner.matches {
-            let mut state = found.state.lock().unwrap();
-            match *state {
-                MatchState::Setup => {
-                    *state = MatchState::Ended;
-                    if inner.slots[usize::from(found.slot)] == Some(*id) {
-                        inner.slots[usize::from(found.slot)] = None;
-                    }
-                }
+            match found.state() {
+                MatchState::Setup => setups.push(*id),
                 MatchState::Running => running += 1,
                 MatchState::Ended => {}
             }
+        }
+        for id in setups {
+            Self::close_in(inner, id, CloseReason::Stopping);
         }
         running
     }

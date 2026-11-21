@@ -18,6 +18,8 @@ use std::os::unix::net::UnixStream;
 use std::process::Command;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
 use std::thread::JoinHandle;
 use std::time::Duration;
 
@@ -31,17 +33,21 @@ use specula_assets::command::QueryKind;
 use rocket::tokio::sync::broadcast;
 
 use crate::feed::Summary;
-use crate::nickname::Nickname;
 use crate::observer;
 use crate::observer::EngineDirs;
 use crate::registry::MatchId;
 use crate::seats::Seats;
+use crate::settings::Choice;
+use crate::settings::Launch;
+use crate::settings::Settings;
 use crate::summary_envelope;
 use crate::view::Hub;
 use crate::view::SummaryBody;
 use crate::view::spawn_brotli;
 
 const PLAY_SCRIPT: &str = "scripts/play.sh";
+/// Where the engine finds the settings file (`EngineDirs::settings_file`).
+const SETTINGS_VFS_PATH: &str = "config/matchsettings.mp.json";
 const UPLINK_COMMAND: u8 = 1;
 const UPLINK_QUERY: u8 = 2;
 const UPLINK_PAUSE: u8 = 3;
@@ -56,49 +62,12 @@ const REPLY_BACKLOG: usize = 64;
 /// `g_AutoFormation.getNull()` with `formationwalkonly`
 /// (`globalscripts/Formation.js`).
 const NULL_FORMATION: &str = "special/formations/null";
-const MAX_PLAYERS: usize = 8;
-const MAX_DIFFICULTY: u8 = 5;
-/// `simulation/data/settings/starting_resources.json`, which the setup
-/// page offers.
-const STARTING_RESOURCES: [u32; 6] = [100, 300, 500, 1000, 3000, 50000];
-/// Its default, for a page from before the choice.
-const DEFAULT_STARTING_RESOURCES: u32 = 300;
 /// `feed::Player::state`.
 const PLAYER_ACTIVE: u8 = 0;
 
-/// The random maps the setup page offers: script name and the engine's
-/// name for it (`settings.Name` of `maps/random/<name>.json`), which the
-/// page translates.
-pub const MAPS: &[(&str, &str)] = &[
-    ("mainland", "Mainland"),
-    ("alpine_lakes", "Alpine Lakes"),
-    ("african_plains", "African Plains"),
-    ("continent", "Continent"),
-    ("corinthian_isthmus", "Corinthian Isthmus"),
-    ("gulf_of_bothnia", "Gulf of Bothnia"),
-    ("lake", "Lake"),
-    ("lorraine_plain", "Lorraine Plain"),
-    ("neareastern_badlands", "Neareastern Badlands"),
-    ("oasis", "Oasis"),
-    ("persian_highlands", "Persian Highlands"),
-    ("wild_lake", "Wild Lake"),
-];
-
-/// `session-gui` writes it from the game data; the client embeds it too.
-const CIVS_TXT: &str = include_str!("../../specula-web/civs.txt");
-
-/// Civ code and the engine's name for it, which the page translates.
-pub fn civs() -> impl Iterator<Item = (&'static str, &'static str)> {
-    CIVS_TXT
-        .lines()
-        .filter(|line| !line.starts_with('#'))
-        .filter_map(|line| line.split_once('\t'))
-}
-
-/// What the setup page and the player's page read: whether a game is
-/// running and is the visitor's, whether its seat is defeated, whether the
-/// visitor's last game can be repeated, and the maps and civs to choose
-/// from.
+/// What the player's page reads: whether a game is running and is the
+/// visitor's, whether its seat is defeated and whether the visitor's last
+/// game can be repeated.
 pub fn setup_json(status: &Status) -> String {
     let mut json = Json::new();
     json.boolean("running", status.running);
@@ -110,49 +79,27 @@ pub fn setup_json(status: &Status) -> String {
         json.raw("wall_left_ms", &wall_left.as_millis().to_string());
         json.raw("game_limit_ms", &game_limit.as_millis().to_string());
     }
-    json.raw("maps", &pairs(&mut MAPS.iter().copied()));
-    json.raw("civs", &pairs(&mut civs()));
     json.finish()
 }
 
-fn pairs(items: &mut dyn Iterator<Item = (&str, &str)>) -> String {
-    let mut out = String::from("[");
-    for (index, (code, name)) in items.enumerate() {
-        if index > 0 {
-            out.push(',');
-        }
-        out.push('[');
-        push_string(&mut out, code);
-        out.push(',');
-        push_string(&mut out, name);
-        out.push(']');
-    }
-    out.push(']');
-    out
-}
-
-/// What the setup form reads (`GET /new`): whether every slot is taken,
-/// whether the visitor has a game running and which, the newest running
-/// one, and the maps and civs to choose from. The ids are UUIDs, empty for
-/// none.
+/// What the new game form reads (`GET /new`): whether every slot is taken,
+/// whether the visitor hosts a game and which, the newest running one. The
+/// ids are UUIDs, empty for none.
 pub fn form_json(
     running: bool,
-    mine: bool,
     own: Option<MatchId>,
     latest: Option<MatchId>,
     stopping: bool,
 ) -> String {
     let mut json = Json::new();
     json.boolean("running", running);
-    json.boolean("mine", mine);
+    json.boolean("mine", own.is_some());
     json.boolean("stopping", stopping);
     json.text("match", &own.map(|id| id.to_string()).unwrap_or_default());
     json.text(
         "latest",
         &latest.map(|id| id.to_string()).unwrap_or_default(),
     );
-    json.raw("maps", &pairs(&mut MAPS.iter().copied()));
-    json.raw("civs", &pairs(&mut civs()));
     json.finish()
 }
 
@@ -173,89 +120,12 @@ pub struct Status {
     pub limits: Option<(Duration, Duration)>,
 }
 
-/// What the setup page chose.
-#[derive(Clone)]
-pub struct Setup {
-    pub map: String,
-    /// One per player, in order.
-    pub slots: Vec<Slot>,
-    /// The game setup's Explored Map and Revealed Map; revealed implies
-    /// explored, as `MapExploration.setRevealed` makes it.
-    pub explored: bool,
-    pub revealed: bool,
-    /// The game setup's Starting Resources: each resource's amount.
-    pub resources: u32,
-    /// The owner's, as they were at launch: nothing changes a launched
-    /// setup, so the name is locked with it (D10).
-    pub nickname: Nickname,
-}
-
-impl Setup {
-    /// From the setup page's form: `nickname`, `map`, `players`, `resources`,
-    /// `explored` and `revealed` when checked, and for each player i from 1, `civ<i>`,
-    /// `slot<i>` ("you", "petra" or "empty") and `difficulty<i>` for Petra.
-    /// Checked when the game starts.
-    pub fn from_form(form: &HashMap<String, String>) -> Result<Setup, &'static str> {
-        let field = |name: &str| form.get(name).map(String::as_str).ok_or("field missing");
-        let players: usize = field("players")?.parse().map_err(|_| "bad player count")?;
-        if !(2..=MAX_PLAYERS).contains(&players) {
-            return Err("2 to 8 players");
-        }
-        let mut slots = Vec::with_capacity(players);
-        for player in 1..=players {
-            let kind = match field(&format!("slot{player}"))? {
-                "you" => SlotKind::You,
-                "petra" => SlotKind::Petra(
-                    field(&format!("difficulty{player}"))?
-                        .parse()
-                        .map_err(|_| "bad difficulty")?,
-                ),
-                "empty" => SlotKind::Empty,
-                _ => return Err("bad slot"),
-            };
-            slots.push(Slot {
-                civ: field(&format!("civ{player}"))?.to_string(),
-                kind,
-            });
-        }
-        let revealed = form.contains_key("revealed");
-        let resources = match form.get("resources") {
-            Some(resources) => resources.parse().map_err(|_| "bad starting resources")?,
-            None => DEFAULT_STARTING_RESOURCES,
-        };
-        let nickname = Nickname::parse(field("nickname")?).ok_or("bad nickname")?;
-        Ok(Setup {
-            map: field("map")?.to_string(),
-            slots,
-            explored: revealed || form.contains_key("explored"),
-            revealed,
-            resources,
-            nickname,
-        })
-    }
-}
-
-#[derive(Clone)]
-pub struct Slot {
-    /// A civ code, or "random".
-    pub civ: String,
-    pub kind: SlotKind,
-}
-
-#[derive(Clone, Copy, PartialEq)]
-pub enum SlotKind {
-    You,
-    /// Petra at this difficulty, 0 (sandbox) to 5 (very hard).
-    Petra(u8),
-    Empty,
-}
-
 pub struct Play {
     socket: String,
     port: u16,
     dirs: EngineDirs,
-    /// Server-wide launch counter, for the log line only.
-    generation: u64,
+    /// Server-wide launch counter, for the log line only; set at the start.
+    generation: AtomicU64,
     hub: Arc<Hub>,
     seats: Arc<Seats>,
     inner: Mutex<Inner>,
@@ -273,8 +143,15 @@ struct Inner {
 
 struct Game {
     running: bool,
-    /// What it was started with, for a rematch.
-    setup: Setup,
+    /// The setup's settings with the random choices unresolved, which a
+    /// rematch opens a new setup from.
+    settings: Settings,
+    /// What the engine started with: the resolved settings and the attributes
+    /// it was given.
+    // Read by the engine's report of its own attributes (M21) and the
+    // rematch's replay of the draw (M35).
+    #[allow(dead_code)]
+    launch: Launch,
     /// Every statistics capture of each human seat, by player number, kept
     /// after the engine exits.
     summaries: HashMap<u8, Vec<Arc<SeatCapture>>>,
@@ -296,7 +173,6 @@ impl Play {
         socket: String,
         port: u16,
         hub: Arc<Hub>,
-        generation: u64,
         dirs: EngineDirs,
         seats: Arc<Seats>,
     ) -> Self {
@@ -304,7 +180,7 @@ impl Play {
             socket,
             port,
             dirs,
-            generation,
+            generation: AtomicU64::new(0),
             hub,
             seats,
             inner: Mutex::new(Inner::default()),
@@ -312,36 +188,53 @@ impl Play {
         }
     }
 
-    /// The seat and the engine's arguments for `setup`, so a bad form is
-    /// refused before anything is spent on it.
-    pub fn check(setup: &Setup) -> Result<(u8, Vec<String>), &'static str> {
-        let seat = setup
-            .slots
-            .iter()
-            .position(|slot| slot.kind == SlotKind::You)
-            .ok_or("no slot is yours")? as u8
-            + 1;
-        Ok((seat, engine_args(setup)?))
-    }
-
     /// Starts the game for the seats the table holds and gives the thread
-    /// that runs its engine. `previous` is the runner of the game this one
-    /// replaces in the slot, joined first: the UDP port is the slot's.
+    /// that runs its engine. `previous` holds the runner of the game this one
+    /// replaces in the slot, joined first: the UDP port is the slot's. It is
+    /// taken only once nothing here can fail, so a refused start leaves it
+    /// for the next try.
     /// `on_exit` runs once the engine is gone and no lock of this is held.
     pub fn start(
         self: &Arc<Self>,
-        setup: &Setup,
-        previous: Option<JoinHandle<()>>,
+        launch: Launch,
+        settings: Settings,
+        previous: &Mutex<Option<JoinHandle<()>>>,
+        generation: u64,
         on_exit: impl FnOnce() + Send + 'static,
     ) -> Result<JoinHandle<()>, &'static str> {
-        let (_, args) = Self::check(setup)?;
+        // `main.cpp` wants a non-empty `-autostart=` with
+        // `-autostart-nonvisual`; the script reads the settings file and
+        // ignores it.
+        let map = match &launch.settings.map.map {
+            Some(Choice::Fixed(path)) => path.strip_prefix("maps/").unwrap_or(path).to_string(),
+            _ => return Err("the settings name no map"),
+        };
+        let file = self
+            .dirs
+            .settings_file()
+            .ok_or("cannot write the settings file")?;
+        let written = file
+            .parent()
+            .map_or(Ok(()), std::fs::create_dir_all)
+            .and_then(|()| std::fs::write(&file, launch.attributes.to_string()));
+        if let Err(error) = written {
+            eprintln!("cannot write the settings file {}: {error}", file.display());
+            return Err("cannot write the settings file");
+        }
+        let args = [
+            format!("-autostart={map}"),
+            format!("-autostart-specula-settings={SETTINGS_VFS_PATH}"),
+        ];
+        let previous = previous.lock().unwrap().take();
+        self.generation.store(generation, Ordering::SeqCst);
         self.inner.lock().unwrap().game = Some(Game {
             running: true,
-            setup: setup.clone(),
+            settings,
+            launch,
             summaries: HashMap::new(),
         });
         let host = self.seats.host().unwrap_or_default();
-        println!("game {} for {host}: {}", self.generation, args.join(" "));
+        println!("game {generation} for {host}: {}", args.join(" "));
         // The engine connects the feed after this, so its first turn
         // already has the seats' streams.
         let players = self.seats.players().into_iter().map(u32::from).collect();
@@ -567,7 +460,10 @@ impl Play {
         let mut inner = self.inner.lock().unwrap();
         match &mut inner.game {
             Some(game) if game.running && out => {
-                println!("game {} is decided, stopping its engine", self.generation);
+                println!(
+                    "game {} is decided, stopping its engine",
+                    self.generation.load(Ordering::SeqCst)
+                );
                 self.stop_engine(game);
                 true
             }
@@ -587,22 +483,23 @@ impl Play {
         running && self.humans_out()
     }
 
-    /// Who hosts the game and with what it started, which outlives the
-    /// `Play`. None once the host powers found nobody to pass to.
-    pub fn owner_setup(&self) -> Option<(String, Setup)> {
+    /// Who hosts the game and the settings it was set up with, which
+    /// outlive the `Play`. None once the host powers found nobody to pass
+    /// to.
+    pub fn owner_settings(&self) -> Option<(String, Settings)> {
         let host = self.seats.host()?;
         let inner = self.inner.lock().unwrap();
         let game = inner.game.as_ref()?;
-        Some((host, game.setup.clone()))
+        Some((host, game.settings.clone()))
     }
 
-    /// The setup of the game `owner` hosts, which a rematch repeats.
-    pub fn setup_of(&self, owner: &str) -> Option<Setup> {
+    /// The settings of the game `owner` hosts, which a rematch repeats.
+    pub fn settings_of(&self, owner: &str) -> Option<Settings> {
         if !self.seats.is_host(owner) {
             return None;
         }
         let inner = self.inner.lock().unwrap();
-        Some(inner.game.as_ref()?.setup.clone())
+        Some(inner.game.as_ref()?.settings.clone())
     }
 
     pub fn set_uplink(&self, stream: Option<UnixStream>) {
@@ -661,57 +558,6 @@ impl Play {
             inner.uplink = None;
         }
     }
-}
-
-/// The `-autostart-*` options for `setup`, checked.
-fn engine_args(setup: &Setup) -> Result<Vec<String>, &'static str> {
-    if !MAPS.iter().any(|(name, _)| *name == setup.map) {
-        return Err("unknown map");
-    }
-    if !(2..=MAX_PLAYERS).contains(&setup.slots.len()) {
-        return Err("2 to 8 players");
-    }
-    if setup
-        .slots
-        .iter()
-        .filter(|slot| slot.kind == SlotKind::You)
-        .count()
-        != 1
-    {
-        return Err("exactly one slot must be yours");
-    }
-    let mut args = vec![
-        format!("-autostart=random/{}", setup.map),
-        format!("-autostart-players={}", setup.slots.len()),
-        "-autostart-seed=-1".to_string(),
-        "-autostart-aiseed=-1".to_string(),
-    ];
-    // Read by autostart_specula_play.js.
-    if setup.explored {
-        args.push("-autostart-specula-explored".to_string());
-    }
-    if setup.revealed {
-        args.push("-autostart-specula-revealed".to_string());
-    }
-    if !STARTING_RESOURCES.contains(&setup.resources) {
-        return Err("unknown starting resources");
-    }
-    args.push(format!("-autostart-specula-resources={}", setup.resources));
-    for (index, slot) in setup.slots.iter().enumerate() {
-        let player = index + 1;
-        if slot.civ != "random" && !civs().any(|(code, _)| code == slot.civ) {
-            return Err("unknown civ");
-        }
-        args.push(format!("-autostart-civ={player}:{}", slot.civ));
-        if let SlotKind::Petra(difficulty) = slot.kind {
-            if difficulty > MAX_DIFFICULTY {
-                return Err("unknown difficulty");
-            }
-            args.push(format!("-autostart-ai={player}:petra"));
-            args.push(format!("-autostart-aidiff={player}:{difficulty}"));
-        }
-    }
-    Ok(args)
 }
 
 /// The engine's command JSON for `order`, field for field as the session

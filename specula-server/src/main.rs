@@ -11,10 +11,8 @@ mod observer;
 mod play;
 mod registry;
 mod seats;
-// Nothing builds the settings until the setup protocol (M15) and the engine's
-// settings file (M20).
-#[allow(dead_code)]
 mod settings;
+mod setup;
 mod stop;
 mod terrain;
 mod usage;
@@ -59,7 +57,6 @@ use crate::delta::DeltaMeter;
 use crate::feed::Record;
 use crate::history::History;
 use crate::play::Play;
-use crate::play::Setup;
 use crate::registry::MatchId;
 use crate::registry::Registry;
 use crate::usage::Usage;
@@ -241,6 +238,7 @@ async fn main() {
                 play_status,
                 new_status,
                 play_new,
+                setup_socket,
                 play_action,
                 play_viewer,
                 play_detail_viewer,
@@ -368,6 +366,12 @@ async fn match_page(
     cookies: &CookieJar<'_>,
     referrer: usage::Referrer,
 ) -> Option<web::IndexPage> {
+    // A setup is its own page (D13); one that closed says why.
+    if registry.setup_page(id) {
+        return web::render("setup.html", pkg, assets, atlases, usage, cookies, referrer)
+            .await
+            .map(web::IndexPage::Page);
+    }
     let source = registry.resolve(id)?;
     // An ended match is its replay (D23), which the worker opens only from
     // a moment.
@@ -394,6 +398,11 @@ async fn match_map_page(
     cookies: &CookieJar<'_>,
     referrer: usage::Referrer,
 ) -> Option<web::IndexPage> {
+    if registry.setup_page(id) {
+        return Some(web::IndexPage::Redirect(Box::new(
+            rocket::response::Redirect::to(format!("/g/{id}")),
+        )));
+    }
     let source = registry.resolve(id)?;
     // As for `match_page`.
     if t.is_none() && source.replay_only() {
@@ -454,12 +463,10 @@ fn new_status(registry: &State<Arc<Registry>>, cookies: &CookieJar<'_>) -> Optio
     if registry.broadcast().is_some() {
         return None;
     }
-    let own = usage::visitor(cookies).and_then(|visitor| registry.own_running(&visitor));
-    let mine = own.is_some();
+    let own = usage::visitor(cookies).and_then(|visitor| registry.own_hosted(&visitor));
     Some(Json(
         play::form_json(
-            mine || !registry.slot_free(),
-            mine,
+            own.is_some() || !registry.slot_free(),
             own,
             registry.latest_running(),
             registry.stopping(),
@@ -468,8 +475,8 @@ fn new_status(registry: &State<Arc<Registry>>, cookies: &CookieJar<'_>) -> Optio
     ))
 }
 
-/// Starts a game from the setup page's form and answers its UUID; the text
-/// says why not.
+/// Opens a setup for the visitor (D13) and answers its UUID; the text says
+/// why not. The form is the nickname only.
 #[rocket::post("/new", data = "<form>")]
 fn play_new(
     form: rocket::form::Form<HashMap<String, String>>,
@@ -482,9 +489,12 @@ fn play_new(
     }
     // The page set the cookie when it loaded.
     let visitor = usage::visitor(cookies).ok_or(refuse("no visitor cookie"))?;
-    let setup = Setup::from_form(&form).map_err(refuse)?;
+    let nickname = form
+        .get("nickname")
+        .and_then(|name| nickname::Nickname::parse(name))
+        .ok_or(refuse("bad nickname"))?;
     registry
-        .launch(&visitor, &setup)
+        .open_setup(&visitor, nickname, None)
         .map(|id| id.to_string())
         .map_err(refuse)
 }
@@ -517,6 +527,136 @@ fn play_action(
         _ => Err("unknown action"),
     }
     .map_err(refuse)
+}
+
+/// Sent on a setup socket that closes as it opens, or for a match that is
+/// no setup any more.
+fn done_channel(socket: WebSocket, text: String) -> Channel<'static> {
+    socket.channel(move |mut stream| {
+        Box::pin(async move {
+            stream.send(rocket_ws::Message::text(text)).await?;
+            Ok(())
+        })
+    })
+}
+
+/// Counts a visitor's socket in the room and, once they are a member, in
+/// the seat table (U2); undone when the stream closes.
+struct SetupGuard {
+    found: Arc<registry::Match>,
+    cookie: String,
+    counted: bool,
+}
+
+impl SetupGuard {
+    /// A socket counts for its member once, however often they join.
+    fn member(&mut self) {
+        if !self.counted {
+            self.counted = self.found.seats.connect(&self.cookie);
+        }
+    }
+}
+
+impl Drop for SetupGuard {
+    fn drop(&mut self) {
+        self.found.room.close_socket();
+        if self.counted {
+            self.found.seats.disconnect(&self.cookie);
+        }
+    }
+}
+
+/// The setup page's socket (M15): the catalog, then the whole state at
+/// every change, and the visitor's requests back. Anything that is not the
+/// visitor's to ask is dropped.
+#[rocket::get("/g/<id>/setup")]
+fn setup_socket(
+    id: MatchId,
+    socket: WebSocket,
+    registry: &State<Arc<Registry>>,
+    cookies: &CookieJar<'_>,
+) -> Option<Channel<'static>> {
+    if let Some(reason) = registry.closed_reason(id) {
+        return Some(done_channel(socket, setup::closed_json(reason)));
+    }
+    let Some(found) = registry
+        .hosted(id)
+        .filter(|found| found.state() == registry::MatchState::Setup)
+    else {
+        // Launched, or on its way: the page reloads into the game.
+        registry.resolve(id)?;
+        return Some(done_channel(socket, r#"{"type":"launched"}"#.to_string()));
+    };
+    let cookie = usage::visitor(cookies)?;
+    let registry = Arc::clone(registry);
+    found.room.open_socket();
+    let mut guard = SetupGuard {
+        found: Arc::clone(&found),
+        cookie: cookie.clone(),
+        counted: false,
+    };
+    guard.member();
+    Some(socket.channel(move |mut stream| {
+        Box::pin(async move {
+            let mut changes = guard.found.room.subscribe();
+            let Some((catalog, catalog_json)) = registry.catalog() else {
+                return Ok(());
+            };
+            stream.send(rocket_ws::Message::text(catalog_json)).await?;
+            loop {
+                let (state, phase) =
+                    guard
+                        .found
+                        .room
+                        .state_json(&guard.found.seats, catalog, Some(&cookie));
+                match phase {
+                    // Nothing while launching: the next state is `launched`,
+                    // or the setup open again.
+                    setup::Phase::Launching => {}
+                    setup::Phase::Open => stream.send(rocket_ws::Message::text(state)).await?,
+                    setup::Phase::Launched | setup::Phase::Closed(_) => {
+                        stream.send(rocket_ws::Message::text(state)).await?;
+                        return Ok(());
+                    }
+                }
+                // Until the next change; requests are served as they come.
+                loop {
+                    rocket::tokio::select! {
+                        biased;
+                        incoming = stream.next() => {
+                            let Some(message) = incoming else {
+                                return Ok(());
+                            };
+                            let rocket_ws::Message::Text(text) = message? else {
+                                continue;
+                            };
+                            let Some(request) = setup::parse(&text) else {
+                                continue;
+                            };
+                            let joined = matches!(request, setup::Request::Join(_));
+                            let launch = matches!(request, setup::Request::Launch);
+                            let result = registry.setup_request(id, &cookie, request);
+                            if joined {
+                                guard.member();
+                            }
+                            if let (true, Err(reason)) = (launch, result) {
+                                let error = serde_json::json!({ "type": "error", "text": reason });
+                                stream
+                                    .send(rocket_ws::Message::text(error.to_string()))
+                                    .await?;
+                            }
+                        }
+                        changed = changes.changed() => {
+                            if changed.is_err() {
+                                return Ok(());
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
+        })
+    }))
 }
 
 /// The stream of the visitor's seat: undelayed, and only what its player

@@ -9,6 +9,8 @@
 //! no other visitor can take the name meanwhile.
 
 use std::sync::Mutex;
+use std::time::Duration;
+use std::time::Instant;
 
 use crate::nickname::Nickname;
 use crate::nickname::suffix_duplicates;
@@ -31,17 +33,58 @@ struct Member {
     nickname: Nickname,
     player: Option<u8>,
     present: bool,
+    ready: Ready,
+    /// Open setup sockets of this cookie.
+    sockets: u32,
+    /// When the last setup socket closed; a refresh reconnects within
+    /// `LEAVE_GRACE` and keeps the seat.
+    away_since: Option<Instant>,
+    /// The seat held when they left the setup, for D37.
+    last_player: Option<u8>,
+}
+
+/// Vanilla's ready states (`ReadyController.js`).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Ready {
+    No = 0,
+    Yes = 1,
+    /// The host's, and a client's who pressed Ready twice.
+    Stay = 2,
+}
+
+impl Ready {
+    pub fn from_u8(state: u8) -> Option<Ready> {
+        match state {
+            0 => Some(Ready::No),
+            1 => Some(Ready::Yes),
+            2 => Some(Ready::Stay),
+            _ => None,
+        }
+    }
+
+    pub fn as_u8(self) -> u8 {
+        self as u8
+    }
+}
+
+/// One member as the setup page shows them.
+pub struct MemberView {
+    pub name: Nickname,
+    pub player: Option<u8>,
+    pub present: bool,
+    pub connected: bool,
+    pub ready: Ready,
 }
 
 /// Where a host transfer looks for the next host.
-// Built only by `leave`'s callers (M15, M25).
-#[allow(dead_code)]
 #[derive(Clone, Copy)]
 pub enum Phase {
     /// The earliest joiner still here, seated or not (D38).
     Setup,
     /// The earliest joiner still here who holds a seat still in the game
     /// (D46): a resigned or defeated player is out of it.
+    // Built by in-game presence (M25).
+    #[allow(dead_code)]
     Running,
 }
 
@@ -77,6 +120,10 @@ impl Seats {
                     nickname,
                     player: None,
                     present: true,
+                    ready: Ready::No,
+                    sockets: 0,
+                    away_since: None,
+                    last_player: None,
                 });
                 table.members.len() - 1
             }
@@ -101,15 +148,16 @@ impl Seats {
         {
             return Err("that slot is taken");
         }
-        table.members[index].player = player;
+        let member = &mut table.members[index];
+        if member.player != player {
+            member.ready = Ready::No;
+        }
+        member.player = player;
         Ok(())
     }
 
     /// Marks `cookie` gone, and passes the host powers on if they held
     /// them. `active` says whether a player is still in the game.
-    // Its callers come with the setup socket (M15) and presence (M25);
-    // until then nobody leaves a match but by its end.
-    #[allow(dead_code)]
     pub fn leave(&self, cookie: &str, phase: Phase, active: impl Fn(u8) -> bool) {
         let table = &mut *self.inner.lock().unwrap();
         let Some(index) = table.index_of(cookie) else {
@@ -151,6 +199,215 @@ impl Seats {
             .iter()
             .filter_map(|member| member.player)
             .collect()
+    }
+
+    pub fn index_of(&self, cookie: &str) -> Option<usize> {
+        self.inner.lock().unwrap().index_of(cookie)
+    }
+
+    /// Host operations name members by index; cookies never leave the
+    /// server.
+    pub fn cookie_at(&self, index: usize) -> Option<String> {
+        let table = self.inner.lock().unwrap();
+        Some(table.members.get(index)?.cookie.clone())
+    }
+
+    pub fn nickname_of(&self, cookie: &str) -> Option<Nickname> {
+        let table = self.inner.lock().unwrap();
+        Some(table.members[table.index_of(cookie)?].nickname.clone())
+    }
+
+    /// The member holding player `player`.
+    pub fn cookie_of_player(&self, player: u8) -> Option<String> {
+        let table = self.inner.lock().unwrap();
+        table
+            .members
+            .iter()
+            .find(|member| member.player == Some(player))
+            .map(|member| member.cookie.clone())
+    }
+
+    /// Unseats every member holding a player number above `count`
+    /// (`unassignInvalidPlayers`); answers whether any.
+    pub fn unseat_beyond(&self, count: usize) -> bool {
+        let table = &mut *self.inner.lock().unwrap();
+        let mut any = false;
+        for member in &mut table.members {
+            if member
+                .player
+                .is_some_and(|player| usize::from(player) > count)
+            {
+                member.player = None;
+                member.ready = Ready::No;
+                any = true;
+            }
+        }
+        any
+    }
+
+    /// A setup socket of `cookie` opened; answers whether they are a member
+    /// (a visitor who has not joined has nothing to count).
+    pub fn connect(&self, cookie: &str) -> bool {
+        let table = &mut *self.inner.lock().unwrap();
+        let Some(index) = table.index_of(cookie) else {
+            return false;
+        };
+        let member = &mut table.members[index];
+        member.sockets += 1;
+        member.away_since = None;
+        true
+    }
+
+    pub fn disconnect(&self, cookie: &str) {
+        let table = &mut *self.inner.lock().unwrap();
+        if let Some(index) = table.index_of(cookie) {
+            let member = &mut table.members[index];
+            member.sockets = member.sockets.saturating_sub(1);
+            if member.sockets == 0 {
+                member.away_since = Some(Instant::now());
+            }
+        }
+    }
+
+    /// Members present with no setup socket for longer than `grace` (U2).
+    pub fn due_to_leave(&self, grace: Duration) -> Vec<String> {
+        let table = self.inner.lock().unwrap();
+        table
+            .members
+            .iter()
+            .filter(|member| {
+                member.present
+                    && member.sockets == 0
+                    && member
+                        .away_since
+                        .is_some_and(|since| since.elapsed() >= grace)
+            })
+            .map(|member| member.cookie.clone())
+            .collect()
+    }
+
+    /// A member leaves the setup: their seat is remembered for their return
+    /// and freed. Answers whether they held one.
+    pub fn leave_setup(&self, cookie: &str) -> bool {
+        let seated = {
+            let table = &mut *self.inner.lock().unwrap();
+            let Some(index) = table.index_of(cookie) else {
+                return false;
+            };
+            let member = &mut table.members[index];
+            let seated = member.player.is_some();
+            member.last_player = member.player;
+            member.player = None;
+            member.ready = Ready::No;
+            seated
+        };
+        self.leave(cookie, Phase::Setup, |_| true);
+        seated
+    }
+
+    /// A member coming back takes the seat they held if `free` still
+    /// offers it and nobody holds it (D37).
+    pub fn take_back(&self, cookie: &str, free: impl Fn(u8) -> bool) -> Option<u8> {
+        let table = &mut *self.inner.lock().unwrap();
+        let index = table.index_of(cookie)?;
+        let held = table.members[index].last_player?;
+        table.members[index].last_player = None;
+        let taken = table
+            .members
+            .iter()
+            .any(|member| member.player == Some(held));
+        if taken || !free(held) {
+            return None;
+        }
+        let member = &mut table.members[index];
+        member.player = Some(held);
+        member.ready = Ready::No;
+        Some(held)
+    }
+
+    /// Two seated members trade seats.
+    pub fn swap_players(&self, a: &str, b: &str) -> Result<(), &'static str> {
+        let table = &mut *self.inner.lock().unwrap();
+        let a = table.index_of(a).ok_or("not in this match")?;
+        let b = table.index_of(b).ok_or("not in this match")?;
+        let (first, second) = (table.members[a].player, table.members[b].player);
+        if first.is_none() || second.is_none() {
+            return Err("not seated");
+        }
+        table.members[a].player = second;
+        table.members[b].player = first;
+        Ok(())
+    }
+
+    /// Only a seated member readies, and not the host, whose ready stays
+    /// `Stay` (`ReadyButton`'s constructor).
+    pub fn set_ready(&self, cookie: &str, ready: Ready) -> Result<(), &'static str> {
+        let table = &mut *self.inner.lock().unwrap();
+        let index = table.index_of(cookie).ok_or("not in this match")?;
+        if table.host == Some(index) {
+            return Err("the host never readies");
+        }
+        let member = &mut table.members[index];
+        if member.player.is_none() {
+            return Err("not seated");
+        }
+        member.ready = ready;
+        Ok(())
+    }
+
+    /// `CNetServerWorker::ClearAllPlayerReady`: Ready goes back to Not
+    /// ready, Stay Ready stays.
+    pub fn reset_ready(&self) {
+        let table = &mut *self.inner.lock().unwrap();
+        for member in &mut table.members {
+            if member.ready == Ready::Yes {
+                member.ready = Ready::No;
+            }
+        }
+    }
+
+    pub fn force_host_stay(&self) {
+        let table = &mut *self.inner.lock().unwrap();
+        if let Some(host) = table.host {
+            table.members[host].ready = Ready::Stay;
+        }
+    }
+
+    /// Every member in join order, and the host's index.
+    pub fn snapshot(&self) -> (Vec<MemberView>, Option<usize>) {
+        let table = self.inner.lock().unwrap();
+        let views = table
+            .members
+            .iter()
+            .map(|member| MemberView {
+                name: member.nickname.clone(),
+                player: member.player,
+                present: member.present,
+                connected: member.sockets > 0,
+                ready: member.ready,
+            })
+            .collect();
+        (views, table.host)
+    }
+
+    /// Seated members' player numbers and names, for the launch.
+    pub fn seated_names(&self) -> Vec<(u8, Nickname)> {
+        let table = self.inner.lock().unwrap();
+        table
+            .members
+            .iter()
+            .filter_map(|member| Some((member.player?, member.nickname.clone())))
+            .collect()
+    }
+
+    /// Whether no seated member is Not ready. The host counts too, but is
+    /// always Stay ready (`force_host_stay`).
+    pub fn everyone_ready(&self) -> bool {
+        let table = self.inner.lock().unwrap();
+        table
+            .members
+            .iter()
+            .all(|member| member.player.is_none() || member.ready != Ready::No)
     }
 }
 

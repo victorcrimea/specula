@@ -35,6 +35,7 @@ mod projectile;
 mod render;
 mod research;
 mod selection;
+mod setup;
 mod shadow;
 mod silhouette;
 mod sky;
@@ -1801,6 +1802,18 @@ pub fn observer_main(
 pub fn play_setup_main() {
     set_panic_hook();
     lang::start_page();
+}
+
+/// Entry point of setup.html, a match's setup (D13): the host edits the
+/// settings and the visitors watch, over the setup socket.
+#[wasm_bindgen]
+pub fn setup_main() {
+    set_panic_hook();
+    wasm_bindgen_futures::spawn_local(async {
+        if let Err(error) = setup::run().await {
+            web_sys::console::error_1(&error.into());
+        }
+    });
 }
 
 /// Entry point of unit.html.
@@ -4226,6 +4239,28 @@ fn open_setup() {
     }
 }
 
+/// Puts `text` on the clipboard. An insecure origin has no clipboard; the
+/// caller's label then stays as it is.
+pub(crate) fn write_clipboard(text: &str) -> bool {
+    let Some(window) = web_sys::window() else {
+        return false;
+    };
+    // Through Reflect: the Clipboard API is not among web-sys's enabled
+    // features, and it is one call.
+    let navigator = window.navigator();
+    js_sys::Reflect::get(&navigator, &"clipboard".into())
+        .ok()
+        .filter(|clipboard| !clipboard.is_undefined())
+        .and_then(|clipboard| {
+            let function = js_sys::Reflect::get(&clipboard, &"writeText".into())
+                .ok()?
+                .dyn_into::<js_sys::Function>()
+                .ok()?;
+            function.call1(&clipboard, &text.into()).ok()
+        })
+        .is_some()
+}
+
 /// Copies a link to the match at the playhead; `t` is the clock's seconds.
 fn copy_match_link(app: &Rc<RefCell<App>>) {
     let Some(window) = web_sys::window() else {
@@ -4248,21 +4283,7 @@ fn copy_match_link(app: &Rc<RefCell<App>>) {
         "{}{path}?t={seconds}",
         location.origin().unwrap_or_default()
     );
-    // Through Reflect: the Clipboard API is not among web-sys's enabled
-    // features, and it is one call.
-    let navigator = window.navigator();
-    let write_text = js_sys::Reflect::get(&navigator, &"clipboard".into())
-        .ok()
-        .filter(|clipboard| !clipboard.is_undefined())
-        .and_then(|clipboard| {
-            let function = js_sys::Reflect::get(&clipboard, &"writeText".into())
-                .ok()?
-                .dyn_into::<js_sys::Function>()
-                .ok()?;
-            function.call1(&clipboard, &link.into()).ok()
-        });
-    // An insecure origin has no clipboard; the label then stays as it is.
-    if write_text.is_none() {
+    if !write_clipboard(&link) {
         return;
     }
     let app_ref = &mut *app.borrow_mut();

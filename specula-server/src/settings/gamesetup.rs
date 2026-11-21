@@ -120,7 +120,7 @@ pub fn available_filters(catalog: &Catalog, kind: MapType) -> Vec<&'static MapFi
 }
 
 /// Index 0 is the default, as `prepareForDropdown` without a `Default`.
-fn map_choices(catalog: &Catalog, kind: MapType, filter: &str) -> Vec<String> {
+pub(crate) fn map_choices(catalog: &Catalog, kind: MapType, filter: &str) -> Vec<String> {
     let mut choices = Vec::new();
     if kind == MapType::Random {
         choices.push(RANDOM.to_string());
@@ -352,6 +352,8 @@ pub enum Change {
     MapFilter(String),
     Map(Choice<String>),
     /// `MapBrowserPage.onSubmitMapSelection`.
+    // The setup page has no map browser, so the protocol never builds it.
+    #[allow(dead_code)]
     BrowseMap {
         kind: MapType,
         filter: String,

@@ -45,7 +45,7 @@ impl<T: Clone + Into<Value>> Choice<T> {
 
 impl Choice<String> {
     /// `"random"` is the choice left to chance, anything else is itself.
-    fn from_name(name: &str) -> Choice<String> {
+    pub(crate) fn from_name(name: &str) -> Choice<String> {
         if name == RANDOM {
             Choice::Random
         } else {

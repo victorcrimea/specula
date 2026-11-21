@@ -39,8 +39,6 @@ pub const AI_BEHAVIORS: [&str; 4] = ["random", "balanced", "defensive", "aggress
 /// `gui.gamesetup.aibehavior` in default.cfg.
 pub const DEFAULT_AI_BEHAVIOR: &str = "random";
 
-// M15 reads the catalog; until then only its counts are.
-#[allow(dead_code)]
 pub struct Catalog {
     pub maps: Vec<Map>,
     pub biomes: Vec<Biome>,
@@ -64,7 +62,6 @@ pub struct Catalog {
     pub ais: Vec<AiBot>,
 }
 
-#[allow(dead_code)]
 pub struct AiBot {
     /// The directory under `simulation/ai/`, which `PlayerData[i].AI` names.
     pub id: String,
@@ -95,6 +92,10 @@ impl MapType {
         }
     }
 
+    pub fn from_name(name: &str) -> Option<MapType> {
+        MapType::ALL.into_iter().find(|kind| kind.name() == name)
+    }
+
     fn dir(self) -> &'static str {
         match self {
             MapType::Skirmish => "maps/skirmishes",
@@ -111,7 +112,6 @@ impl MapType {
     }
 }
 
-#[allow(dead_code)]
 pub struct Map {
     pub kind: MapType,
     /// `initAttributes.map`: the path without its suffix, such as
@@ -128,22 +128,24 @@ pub struct Map {
     pub settings: Value,
 }
 
-#[allow(dead_code)]
 pub struct Biome {
     /// Relative to `rmbiome/` without `.json`, such as `generic/aegean`, which
     /// a map's `SupportedBiomes` prefixes or lists.
     pub id: String,
     pub title: String,
     pub description: String,
+    // Shown with the map previews (M22).
+    #[allow(dead_code)]
     pub preview: Option<String>,
 }
 
 /// Names are not here: they are the player templates', which `civs.txt`
 /// already holds.
-#[allow(dead_code)]
 pub struct Civ {
     pub code: String,
     /// A list, as `germ.json` writes it, though most civs write one string.
+    // No setup control reads it.
+    #[allow(dead_code)]
     pub cultures: Vec<String>,
     /// What `PlayerName` names an AI of this civ.
     pub ai_names: Vec<String>,
@@ -151,7 +153,6 @@ pub struct Civ {
     pub selectable: bool,
 }
 
-#[allow(dead_code)]
 pub struct GameSpeed {
     pub speed: f64,
     pub title: String,
@@ -160,7 +161,6 @@ pub struct GameSpeed {
     pub fast_forward: bool,
 }
 
-#[allow(dead_code)]
 pub struct MapSize {
     pub name: String,
     pub tooltip: String,
@@ -168,24 +168,27 @@ pub struct MapSize {
     pub default: bool,
 }
 
-#[allow(dead_code)]
 pub struct PlayerDefault {
     pub name: String,
+    // The setup's own defaults replace these (`PlayerCiv`, `PlayerColor`
+    // and the AI's constants), as vanilla's do.
+    #[allow(dead_code)]
     pub civ: String,
+    #[allow(dead_code)]
     pub color: [u8; 3],
     pub ai: String,
+    #[allow(dead_code)]
     pub ai_difficulty: u8,
+    #[allow(dead_code)]
     pub ai_behavior: String,
 }
 
-#[allow(dead_code)]
 pub struct PlayerPlacement {
     pub id: String,
     pub name: String,
     pub description: String,
 }
 
-#[allow(dead_code)]
 pub struct PopulationCapacity {
     pub name: String,
     pub title: String,
@@ -198,14 +201,12 @@ pub struct PopulationCapacity {
     pub option_default: u32,
 }
 
-#[allow(dead_code)]
 pub struct StartingResources {
     pub resources: u32,
     pub title: String,
     pub default: bool,
 }
 
-#[allow(dead_code)]
 pub struct TriggerDifficulty {
     pub difficulty: u8,
     pub name: String,
@@ -214,7 +215,6 @@ pub struct TriggerDifficulty {
     pub default: bool,
 }
 
-#[allow(dead_code)]
 pub struct VictoryCondition {
     /// The file name without `.json`, as `loadVictoryConditions` names it.
     pub name: String,

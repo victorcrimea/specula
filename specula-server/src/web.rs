@@ -116,11 +116,17 @@ impl<'r> FromParam<'r> for Page {
     type Error = &'r str;
 
     fn from_param(param: &'r str) -> Result<Self, Self::Error> {
-        ["index.html", "unit.html", "map.html", "play.html"]
-            .into_iter()
-            .find(|page| *page == param)
-            .map(Page)
-            .ok_or(param)
+        [
+            "index.html",
+            "unit.html",
+            "map.html",
+            "play.html",
+            "setup.html",
+        ]
+        .into_iter()
+        .find(|page| *page == param)
+        .map(Page)
+        .ok_or(param)
     }
 }
 
