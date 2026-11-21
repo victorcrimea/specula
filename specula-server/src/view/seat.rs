@@ -1742,6 +1742,14 @@ impl Seat {
         Ok(())
     }
 
+    /// Tells the seat's viewers a mutual ally's flare.
+    pub fn flare(&mut self, turn: u32, sender: u8, x: f32, z: f32) -> io::Result<()> {
+        let visual = self.stream.flare_message(turn, sender, x, z)?;
+        self.shown
+            .apply(Release::Flare(visual), None, self.shown.match_id);
+        Ok(())
+    }
+
     /// Tells the seat's viewers its control (`Hub::set_control`).
     pub fn control(&mut self, turn: u32, body: &[u8]) -> io::Result<()> {
         if let Some(op) = self.stream.set_control(turn, body)? {

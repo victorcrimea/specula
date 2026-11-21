@@ -90,6 +90,8 @@ struct Pending {
     /// The file chosen once the group is in.
     file: Option<FileRef>,
     until: f64,
+    /// `PlayAsUI`: heard wherever the camera is, as if omnipresent.
+    ui: bool,
 }
 
 /// The playlist music.js would be playing.
@@ -185,6 +187,24 @@ impl Audio {
             owned,
             file: None,
             until: now + PENDING_MS,
+            ui: false,
+        });
+    }
+
+    /// Asks for a sound group to be played as the GUI's
+    /// `Engine.PlayUISound` does: not placed in the world, so heard
+    /// wherever the camera is.
+    pub fn play_ui(&mut self, group: &str, now: f64) {
+        if !self.playing() {
+            return;
+        }
+        self.pending.push(Pending {
+            group: group.to_string(),
+            position: [0.0; 3],
+            owned: true,
+            file: None,
+            until: now + PENDING_MS,
+            ui: true,
         });
     }
 
@@ -229,7 +249,7 @@ impl Audio {
             match self.buffer(file) {
                 Some(Buffer::Ready(buffer)) => {
                     if let Some(listener) = listener {
-                        self.start(&group, &buffer, sound.position, listener);
+                        self.start(&group, &buffer, sound.position, sound.ui, listener);
                     }
                 }
                 Some(Buffer::Failed) => {}
@@ -279,12 +299,13 @@ impl Audio {
         group: &SoundGroup,
         buffer: &AudioBuffer,
         position: [f32; 3],
+        ui: bool,
         listener: &Listener,
     ) {
         let Some(buses) = &self.buses else {
             return;
         };
-        let omnipresent = group.flags & SOUND_OMNIPRESENT != 0;
+        let omnipresent = ui || group.flags & SOUND_OMNIPRESENT != 0;
         let distanceless = group.flags & SOUND_DISTANCELESS != 0;
         let (on_screen, angle, rolloff) = off_center(position, listener);
         if !on_screen && !distanceless && !omnipresent {

@@ -58,12 +58,18 @@ const MAP_PREVIEW_WIDTH: u32 = 400;
 const MAP_PREVIEW_HEIGHT: u32 = 300;
 /// The stock map preview images, under `UI`.
 const MAP_PREVIEWS: &str = "session/icons/mappreview";
+/// The minimap flare's animation, in the engine's own `mod`:
+/// `flare_texture_count` and `flare_render_size` in
+/// `gui/session/minimap/MiniMap.xml`.
+const FLARE_FRAMES: &str = "art/textures/animated/minimap-flare";
+const FLARE_FRAME_COUNT: u32 = 16;
+const FLARE_FRAME_SIDE: u32 = 128;
 const WEBP_QUALITY: f32 = 85.0;
 const BROTLI_QUALITY: u32 = 11;
 const BROTLI_WINDOW_BITS: u32 = 22;
 
 /// (custom property key, path under `UI`), copied as they are.
-const TEXTURES: [(&str, &str); 115] = [
+const TEXTURES: [(&str, &str); 120] = [
     ("hud-panels", "session/hud_panels.png"),
     ("line-horiz", "global/border/line_horiz.png"),
     ("line-vert", "global/border/line_vert.png"),
@@ -148,6 +154,23 @@ const TEXTURES: [(&str, &str); 115] = [
         "session/minimap-idle-highlight.png",
     ),
     ("minimap-idle-disabled", "session/minimap-idle-disabled.png"),
+    ("minimap-player-flare", "session/minimap-player-flare.png"),
+    (
+        "minimap-player-flare-highlight",
+        "session/minimap-player-flare-highlight.png",
+    ),
+    (
+        "minimap-observer-flare",
+        "session/minimap-observer-flare.png",
+    ),
+    (
+        "minimap-observer-flare-highlight",
+        "session/minimap-observer-flare-highlight.png",
+    ),
+    (
+        "minimap-flare-disabled",
+        "session/minimap-flare-disabled.png",
+    ),
     ("stance-defensive", "session/icons/stances/defensive.png"),
     // The `<icon>`s of gui/common/resources/, which tooltips name as
     // `[icon="icon_<code>"]`.
@@ -420,6 +443,19 @@ fn run(mod_dir: &Path, output: &Path, civs_path: &Path) -> Result<(), String> {
         written += bytes.len();
         properties.push((key, name));
     }
+    let mut frames = Vec::new();
+    for i in 0..FLARE_FRAME_COUNT {
+        let path = engine_mod
+            .join(FLARE_FRAMES)
+            .join(format!("frame{i:02}.png"));
+        let image =
+            decode_png(&read(&path)?).map_err(|error| format!("{}: {error}", path.display()))?;
+        frames.push(resize(image, FLARE_FRAME_SIDE)?);
+    }
+    let bytes = encode_png(&strip(frames))?;
+    let name = put(output, "minimap-flare", "png", &bytes, false)?;
+    written += bytes.len();
+    properties.push(("minimap-flare".to_string(), name));
     // The engine's own mod first, so a public cursor of the same name
     // wins, as the VFS mounts public over it.
     let mut cursors = BTreeMap::new();
@@ -675,6 +711,28 @@ fn crop(image: Rgba, width: u32, height: u32) -> Rgba {
         let start = (row * image.width * 4) as usize;
         let end = start + (width * 4) as usize;
         pixels.extend_from_slice(&image.pixels[start..end]);
+    }
+    Rgba {
+        width,
+        height,
+        pixels,
+    }
+}
+
+/// The frames side by side, in order.
+fn strip(frames: Vec<Rgba>) -> Rgba {
+    let height = frames.first().map_or(0, |frame| frame.height);
+    let width: u32 = frames.iter().map(|frame| frame.width).sum();
+    let mut pixels = vec![0; (width * height * 4) as usize];
+    let mut x = 0;
+    for frame in frames {
+        for row in 0..height.min(frame.height) {
+            let from = (row * frame.width * 4) as usize;
+            let to = ((row * width + x) * 4) as usize;
+            let length = (frame.width * 4) as usize;
+            pixels[to..to + length].copy_from_slice(&frame.pixels[from..from + length]);
+        }
+        x += frame.width;
     }
     Rgba {
         width,

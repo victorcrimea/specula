@@ -264,6 +264,11 @@ pub async fn status() -> Result<Status, String> {
 /// Posts `play/<action>` of the match (resign, end or rematch); the answer
 /// is the body, and the error the server's reason.
 pub async fn post(action: &str) -> Result<String, String> {
+    post_path(&format!("/play/{action}")).await
+}
+
+/// Posts to `path` under the match's base.
+pub async fn post_path(path: &str) -> Result<String, String> {
     let window = web_sys::window().ok_or("no window")?;
     // Through Reflect: RequestInit is not among web-sys's enabled features,
     // and it is one call.
@@ -273,7 +278,7 @@ pub async fn post(action: &str) -> Result<String, String> {
         .ok_or("no fetch")?;
     let init = js_sys::Object::new();
     let _ = js_sys::Reflect::set(&init, &"method".into(), &"POST".into());
-    let url = JsValue::from_str(&format!("{}/play/{action}", crate::match_base()));
+    let url = JsValue::from_str(&format!("{}{path}", crate::match_base()));
     let promise: js_sys::Promise = fetch
         .call2(&window, &url, &init)
         .map_err(|_| "cannot send the request")?
@@ -295,7 +300,7 @@ pub async fn post(action: &str) -> Result<String, String> {
     if response.ok() {
         return Ok(body);
     }
-    Err(format!("{action}: {body}"))
+    Err(format!("{path}: {body}"))
 }
 
 /// Opens the match's page again, which shows it as it now is for the

@@ -1,8 +1,8 @@
-//! The viewer stream, wire format v24: messages for each keyframe, turn or
+//! The viewer stream, wire format v25: messages for each keyframe, turn or
 //! match end, varints and zigzag as in `wire.rs`, positions and heights in
 //! 1/16 m, carried brotli-compressed as below.
 //!
-//! - kind 1 keyframe: varint turn, u8 wire version (24; a viewer stops
+//! - kind 1 keyframe: varint turn, u8 wire version (25; a viewer stops
 //!   at any other, since nothing after it would read right), u64 match id, f32 game speed (the
 //!   match's sim rate), varint delay in ms (how long after the game the
 //!   server shows it), varint first turn of the match's history, varint
@@ -62,6 +62,10 @@
 //!   changes or the ledger's shape changes, and once a second while a
 //!   budget is charged or a countdown runs. Budgets are as of the message;
 //!   a charged one runs down in real time after it.
+//! - kind 5 flare (v25): varint turn, u8 sender player, f32 x, f32 z (in
+//!   metres, little-endian). It is sent at once to the sender's mutual
+//!   allies' seat streams and, with the delay, to the observers'. It sits in
+//!   the frame like a pause, but is never in a keyframe (D51).
 //!
 //! A delta moves the entities as a viewer would, and lists only the
 //! entities whose result would be wrong. A delta applies in this order:
@@ -298,6 +302,8 @@
 //! - 5 starts: varint ms until the first turn is shown. Sent while the
 //!   server has turns but holds them all back (the delay), so a viewer
 //!   that has nothing to show yet can tell when it will.
+//! - 6 flare: f32 x, f32 z, an observer's flare. Only on the observers'
+//!   socket, at once, and never in a segment or in the history (D51).
 //!
 //! So the compression is done once per match, not per viewer, and a
 //! viewer joins at the open segment's keyframe (init.md 4).
@@ -349,6 +355,7 @@ use crate::feed::SoundTarget;
 use crate::feed::TemplateDetails;
 use crate::feed::Terrain;
 use crate::feed::Territory;
+use crate::flare;
 use crate::history::History;
 use crate::pause;
 use crate::registry::MatchId;
@@ -369,6 +376,7 @@ const MESSAGE_KEYFRAME: u8 = 1;
 const MESSAGE_DELTA: u8 = 2;
 const MESSAGE_ENDED: u8 = 3;
 const MESSAGE_PAUSE: u8 = 4;
+const MESSAGE_FLARE: u8 = 5;
 const CHANGED_POSITION: u64 = 1;
 const CHANGED_COLOR: u64 = 2;
 const CHANGED_ICON: u64 = 4;
@@ -426,6 +434,7 @@ const ENVELOPE_FRAME: u8 = 2;
 const ENVELOPE_MORE: u8 = 3;
 const ENVELOPE_ENDED: u8 = 4;
 const ENVELOPE_STARTS: u8 = 5;
+const ENVELOPE_FLARE: u8 = 6;
 
 pub type Message = Arc<[u8]>;
 
@@ -1090,6 +1099,8 @@ enum Release {
     Summary(Arc<SummaryEntry>),
     /// A pause or resume, a message in the visual frame.
     Pause(TrackOp),
+    /// A player's flare, a message in the visual frame.
+    Flare(TrackOp),
     /// A control message in the detail frame.
     Detail(TrackOp),
     End {
@@ -1161,7 +1172,7 @@ impl Shown {
                 let _ = self.visual.sender.send(visual);
                 let _ = self.detail.sender.send(detail);
             }
-            Release::Pause(op) => {
+            Release::Pause(op) | Release::Flare(op) => {
                 // Before the match's first turn there is no frame to put it in.
                 if !self.has_turn || self.ended.is_some() {
                     return;
@@ -1214,6 +1225,15 @@ impl Shown {
                 }
             }
         }
+    }
+
+    /// A message sent only on the visual socket at once, which no track
+    /// holds: an observer's flare is never stored (D51).
+    fn side(&self, message: Message) {
+        if !self.has_turn || self.ended.is_some() {
+            return;
+        }
+        let _ = self.visual.sender.send(message);
     }
 }
 
@@ -1671,6 +1691,16 @@ impl Stream {
         self.visual.push(&out.0, None)
     }
 
+    fn flare_message(&mut self, turn: u32, sender: u8, x: f32, z: f32) -> io::Result<TrackOp> {
+        let mut out = Writer::default();
+        out.u8(MESSAGE_FLARE);
+        out.varint(u64::from(turn));
+        out.u8(sender);
+        out.f32(x);
+        out.f32(z);
+        self.visual.push(&out.0, None)
+    }
+
     /// The final keyframes of an ending match, and the tails of its frames.
     fn finish(&mut self, common: &Common, turn: u32) -> (Ended, Vec<u8>, Vec<u8>) {
         // A match that ends while paused is over, not paused.
@@ -1754,6 +1784,9 @@ struct State {
     /// The registry dropped the hub; the publisher returns once nothing is
     /// queued, so the hub is freed when its last viewer closes.
     retired: bool,
+    /// How often each player and each observer may flare, and the
+    /// observers' shared budget.
+    flares: flare::Limiter,
 }
 
 impl State {
@@ -1767,6 +1800,18 @@ impl State {
             terrain_id: self.terrain.as_ref().map_or(0, |(id, _)| *id),
         }
     }
+}
+
+/// A flare needs a running match and a point on the map.
+fn check_flare(state: &State, x: f32, z: f32) -> Result<(), &'static str> {
+    if !state.has_turn || state.ended {
+        return Err("no game running");
+    }
+    let map_size = state.map_size as f32;
+    if !(x.is_finite() && z.is_finite()) || x < 0.0 || z < 0.0 || x > map_size || z > map_size {
+        return Err("off the map");
+    }
+    Ok(())
 }
 
 impl Shown {
@@ -1874,6 +1919,7 @@ impl Hub {
                 next_uuid: uuid,
                 uuids: Vec::new(),
                 retired: false,
+                flares: flare::Limiter::default(),
             }),
         }
     }
@@ -2137,6 +2183,63 @@ impl Hub {
             Ok(op) => self.queue(&mut state, Release::Pause(op)),
             Err(error) => eprintln!("cannot encode a ledger: {error}"),
         }
+    }
+
+    /// A player's flare: at once to its mutual allies' seats and, with the
+    /// delay, to the observers. It is never keyframed (D51).
+    pub fn flare_from_seat(&self, player: u32, x: f32, z: f32) -> Result<(), &'static str> {
+        let mut state = self.state.lock().unwrap();
+        check_flare(&state, x, z)?;
+        if !state
+            .flares
+            .allow(&[flare::Sender::Seat(player)], Instant::now())
+        {
+            return Err("too many flares");
+        }
+        let turn = state.turn;
+        let sender = player as u8;
+        let allies: Vec<usize> = state
+            .seats
+            .iter()
+            .enumerate()
+            .filter(|(_, seat)| {
+                seat.player != player
+                    && seat::mutual_ally(
+                        &state.observer.players,
+                        player as usize,
+                        seat.player as usize,
+                    )
+            })
+            .map(|(index, _)| index)
+            .collect();
+        for index in allies {
+            if let Err(error) = state.seats[index].flare(turn, sender, x, z) {
+                eprintln!("cannot encode a flare: {error}");
+            }
+        }
+        match state.observer.flare_message(turn, sender, x, z) {
+            Ok(op) => self.queue(&mut state, Release::Flare(op)),
+            Err(error) => eprintln!("cannot encode a flare: {error}"),
+        }
+        Ok(())
+    }
+
+    /// An observer's flare, for the other observers only, at once and
+    /// never stored (D51).
+    pub fn flare_from_observer(&self, visitor: &str, x: f32, z: f32) -> Result<(), &'static str> {
+        let mut state = self.state.lock().unwrap();
+        check_flare(&state, x, z)?;
+        if !state.flares.allow(
+            &[
+                flare::Sender::Observers,
+                flare::Sender::Visitor(visitor.to_string()),
+            ],
+            Instant::now(),
+        ) {
+            return Err("too many flares");
+        }
+        state.shown.side(envelope_flare(x, z).into());
+        Ok(())
     }
 
     pub fn set_template_icon(&self, template: u32, icon: Icon) {
@@ -2809,7 +2912,11 @@ fn ending(
             data_files,
             ..
         } => Some((terrain.as_ref(), data_files)),
-        Release::Turn { .. } | Release::Summary(_) | Release::Pause(_) | Release::Detail(_) => None,
+        Release::Turn { .. }
+        | Release::Summary(_)
+        | Release::Pause(_)
+        | Release::Flare(_)
+        | Release::Detail(_) => None,
     })
 }
 
@@ -2860,6 +2967,15 @@ fn envelope_starts(wait: Duration) -> Message {
     out.u8(ENVELOPE_STARTS);
     out.varint(wait.as_millis() as u64);
     out.0.into()
+}
+
+/// An observer's flare, which only the observers' socket carries.
+fn envelope_flare(x: f32, z: f32) -> Vec<u8> {
+    let mut out = Writer::default();
+    out.u8(ENVELOPE_FLARE);
+    out.f32(x);
+    out.f32(z);
+    out.0
 }
 
 fn envelope_ended(message: &[u8]) -> Vec<u8> {

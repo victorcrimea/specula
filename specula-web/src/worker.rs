@@ -27,7 +27,8 @@
 //! u8 1 while it is followed; or u8 `POST_DETAIL`,
 //! then a detail stream message (`detail.rs`), none to clear the details;
 //! or u8 `POST_STARTS`, u32 ms until the server shows the match's first
-//! turn, while it holds them all back.
+//! turn, while it holds them all back; or u8 `POST_FLARE`, f32 x, f32 z, an
+//! observer's flare, at once.
 //!
 //! A page opened with `?t=<seconds>` (a copied link) names a moment of the
 //! clock of the match the hub shows, and the page passes it on in the
@@ -75,6 +76,7 @@ pub const POST_STATUS: u8 = 2;
 pub const POST_TERRAIN: u8 = 3;
 pub const POST_DETAIL: u8 = 4;
 pub const POST_STARTS: u8 = 5;
+pub const POST_FLARE: u8 = 6;
 pub const STATUS_LIVE: u8 = 1;
 pub const STATUS_PAUSED: u8 = 2;
 /// The shown match has ended.
@@ -381,6 +383,12 @@ impl Playback {
             }
             return;
         }
+        if envelope == stream::ENVELOPE_FLARE {
+            let mut out = vec![POST_FLARE];
+            out.extend_from_slice(body);
+            self.post(&out);
+            return;
+        }
         let messages = match envelope {
             stream::ENVELOPE_JOIN => stream::read_join(body, |_| false).map(|(frame, messages)| {
                 self.frame = Some(frame);
@@ -603,6 +611,9 @@ impl Playback {
         // Not a turn: it has no place in the playback's turn order, so it
         // only reaches a viewer who is live, and the keyframes of the others
         // carry the state.
+        if stream::is_flare(&message) {
+            return Applied::Live(message);
+        }
         if stream::is_pause(&message) {
             if let Err(error) = self.live_scene.apply(&message, 1.0) {
                 self.drop_stream(error);
@@ -986,7 +997,7 @@ impl Playback {
                 .and_then(|messages| {
                     messages
                         .into_iter()
-                        .filter(|message| !stream::is_pause(message))
+                        .filter(|message| !stream::is_pause(message) && !stream::is_flare(message))
                         .map(|message| Ok((stream::message_turn(&message)?, message)))
                         .collect::<Result<Vec<_>, &'static str>>()
                         .map_err(String::from)
@@ -1066,6 +1077,7 @@ impl Playback {
                 .set((page_id, page_revision.max(self.live_scene.terrain_revision)));
         }
         if !stream::is_pause(message)
+            && !stream::is_flare(message)
             && let Ok(turn) = stream::message_turn(message)
         {
             self.page_turn.set(turn);

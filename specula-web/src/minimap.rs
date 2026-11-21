@@ -3,6 +3,7 @@
 //! moving the camera there, as the game's `CMiniMap`.
 
 use std::cell::Cell;
+use std::cell::RefCell;
 use std::rc::Rc;
 
 use wasm_bindgen::JsCast;
@@ -16,6 +17,9 @@ use crate::render::Renderer;
 use crate::stream::Scene;
 use crate::terrain::TerrainImage;
 
+/// The flare presses: the map point and whether it was the left button.
+type FlarePresses = Rc<RefCell<Vec<([f32; 2], bool)>>>;
+
 pub struct Minimap {
     canvas: HtmlCanvasElement,
     renderer: Renderer,
@@ -23,6 +27,13 @@ pub struct Minimap {
     target: Rc<Cell<Option<[f32; 2]>>>,
     /// In metres; read by the pointer handlers too.
     map_size: Rc<Cell<f32>>,
+    /// Flares are armed: a press flares instead of moving the camera.
+    flare_armed: Rc<Cell<bool>>,
+    /// The presses while armed: the map point and whether it was the left
+    /// button.
+    flare_presses: FlarePresses,
+    /// The canvas's `data-cursor`, empty for none.
+    cursor: String,
     circular: bool,
     outline: Option<[[f32; 2]; 4]>,
     progress: f32,
@@ -37,12 +48,17 @@ impl Minimap {
         let renderer = Renderer::new(canvas.clone(), ratio).await?;
         let target = Rc::new(Cell::new(None));
         let map_size = Rc::new(Cell::new(0.0));
-        wire_pointer(&canvas, &target, &map_size);
+        let flare_armed = Rc::new(Cell::new(false));
+        let flare_presses = Rc::new(RefCell::new(Vec::new()));
+        wire_pointer(&canvas, &target, &map_size, &flare_armed, &flare_presses);
         Ok(Minimap {
             canvas,
             renderer,
             target,
             map_size,
+            flare_armed,
+            flare_presses,
+            cursor: String::new(),
             circular: false,
             outline: None,
             progress: 1.0,
@@ -53,6 +69,29 @@ impl Minimap {
     /// The map point to move the camera to, once per click or drag step.
     pub fn take_target(&self) -> Option<[f32; 2]> {
         self.target.take()
+    }
+
+    pub fn set_flare_armed(&self, armed: bool) {
+        self.flare_armed.set(armed);
+    }
+
+    /// The presses since the last call while flares are armed: the map
+    /// point, and whether it was the left button.
+    pub fn take_flare_presses(&self) -> Vec<([f32; 2], bool)> {
+        std::mem::take(&mut *self.flare_presses.borrow_mut())
+    }
+
+    pub fn set_cursor(&mut self, cursor: Option<&str>) {
+        let cursor = cursor.unwrap_or_default();
+        if cursor == self.cursor {
+            return;
+        }
+        let _ = if cursor.is_empty() {
+            self.canvas.remove_attribute("data-cursor")
+        } else {
+            self.canvas.set_attribute("data-cursor", cursor)
+        };
+        self.cursor = cursor.to_string();
     }
 
     pub fn set_scene(&mut self, scene: &Scene, palette: &[u32]) {
@@ -167,12 +206,14 @@ fn crop_by_circle(points: &[[f32; 2]; 4], center: [f32; 2], radius: f32) -> Vec<
 }
 
 /// The primary button or a finger moves the camera on press and while
-/// dragged, as `CMiniMap::HandleMessage`. The handlers live as long as the
-/// page.
+/// dragged, as `CMiniMap::HandleMessage`; while flares are armed a press is
+/// a flare instead. The handlers live as long as the page.
 fn wire_pointer(
     canvas: &HtmlCanvasElement,
     target: &Rc<Cell<Option<[f32; 2]>>>,
     map_size: &Rc<Cell<f32>>,
+    flare_armed: &Rc<Cell<bool>>,
+    flare_presses: &FlarePresses,
 ) {
     let held: Rc<Cell<Option<i32>>> = Rc::new(Cell::new(None));
     let point = {
@@ -201,9 +242,21 @@ fn wire_pointer(
 
     let (down_held, down_target, down_point) = (Rc::clone(&held), Rc::clone(target), point.clone());
     let down_canvas = canvas.clone();
+    let down_armed = Rc::clone(flare_armed);
+    let down_presses = Rc::clone(flare_presses);
     listen(
         "pointerdown",
         Closure::new(move |event: MouseEvent| {
+            if down_armed.get() {
+                let button = event.button();
+                if button == 0 || button == 2 {
+                    event.prevent_default();
+                    if let Some(point) = down_point(&event) {
+                        down_presses.borrow_mut().push((point, button == 0));
+                    }
+                }
+                return;
+            }
             if event.button() != 0 {
                 return;
             }

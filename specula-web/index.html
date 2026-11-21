@@ -192,6 +192,28 @@ body { cursor: var(--gui-cursor-default, default); }
 #idle-worker:hover { background-image: var(--gui-minimap-idle-highlight); }
 #idle-worker:disabled { background-image: var(--gui-minimap-idle-disabled); }
 #idle-worker[hidden], #idle-worker-count[hidden] { display: none; }
+/* flareButton (2 4 117 119), clipped as #diplomacy is, about the texture's
+   bottom right corner. */
+#flare { position: absolute; left: 2px; top: 4px; width: 115px; height: 115px;
+  padding: 0; border: 0; touch-action: none;
+  background: var(--gui-minimap-player-flare) 0 0 / 100% 100% no-repeat;
+  clip-path: path(evenodd, "M0 0H115V115H0Z M236 115A121 121 0 1 0 -6 115A121 121 0 1 0 236 115Z"); }
+#flare:hover { background-image: var(--gui-minimap-player-flare-highlight); }
+#flare[data-observer] { background-image: var(--gui-minimap-observer-flare); }
+#flare[data-observer]:hover { background-image: var(--gui-minimap-observer-flare-highlight); }
+#flare:disabled, #flare[data-observer]:disabled { background-image: var(--gui-minimap-flare-disabled); }
+#flare[hidden] { display: none; }
+/* CMiniMap's flares, over the map and not clipped to its circle, as
+   vanilla does (a TODO there). */
+#minimap-flares { position: absolute; left: 8px; top: 10px; width: 184px; height: 184px;
+  pointer-events: none; }
+.flare { position: absolute; width: 64px; height: 64px; translate: -50% -50%; }
+/* The frames are white, so the engine's multiply by the colour gives the
+   colour itself, and the mask gives the texture's alpha. JS moves the
+   mask to the frame. */
+.flare-frame { position: absolute; inset: 0; background: var(--flare-color);
+  mask: var(--gui-minimap-flare) 0 0 / 1024px 64px; }
+.flare-frame[hidden] { display: none; }
 /* totalNumberIdleWorkers (85% 89% 97% 98%), sans-bold-stroke-14. */
 #idle-worker-count { position: absolute; left: 170px; top: 181.5px; width: 24px; height: 18.5px;
   display: flex; align-items: flex-end; justify-content: flex-end; pointer-events: none;
@@ -1057,9 +1079,11 @@ body:not([data-debug="storage"]) #stats-storage { display: none; }
 <div id="minimap-background"></div>
 <div id="minimap-circle"></div>
 <canvas id="minimap" aria-label="Minimap" data-i18n-attrs="aria-label"></canvas>
+<div id="minimap-flares"></div>
 <button id="diplomacy" type="button" aria-pressed="false" aria-label="Diplomacy colours" data-tooltip="Toggle Diplomacy Colors" data-tooltip-style="sessionToolTipBottom" data-i18n-attrs="aria-label data-tooltip"></button>
 <button id="idle-worker" type="button" hidden disabled aria-label="Idle workers" data-tooltip-style="sessionToolTipBottom" data-i18n-attrs="aria-label"></button>
 <span id="idle-worker-count" hidden></span>
+<button id="flare" type="button" hidden aria-label="Send a flare to your allies." data-tooltip-style="sessionToolTip" data-i18n-attrs="aria-label"></button>
 <button id="minimap-toggle" type="button" aria-expanded="true" aria-label="Fold the minimap"></button>
 <span class="edge top"></span><span class="edge right"></span><span class="edge bottom"></span><span class="edge left"></span>
 <span class="edge corner top-right"></span><span class="edge corner bottom-right"></span><span class="edge corner bottom-left"></span><span class="edge corner top-left"></span>
@@ -1351,6 +1375,9 @@ body:not([data-debug="storage"]) #stats-storage { display: none; }
 <option value="0" selected data-i18n>Off</option>
 <option value="1" data-i18n>On</option>
 </select></label>
+<h3 data-i18n>Minimap</h3>
+<label data-i18n>Flare display duration <span><input id="flarelifetime" type="range" min="0" max="60" step="1" value="6">
+<span id="flarelifetime-value">6</span></span></label>
 <h3 data-i18n>Range overlays</h3>
 <label data-i18n>Attack ranges (Alt+C) <select id="ranges-attack">
 <option value="0" data-i18n>Off</option>
@@ -1520,8 +1547,8 @@ settings.</p>
   // Each control's own change handler applies and saves it, so a preset
   // only sets values. Document order puts a parent before its dependents,
   // so Max enables them before it reaches them. Projectiles, status bars,
-  // range overlays and tooltips show what happens rather than how well it
-  // is drawn, so no preset touches them.
+  // range overlays, tooltips and the flare lifetime show what happens
+  // rather than how well it is drawn, so no preset touches them.
   // Fog hides the far side of the map, which a maximalist wants to see.
   // Balanced takes each control's data-balanced, chosen from benchmark
   // runs for the look per frame time; the benchmark reads them too.
@@ -1530,7 +1557,8 @@ settings.</p>
     const pane = document.getElementById("pane-quality");
     for (const control of pane.querySelectorAll("select, input[type=range]")) {
       if (control.id === "projectiles" || control.id.startsWith("ranges-") ||
-          control.id === "detailed-tooltips" || control.id === "status-bars") continue;
+          control.id === "detailed-tooltips" || control.id === "status-bars" ||
+          control.id === "flarelifetime") continue;
       if (preset === "balanced") {
         const value = control.dataset.balanced;
         if (value === undefined) continue;

@@ -1,5 +1,5 @@
 //! Decoder for specula-server's viewer stream and match segments, wire
-//! format v24 (and v19 to v23 of stored matches); the layout is documented
+//! format v25 (and v19 to v24 of stored matches); the layout is documented
 //! in `specula-server/src/view.rs`.
 
 use std::collections::BTreeMap;
@@ -21,10 +21,12 @@ pub const ENVELOPE_FRAME: u8 = 2;
 pub const ENVELOPE_MORE: u8 = 3;
 pub const ENVELOPE_ENDED: u8 = 4;
 pub const ENVELOPE_STARTS: u8 = 5;
+pub const ENVELOPE_FLARE: u8 = 6;
 const MESSAGE_KEYFRAME: u8 = 1;
 const MESSAGE_DELTA: u8 = 2;
 const MESSAGE_ENDED: u8 = 3;
 const MESSAGE_PAUSE: u8 = 4;
+const MESSAGE_FLARE: u8 = 5;
 const CHANGED_POSITION: u64 = 1;
 const CHANGED_COLOR: u64 = 2;
 const CHANGED_ICON: u64 = 4;
@@ -710,6 +712,9 @@ impl Scene {
             MESSAGE_KEYFRAME => self.apply_keyframe(&mut cursor)?,
             MESSAGE_DELTA => self.apply_delta(&mut cursor, progress)?,
             MESSAGE_PAUSE => self.apply_pause(&mut cursor)?,
+            MESSAGE_FLARE => {
+                cursor.0 = &[];
+            }
             _ => return Err("unknown message kind"),
         }
         if !cursor.0.is_empty() {
@@ -1705,6 +1710,35 @@ pub fn is_keyframe(message: &[u8]) -> bool {
 
 pub fn is_pause(message: &[u8]) -> bool {
     message.first() == Some(&MESSAGE_PAUSE)
+}
+
+pub fn is_flare(message: &[u8]) -> bool {
+    message.first() == Some(&MESSAGE_FLARE)
+}
+
+/// A flare's sender player, position in metres.
+pub fn read_flare(message: &[u8]) -> Result<(u8, f32, f32), &'static str> {
+    let (_, body) = message.split_first().ok_or("empty message")?;
+    let mut cursor = ByteReader(body);
+    cursor.varint()?;
+    let sender = cursor.u8()?;
+    let x = f32::from_bits(cursor.u32()?);
+    let z = f32::from_bits(cursor.u32()?);
+    if !cursor.0.is_empty() {
+        return Err("trailing bytes");
+    }
+    Ok((sender, x, z))
+}
+
+/// An observer's flare: its position in metres.
+pub fn read_observer_flare(body: &[u8]) -> Result<(f32, f32), &'static str> {
+    let mut cursor = ByteReader(body);
+    let x = f32::from_bits(cursor.u32()?);
+    let z = f32::from_bits(cursor.u32()?);
+    if !cursor.0.is_empty() {
+        return Err("trailing bytes");
+    }
+    Ok((x, z))
 }
 
 pub fn is_ended(message: &[u8]) -> bool {

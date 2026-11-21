@@ -5,6 +5,7 @@ mod config;
 mod delta;
 mod detail;
 mod feed;
+mod flare;
 mod history;
 mod nickname;
 mod observer;
@@ -242,6 +243,7 @@ async fn main() {
                 setup_socket,
                 play_action,
                 play_kick,
+                observer_flare,
                 play_viewer,
                 play_detail_viewer,
                 play_segment_file,
@@ -508,13 +510,15 @@ fn play_new(
         .map_err(refuse)
 }
 
-/// The player's page's Resign, Pause, Claim, End, Exit and Rematch, for the
-/// visitor's game; the text says why not. A rematch answers the new game's
-/// UUID.
-#[rocket::post("/g/<id>/play/<action>")]
+/// The player's page's Resign, Pause, Claim, End, Exit, Rematch and Flare,
+/// for the visitor's game; the text says why not. A rematch answers the new
+/// game's UUID.
+#[rocket::post("/g/<id>/play/<action>?<x>&<z>")]
 fn play_action(
     id: MatchId,
     action: &str,
+    x: Option<f32>,
+    z: Option<f32>,
     registry: &State<Arc<Registry>>,
     cookies: &CookieJar<'_>,
 ) -> Result<String, rocket::response::status::BadRequest<&'static str>> {
@@ -535,9 +539,31 @@ fn play_action(
         "resume" => play.set_paused(&visitor, false).map(|()| String::new()),
         "claim" => play.claim(&visitor).map(|()| String::new()),
         "end" => play.end(&visitor).map(|()| String::new()),
+        "flare" => match (x, z) {
+            (Some(x), Some(z)) => play.flare(&visitor, x, z).map(|()| String::new()),
+            _ => Err("no position"),
+        },
         _ => Err("unknown action"),
     }
     .map_err(refuse)
+}
+
+/// An observer's flare, for the other observers only (D51).
+#[rocket::post("/g/<id>/flare?<x>&<z>")]
+fn observer_flare(
+    id: MatchId,
+    x: f32,
+    z: f32,
+    registry: &State<Arc<Registry>>,
+    cookies: &CookieJar<'_>,
+) -> Result<(), rocket::response::status::BadRequest<&'static str>> {
+    let refuse = rocket::response::status::BadRequest;
+    let visitor = usage::visitor(cookies).ok_or(refuse("no visitor cookie"))?;
+    let hub = registry
+        .resolve(id)
+        .and_then(|found| found.hub)
+        .ok_or(refuse("no match"))?;
+    hub.flare_from_observer(&visitor, x, z).map_err(refuse)
 }
 
 /// The host's kick of a seat from the diplomacy window (M29).

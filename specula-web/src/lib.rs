@@ -9,6 +9,7 @@ mod diplomacy;
 mod diplomacy_window;
 mod far;
 mod field;
+mod flare;
 mod game_menu;
 mod gpu;
 mod icons;
@@ -137,6 +138,7 @@ use crate::worker::COMMAND_SCRUB;
 use crate::worker::COMMAND_SEEK;
 use crate::worker::COMMAND_SPEED;
 use crate::worker::POST_DETAIL;
+use crate::worker::POST_FLARE;
 use crate::worker::POST_SCENE;
 use crate::worker::POST_STARTS;
 use crate::worker::POST_STATUS;
@@ -427,6 +429,9 @@ trait View {
     fn set_ghosts(&mut self, _ghosts: Vec<placement::Ghost>) {}
     /// Shows a walk order's target marker at x and z in metres.
     fn add_target_marker(&mut self, _x: f32, _z: f32) {}
+    /// Shows a flare's target marker at x and z in metres, owned by
+    /// `owner` (0 for an observer).
+    fn add_flare_marker(&mut self, _x: f32, _z: f32, _owner: u8) {}
     /// Where the camera is, for the benchmark to hold it there.
     fn camera(&self) -> Option<CameraPose> {
         None
@@ -688,6 +693,8 @@ struct App {
     /// On `/play`: the minimap's idle worker button.
     idle_worker: Option<IdleWorker>,
     idle_finder: idle::Finder,
+    /// The minimap's flare button and animation, on a match's pages.
+    flares: Option<flare::Flares>,
 }
 
 /// The minimap's idle worker button and its count.
@@ -1101,7 +1108,11 @@ impl App {
             }
         }
         self.play_sounds(now, progress);
+        self.flare_input();
         self.give_orders();
+        if let Some(flares) = &mut self.flares {
+            flares.frame(page_now(), self.scene.map_size as f32);
+        }
         if let Some(ranges) = &mut self.ranges {
             ranges.show(self.renderer.ranges());
         }
@@ -1205,6 +1216,137 @@ impl App {
         if let (Some(order), Some(uplink)) = (order, &self.uplink) {
             uplink.send(&order);
         }
+    }
+
+    /// `INPUT_FLARE`: the button's mode and a held K turn the next press, on
+    /// the view or the minimap, into a flare (`gui/session/input.js`).
+    fn flare_input(&mut self) {
+        let Some(flares) = self.flares.as_mut() else {
+            return;
+        };
+        let enabled = self.live && !self.match_over.ended;
+        flares.set_enabled(enabled);
+        let armed = flares.armed();
+        self.renderer
+            .set_preselecting(self.preselected.is_some() || armed);
+        if let Some(minimap) = &mut self.minimap {
+            minimap.set_flare_armed(armed);
+            minimap.set_cursor(armed.then(|| flares.cursor()));
+        }
+        let mut sends = Vec::new();
+        if armed {
+            for target in self.renderer.take_order_targets() {
+                if flares.held || target.left {
+                    if let Some([x, z]) = target.point {
+                        sends.push([x, z]);
+                    }
+                    if flares.toggled {
+                        flares.toggled = false;
+                    }
+                } else {
+                    flares.toggled = false;
+                }
+            }
+        }
+        let presses = self
+            .minimap
+            .as_ref()
+            .map(Minimap::take_flare_presses)
+            .unwrap_or_default();
+        for (point, left) in presses {
+            if flares.held || left {
+                sends.push(point);
+                if flares.toggled {
+                    flares.toggled = false;
+                }
+            } else {
+                flares.toggled = false;
+            }
+        }
+        // On an observer page `give_orders` returns before it sets a cursor.
+        if self.uplink.is_none() {
+            let cursor = if armed {
+                flares.cursor().to_string()
+            } else {
+                String::new()
+            };
+            if cursor != self.cursor {
+                let _ = if cursor.is_empty() {
+                    self.canvas.remove_attribute("data-cursor")
+                } else {
+                    self.canvas.set_attribute("data-cursor", &cursor)
+                };
+                self.cursor = cursor;
+            }
+        }
+        for [x, z] in sends {
+            self.send_flare(x, z);
+        }
+    }
+
+    /// Sends a flare at x and z in metres, to be shown at once, as
+    /// `triggerFlareAction` does.
+    fn send_flare(&mut self, x: f32, z: f32) {
+        let Some(flares) = self.flares.as_mut() else {
+            return;
+        };
+        if !flares.take_send(page_now()) {
+            return;
+        }
+        let observer = flares.observer;
+        let sender = if observer {
+            0
+        } else {
+            self.uplink.as_ref().and_then(Uplink::seat).unwrap_or(0) as u8
+        };
+        self.show_flare(sender, x, z);
+        wasm_bindgen_futures::spawn_local(flare::send(observer, x, z));
+    }
+
+    /// `renderAndPlayFlare`: the 3D marker owned by the sender (gaia white
+    /// for an observer), the minimap flare in the sender's colour, and the
+    /// sound.
+    fn show_flare(&mut self, sender: u8, x: f32, z: f32) {
+        self.renderer.add_flare_marker(x, z, sender);
+        let color = self
+            .palette
+            .get(sender as usize)
+            .copied()
+            .unwrap_or(0xFFFF_FFFF);
+        if let Some(document) = web_sys::window().and_then(|window| window.document())
+            && let Some(flares) = &mut self.flares
+        {
+            flares.add(&document, x, z, color, page_now());
+        }
+        if let Some(sound) = &mut self.sound {
+            sound.audio.play_ui(flare::SOUND, page_now());
+        }
+    }
+
+    /// `handleFlare`: a flare from the stream, subject to the receive limit.
+    fn accept_flare(&mut self, sender: u8, x: f32, z: f32) {
+        let allowed = {
+            let Some(flares) = self.flares.as_mut() else {
+                return;
+            };
+            if !self.live {
+                return;
+            }
+            flares.take_received(page_now())
+        };
+        if !allowed {
+            let name = self
+                .scene
+                .players
+                .get(sender as usize)
+                .filter(|_| sender != 0)
+                .map_or("an observer", |player| player.name.as_str());
+            web_sys::console::warn_1(
+                &format!("Received too many flares. Dropping a flare request by '{name}'.").into(),
+            );
+            return;
+        }
+        self.show_flare(sender, x, z);
     }
 
     fn give_orders(&mut self) {
@@ -1332,7 +1474,9 @@ impl App {
                 sounds.extend(action.sound);
             }
         }
-        self.renderer.set_preselecting(self.preselected.is_some());
+        self.renderer.set_preselecting(
+            self.preselected.is_some() || self.flares.as_ref().is_some_and(flare::Flares::armed),
+        );
         for (name, id) in sounds {
             self.renderer.queue_sound(id, name);
         }
@@ -1376,6 +1520,10 @@ impl App {
             .map(|action| (action.cursor, action.tooltip))
             .unwrap_or_default();
         let (cursor, tooltip) = cursor;
+        let cursor = match &self.flares {
+            Some(flares) if flares.armed() => flares.cursor().to_string(),
+            _ => cursor,
+        };
         if tooltip != self.action_tooltip {
             let _ = self.canvas.set_attribute(tooltip::ATTRIBUTE, &tooltip);
             self.action_tooltip = tooltip;
@@ -2162,6 +2310,14 @@ async fn run(
     } else {
         None
     };
+    // An older page has no flare button; flares are then not sent.
+    let flares = if page == Page::Observer && !match_base().is_empty() {
+        flare::Flares::new(&document, !seated)
+            .inspect_err(|error| web_sys::console::error_1(&format!("flare: {error}").into()))
+            .ok()
+    } else {
+        None
+    };
     let live_delay = match page {
         Page::Map => None,
         // The player's stream has no delay, whatever the observers' is.
@@ -2300,6 +2456,7 @@ async fn run(
         uplink: seated.then(Uplink::open),
         idle_worker,
         idle_finder: idle::Finder::default(),
+        flares,
         seat_shown: None,
         cursor: String::new(),
         action_tooltip: String::new(),
@@ -2315,6 +2472,7 @@ async fn run(
     wire_message_box(&app, &window);
     wire_game_menu(&app);
     wire_pause(&app, &window);
+    wire_flare(&app, &window);
     wire_summary(&app, &window);
     wire_command_hotkeys(&app, &window);
     wire_idle(&app, &window);
@@ -2327,6 +2485,12 @@ async fn run(
             element(&document, "shadowscutoff-value")?,
             &shadows,
         );
+        if let (Ok(slider), Ok(readout)) = (
+            element::<HtmlInputElement>(&document, "flarelifetime"),
+            element::<HtmlElement>(&document, "flarelifetime-value"),
+        ) {
+            wire_flare_lifetime(&app, slider, readout);
+        }
         wire_language(&app, element(&document, "language")?);
         wire_textures(&app, element(&document, "textures")?);
         wire_maps(&app, element(&document, "maps")?);
@@ -3342,6 +3506,95 @@ fn wire_command_hotkeys(app: &Rc<RefCell<App>>, window: &web_sys::Window) {
     on_key.forget();
 }
 
+/// A key event's `name` property as text, or empty.
+fn event_text(object: &JsValue, name: &str) -> String {
+    js_sys::Reflect::get(object, &name.into())
+        .ok()
+        .and_then(|value| value.as_string())
+        .unwrap_or_default()
+}
+
+fn event_flag(event: &web_sys::Event, name: &str) -> bool {
+    js_sys::Reflect::get(event, &name.into()).is_ok_and(|value| value.is_truthy())
+}
+
+/// Whether a key event's target is a field that takes typing.
+fn event_focused(event: &web_sys::Event) -> bool {
+    let tag = event
+        .target()
+        .map(|element| event_text(&element, "tagName"))
+        .unwrap_or_default();
+    matches!(tag.as_str(), "INPUT" | "SELECT" | "TEXTAREA")
+}
+
+/// The flare button and session.flare (K, held): the button enters the mode,
+/// and a held K flares with any mouse button, as `triggerFlareAction` does.
+fn wire_flare(app: &Rc<RefCell<App>>, window: &web_sys::Window) {
+    let Some(button) = app
+        .borrow()
+        .flares
+        .as_ref()
+        .map(|flares| flares.button.clone())
+    else {
+        return;
+    };
+    let target = Rc::clone(app);
+    let on_click = Closure::<dyn FnMut(MouseEvent)>::new(move |_: MouseEvent| {
+        if let Ok(mut app) = target.try_borrow_mut()
+            && let Some(flares) = &mut app.flares
+        {
+            flares.press_button();
+        }
+    });
+    button.set_onclick(Some(on_click.as_ref().unchecked_ref()));
+    on_click.forget();
+
+    let target = Rc::clone(app);
+    let on_key = Closure::<dyn FnMut(web_sys::Event)>::new(move |event: web_sys::Event| {
+        if event_text(&event, "code") != "KeyK"
+            || event_flag(&event, "ctrlKey")
+            || event_flag(&event, "altKey")
+            || event_flag(&event, "metaKey")
+            || event_focused(&event)
+        {
+            return;
+        }
+        if let Ok(mut app) = target.try_borrow_mut()
+            && let Some(flares) = &mut app.flares
+        {
+            flares.set_held(true);
+        }
+    });
+    let _ = window.add_event_listener_with_callback("keydown", on_key.as_ref().unchecked_ref());
+    // The window lives as long as the page, so its handler does too.
+    on_key.forget();
+
+    let target = Rc::clone(app);
+    let on_keyup = Closure::<dyn FnMut(web_sys::Event)>::new(move |event: web_sys::Event| {
+        if event_text(&event, "code") != "KeyK" {
+            return;
+        }
+        if let Ok(mut app) = target.try_borrow_mut()
+            && let Some(flares) = &mut app.flares
+        {
+            flares.set_held(false);
+        }
+    });
+    let _ = window.add_event_listener_with_callback("keyup", on_keyup.as_ref().unchecked_ref());
+    on_keyup.forget();
+
+    let target = Rc::clone(app);
+    let on_blur = Closure::<dyn FnMut(web_sys::Event)>::new(move |_: web_sys::Event| {
+        if let Ok(mut app) = target.try_borrow_mut()
+            && let Some(flares) = &mut app.flares
+        {
+            flares.set_held(false);
+        }
+    });
+    let _ = window.add_event_listener_with_callback("blur", on_blur.as_ref().unchecked_ref());
+    on_blur.forget();
+}
+
 /// The idle hotkeys (`hotkeys/misc.xml` and the idle worker button's, the
 /// engine's default keys): selection.idleworker (Period, NumDecimal),
 /// idlewarrior (Slash, NumDivide), idleunit (BackSlash) and idlebuilder
@@ -4026,6 +4279,55 @@ fn wire_list(
     });
 }
 
+/// The flare lifetime slider (`gui.session.flarelifetime`), kept across
+/// visits: how long the minimap shows a flare, 0 to 60 s. The 3D marker
+/// always lives 6 s, as in the game.
+fn wire_flare_lifetime(app: &Rc<RefCell<App>>, slider: HtmlInputElement, readout: HtmlElement) {
+    let in_range = |seconds: &f64| (0.0..=flare::MAX_LIFETIME_S).contains(seconds);
+    let saved = web_sys::window()
+        .and_then(|window| window.local_storage().ok().flatten())
+        .and_then(|storage| {
+            storage
+                .get_item(flare::LIFETIME_SETTINGS_KEY)
+                .ok()
+                .flatten()
+        })
+        .and_then(|text| text.parse::<f64>().ok())
+        .filter(in_range)
+        .unwrap_or(flare::DEFAULT_LIFETIME_S);
+    slider.set_value(&saved.to_string());
+    readout.set_text_content(Some(&format!("{saved}")));
+    if let Some(flares) = &mut app.borrow_mut().flares {
+        flares.set_lifetime(saved);
+    }
+
+    let target = Rc::clone(app);
+    let input = slider.clone();
+    on_input(&slider, move || {
+        let seconds = input
+            .value()
+            .parse::<f64>()
+            .ok()
+            .filter(in_range)
+            .unwrap_or(0.0);
+        readout.set_text_content(Some(&format!("{seconds}")));
+        if let Some(flares) = &mut target.borrow_mut().flares {
+            flares.set_lifetime(seconds);
+        }
+    });
+
+    // Saved on release only, so a drag does not write storage per step.
+    let input = slider.clone();
+    on_change(&slider, move || {
+        // Best effort: without storage the choice lasts only this visit.
+        if let Some(storage) =
+            web_sys::window().and_then(|window| window.local_storage().ok().flatten())
+        {
+            let _ = storage.set_item(flare::LIFETIME_SETTINGS_KEY, &input.value());
+        }
+    });
+}
+
 /// The shadow cutoff slider, kept across visits, applied as it is
 /// dragged; disabled while shadows are off, as in the game's options.
 fn wire_shadow_cutoff(
@@ -4589,6 +4891,12 @@ fn connect(app: &Rc<RefCell<App>>) {
                 }
             }
             Some((&POST_DETAIL, message)) => receive_detail(&receiver, message),
+            Some((&POST_FLARE, rest)) => match stream::read_observer_flare(rest) {
+                Ok((x, z)) => receiver.borrow_mut().accept_flare(0, x, z),
+                Err(error) => {
+                    web_sys::console::error_1(&format!("bad flare envelope: {error}").into())
+                }
+            },
             Some((&POST_STARTS, rest)) => {
                 if let Some(wait_ms) = rest.first_chunk::<4>() {
                     // The frame clock, which the countdown runs on.
@@ -4732,6 +5040,10 @@ fn fetch_link_uuid(app: std::rc::Weak<RefCell<App>>, match_id: u64) {
 
 /// `turn_ms` is the real time per turn when played back, 0 when live.
 fn receive(app_rc: &Rc<RefCell<App>>, turn_ms: f64, message: &[u8]) {
+    if stream::is_flare(message) {
+        receive_flare(app_rc, message);
+        return;
+    }
     let app = &mut *app_rc.borrow_mut();
     match app.scene.apply(message, app.progress) {
         // Not a turn: nothing moves, the veil only comes or goes.
@@ -4821,6 +5133,15 @@ fn receive(app_rc: &Rc<RefCell<App>>, turn_ms: f64, message: &[u8]) {
             web_sys::console::error_1(&format!("bad stream message: {error}").into());
             app.worker.terminate();
         }
+    }
+}
+
+/// A player's flare from the stream: a mutual ally's or, on the observer
+/// page, any player's.
+fn receive_flare(app: &Rc<RefCell<App>>, message: &[u8]) {
+    match stream::read_flare(message) {
+        Ok((sender, x, z)) => app.borrow_mut().accept_flare(sender, x, z),
+        Err(error) => web_sys::console::error_1(&format!("bad flare message: {error}").into()),
     }
 }
 

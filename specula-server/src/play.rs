@@ -705,6 +705,13 @@ impl Play {
         Ok(())
     }
 
+    /// A flare from `owner`'s seat, to its mutual allies and the observers
+    /// (D51).
+    pub fn flare(&self, visitor: &str, x: f32, z: f32) -> Result<(), &'static str> {
+        let seat = self.running_seat(visitor)?;
+        self.hub.flare_from_seat(u32::from(seat), x, z)
+    }
+
     /// Pauses or resumes the game for `owner`'s seat through the ledger, as
     /// the session's PauseControl does. A seat out of pause time is refused.
     pub fn set_paused(&self, owner: &str, paused: bool) -> Result<(), &'static str> {

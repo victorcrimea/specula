@@ -128,6 +128,7 @@ fn hotkey_keys(hotkey: &str) -> Option<&'static str> {
         "session.backtowork" => "Y",
         "session.guard" => "G",
         "session.patrol" => "P",
+        "session.flare" => "K",
         "session.gui.barter.toggle" => "Ctrl+B",
         "pause" => "Pause, Shift+Space",
         "session.massbarter" | "session.fulltradeswap" => "Shift",
