@@ -611,7 +611,7 @@ impl Playback {
         // Not a turn: it has no place in the playback's turn order, so it
         // only reaches a viewer who is live, and the keyframes of the others
         // carry the state.
-        if stream::is_flare(&message) {
+        if stream::is_transient(&message) {
             return Applied::Live(message);
         }
         if stream::is_pause(&message) {
@@ -997,7 +997,9 @@ impl Playback {
                 .and_then(|messages| {
                     messages
                         .into_iter()
-                        .filter(|message| !stream::is_pause(message) && !stream::is_flare(message))
+                        .filter(|message| {
+                            !stream::is_pause(message) && !stream::is_transient(message)
+                        })
                         .map(|message| Ok((stream::message_turn(&message)?, message)))
                         .collect::<Result<Vec<_>, &'static str>>()
                         .map_err(String::from)
@@ -1077,7 +1079,7 @@ impl Playback {
                 .set((page_id, page_revision.max(self.live_scene.terrain_revision)));
         }
         if !stream::is_pause(message)
-            && !stream::is_flare(message)
+            && !stream::is_transient(message)
             && let Ok(turn) = stream::message_turn(message)
         {
             self.page_turn.set(turn);

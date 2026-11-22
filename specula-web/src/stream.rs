@@ -27,6 +27,7 @@ const MESSAGE_DELTA: u8 = 2;
 const MESSAGE_ENDED: u8 = 3;
 const MESSAGE_PAUSE: u8 = 4;
 const MESSAGE_FLARE: u8 = 5;
+const MESSAGE_NOTIFICATION: u8 = 6;
 const CHANGED_POSITION: u64 = 1;
 const CHANGED_COLOR: u64 = 2;
 const CHANGED_ICON: u64 = 4;
@@ -712,7 +713,7 @@ impl Scene {
             MESSAGE_KEYFRAME => self.apply_keyframe(&mut cursor)?,
             MESSAGE_DELTA => self.apply_delta(&mut cursor, progress)?,
             MESSAGE_PAUSE => self.apply_pause(&mut cursor)?,
-            MESSAGE_FLARE => {
+            MESSAGE_FLARE | MESSAGE_NOTIFICATION => {
                 cursor.0 = &[];
             }
             _ => return Err("unknown message kind"),
@@ -1714,6 +1715,62 @@ pub fn is_pause(message: &[u8]) -> bool {
 
 pub fn is_flare(message: &[u8]) -> bool {
     message.first() == Some(&MESSAGE_FLARE)
+}
+
+pub fn is_notification(message: &[u8]) -> bool {
+    message.first() == Some(&MESSAGE_NOTIFICATION)
+}
+
+/// A message that is no turn and is in no keyframe: a flare or a
+/// notification.
+pub fn is_transient(message: &[u8]) -> bool {
+    is_flare(message) || is_notification(message)
+}
+
+pub const NOTE_ATTACKED: u8 = 1;
+pub const NOTE_AUTOQUEUE_STOPPED: u8 = 2;
+const NOTE_DOMESTIC: u8 = 1;
+const NOTE_UNIT: u8 = 2;
+
+/// What the session GUI would tell the player.
+pub struct Note {
+    pub turn: u32,
+    pub kind: u8,
+    /// The attacker's owner, Gaia 0.
+    pub attacker: u8,
+    /// The target is a domestic animal.
+    pub domestic: bool,
+    /// The target is a unit, which `focusAttack` follows.
+    pub unit: bool,
+    pub target: u32,
+    /// Metres.
+    pub x: f32,
+    pub z: f32,
+}
+
+pub fn read_notification(message: &[u8]) -> Result<Note, &'static str> {
+    let (_, body) = message.split_first().ok_or("empty message")?;
+    let mut cursor = ByteReader(body);
+    let turn = u32::try_from(cursor.varint()?).map_err(|_| "turn out of range")?;
+    let kind = cursor.u8()?;
+    let attacker = cursor.u8()?;
+    let flags = cursor.u8()?;
+    let target = u32::try_from(cursor.varint()?).map_err(|_| "entity out of range")?;
+    let x = f32::from_bits(cursor.u32()?);
+    let z = f32::from_bits(cursor.u32()?);
+    if !cursor.0.is_empty() {
+        return Err("trailing bytes");
+    }
+    Ok(Note {
+        turn,
+        kind,
+        attacker,
+        domestic: flags & NOTE_DOMESTIC != 0,
+        unit: flags & NOTE_UNIT != 0,
+        target,
+        x,
+        z,
+    })
 }
 
 /// A flare's sender player, position in metres.

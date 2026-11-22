@@ -29,6 +29,8 @@ pub const TIMESTAMP_KEY: &str = "specula.chat.timestamp";
 pub const NICK_KEY: &str = "specula.chat.nick";
 /// Hide what observers write while the visitor plays (D49), off by default.
 pub const HIDE_OBSERVERS_KEY: &str = "specula.chat.hideobservers";
+/// `gui.session.notifications.attack`, on unless turned off.
+pub const NOTIFY_ATTACK_KEY: &str = "specula.chat.notifyattack";
 /// `chat.session.extended`, on unless turned off.
 pub const EXTENDED_KEY: &str = "specula.chat.extended";
 /// The key `play.html` and the setup page keep the nickname under.
@@ -516,7 +518,7 @@ pub fn time_of(sent_ms: f64) -> String {
 }
 
 /// `TimestampFormat`; the backslash is the engine GUI's markup escape.
-fn stamp(sent_ms: f64) -> String {
+pub fn stamp(sent_ms: f64) -> String {
     lang::format(
         &lang::translate("\\[%(time)s]"),
         &[("time", &time_of(sent_ms))],

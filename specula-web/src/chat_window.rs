@@ -3,12 +3,16 @@
 //! of `chat_window.xml`, and the last lines on the screen for a while.
 //!
 //! What differs from the engine: the addressee list is the server's members
-//! (`chat::Chat::members`), the lines carry the server's send time, and there
-//! are no game or network notifications in the history, since the server
-//! sends none (CONTROL-IMPL.md V95).
+//! (`chat::Chat::members`), the lines carry the server's send time, and of
+//! the game and network notifications only the attack line is there, since
+//! the server sends no others (CONTROL-IMPL.md V95).
 
+use std::cell::Cell;
 use std::collections::VecDeque;
+use std::rc::Rc;
 
+use wasm_bindgen::JsCast;
+use wasm_bindgen::closure::Closure;
 use web_sys::Document;
 use web_sys::HtmlButtonElement;
 use web_sys::HtmlElement;
@@ -41,6 +45,23 @@ const FILTERS: [(&str, &str); 7] = [
     ("private", "Private chat"),
 ];
 
+/// Where `ChatMessageFormatSimulation.attack`'s line and the
+/// camera.lastattackfocus hotkey take the camera (`focusAttack`).
+#[derive(Clone, Copy)]
+pub struct Attack {
+    pub target: u32,
+    /// The target is a unit, so it is followed rather than looked at.
+    pub unit: bool,
+    pub x: f32,
+    pub z: f32,
+}
+
+/// The attack line's attribute that holds its `Attack`, read on a click.
+const FOCUS_ATTRIBUTE: &str = "data-focus";
+/// Stand-ins for the parts of a translated line that are not text.
+const ICON_MARK: char = '\u{E000}';
+const ATTACKER_MARK: char = '\u{E001}';
+
 /// What the page wires listeners to.
 pub struct Controls {
     pub input: HtmlInputElement,
@@ -61,6 +82,14 @@ enum Item {
     },
     /// An error of the server, as the engine's plain system lines.
     System(String),
+    /// `ChatMessageFormatSimulation.attack`, its text fixed on arrival as
+    /// the engine's history keeps it.
+    Attack {
+        domestic: bool,
+        attacker: String,
+        color: String,
+        received_ms: f64,
+    },
 }
 
 /// `#chat-window` and `#chat-overlay`.
@@ -95,6 +124,8 @@ pub struct ChatWindow {
     /// What the history was last drawn for.
     drawn: String,
     can_send: Option<bool>,
+    /// An attack line clicked since the last `take_focus`.
+    focus: Rc<Cell<Option<Attack>>>,
 }
 
 struct Captions {
@@ -136,13 +167,152 @@ impl ChatWindow {
             history_dirty: true,
             drawn: String::new(),
             can_send: None,
+            focus: Rc::new(Cell::new(None)),
         };
+        window.wire_focus();
         window.panel.set_hidden(true);
         window
             .extended
             .set_checked(chat::setting(chat::EXTENDED_KEY, true));
         window.apply_extended();
         Ok(window)
+    }
+
+    /// One listener on the overlay for every attack line, as the lines come
+    /// and go.
+    fn wire_focus(&self) {
+        let focus = Rc::clone(&self.focus);
+        let on_click = Closure::<dyn FnMut(web_sys::Event)>::new(move |event: web_sys::Event| {
+            let attack = event
+                .target()
+                .and_then(|target| target.dyn_into::<web_sys::Element>().ok())
+                .and_then(|element| {
+                    element
+                        .closest(&format!("[{FOCUS_ATTRIBUTE}]"))
+                        .ok()
+                        .flatten()
+                })
+                .and_then(|line| line.get_attribute(FOCUS_ATTRIBUTE))
+                .and_then(|value| parse_attack(&value));
+            if attack.is_some() {
+                focus.set(attack);
+            }
+        });
+        let _ = self
+            .overlay
+            .add_event_listener_with_callback("click", on_click.as_ref().unchecked_ref());
+        // The overlay lives as long as the page, so its handler does too.
+        on_click.forget();
+    }
+
+    /// The attack line clicked since the last call.
+    pub fn take_focus(&self) -> Option<Attack> {
+        self.focus.take()
+    }
+
+    /// `ChatMessageFormatSimulation.attack`: a line in the overlay that
+    /// focuses the attack when clicked, and one in the history.
+    pub fn push_attack(
+        &mut self,
+        now: f64,
+        domestic: bool,
+        attacker: &str,
+        color: &str,
+        attack: Attack,
+    ) {
+        let attacker = if attacker.is_empty() {
+            lang::translate("Unknown Player")
+        } else {
+            attacker.to_string()
+        };
+        let received_ms = js_sys::Date::now();
+        let line = self.attack_line(domestic, &attacker, color, None);
+        let _ = line.set_attribute(
+            FOCUS_ATTRIBUTE,
+            &format!(
+                "{} {} {} {}",
+                attack.target,
+                u8::from(attack.unit),
+                attack.x,
+                attack.z
+            ),
+        );
+        let _ = line.set_attribute(
+            crate::tooltip::ATTRIBUTE,
+            &lang::translate("Click to focus on the attacked unit."),
+        );
+        let _ = line.set_attribute("class", "focus");
+        self.push_overlay(now, line);
+        self.items.push(Item::Attack {
+            domestic,
+            attacker,
+            color: color.to_string(),
+            received_ms,
+        });
+        self.trim_items();
+        self.history_dirty = true;
+    }
+
+    /// The attack text with its icon and the attacker's coloured name, after
+    /// the history's timestamp when one is given.
+    fn attack_line(
+        &self,
+        domestic: bool,
+        attacker: &str,
+        color: &str,
+        time: Option<f64>,
+    ) -> HtmlElement {
+        let template = if domestic {
+            lang::translate("%(icon)sYour livestock has been attacked by %(attacker)s!")
+        } else {
+            lang::translate("%(icon)sYou have been attacked by %(attacker)s!")
+        };
+        let mut shown = lang::format(
+            &template,
+            &[
+                ("icon", &ICON_MARK.to_string()),
+                ("attacker", &ATTACKER_MARK.to_string()),
+            ],
+        );
+        if let Some(time) = time {
+            shown = lang::format(
+                &lang::translate("%(time)s %(message)s"),
+                &[("time", &chat::stamp(time)), ("message", &shown)],
+            );
+        }
+        let root: HtmlElement = create(&self.document, "div").expect("a div");
+        let span = |text: &str| {
+            let span: HtmlElement = create(&self.document, "span").expect("a span");
+            span.set_text_content(Some(text));
+            span
+        };
+        let mut pending = String::new();
+        for c in shown.chars() {
+            if c != ICON_MARK && c != ATTACKER_MARK {
+                pending.push(c);
+                continue;
+            }
+            if !pending.is_empty() {
+                let _ = root.append_child(&span(&pending));
+                pending.clear();
+            }
+            if c == ICON_MARK {
+                let icon = span("");
+                let _ = icon.set_attribute("class", "icon");
+                let _ = icon
+                    .style()
+                    .set_property("background-image", "var(--gui-icon-focusattacked)");
+                let _ = root.append_child(&icon);
+            } else {
+                let name = span(attacker);
+                let _ = name.style().set_property("color", color);
+                let _ = root.append_child(&name);
+            }
+        }
+        if !pending.is_empty() {
+            let _ = root.append_child(&span(&pending));
+        }
+        root
     }
 
     pub fn controls(&self) -> Controls {
@@ -565,6 +735,18 @@ impl ChatWindow {
                         let _ = self.history.append_child(&element);
                     }
                 }
+                Item::Attack {
+                    domestic,
+                    attacker,
+                    color,
+                    received_ms,
+                } => {
+                    if filter == "all" {
+                        let time = timestamps.then_some(*received_ms);
+                        let line = self.attack_line(*domestic, attacker, color, time);
+                        let _ = self.history.append_child(&line);
+                    }
+                }
                 Item::System(text) => {
                     if filter == "all" {
                         let line = self.system_line(text);
@@ -577,6 +759,17 @@ impl ChatWindow {
             self.history.set_scroll_top(self.history.scroll_height());
         }
     }
+}
+
+fn parse_attack(value: &str) -> Option<Attack> {
+    let mut parts = value.split(' ');
+    let attack = Attack {
+        target: parts.next()?.parse().ok()?,
+        unit: parts.next()? == "1",
+        x: parts.next()?.parse().ok()?,
+        z: parts.next()?.parse().ok()?,
+    };
+    Some(attack)
 }
 
 /// `colorizePlayernameByID`: the player's colour, white for gaia and

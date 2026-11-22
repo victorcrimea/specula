@@ -1,8 +1,8 @@
-//! The viewer stream, wire format v25: messages for each keyframe, turn or
+//! The viewer stream, wire format v26: messages for each keyframe, turn or
 //! match end, varints and zigzag as in `wire.rs`, positions and heights in
 //! 1/16 m, carried brotli-compressed as below.
 //!
-//! - kind 1 keyframe: varint turn, u8 wire version (25; a viewer stops
+//! - kind 1 keyframe: varint turn, u8 wire version (26; a viewer stops
 //!   at any other, since nothing after it would read right), u64 match id, f32 game speed (the
 //!   match's sim rate), varint delay in ms (how long after the game the
 //!   server shows it), varint first turn of the match's history, varint
@@ -66,6 +66,12 @@
 //!   metres, little-endian). It is sent at once to the sender's mutual
 //!   allies' seat streams and, with the delay, to the observers'. It sits in
 //!   the frame like a pause, but is never in a keyframe (D51).
+//! - kind 6 notification (v26): varint turn, u8 note (1 attacked, 2
+//!   auto-queue stopped), u8 attacker player (Gaia 0), u8 flags (1 the
+//!   target is a domestic animal, 2 it is a unit), varint target entity,
+//!   f32 x, f32 z (metres; target and position 0 for a note 2).
+//!   It is sent at once to the seat of the player it is for and to no
+//!   observer; it sits in the frame like a flare and is never in a keyframe.
 //!
 //! A delta moves the entities as a viewer would, and lists only the
 //! entities whose result would be wrong. A delta applies in this order:
@@ -349,6 +355,7 @@ use crate::feed::Entity;
 use crate::feed::Icon;
 use crate::feed::Launch;
 use crate::feed::LosRun;
+use crate::feed::Note;
 use crate::feed::Players;
 use crate::feed::Sound;
 use crate::feed::SoundTarget;
@@ -378,6 +385,7 @@ const MESSAGE_DELTA: u8 = 2;
 const MESSAGE_ENDED: u8 = 3;
 const MESSAGE_PAUSE: u8 = 4;
 const MESSAGE_FLARE: u8 = 5;
+const MESSAGE_NOTIFICATION: u8 = 6;
 const CHANGED_POSITION: u64 = 1;
 const CHANGED_COLOR: u64 = 2;
 const CHANGED_ICON: u64 = 4;
@@ -1100,7 +1108,7 @@ enum Release {
     Summary(Arc<SummaryEntry>),
     /// A pause or resume, a message in the visual frame.
     Pause(TrackOp),
-    /// A player's flare, a message in the visual frame.
+    /// A player's flare or notification, a message in the visual frame.
     Flare(TrackOp),
     /// A control message in the detail frame.
     Detail(TrackOp),
@@ -1702,6 +1710,19 @@ impl Stream {
         self.visual.push(&out.0, None)
     }
 
+    fn notification_message(&mut self, turn: u32, note: &Note) -> io::Result<TrackOp> {
+        let mut out = Writer::default();
+        out.u8(MESSAGE_NOTIFICATION);
+        out.varint(u64::from(turn));
+        out.u8(note.kind);
+        out.u8(note.attacker);
+        out.u8(note.flags);
+        out.varint(u64::from(note.target));
+        out.f32(note.x);
+        out.f32(note.z);
+        self.visual.push(&out.0, None)
+    }
+
     /// The final keyframes of an ending match, and the tails of its frames.
     fn finish(&mut self, common: &Common, turn: u32) -> (Ended, Vec<u8>, Vec<u8>) {
         // A match that ends while paused is over, not paused.
@@ -2177,6 +2198,26 @@ impl Hub {
         match state.observer.pause(turn, players) {
             Ok(op) => self.queue(&mut state, Release::Pause(op)),
             Err(error) => eprintln!("cannot encode a pause: {error}"),
+        }
+    }
+
+    /// What the session GUI tells a player (an attack, a stopped
+    /// auto-queue): at once to that player's seat only. Observers have no
+    /// player, and it is never keyframed, as a flare.
+    pub fn notify(&self, notes: &[Note]) {
+        let mut state = self.state.lock().unwrap();
+        if !state.has_turn || state.ended {
+            return;
+        }
+        let turn = state.turn;
+        for note in notes {
+            for seat in &mut state.seats {
+                if seat.player == u32::from(note.player)
+                    && let Err(error) = seat.notification(turn, note)
+                {
+                    eprintln!("cannot encode a notification: {error}");
+                }
+            }
         }
     }
 

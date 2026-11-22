@@ -1510,6 +1510,7 @@ pub(crate) fn serve(
                 }
             }
             Record::Pause(players) => hub.set_pause(&players),
+            Record::Notifications(notes) => hub.notify(&notes),
             Record::KeepAlive => hub.feed_alive(),
             Record::InitAttributes(json) => {
                 // The broadcast has no game to compare with.

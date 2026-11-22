@@ -42,10 +42,12 @@ const RECORD_SUMMARY: u8 = 25;
 const RECORD_PAUSE: u8 = 26;
 const RECORD_KEEPALIVE: u8 = 27;
 const RECORD_INIT_ATTRIBUTES: u8 = 28;
+const RECORD_NOTIFICATIONS: u8 = 29;
 const ENTITY_SIZE: usize = 84;
 const ENTITY_SIZE_V14: usize = 74;
 const SOUND_SIZE: usize = 29;
 const SOUND_SIZE_V14: usize = 27;
+const NOTE_SIZE: usize = 16;
 const LAUNCH_SIZE: usize = 52;
 const COLOR_MINIMAP: u8 = 1;
 const HAS_VISUAL: u8 = 2;
@@ -779,6 +781,26 @@ pub enum Record {
     KeepAlive,
     /// Kind 28: the simulation's init attributes as JSON, once at the start.
     InitAttributes(Vec<u8>),
+    /// Kind 29: what the session GUI would tell a player, before the turn
+    /// record it belongs to.
+    Notifications(Vec<Note>),
+}
+
+/// A notification for one player.
+#[derive(Clone, Copy)]
+pub struct Note {
+    /// 1 attacked, 2 auto-queue stopped.
+    pub kind: u8,
+    pub player: u8,
+    /// The attacker's owner, Gaia 0.
+    pub attacker: u8,
+    /// 1: the target is a domestic animal, 2: it is a unit.
+    pub flags: u8,
+    /// The attacked entity; zero for an auto-queue stop.
+    pub target: u32,
+    /// Metres; zero for an auto-queue stop.
+    pub x: f32,
+    pub z: f32,
 }
 
 /// The statistics summary of one capture, as JSON.
@@ -964,6 +986,7 @@ pub fn read_record(reader: &mut impl Read, version: u32) -> io::Result<Option<Re
             }
             RECORD_KEEPALIVE => return Ok(Some(Record::KeepAlive)),
             RECORD_INIT_ATTRIBUTES => return Ok(Some(Record::InitAttributes(payload))),
+            RECORD_NOTIFICATIONS => return decode_notifications(&payload).map(Some),
             RECORD_QUERY_REPLY => {
                 let mut cursor = Cursor(&payload);
                 let id = cursor.u32()?;
@@ -1232,6 +1255,29 @@ fn decode_territory(payload: &[u8]) -> io::Result<Record> {
         height,
         tiles,
     }))
+}
+
+fn decode_notifications(payload: &[u8]) -> io::Result<Record> {
+    let mut cursor = Cursor(payload);
+    let count = cursor.u32()? as usize;
+    if cursor.0.len() != count * NOTE_SIZE {
+        return Err(invalid(
+            "notifications record length does not match its count",
+        ));
+    }
+    let mut notes = Vec::with_capacity(count);
+    for _ in 0..count {
+        notes.push(Note {
+            kind: cursor.u8()?,
+            player: cursor.u8()?,
+            attacker: cursor.u8()?,
+            flags: cursor.u8()?,
+            target: cursor.u32()?,
+            x: cursor.f32()?,
+            z: cursor.f32()?,
+        });
+    }
+    Ok(Record::Notifications(notes))
 }
 
 fn decode_sounds(payload: &[u8], version: u32) -> io::Result<Record> {

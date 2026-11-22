@@ -53,6 +53,7 @@ use crate::feed::LOS_EXPLORED;
 use crate::feed::LOS_VISIBLE;
 use crate::feed::Launch;
 use crate::feed::Mirage;
+use crate::feed::Note;
 use crate::feed::PlayerGui;
 use crate::feed::Players;
 use crate::feed::ProductionItem;
@@ -1745,6 +1746,14 @@ impl Seat {
     /// Tells the seat's viewers a mutual ally's flare.
     pub fn flare(&mut self, turn: u32, sender: u8, x: f32, z: f32) -> io::Result<()> {
         let visual = self.stream.flare_message(turn, sender, x, z)?;
+        self.shown
+            .apply(Release::Flare(visual), None, self.shown.match_id);
+        Ok(())
+    }
+
+    /// Tells the seat's viewers a notification for its player.
+    pub fn notification(&mut self, turn: u32, note: &Note) -> io::Result<()> {
+        let visual = self.stream.notification_message(turn, note)?;
         self.shown
             .apply(Release::Flare(visual), None, self.shown.match_id);
         Ok(())

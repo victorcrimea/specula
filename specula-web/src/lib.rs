@@ -621,6 +621,9 @@ struct App {
     match_over: MatchOver,
     stream_start: StreamStart,
     time_limit: Option<TimeLimit>,
+    time_notifications: TimeNotifications,
+    /// `g_LastAttack`, which camera.lastattackfocus focuses.
+    last_attack: Option<chat_window::Attack>,
     /// Only the 3D page plays sound.
     sound: Option<SoundControls>,
     /// Only the 3D page has assets to warm up.
@@ -645,6 +648,8 @@ struct App {
     chat_timestamps: bool,
     chat_nick: bool,
     chat_hide_observers: bool,
+    /// gui.session.notifications.attack.
+    chat_notify_attack: bool,
     /// Only the 3D page has the Barter & Trade dialog.
     trade_window: Option<TradeWindow>,
     /// session.massbarter (Shift) is held.
@@ -1032,6 +1037,47 @@ impl TimeLimit {
     }
 }
 
+/// `TimeNotificationOverlay`: the engine's untyped notifications for the
+/// seat's player, each shown until its end in game time, so a pause holds
+/// it. Of them the feed has only the stopped auto-queue.
+struct TimeNotifications {
+    /// None on an older cached page without the element.
+    element: Option<HtmlElement>,
+    /// The engine's message, translated as it is shown, and its end in
+    /// simulation ms.
+    notes: Vec<(&'static str, f64)>,
+    shown: String,
+}
+
+impl TimeNotifications {
+    /// `AddTimeNotification`'s default duration.
+    const DURATION_MS: f64 = 10_000.0;
+
+    fn push(&mut self, message: &'static str, turn: u32) {
+        self.notes
+            .push((message, f64::from(turn) * TURN_MS + Self::DURATION_MS));
+    }
+
+    fn frame(&mut self, turn: u32) {
+        let Some(element) = &self.element else {
+            return;
+        };
+        let time = f64::from(turn) * TURN_MS;
+        self.notes.retain(|(_, end)| *end > time);
+        let text = self
+            .notes
+            .iter()
+            .map(|(message, _)| lang::translate(message))
+            .collect::<Vec<_>>()
+            .join("\n");
+        if text != self.shown {
+            element.set_text_content(Some(&text));
+            element.set_hidden(text.is_empty());
+            self.shown = text;
+        }
+    }
+}
+
 /// The countdown shown while the server holds back the match's first
 /// turns, so that a viewer joining then does not face an empty view.
 struct StreamStart {
@@ -1161,6 +1207,7 @@ impl App {
                 self.match_over.ended || self.match_over.archived,
             );
         }
+        self.time_notifications.frame(self.scene.turn);
         if let Some(warmup) = &mut self.warmup {
             let index_loaded = self
                 .renderer
@@ -1191,6 +1238,9 @@ impl App {
             {
                 sound.audio.play_ui(chat_window::NICK_SOUND, page_now());
             }
+        }
+        if let Some(attack) = self.chat_window.as_ref().and_then(ChatWindow::take_focus) {
+            self.focus_attack(attack);
         }
         if let Some(ranges) = &mut self.ranges {
             ranges.show(self.renderer.ranges());
@@ -1633,6 +1683,18 @@ impl App {
         if let Some(uplink) = &self.uplink {
             self.placement
                 .update(&mut *self.renderer, uplink, &self.scene, seat);
+        }
+    }
+
+    /// `focusAttack`: follows a unit the scene still has, else looks at
+    /// where the attack was.
+    fn focus_attack(&mut self, attack: chat_window::Attack) {
+        // A unit that just died can linger in the scene, and the follow then
+        // drops without moving the camera, so the cached position comes
+        // first and the follow, if the unit is drawn, takes over from it.
+        self.renderer.move_to(attack.x, attack.z);
+        if attack.unit && self.scene.dots.contains_key(&attack.target) {
+            self.renderer.follow(attack.target);
         }
     }
 
@@ -2528,6 +2590,12 @@ async fn run(
             shown: String::new(),
         },
         time_limit,
+        time_notifications: TimeNotifications {
+            element: element(&document, "notification-text").ok(),
+            notes: Vec::new(),
+            shown: String::new(),
+        },
+        last_attack: None,
         sound,
         warmup,
         detail_wanted: false,
@@ -2542,6 +2610,7 @@ async fn run(
         chat_timestamps: chat::setting(chat::TIMESTAMP_KEY, true),
         chat_nick: chat::setting(chat::NICK_KEY, true),
         chat_hide_observers: chat::setting(chat::HIDE_OBSERVERS_KEY, false),
+        chat_notify_attack: chat::setting(chat::NOTIFY_ATTACK_KEY, true),
         trade_window,
         mass_barter: false,
         message_box,
@@ -2588,6 +2657,7 @@ async fn run(
     wire_summary(&app, &window);
     wire_command_hotkeys(&app, &window);
     wire_idle(&app, &window);
+    wire_last_attack(&app, &window);
     if page == Page::Observer {
         let shadows: HtmlSelectElement = element(&document, "shadows")?;
         wire_shadows(&app, shadows.clone());
@@ -3208,7 +3278,7 @@ fn wire_chat_window(app: &Rc<RefCell<App>>, window: &web_sys::Window) {
         return;
     };
     type Setting = (&'static str, &'static str, bool, fn(&mut App, bool));
-    let settings: [Setting; 3] = [
+    let settings: [Setting; 4] = [
         ("chat-timestamp", chat::TIMESTAMP_KEY, true, |app, on| {
             app.chat_timestamps = on
         }),
@@ -3220,6 +3290,12 @@ fn wire_chat_window(app: &Rc<RefCell<App>>, window: &web_sys::Window) {
             chat::HIDE_OBSERVERS_KEY,
             false,
             |app, on| app.chat_hide_observers = on,
+        ),
+        (
+            "chat-notify-attack",
+            chat::NOTIFY_ATTACK_KEY,
+            true,
+            |app, on| app.chat_notify_attack = on,
         ),
     ];
     for (id, key, default, apply) in settings {
@@ -3239,10 +3315,13 @@ fn wire_chat_window(app: &Rc<RefCell<App>>, window: &web_sys::Window) {
         });
     }
     // Observers have nothing to hide from themselves.
-    if !seated()
-        && let Ok(label) = element::<HtmlElement>(&document, "chat-hide-observers-setting")
-    {
-        label.set_hidden(true);
+    // Observers have no attacks to be told of either.
+    if !seated() {
+        for id in ["chat-hide-observers-setting", "chat-notify-attack-setting"] {
+            if let Ok(label) = element::<HtmlElement>(&document, id) {
+                label.set_hidden(true);
+            }
+        }
     }
 }
 
@@ -3970,6 +4049,55 @@ fn wire_flare(app: &Rc<RefCell<App>>, window: &web_sys::Window) {
     });
     let _ = window.add_event_listener_with_callback("blur", on_blur.as_ref().unchecked_ref());
     on_blur.forget();
+}
+
+/// camera.lastattackfocus (Space): `focusAttack(g_LastAttack)`. Shift+Space
+/// is pause, so a modifier leaves it alone.
+fn wire_last_attack(app: &Rc<RefCell<App>>, window: &web_sys::Window) {
+    if app.borrow().uplink.is_none() {
+        return;
+    }
+    let target = Rc::clone(app);
+    let on_key = Closure::<dyn FnMut(web_sys::Event)>::new(move |event: web_sys::Event| {
+        let text = |object: &JsValue, name: &str| {
+            js_sys::Reflect::get(object, &name.into())
+                .ok()
+                .and_then(|value| value.as_string())
+                .unwrap_or_default()
+        };
+        let flag = |name: &str| {
+            js_sys::Reflect::get(&event, &name.into()).is_ok_and(|value| value.is_truthy())
+        };
+        let tag = event
+            .target()
+            .map(|element| text(&element, "tagName"))
+            .unwrap_or_default();
+        if text(&event, "code") != "Space"
+            || matches!(tag.as_str(), "INPUT" | "SELECT" | "TEXTAREA")
+            || flag("shiftKey")
+            || flag("ctrlKey")
+            || flag("altKey")
+            || flag("metaKey")
+            || flag("repeat")
+        {
+            return;
+        }
+        let Ok(mut app) = target.try_borrow_mut() else {
+            return;
+        };
+        if app.message_box.as_ref().is_some_and(MessageBox::is_open) {
+            return;
+        }
+        let Some(attack) = app.last_attack else {
+            return;
+        };
+        // A focused button would also take the Space as a click.
+        event.prevent_default();
+        app.focus_attack(attack);
+    });
+    let _ = window.add_event_listener_with_callback("keydown", on_key.as_ref().unchecked_ref());
+    // The page lives as long as the window, so its handler does too.
+    on_key.forget();
 }
 
 /// The idle hotkeys (`hotkeys/misc.xml` and the idle worker button's, the
@@ -5440,6 +5568,10 @@ fn receive(app_rc: &Rc<RefCell<App>>, turn_ms: f64, message: &[u8]) {
         receive_flare(app_rc, message);
         return;
     }
+    if stream::is_notification(message) {
+        receive_notification(app_rc, message);
+        return;
+    }
     let app = &mut *app_rc.borrow_mut();
     match app.scene.apply(message, app.progress) {
         // Not a turn: nothing moves, the veil only comes or goes.
@@ -5538,6 +5670,63 @@ fn receive_flare(app: &Rc<RefCell<App>>, message: &[u8]) {
     match stream::read_flare(message) {
         Ok((sender, x, z)) => app.borrow_mut().accept_flare(sender, x, z),
         Err(error) => web_sys::console::error_1(&format!("bad flare message: {error}").into()),
+    }
+}
+
+/// A notification for the seat's player, as the session GUI handles it.
+/// Only a live viewer is told, as a flare: a replay of the match already
+/// knows the moment.
+fn receive_notification(app: &Rc<RefCell<App>>, message: &[u8]) {
+    let note = match stream::read_notification(message) {
+        Ok(note) => note,
+        Err(error) => {
+            web_sys::console::error_1(&format!("bad notification message: {error}").into());
+            return;
+        }
+    };
+    let app = &mut *app.borrow_mut();
+    if !app.live {
+        return;
+    }
+    match note.kind {
+        // `g_NotificationsTypes.attack`.
+        stream::NOTE_ATTACKED => {
+            let attack = chat_window::Attack {
+                target: note.target,
+                unit: note.unit,
+                x: note.x,
+                z: note.z,
+            };
+            app.last_attack = Some(attack);
+            if !app.chat_notify_attack {
+                return;
+            }
+            let attacker = app
+                .scene
+                .players
+                .get(usize::from(note.attacker))
+                .map_or("", |player| player.name.as_str());
+            // `colorizePlayernameByID`, Gaia's own colour included.
+            let color = app
+                .palette
+                .get(usize::from(note.attacker))
+                .copied()
+                .unwrap_or(0xFFFF_FFFF);
+            if let Some(chat_window) = &mut app.chat_window {
+                chat_window.push_attack(
+                    page_now(),
+                    note.domestic,
+                    attacker,
+                    &panel::css_color(color, 1.0),
+                    attack,
+                );
+            }
+        }
+        // The engine's own text, translated by the baked language files.
+        stream::NOTE_AUTOQUEUE_STOPPED => app
+            .time_notifications
+            .push("Could not auto-queue unit, de-activating.", note.turn),
+        _ => {}
     }
 }
 
