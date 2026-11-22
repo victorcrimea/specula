@@ -355,7 +355,18 @@ fn run() -> Result<(), String> {
 /// `CSoundGroup::Reload` skips a file it cannot load.
 fn write_sounds(mod_dir: &Path, index: &mut Index, output: &mut Output) -> Result<(), String> {
     let start = Instant::now();
-    let (groups, errors) = sound::load_groups(mod_dir);
+    let (mut groups, errors) = sound::load_groups(mod_dir);
+    // `PlayUISound` plays a bare file (`g_SoundNotifications.nick`), which
+    // no group names; a one-file group lets the page play it like any
+    // group. Gain 1: `PlayAsUI` uses the UI gain alone.
+    groups.push((
+        "interface/ui/chat_alert.ogg".to_string(),
+        sound::Group {
+            gain: 1.0,
+            files: vec!["audio/interface/ui/chat_alert.ogg".to_string()],
+            ..Default::default()
+        },
+    ));
     println!(
         "{} sound groups, {} could not be read",
         groups.len(),

@@ -157,5 +157,18 @@
   "Are you sure you want to end the game for every player?": "全プレイヤーのためにゲームを終了してもよろしいですか？",
   "Claim victory? %(players)s will be resigned.": "勝利を主張しますか？ %(players)s は降参します。",
   "%(players)s left the game. Do you want to claim victory?": "%(players)s がゲームから離脱しました。勝利を主張しますか？",
-  "Kick %(player)s? They cannot play this match again.": "%(player)s をキックしますか？ このプレイヤーはこの試合に再参加できなくなります。"
+  "Kick %(player)s? They cannot play this match again.": "%(player)s をキックしますか？ このプレイヤーはこの試合に再参加できなくなります。",
+  "Hide observer chat": "観戦者のチャットを隠す",
+  "Hide what observers write while you play.": "プレイ中、観戦者の書き込みを表示しません。",
+  "too many messages": "メッセージが多すぎます",
+  "message too long": "メッセージが長すぎます",
+  "empty message": "メッセージが空です",
+  "observers cannot use that channel": "観戦者はそのチャンネルを使用できません",
+  "observers cannot message players": "観戦者はプレイヤーにメッセージを送れません",
+  "only Everyone in setup": "設定中は「全員」のみです",
+  "no such member": "そのメンバーはいません",
+  "no addressee": "宛先がありません",
+  "join first": "先に参加してください",
+  "the chat is closed": "チャットは閉じられています",
+  "invalid nickname": "無効なニックネーム"
 }

@@ -157,5 +157,18 @@
   "Are you sure you want to end the game for every player?": "Vill du verkligen avsluta spelet för alla spelare?",
   "Claim victory? %(players)s will be resigned.": "Kräv seger? %(players)s kommer att ge upp.",
   "%(players)s left the game. Do you want to claim victory?": "%(players)s har lämnat spelet. Vill du kräva seger?",
-  "Kick %(player)s? They cannot play this match again.": "Sparka %(player)s? Spelaren kan inte spela den här matchen igen."
+  "Kick %(player)s? They cannot play this match again.": "Sparka %(player)s? Spelaren kan inte spela den här matchen igen.",
+  "Hide observer chat": "Dölj åskådarchatten",
+  "Hide what observers write while you play.": "Döljer vad åskådare skriver medan du spelar.",
+  "too many messages": "för många meddelanden",
+  "message too long": "meddelandet är för långt",
+  "empty message": "tomt meddelande",
+  "observers cannot use that channel": "åskådare kan inte använda den kanalen",
+  "observers cannot message players": "åskådare kan inte skriva till spelare",
+  "only Everyone in setup": "i inställningarna bara Alla",
+  "no such member": "ingen sådan medlem",
+  "no addressee": "mottagare saknas",
+  "join first": "gå med först",
+  "the chat is closed": "chatten är stängd",
+  "invalid nickname": "ogiltigt smeknamn"
 }

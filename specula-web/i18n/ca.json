@@ -157,5 +157,18 @@
   "Are you sure you want to end the game for every player?": "Segur que vols acabar la partida per a tots els jugadors?",
   "Claim victory? %(players)s will be resigned.": "Reclamar la victòria? %(players)s es rendiran.",
   "%(players)s left the game. Do you want to claim victory?": "%(players)s ha abandonat la partida. Vols reclamar la victòria?",
-  "Kick %(player)s? They cannot play this match again.": "Expulsar %(player)s? No podrà tornar a jugar aquesta partida."
+  "Kick %(player)s? They cannot play this match again.": "Expulsar %(player)s? No podrà tornar a jugar aquesta partida.",
+  "Hide observer chat": "Amaga el xat dels observadors",
+  "Hide what observers write while you play.": "Amaga el que escriuen els observadors mentre jugues.",
+  "too many messages": "massa missatges",
+  "message too long": "missatge massa llarg",
+  "empty message": "missatge buit",
+  "observers cannot use that channel": "els observadors no poden fer servir aquest canal",
+  "observers cannot message players": "els observadors no poden enviar missatges als jugadors",
+  "only Everyone in setup": "només Tothom a la configuració",
+  "no such member": "no existeix aquest membre",
+  "no addressee": "falta el destinatari",
+  "join first": "uneix-te primer",
+  "the chat is closed": "el xat està tancat",
+  "invalid nickname": "sobrenom no vàlid"
 }

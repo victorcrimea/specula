@@ -1,5 +1,6 @@
 mod actors;
 mod catalog;
+mod chat;
 mod classify;
 mod config;
 mod delta;
@@ -7,6 +8,7 @@ mod detail;
 mod feed;
 mod flare;
 mod history;
+mod limit;
 mod nickname;
 mod observer;
 mod pause;
@@ -34,6 +36,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
+use std::time::Instant;
 
 use rocket::State;
 use rocket::config::Shutdown as ShutdownConfig;
@@ -46,6 +49,7 @@ use rocket::http::CookieJar;
 use rocket::http::Header;
 use rocket::tokio::sync::broadcast::Receiver;
 use rocket::tokio::sync::broadcast::error::RecvError;
+use rocket::tokio::time::MissedTickBehavior;
 use rocket_ws::Channel;
 use rocket_ws::WebSocket;
 use specula_assets::command::COMMAND_VERSION;
@@ -241,6 +245,7 @@ async fn main() {
                 new_status,
                 play_new,
                 setup_socket,
+                chat_socket,
                 play_action,
                 play_kick,
                 observer_flare,
@@ -708,6 +713,121 @@ fn setup_socket(
                             break;
                         }
                     }
+                }
+            }
+        })
+    }))
+}
+
+/// The match's chat (M31) from its setup to its end: the backlog this
+/// visitor may read, then each new entry, which an unseated viewer gets
+/// from a seat only after the delay (D49). Sending needs a member, and
+/// `join` makes an observer one. The socket counts for nothing else: a
+/// seat's presence stays with the setup and command sockets.
+#[rocket::get("/g/<id>/chat")]
+fn chat_socket(
+    id: MatchId,
+    socket: WebSocket,
+    registry: &State<Arc<Registry>>,
+    cookies: &CookieJar<'_>,
+) -> Option<Channel<'static>> {
+    let Some(found) = registry.hosted(id) else {
+        // Dropped once ended, or a broadcast that has no chat: nothing more
+        // comes either way.
+        if registry.closed_reason(id).is_some() || registry.resolve(id).is_some() {
+            return Some(done_channel(socket, r#"{"type":"closed"}"#.to_string()));
+        }
+        return None;
+    };
+    let cookie = usage::visitor(cookies);
+    let config = rocket_ws::Config {
+        max_message_size: Some(chat::MAX_FRAME),
+        max_frame_size: Some(chat::MAX_FRAME),
+        ..Default::default()
+    };
+    Some(socket.config(config).channel(move |mut stream| {
+        Box::pin(async move {
+            let _presence = found.chat.present(cookie.as_deref());
+            let mut changes = found.chat.subscribe();
+            stream
+                .send(rocket_ws::Message::text(chat::you_json(
+                    &found,
+                    cookie.as_deref(),
+                )))
+                .await?;
+            let mut cursor = 0u64;
+            let mut pending: Vec<(Instant, String)> = Vec::new();
+            let mut last_members = String::new();
+            let mut live_sent = false;
+            // A seat taken in the setup, a kick or a defeat changes the
+            // members without a chat event, so they are polled.
+            let mut tick = rocket::tokio::time::interval(Duration::from_secs(2));
+            tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
+            loop {
+                // Read before taking, so an entry posted before the close is
+                // among those taken.
+                let closed = found.chat.is_closed();
+                let viewer = chat::viewer(&found, cookie.as_deref());
+                pending.extend(found.chat.take(&mut cursor, &viewer));
+                let now = Instant::now();
+                let mut held = Vec::new();
+                for (due, json) in std::mem::take(&mut pending) {
+                    if due <= now {
+                        stream.send(rocket_ws::Message::text(json)).await?;
+                    } else {
+                        held.push((due, json));
+                    }
+                }
+                pending = held;
+                let members = chat::members_json(&found, cookie.as_deref());
+                if members != last_members {
+                    stream
+                        .send(rocket_ws::Message::text(members.clone()))
+                        .await?;
+                    last_members = members;
+                }
+                // The page skips the backlog for its overlay and sound.
+                if !live_sent {
+                    live_sent = true;
+                    stream
+                        .send(rocket_ws::Message::text(r#"{"type":"live"}"#.to_string()))
+                        .await?;
+                }
+                // A closed match still delivers what is held for the delay,
+                // since its last messages are not yet due.
+                if closed && pending.is_empty() {
+                    stream
+                        .send(rocket_ws::Message::text(r#"{"type":"closed"}"#.to_string()))
+                        .await?;
+                    return Ok(());
+                }
+                let wake = pending.iter().map(|(due, _)| *due).min();
+                let wake_at = wake.unwrap_or(now);
+                rocket::tokio::select! {
+                    biased;
+                    incoming = stream.next() => {
+                        let Some(message) = incoming else {
+                            return Ok(());
+                        };
+                        let rocket_ws::Message::Text(text) = message? else {
+                            continue;
+                        };
+                        let Some(request) = chat::parse(&text) else {
+                            continue;
+                        };
+                        if let Some(reply) = chat::answer(&found, cookie.as_deref(), request) {
+                            stream.send(rocket_ws::Message::text(reply)).await?;
+                        }
+                    }
+                    changed = changes.changed() => {
+                        if changed.is_err() {
+                            return Ok(());
+                        }
+                    }
+                    _ = rocket::tokio::time::sleep_until(
+                        rocket::tokio::time::Instant::from_std(wake_at)
+                    ), if wake.is_some() => {}
+                    _ = tick.tick() => {}
                 }
             }
         })

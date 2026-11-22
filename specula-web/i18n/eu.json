@@ -157,5 +157,18 @@
   "Are you sure you want to end the game for every player?": "Ziur zaude partida jokalari guztientzat amaitu nahi duzula?",
   "Claim victory? %(players)s will be resigned.": "Eskatu garaipena? %(players)s errendituko dira.",
   "%(players)s left the game. Do you want to claim victory?": "%(players)s jokotik irten da. Garaipena eskatu nahi duzu?",
-  "Kick %(player)s? They cannot play this match again.": "%(player)s kanporatu? Ezin izango du partida hau berriro jokatu."
+  "Kick %(player)s? They cannot play this match again.": "%(player)s kanporatu? Ezin izango du partida hau berriro jokatu.",
+  "Hide observer chat": "Ezkutatu behatzaileen txata",
+  "Hide what observers write while you play.": "Ezkutatu behatzaileek idazten dutena jokatzen ari zaren bitartean.",
+  "too many messages": "mezu gehiegi",
+  "message too long": "mezua luzeegia da",
+  "empty message": "mezu hutsa",
+  "observers cannot use that channel": "behatzaileek ezin dute kanal hori erabili",
+  "observers cannot message players": "behatzaileek ezin diete jokalariei mezurik bidali",
+  "only Everyone in setup": "konfigurazioan Guztiak soilik",
+  "no such member": "ez dago kide hori",
+  "no addressee": "hartzailea falta da",
+  "join first": "sartu lehenik",
+  "the chat is closed": "txata itxita dago",
+  "invalid nickname": "ezizen baliogabea"
 }

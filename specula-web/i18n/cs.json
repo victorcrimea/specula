@@ -157,5 +157,18 @@
   "Are you sure you want to end the game for every player?": "Opravdu chcete ukončit hru pro všechny hráče?",
   "Claim victory? %(players)s will be resigned.": "Uplatnit vítězství? %(players)s se vzdají.",
   "%(players)s left the game. Do you want to claim victory?": "%(players)s opustil(i) hru. Chcete uplatnit vítězství?",
-  "Kick %(player)s? They cannot play this match again.": "Vyloučit %(player)s? Nebude moci znovu hrát tuto hru."
+  "Kick %(player)s? They cannot play this match again.": "Vyloučit %(player)s? Nebude moci znovu hrát tuto hru.",
+  "Hide observer chat": "Skrýt chat pozorovatelů",
+  "Hide what observers write while you play.": "Skrýt, co pozorovatelé píší, zatímco hraješ.",
+  "too many messages": "příliš mnoho zpráv",
+  "message too long": "zpráva je příliš dlouhá",
+  "empty message": "prázdná zpráva",
+  "observers cannot use that channel": "pozorovatelé nemohou použít tento kanál",
+  "observers cannot message players": "pozorovatelé nemohou posílat zprávy hráčům",
+  "only Everyone in setup": "v přípravě hry jen Všem",
+  "no such member": "takový člen neexistuje",
+  "no addressee": "chybí adresát",
+  "join first": "nejdřív se připoj",
+  "the chat is closed": "chat je uzavřen",
+  "invalid nickname": "neplatná přezdívka"
 }

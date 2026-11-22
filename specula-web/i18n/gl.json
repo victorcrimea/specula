@@ -157,5 +157,18 @@
   "Are you sure you want to end the game for every player?": "Seguro que queres rematar a partida para todos os xogadores?",
   "Claim victory? %(players)s will be resigned.": "Reclamar a vitoria? %(players)s renderanse.",
   "%(players)s left the game. Do you want to claim victory?": "%(players)s abandonou a partida. Queres reclamar a vitoria?",
-  "Kick %(player)s? They cannot play this match again.": "Expulsar a %(player)s? Non poderá volver xogar esta partida."
+  "Kick %(player)s? They cannot play this match again.": "Expulsar a %(player)s? Non poderá volver xogar esta partida.",
+  "Hide observer chat": "Agochar o chat dos observadores",
+  "Hide what observers write while you play.": "Agocha o que escriben os observadores mentres xogas.",
+  "too many messages": "demasiadas mensaxes",
+  "message too long": "mensaxe demasiado longa",
+  "empty message": "mensaxe baleira",
+  "observers cannot use that channel": "os observadores non poden usar ese canal",
+  "observers cannot message players": "os observadores non poden enviar mensaxes aos xogadores",
+  "only Everyone in setup": "só Todos na configuración",
+  "no such member": "non existe ese membro",
+  "no addressee": "falta o destinatario",
+  "join first": "únete primeiro",
+  "the chat is closed": "o chat está pechado",
+  "invalid nickname": "alcume non válido"
 }

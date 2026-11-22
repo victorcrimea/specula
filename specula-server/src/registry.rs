@@ -53,6 +53,7 @@ use std::time::SystemTime;
 use serde_json::Value;
 
 use crate::catalog::Catalog;
+use crate::chat::Chat;
 use crate::config::Config;
 use crate::history::History;
 use crate::nickname::Nickname;
@@ -177,6 +178,9 @@ pub struct Match {
     /// From the setup's opening on (D13); `play` shares it.
     pub seats: Arc<Seats>,
     pub room: Arc<SetupRoom>,
+    /// From the setup's opening on (D50), so setup chat carries into the
+    /// game; a rematch is a new match with an empty chat.
+    pub chat: Arc<Chat>,
     state: Mutex<MatchState>,
     /// The engine's runner thread, handed to a rematch in the same slot,
     /// which joins it first: the UDP port is the slot's.
@@ -573,6 +577,7 @@ impl Registry {
                 play,
                 seats,
                 room: Arc::new(SetupRoom::new(settings)),
+                chat: Arc::new(Chat::new(self.delay)),
                 state: Mutex::new(MatchState::Setup),
                 runner: Mutex::new(None),
                 previous: Mutex::new(previous),
@@ -761,6 +766,7 @@ impl Registry {
         }
         *found.state.lock().unwrap() = MatchState::Ended;
         found.room.close(reason);
+        found.chat.close();
         found.hub.retire();
         // Its predecessor's engine may still hold the slot's port.
         if let Some(previous) = found.previous.lock().unwrap().take() {
@@ -842,6 +848,7 @@ impl Registry {
                     },
                 );
             }
+            found.chat.close();
             found.hub.retire();
             println!("match {id} dropped from memory");
         }

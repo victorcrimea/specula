@@ -3,6 +3,8 @@ mod audio;
 mod barter;
 mod bench;
 mod blend;
+mod chat;
+mod chat_window;
 mod command_row;
 mod detail;
 mod diplomacy;
@@ -96,6 +98,7 @@ use crate::audio::Settings;
 use crate::bench::Bench;
 use crate::bench::BenchInfo;
 use crate::bench::CameraPose;
+use crate::chat_window::ChatWindow;
 use crate::detail::Control;
 use crate::detail::Details;
 use crate::diplomacy::Perspective;
@@ -637,6 +640,11 @@ struct App {
     research: Option<ResearchProgress>,
     /// Only the 3D page has the diplomacy window.
     diplomacy_window: Option<DiplomacyWindow>,
+    /// Only a hosted match's 3D page has the chat (M32).
+    chat_window: Option<ChatWindow>,
+    chat_timestamps: bool,
+    chat_nick: bool,
+    chat_hide_observers: bool,
     /// Only the 3D page has the Barter & Trade dialog.
     trade_window: Option<TradeWindow>,
     /// session.massbarter (Shift) is held.
@@ -1112,6 +1120,21 @@ impl App {
         self.give_orders();
         if let Some(flares) = &mut self.flares {
             flares.frame(page_now(), self.scene.map_size as f32);
+        }
+        if let Some(chat_window) = &mut self.chat_window {
+            let ring = chat_window.frame(
+                page_now(),
+                &self.palette,
+                seated(),
+                self.chat_hide_observers,
+                self.chat_timestamps,
+            );
+            if ring
+                && self.chat_nick
+                && let Some(sound) = &mut self.sound
+            {
+                sound.audio.play_ui(chat_window::NICK_SOUND, page_now());
+            }
         }
         if let Some(ranges) = &mut self.ranges {
             ranges.show(self.renderer.ranges());
@@ -2217,6 +2240,15 @@ async fn run(
             })
             .ok(),
     };
+    let chat_window = match page {
+        // A broadcast of the engine's own match has no chat route either.
+        Page::Map => None,
+        Page::Observer if match_base().is_empty() => None,
+        // An older page has no chat window; the match still shows.
+        Page::Observer => ChatWindow::new(&document)
+            .inspect_err(|error| web_sys::console::error_1(&format!("chat window: {error}").into()))
+            .ok(),
+    };
     let summary = match page {
         Page::Map => None,
         // An older page has no summary window; the match still shows.
@@ -2431,6 +2463,10 @@ async fn run(
         top,
         research,
         diplomacy_window,
+        chat_window,
+        chat_timestamps: chat::setting(chat::TIMESTAMP_KEY, true),
+        chat_nick: chat::setting(chat::NICK_KEY, true),
+        chat_hide_observers: chat::setting(chat::HIDE_OBSERVERS_KEY, false),
         trade_window,
         mass_barter: false,
         message_box,
@@ -2469,6 +2505,7 @@ async fn run(
     wire_research(&app);
     wire_diplomacy_window(&app, &window);
     wire_trade_window(&app, &window);
+    wire_chat_window(&app, &window);
     wire_message_box(&app, &window);
     wire_game_menu(&app);
     wire_pause(&app, &window);
@@ -2883,6 +2920,226 @@ fn wire_diplomacy_window(app: &Rc<RefCell<App>>, window: &web_sys::Window) {
     let _ = window.add_event_listener_with_callback("keydown", on_key.as_ref().unchecked_ref());
     // The window lives as long as the page, so its handler does too.
     on_key.forget();
+}
+
+/// Opens the chat window on `channel`, closing the other dialogs first as
+/// `closeOpenDialogs` does.
+fn open_chat(app: &mut App, channel: chat::Channel, to: Option<usize>) {
+    let Some(chat_window) = &mut app.chat_window else {
+        return;
+    };
+    if !chat_window.available() {
+        return;
+    }
+    if let Some(diplomacy_window) = &mut app.diplomacy_window {
+        diplomacy_window.set_open(false);
+    }
+    if let Some(trade_window) = &mut app.trade_window {
+        trade_window.set_open(false, app.perspective);
+    }
+    chat_window.open(channel, to, &app.palette);
+}
+
+/// The chat (M32): Enter, T and L open it as the engine's `chat`, `teamchat`
+/// and `privatechat` hotkeys; its input sends on Enter and closes on
+/// Escape, and its settings tab keeps the timestamps, the nick sound and the
+/// hiding of observers.
+fn wire_chat_window(app: &Rc<RefCell<App>>, window: &web_sys::Window) {
+    let Some(controls) = app.borrow().chat_window.as_ref().map(ChatWindow::controls) else {
+        return;
+    };
+    let target = Rc::clone(app);
+    on_click(&controls.send, move || {
+        if let Ok(mut app) = target.try_borrow_mut()
+            && let Some(chat_window) = &mut app.chat_window
+        {
+            chat_window.submit();
+        }
+    });
+    let target = Rc::clone(app);
+    on_click(&controls.cancel, move || {
+        if let Ok(mut app) = target.try_borrow_mut()
+            && let Some(chat_window) = &mut app.chat_window
+        {
+            chat_window.close();
+        }
+    });
+    let target = Rc::clone(app);
+    on_change(&controls.extended, move || {
+        if let Ok(mut app) = target.try_borrow_mut()
+            && let Some(chat_window) = &mut app.chat_window
+        {
+            chat_window.extended_changed();
+        }
+    });
+    let target = Rc::clone(app);
+    on_change(&controls.filter, move || {
+        if let Ok(mut app) = target.try_borrow_mut()
+            && let Some(chat_window) = &mut app.chat_window
+        {
+            chat_window.filter_changed();
+        }
+    });
+    let target = Rc::clone(app);
+    on_change(&controls.to, move || {
+        if let Ok(app) = target.try_borrow()
+            && let Some(chat_window) = &app.chat_window
+        {
+            chat_window.refocus();
+        }
+    });
+    // The input is a text field, so the page's key handlers skip it: its
+    // own keys are here.
+    let target = Rc::clone(app);
+    let on_input_key = Closure::<dyn FnMut(web_sys::Event)>::new(move |event: web_sys::Event| {
+        let code = js_sys::Reflect::get(&event, &"code".into())
+            .ok()
+            .and_then(|value| value.as_string())
+            .unwrap_or_default();
+        let Ok(mut app) = target.try_borrow_mut() else {
+            return;
+        };
+        let Some(chat_window) = &mut app.chat_window else {
+            return;
+        };
+        // Stopped here: the window's Escape handlers would also close a
+        // message box or the summary under the chat.
+        match code.as_str() {
+            "Enter" | "NumpadEnter" => {
+                event.prevent_default();
+                event.stop_propagation();
+                chat_window.submit();
+            }
+            "Escape" => {
+                event.prevent_default();
+                event.stop_propagation();
+                chat_window.close();
+            }
+            _ => {}
+        }
+    });
+    let _ = controls
+        .input
+        .add_event_listener_with_callback("keydown", on_input_key.as_ref().unchecked_ref());
+    on_input_key.forget();
+
+    let target = Rc::clone(app);
+    let on_key = Closure::<dyn FnMut(web_sys::Event)>::new(move |event: web_sys::Event| {
+        let text = |object: &JsValue, name: &str| {
+            js_sys::Reflect::get(object, &name.into())
+                .ok()
+                .and_then(|value| value.as_string())
+                .unwrap_or_default()
+        };
+        let flag = |name: &str| {
+            js_sys::Reflect::get(&event, &name.into()).is_ok_and(|value| value.is_truthy())
+        };
+        let tag = event
+            .target()
+            .map(|element| text(&element, "tagName"))
+            .unwrap_or_default();
+        if matches!(tag.as_str(), "INPUT" | "SELECT" | "TEXTAREA")
+            || flag("altKey")
+            || flag("metaKey")
+            || flag("ctrlKey")
+            || flag("shiftKey")
+            || flag("repeat")
+        {
+            return;
+        }
+        let code = text(&event, "code");
+        // A focused button or link takes Enter as its own press.
+        if matches!(code.as_str(), "Enter" | "NumpadEnter")
+            && matches!(tag.as_str(), "BUTTON" | "A")
+        {
+            return;
+        }
+        let Ok(mut app) = target.try_borrow_mut() else {
+            return;
+        };
+        // A question or the summary waits for its own answer first.
+        let modal = app.message_box.as_ref().is_some_and(MessageBox::is_open)
+            || app
+                .summary
+                .as_ref()
+                .is_some_and(|summary| summary.try_borrow().is_ok_and(|summary| summary.is_open()));
+        if modal && code != "Escape" {
+            return;
+        }
+        let observer = app.chat_window.as_ref().is_none_or(ChatWindow::is_observer);
+        let last_private = app.chat_window.as_ref().and_then(ChatWindow::last_private);
+        match code.as_str() {
+            "Enter" | "NumpadEnter" => {
+                event.prevent_default();
+                open_chat(&mut app, chat::Channel::Everyone, None);
+            }
+            "KeyT" => {
+                event.prevent_default();
+                let channel = if observer {
+                    chat::Channel::Observers
+                } else {
+                    chat::Channel::Allies
+                };
+                open_chat(&mut app, channel, None);
+            }
+            // Before any private message the engine's hotkey has no partner
+            // to select.
+            "KeyL" if last_private.is_some() => {
+                event.prevent_default();
+                open_chat(&mut app, chat::Channel::Private, last_private);
+            }
+            "Escape" => {
+                if let Some(chat_window) = &mut app.chat_window {
+                    chat_window.close();
+                }
+            }
+            _ => {}
+        }
+    });
+    let _ = window.add_event_listener_with_callback("keydown", on_key.as_ref().unchecked_ref());
+    // The window lives as long as the page, so its handler does too.
+    on_key.forget();
+
+    let Some(document) = window.document() else {
+        return;
+    };
+    type Setting = (&'static str, &'static str, bool, fn(&mut App, bool));
+    let settings: [Setting; 3] = [
+        ("chat-timestamp", chat::TIMESTAMP_KEY, true, |app, on| {
+            app.chat_timestamps = on
+        }),
+        ("chat-nick", chat::NICK_KEY, true, |app, on| {
+            app.chat_nick = on
+        }),
+        (
+            "chat-hide-observers",
+            chat::HIDE_OBSERVERS_KEY,
+            false,
+            |app, on| app.chat_hide_observers = on,
+        ),
+    ];
+    for (id, key, default, apply) in settings {
+        // An older page lacks the tab; the chat still works.
+        let Ok(checkbox) = element::<HtmlInputElement>(&document, id) else {
+            continue;
+        };
+        checkbox.set_checked(chat::setting(key, default));
+        let target = Rc::clone(app);
+        let box_ = checkbox.clone();
+        on_change(&checkbox, move || {
+            let on = box_.checked();
+            chat::store_setting(key, on);
+            if let Ok(mut app) = target.try_borrow_mut() {
+                apply(&mut app, on);
+            }
+        });
+    }
+    // Observers have nothing to hide from themselves.
+    if !seated()
+        && let Ok(label) = element::<HtmlElement>(&document, "chat-hide-observers-setting")
+    {
+        label.set_hidden(true);
+    }
 }
 
 /// The Barter & Trade dialog: `#top-trade` (`tradeButton`), its Close, its
@@ -3948,6 +4205,9 @@ fn wire_language(app: &Rc<RefCell<App>>, select: HtmlSelectElement) {
                         app.top_dirty = true;
                         if let Some(diplomacy_window) = &mut app.diplomacy_window {
                             diplomacy_window.invalidate();
+                        }
+                        if let Some(chat_window) = &mut app.chat_window {
+                            chat_window.invalidate();
                         }
                         if let Some(summary) = &app.summary
                             && let Ok(mut summary) = summary.try_borrow_mut()

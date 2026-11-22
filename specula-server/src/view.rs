@@ -357,6 +357,7 @@ use crate::feed::Terrain;
 use crate::feed::Territory;
 use crate::flare;
 use crate::history::History;
+use crate::limit;
 use crate::pause;
 use crate::registry::MatchId;
 use crate::summary_envelope;
@@ -1786,7 +1787,7 @@ struct State {
     retired: bool,
     /// How often each player and each observer may flare, and the
     /// observers' shared budget.
-    flares: flare::Limiter,
+    flares: limit::Limiter<flare::Sender>,
 }
 
 impl State {
@@ -1919,7 +1920,7 @@ impl Hub {
                 next_uuid: uuid,
                 uuids: Vec::new(),
                 retired: false,
-                flares: flare::Limiter::default(),
+                flares: limit::Limiter::new(flare::SCOPE),
             }),
         }
     }
@@ -2095,6 +2096,19 @@ impl Hub {
         players.get(player as usize).map(|player| player.state)
     }
 
+    /// Each player's state and stances from the feed's latest players record,
+    /// indexed by player number (0 is gaia), for the chat's addressees (M31).
+    pub fn diplomacy(&self) -> Vec<(u8, Vec<u8>)> {
+        let state = self.state.lock().unwrap();
+        state
+            .observer
+            .players
+            .players
+            .iter()
+            .map(|player| (player.state, player.stances.clone()))
+            .collect()
+    }
+
     /// The player a defeated seat is shown the vision of (D47), from the
     /// feed's latest players record.
     pub fn team_eyes(&self, player: u32) -> Option<u32> {
@@ -2190,10 +2204,10 @@ impl Hub {
     pub fn flare_from_seat(&self, player: u32, x: f32, z: f32) -> Result<(), &'static str> {
         let mut state = self.state.lock().unwrap();
         check_flare(&state, x, z)?;
-        if !state
-            .flares
-            .allow(&[flare::Sender::Seat(player)], Instant::now())
-        {
+        if !state.flares.allow(
+            &[(flare::Sender::Seat(player), flare::MAXIMUM)],
+            Instant::now(),
+        ) {
             return Err("too many flares");
         }
         let turn = state.turn;
@@ -2231,8 +2245,8 @@ impl Hub {
         check_flare(&state, x, z)?;
         if !state.flares.allow(
             &[
-                flare::Sender::Observers,
-                flare::Sender::Visitor(visitor.to_string()),
+                (flare::Sender::Observers, flare::MAXIMUM),
+                (flare::Sender::Visitor(visitor.to_string()), flare::MAXIMUM),
             ],
             Instant::now(),
         ) {

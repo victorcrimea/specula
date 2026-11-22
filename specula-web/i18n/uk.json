@@ -157,5 +157,18 @@
   "Are you sure you want to end the game for every player?": "Ви впевнені, що хочете завершити гру для всіх гравців?",
   "Claim victory? %(players)s will be resigned.": "Заявити про перемогу? %(players)s здадуться.",
   "%(players)s left the game. Do you want to claim victory?": "%(players)s вийшов(ли) з гри. Заявити про перемогу?",
-  "Kick %(player)s? They cannot play this match again.": "Виключити %(player)s? Цей гравець більше не зможе грати в цю гру."
+  "Kick %(player)s? They cannot play this match again.": "Виключити %(player)s? Цей гравець більше не зможе грати в цю гру.",
+  "Hide observer chat": "Сховати чат спостерігачів",
+  "Hide what observers write while you play.": "Ховає те, що пишуть спостерігачі, поки ви граєте.",
+  "too many messages": "забагато повідомлень",
+  "message too long": "повідомлення задовге",
+  "empty message": "порожнє повідомлення",
+  "observers cannot use that channel": "спостерігачі не можуть користуватися цим каналом",
+  "observers cannot message players": "спостерігачі не можуть писати гравцям",
+  "only Everyone in setup": "у налаштуванні гри доступно лише «Усім»",
+  "no such member": "такого учасника немає",
+  "no addressee": "не вказано адресата",
+  "join first": "спершу приєднайтеся",
+  "the chat is closed": "чат закрито",
+  "invalid nickname": "неприпустимий нікнейм"
 }

@@ -157,5 +157,18 @@
   "Are you sure you want to end the game for every player?": "Yakin ingin mengakhiri permainan untuk semua pemain?",
   "Claim victory? %(players)s will be resigned.": "Klaim kemenangan? %(players)s akan menyerah.",
   "%(players)s left the game. Do you want to claim victory?": "%(players)s telah keluar dari permainan. Klaim kemenangan?",
-  "Kick %(player)s? They cannot play this match again.": "Keluarkan %(player)s? Pemain ini tidak dapat bermain lagi di permainan ini."
+  "Kick %(player)s? They cannot play this match again.": "Keluarkan %(player)s? Pemain ini tidak dapat bermain lagi di permainan ini.",
+  "Hide observer chat": "Sembunyikan obrolan pengamat",
+  "Hide what observers write while you play.": "Sembunyikan apa yang ditulis pengamat saat Anda bermain.",
+  "too many messages": "terlalu banyak pesan",
+  "message too long": "pesan terlalu panjang",
+  "empty message": "pesan kosong",
+  "observers cannot use that channel": "pengamat tidak dapat memakai saluran itu",
+  "observers cannot message players": "pengamat tidak dapat mengirim pesan ke pemain",
+  "only Everyone in setup": "di pengaturan hanya Semua orang",
+  "no such member": "anggota tidak ditemukan",
+  "no addressee": "penerima tidak ada",
+  "join first": "bergabunglah dahulu",
+  "the chat is closed": "obrolan telah ditutup",
+  "invalid nickname": "nama panggilan tidak valid"
 }

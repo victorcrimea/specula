@@ -157,5 +157,18 @@
   "Are you sure you want to end the game for every player?": "Oyunu tüm oyuncular için bitirmek istediğinizden emin misiniz?",
   "Claim victory? %(players)s will be resigned.": "Zafer talep edilsin mi? %(players)s teslim olacak.",
   "%(players)s left the game. Do you want to claim victory?": "%(players)s oyundan ayrıldı. Zafer talep etmek ister misiniz?",
-  "Kick %(player)s? They cannot play this match again.": "%(player)s atılsın mı? Bu oyuncu bu maçı bir daha oynayamayacak."
+  "Kick %(player)s? They cannot play this match again.": "%(player)s atılsın mı? Bu oyuncu bu maçı bir daha oynayamayacak.",
+  "Hide observer chat": "Gözlemci sohbetini gizle",
+  "Hide what observers write while you play.": "Sen oynarken gözlemcilerin yazdıklarını gizler.",
+  "too many messages": "çok fazla mesaj",
+  "message too long": "mesaj çok uzun",
+  "empty message": "boş mesaj",
+  "observers cannot use that channel": "gözlemciler bu kanalı kullanamaz",
+  "observers cannot message players": "gözlemciler oyunculara mesaj gönderemez",
+  "only Everyone in setup": "kurulumda yalnızca Herkes",
+  "no such member": "böyle bir üye yok",
+  "no addressee": "alıcı yok",
+  "join first": "önce katıl",
+  "the chat is closed": "sohbet kapalı",
+  "invalid nickname": "geçersiz takma ad"
 }

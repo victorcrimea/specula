@@ -157,5 +157,18 @@
   "Are you sure you want to end the game for every player?": "question before End game; Yes ends the game for everyone",
   "Claim victory? %(players)s will be resigned.": "question before Claim victory; %(players)s is a list of player names, such as Alice, Bob",
   "%(players)s left the game. Do you want to claim victory?": "popup offering Claim victory once the others have left; %(players)s is a list of player names",
-  "Kick %(player)s? They cannot play this match again.": "question before a kick; %(player)s is the player's name"
+  "Kick %(player)s? They cannot play this match again.": "question before a kick; %(player)s is the player's name",
+  "Hide observer chat": "settings checkbox label in the Chat tab: a player does not see what observers write in chat",
+  "Hide what observers write while you play.": "tooltip of the Hide observer chat checkbox",
+  "too many messages": "chat refusal shown to the sender: they sent messages too fast and must wait",
+  "message too long": "chat refusal shown to the sender: the text is longer than the limit",
+  "empty message": "chat refusal shown to the sender: the message has no text",
+  "observers cannot use that channel": "chat refusal shown to an observer who picked Allies or Enemies, which only players can use",
+  "observers cannot message players": "chat refusal shown to an observer who tried a private message to a player",
+  "only Everyone in setup": "chat refusal in the game setup: only the Everyone addressee exists there; Everyone is the engine's name of the addressee that reaches all",
+  "no such member": "chat refusal: the private message's addressee is not in the match",
+  "no addressee": "chat refusal: a private message was sent without choosing whom to send it to",
+  "join first": "chat refusal: the visitor must enter a nickname before sending",
+  "the chat is closed": "chat refusal: the match has ended, so the chat takes no more messages",
+  "invalid nickname": "chat refusal: the nickname stored in this browser breaks the nickname rule, so the visitor cannot chat"
 }

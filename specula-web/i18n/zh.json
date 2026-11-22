@@ -157,5 +157,18 @@
   "Are you sure you want to end the game for every player?": "确定要为所有玩家结束游戏吗？",
   "Claim victory? %(players)s will be resigned.": "宣布胜利？%(players)s 将被投降。",
   "%(players)s left the game. Do you want to claim victory?": "%(players)s 已离开游戏。是否宣布胜利？",
-  "Kick %(player)s? They cannot play this match again.": "踢出 %(player)s？该玩家将无法再参加本局游戏。"
+  "Kick %(player)s? They cannot play this match again.": "踢出 %(player)s？该玩家将无法再参加本局游戏。",
+  "Hide observer chat": "隐藏观战者聊天",
+  "Hide what observers write while you play.": "游戏时隐藏观战者发送的内容。",
+  "too many messages": "消息过多",
+  "message too long": "消息过长",
+  "empty message": "消息为空",
+  "observers cannot use that channel": "观战者不能使用该频道",
+  "observers cannot message players": "观战者不能给玩家发私信",
+  "only Everyone in setup": "设置阶段只能发给所有人",
+  "no such member": "没有这个成员",
+  "no addressee": "缺少收信人",
+  "join first": "请先加入",
+  "the chat is closed": "聊天已关闭",
+  "invalid nickname": "无效的昵称"
 }

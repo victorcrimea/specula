@@ -157,5 +157,18 @@
   "Are you sure you want to end the game for every player?": "Weet je zeker dat je het spel voor alle spelers wilt beëindigen?",
   "Claim victory? %(players)s will be resigned.": "Overwinning claimen? %(players)s geven zich over.",
   "%(players)s left the game. Do you want to claim victory?": "%(players)s heeft het spel verlaten. Wil je de overwinning claimen?",
-  "Kick %(player)s? They cannot play this match again.": "%(player)s verwijderen? Deze speler kan dit spel niet meer spelen."
+  "Kick %(player)s? They cannot play this match again.": "%(player)s verwijderen? Deze speler kan dit spel niet meer spelen.",
+  "Hide observer chat": "Toeschouwerchat verbergen",
+  "Hide what observers write while you play.": "Verbergt wat toeschouwers schrijven terwijl je speelt.",
+  "too many messages": "te veel berichten",
+  "message too long": "bericht te lang",
+  "empty message": "leeg bericht",
+  "observers cannot use that channel": "toeschouwers kunnen dat kanaal niet gebruiken",
+  "observers cannot message players": "toeschouwers kunnen geen berichten naar spelers sturen",
+  "only Everyone in setup": "in de instellingen alleen Iedereen",
+  "no such member": "dat lid bestaat niet",
+  "no addressee": "geen geadresseerde",
+  "join first": "doe eerst mee",
+  "the chat is closed": "de chat is gesloten",
+  "invalid nickname": "ongeldige bijnaam"
 }

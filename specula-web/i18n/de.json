@@ -157,5 +157,18 @@
   "Are you sure you want to end the game for every player?": "Möchtest du das Spiel für alle Spieler wirklich beenden?",
   "Claim victory? %(players)s will be resigned.": "Sieg beanspruchen? %(players)s werden aufgeben.",
   "%(players)s left the game. Do you want to claim victory?": "%(players)s hat das Spiel verlassen. Möchtest du den Sieg beanspruchen?",
-  "Kick %(player)s? They cannot play this match again.": "%(player)s rauswerfen? Diese Person kann dieses Spiel nicht mehr spielen."
+  "Kick %(player)s? They cannot play this match again.": "%(player)s rauswerfen? Diese Person kann dieses Spiel nicht mehr spielen.",
+  "Hide observer chat": "Zuschauer-Chat ausblenden",
+  "Hide what observers write while you play.": "Blendet aus, was Zuschauer schreiben, während du spielst.",
+  "too many messages": "zu viele Nachrichten",
+  "message too long": "Nachricht zu lang",
+  "empty message": "leere Nachricht",
+  "observers cannot use that channel": "Zuschauer können diesen Kanal nicht nutzen",
+  "observers cannot message players": "Zuschauer können Spielern keine Nachrichten senden",
+  "only Everyone in setup": "in der Spielvorbereitung nur Alle",
+  "no such member": "kein solches Mitglied",
+  "no addressee": "kein Empfänger",
+  "join first": "tritt zuerst bei",
+  "the chat is closed": "der Chat ist geschlossen",
+  "invalid nickname": "ungültiger Spitzname"
 }

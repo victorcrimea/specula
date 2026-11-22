@@ -246,15 +246,15 @@ body { cursor: var(--gui-cursor-default, default); }
   var(--gui-panel-shader-top-edge) 0 0 / 100% 1px no-repeat; }
 /* The engine's `-stroke` fonts: a 1 px black outline. The top panel
    shares the text and bar styles. */
-:is(#details, #top-panel, #diplomacy-window, #trade-window, #match-summary, #message-box, #research) .text { position: absolute; display: flex; align-items: center;
+:is(#details, #top-panel, #diplomacy-window, #trade-window, #match-summary, #message-box, #research, #chat-window) .text { position: absolute; display: flex; align-items: center;
   white-space: pre; overflow: hidden; line-height: 1.1;
   -webkit-text-stroke: 2px black; paint-order: stroke fill; }
-:is(#details, #top-panel, #diplomacy-window, #trade-window, #match-summary, #message-box, #research) .center { justify-content: center; text-align: center; }
+:is(#details, #top-panel, #diplomacy-window, #trade-window, #match-summary, #message-box, #research, #chat-window) .center { justify-content: center; text-align: center; }
 :is(#details, #top-panel) .right { justify-content: flex-end; text-align: right; }
 :is(#details, #top-panel) .sans-stroke-12 { font-size: 12px; font-weight: 400; }
 :is(#details, #top-panel, #research) .sans-stroke-14 { font-size: 14px; font-weight: 400; }
 :is(#details, #top-panel) .sans-bold-stroke-13 { font-size: 13px; font-weight: 700; }
-:is(#details, #top-panel, #diplomacy-window, #trade-window, #match-summary, #message-box) .sans-bold-stroke-14 { font-size: 14px; font-weight: 700; }
+:is(#details, #top-panel, #diplomacy-window, #trade-window, #match-summary, #message-box, #chat-window) .sans-bold-stroke-14 { font-size: 14px; font-weight: 700; }
 :is(#details, #top-panel) .gold { color: var(--gui-gold); }
 /* A bar: barBorder around it, the background, the foreground and
    statsBarShaderHorizontal or ...Vertical over them. */
@@ -760,32 +760,32 @@ body:not([data-debug="storage"]) #stats-storage { display: none; }
   font-family: "0ad sans", "0ad sans fallback", sans-serif; color: white;
   user-select: none; -webkit-user-select: none; }
 #diplomacy-window[hidden], #diplomacy-window [hidden] { display: none; }
-:is(#diplomacy-window, #trade-window, #message-box-dialog, #match-summary) > .frame { position: absolute; pointer-events: none; background-repeat: no-repeat; }
-:is(#diplomacy-window, #trade-window, #message-box-dialog, #match-summary) > .background { left: 4px; top: 0; right: 4px; bottom: 4px;
+:is(#diplomacy-window, #trade-window, #message-box-dialog, #match-summary, #chat-window) > .frame { position: absolute; pointer-events: none; background-repeat: no-repeat; }
+:is(#diplomacy-window, #trade-window, #message-box-dialog, #match-summary, #chat-window) > .background { left: 4px; top: 0; right: 4px; bottom: 4px;
   background: var(--gui-dialog-background) 0 0 / 512px 512px repeat; }
-:is(#diplomacy-window, #trade-window, #message-box-dialog, #match-summary) > .shade { left: 4px; right: 4px; height: 128px;
+:is(#diplomacy-window, #trade-window, #message-box-dialog, #match-summary, #chat-window) > .shade { left: 4px; right: 4px; height: 128px;
   background-image: var(--gui-dialog-shadow); background-size: 100% 100%; }
-:is(#diplomacy-window, #trade-window, #message-box-dialog, #match-summary) > .shade.top { top: 0; scale: -1 -1; }
-:is(#diplomacy-window, #trade-window, #message-box-dialog, #match-summary) > .shade.bottom { bottom: 4px; }
-:is(#diplomacy-window, #trade-window, #message-box-dialog, #match-summary) > .edge { left: 4px; right: 4px; height: 8px;
+:is(#diplomacy-window, #trade-window, #message-box-dialog, #match-summary, #chat-window) > .shade.top { top: 0; scale: -1 -1; }
+:is(#diplomacy-window, #trade-window, #message-box-dialog, #match-summary, #chat-window) > .shade.bottom { bottom: 4px; }
+:is(#diplomacy-window, #trade-window, #message-box-dialog, #match-summary, #chat-window) > .edge { left: 4px; right: 4px; height: 8px;
   background: var(--gui-dialog-border) 0 0 / 2048px 8px repeat-x; }
-:is(#diplomacy-window, #trade-window, #message-box-dialog, #match-summary) > .edge.top { top: -4px; }
-:is(#diplomacy-window, #trade-window, #message-box-dialog, #match-summary) > .edge.bottom { bottom: 0; }
-:is(#diplomacy-window, #trade-window, #message-box-dialog, #match-summary) > .deco { width: 64px; height: 32px; background-size: 100% 100%; }
-:is(#diplomacy-window, #trade-window, #message-box-dialog, #match-summary) > .deco.top-left { left: -14px; top: -21px;
+:is(#diplomacy-window, #trade-window, #message-box-dialog, #match-summary, #chat-window) > .edge.top { top: -4px; }
+:is(#diplomacy-window, #trade-window, #message-box-dialog, #match-summary, #chat-window) > .edge.bottom { bottom: 0; }
+:is(#diplomacy-window, #trade-window, #message-box-dialog, #match-summary, #chat-window) > .deco { width: 64px; height: 32px; background-size: 100% 100%; }
+:is(#diplomacy-window, #trade-window, #message-box-dialog, #match-summary, #chat-window) > .deco.top-left { left: -14px; top: -21px;
   background-image: var(--gui-dialog-deco-top); scale: -1 1; }
-:is(#diplomacy-window, #trade-window, #message-box-dialog, #match-summary) > .deco.top-right { right: -14px; top: -21px;
+:is(#diplomacy-window, #trade-window, #message-box-dialog, #match-summary, #chat-window) > .deco.top-right { right: -14px; top: -21px;
   background-image: var(--gui-dialog-deco-top); }
-:is(#diplomacy-window, #trade-window, #message-box-dialog, #match-summary) > .deco.bottom-left { left: -31px; bottom: -10px;
+:is(#diplomacy-window, #trade-window, #message-box-dialog, #match-summary, #chat-window) > .deco.bottom-left { left: -31px; bottom: -10px;
   background-image: var(--gui-dialog-deco-bottom); scale: -1 1; }
-:is(#diplomacy-window, #trade-window, #message-box-dialog, #match-summary) > .deco.bottom-right { right: -31px; bottom: -10px;
+:is(#diplomacy-window, #trade-window, #message-box-dialog, #match-summary, #chat-window) > .deco.bottom-right { right: -31px; bottom: -10px;
   background-image: var(--gui-dialog-deco-bottom); }
-:is(#diplomacy-window, #trade-window, #message-box-dialog, #match-summary) > .titlebar { top: -18px; height: 33px; background-size: 100% 100%; }
-:is(#diplomacy-window, #trade-window, #message-box-dialog, #match-summary) > .titlebar.middle { left: calc(50% - 108px); width: 216px;
+:is(#diplomacy-window, #trade-window, #message-box-dialog, #match-summary, #chat-window) > .titlebar { top: -18px; height: 33px; background-size: 100% 100%; }
+:is(#diplomacy-window, #trade-window, #message-box-dialog, #match-summary, #chat-window) > .titlebar.middle { left: calc(50% - 108px); width: 216px;
   background: var(--gui-dialog-titlebar-middle) 0 0 / 128px 100% repeat-x; }
-:is(#diplomacy-window, #trade-window, #message-box-dialog, #match-summary) > .titlebar.left { left: calc(50% - 134px); width: 32px;
+:is(#diplomacy-window, #trade-window, #message-box-dialog, #match-summary, #chat-window) > .titlebar.left { left: calc(50% - 134px); width: 32px;
   background-image: var(--gui-dialog-titlebar-left); }
-:is(#diplomacy-window, #trade-window, #message-box-dialog, #match-summary) > .titlebar.right { left: calc(50% + 102px); width: 32px;
+:is(#diplomacy-window, #trade-window, #message-box-dialog, #match-summary, #chat-window) > .titlebar.right { left: calc(50% + 102px); width: 32px;
   background-image: var(--gui-dialog-titlebar-left); scale: -1 -1; }
 #diplomacy-title { left: calc(50% - 96px); top: -16px; width: 192px; height: 32px; }
 #diplomacy-table { position: absolute; left: 32px; right: 32px; top: 32px;
@@ -804,12 +804,54 @@ body:not([data-debug="storage"]) #stats-storage { display: none; }
 #diplomacy-rows > .row > button:disabled { color: rgba(210, 210, 210, 0.627); filter: brightness(0.75); }
 #diplomacy-header .swatch { width: 12px; height: 12px; margin-top: 2px;
   box-shadow: 0 0 0 1px black; }
-#diplomacy-window .stone, #match-summary .stone { background: var(--gui-stone-button) 0 0 / 100% 100%; }
-#diplomacy-window .stone.disabled, #match-summary .stone.disabled { filter: brightness(0.75); }
+#diplomacy-window .stone, #match-summary .stone, #chat-window .stone { background: var(--gui-stone-button) 0 0 / 100% 100%; }
+#diplomacy-window .stone.disabled, #match-summary .stone.disabled, #chat-window .stone:disabled { filter: brightness(0.75); }
 #diplomacy-ceasefire { left: 32px; right: 32px; bottom: 62px; height: 28px; align-items: flex-start; }
 #diplomacy-close { left: calc(50% + 100px); bottom: 22px; width: 128px; height: 28px;
   padding: 0; border: 0; color: white; font-family: inherit; }
 #diplomacy-close:hover { background-image: var(--gui-stone-button-over); }
+/* gui/session/chat/chat_window.xml: the small window is the input alone,
+   the large one adds the history above it, 22%-75 to 78%-85 high and, as
+   ChatWindow.resizeChatWindow, as wide as the golden ratio makes the
+   history text. */
+#chat-window { position: fixed; z-index: 90; left: 50%; translate: -50% 0;
+  top: calc(50% - 80px); width: 432px; height: 120px;
+  max-width: calc(100vw - 32px);
+  font-family: "0ad sans", "0ad sans fallback", sans-serif; color: white; font-size: 13px; }
+#chat-window[data-extended="1"] { top: calc(22vh - 75px); height: calc(56vh - 10px);
+  width: calc(1.618 * (56vh - 176px) + 20px); min-width: 432px; }
+#chat-window[hidden], #chat-window [hidden] { display: none; }
+#chat-history-page { position: absolute; left: 0; top: 0; right: 0; bottom: 120px; }
+#chat-page { position: absolute; left: 0; right: 0; bottom: 0; height: 128px; }
+#chat-window .caption { position: absolute; left: 16px; width: 58px; height: 24px; white-space: nowrap; }
+#chat-filter-caption { top: 10px; }
+#chat-to-caption { top: 14px; }
+#chat-text-caption { top: 46px; }
+#chat-window select, #chat-window input[type=text] { position: absolute; left: 75px; right: 16px; height: 26px;
+  box-sizing: border-box; background: rgba(0, 0, 0, 0.6); color: white; border: 1px solid var(--gui-gold, #c9a14a);
+  font: inherit; padding: 0 6px; }
+#chat-window option { background: #202020; }
+#chat-filter { top: 10px; height: 24px; }
+#chat-to { top: 12px; }
+#chat-input { top: 46px; }
+#chat-history { position: absolute; left: 10px; right: 10px; top: 46px; bottom: 0; overflow-y: auto;
+  box-sizing: border-box; padding: 4px 6px; background: rgba(0, 0, 0, 0.6);
+  border: 1px solid var(--gui-gold, #c9a14a); user-select: text; -webkit-user-select: text;
+  overflow-wrap: anywhere; }
+#chat-cancel, #chat-send { top: 80px; height: 36px; padding: 0; border: 0; color: white; font-family: inherit; }
+#chat-cancel { left: 16px; width: calc(30% - 0px); }
+#chat-send { left: calc(70% - 16px); right: 16px; }
+#chat-cancel:hover, #chat-send:hover { background-image: var(--gui-stone-button-over); }
+#chat-extended-label { position: absolute; left: calc(50% - 40px); top: 80px; height: 36px;
+  display: flex; align-items: center; gap: 4px; -webkit-text-stroke: 2px black; paint-order: stroke fill; }
+/* ChatOverlay: the last lines at the screen's top left, which pass clicks
+   through to the game. */
+#chat-overlay { position: fixed; z-index: 5; left: 3px; top: 131px; bottom: 240px; width: 60%;
+  overflow: hidden; pointer-events: none; font-size: 14px; font-weight: 700; color: white;
+  -webkit-text-stroke: 2px black; paint-order: stroke fill; line-height: 1.25;
+  font-family: "0ad sans", "0ad sans fallback", sans-serif; }
+#chat-overlay[hidden] { display: none; }
+.visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
 /* The match summary (gui/summary/summary.xml) in the same frame: a table
    of counters per panel, or the two charts; narrow screens scroll the
    table rather than the page. */
@@ -1224,6 +1266,25 @@ body:not([data-debug="storage"]) #stats-storage { display: none; }
 <div id="diplomacy-ceasefire" class="text sans-bold-stroke-14" hidden></div>
 <button id="diplomacy-close" type="button" class="text center sans-bold-stroke-14 stone"></button>
 </div>
+<div id="chat-overlay" aria-live="polite"></div>
+<div id="chat-window" role="dialog" aria-labelledby="chat-title" hidden>
+<span class="frame background"></span><span class="frame shade top"></span><span class="frame shade bottom"></span>
+<span class="frame edge top"></span><span class="frame edge bottom"></span>
+<span class="frame deco top-left"></span><span class="frame deco top-right"></span>
+<span class="frame deco bottom-left"></span><span class="frame deco bottom-right"></span>
+<span id="chat-title" class="visually-hidden" data-i18n>Chat</span>
+<div id="chat-history-page">
+<label id="chat-filter-caption" class="caption" for="chat-filter"></label><select id="chat-filter"></select>
+<div id="chat-history" role="log"></div>
+</div>
+<div id="chat-page">
+<label id="chat-to-caption" class="caption" for="chat-to"></label><select id="chat-to"></select>
+<label id="chat-text-caption" class="caption" for="chat-input"></label><input id="chat-input" type="text" maxlength="1024" autocomplete="off">
+<button id="chat-cancel" class="text center sans-bold-stroke-14 stone" type="button"></button>
+<label id="chat-extended-label"><input id="chat-extended" type="checkbox"><span id="chat-extended-text"></span></label>
+<button id="chat-send" class="text center sans-bold-stroke-14 stone" type="button"></button>
+</div>
+</div>
 <div id="match-summary" role="dialog" aria-labelledby="summary-title" hidden>
 <span class="frame background"></span><span class="frame shade top"></span><span class="frame shade bottom"></span>
 <span class="frame edge top"></span><span class="frame edge bottom"></span>
@@ -1276,6 +1337,7 @@ body:not([data-debug="storage"]) #stats-storage { display: none; }
 <div class="tabs" role="tablist">
 <button type="button" role="tab" id="tab-quality" aria-controls="pane-quality" aria-selected="true" data-i18n>Quality</button>
 <button type="button" role="tab" id="tab-language" aria-controls="pane-language" aria-selected="false" data-i18n>Language</button>
+<button type="button" role="tab" id="tab-chat" aria-controls="pane-chat" aria-selected="false" data-i18n>Chat</button>
 </div>
 <div class="pane" role="tabpanel" id="pane-quality" aria-labelledby="tab-quality">
 <div class="presets">
@@ -1429,6 +1491,11 @@ body:not([data-debug="storage"]) #stats-storage { display: none; }
 <option value="bilinear" data-i18n>Bilinear</option>
 <option value="pixelated" data-i18n>Pixelated</option>
 </select></label>
+</div>
+<div class="pane" role="tabpanel" id="pane-chat" aria-labelledby="tab-chat" hidden>
+<label title="Display the time when a chat message was posted." data-i18n-attrs="title"><span data-i18n>Chat timestamp</span> <input id="chat-timestamp" type="checkbox"></label>
+<label title="Receive audio notification when someone types your nick." data-i18n-attrs="title"><span data-i18n>Nick notification</span> <input id="chat-nick" type="checkbox"></label>
+<label id="chat-hide-observers-setting" title="Hide what observers write while you play." data-i18n-attrs="title"><span data-i18n>Hide observer chat</span> <input id="chat-hide-observers" type="checkbox"></label>
 </div>
 <div class="pane" role="tabpanel" id="pane-language" aria-labelledby="tab-language" hidden>
 <label data-i18n>Language <select id="language">

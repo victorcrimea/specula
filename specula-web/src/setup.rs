@@ -29,6 +29,7 @@ use web_sys::HtmlSelectElement;
 use web_sys::MessageEvent;
 use web_sys::WebSocket;
 
+use crate::chat;
 use crate::lang;
 use crate::lang::translate;
 use crate::lang::translate_context as tc;
@@ -310,6 +311,10 @@ struct Dom {
     ai_behavior: HtmlSelectElement,
     ai_description: HtmlElement,
     ai_ok: HtmlElement,
+    chat_lines: HtmlElement,
+    chat_form: HtmlElement,
+    chat_input: HtmlInputElement,
+    chat_send: HtmlButtonElement,
 }
 
 struct Control {
@@ -338,6 +343,10 @@ struct Row {
 
 struct Page {
     dom: Dom,
+    chat: Option<chat::Chat>,
+    /// The seats' colours the chat lines were drawn with; the lines are
+    /// drawn again when one changes.
+    chat_colors: String,
     socket: Option<WebSocket>,
     catalog: JsValue,
     state: JsValue,
@@ -388,6 +397,10 @@ pub async fn run() -> Result<(), String> {
         ai_behavior: by_id(&document, "ai-behavior")?,
         ai_description: by_id(&document, "ai-description")?,
         ai_ok: by_id(&document, "ai-ok")?,
+        chat_lines: by_id(&document, "chat-lines")?,
+        chat_form: by_id(&document, "chat-form")?,
+        chat_input: by_id(&document, "chat-input")?,
+        chat_send: by_id(&document, "chat-send")?,
         document: document.clone(),
     };
     let storage = window.local_storage().ok().flatten();
@@ -397,6 +410,8 @@ pub async fn run() -> Result<(), String> {
         .filter(|name| !name.is_empty());
     let page: Shared = Rc::new(RefCell::new(Page {
         dom,
+        chat: None,
+        chat_colors: String::new(),
         socket: None,
         catalog: JsValue::UNDEFINED,
         state: JsValue::UNDEFINED,
@@ -422,7 +437,116 @@ pub async fn run() -> Result<(), String> {
 
     wire_static(&page);
     connect(&page);
+    wire_chat(&page);
     Ok(())
+}
+
+/// The chat of the setup (M32): Everyone only, which the server enforces
+/// too (M31). The socket's messages redraw it, as this page has no frame
+/// loop.
+fn wire_chat(page: &Shared) {
+    let weak = Rc::downgrade(page);
+    let on_change: Rc<dyn Fn()> = Rc::new(move || {
+        if let Some(page) = weak.upgrade() {
+            render_chat(&page);
+        }
+    });
+    let chat = chat::Chat::open(false, Some(on_change));
+    let form = page.borrow().dom.chat_form.clone();
+    page.borrow_mut().chat = Some(chat);
+    let shared = Rc::clone(page);
+    listen(&form, "submit", move |event| {
+        event.prevent_default();
+        let page = shared.borrow();
+        let Some(chat) = &page.chat else {
+            return;
+        };
+        show(&page.dom.error, false);
+        let value = page.dom.chat_input.value();
+        if value.is_empty() || chat.you().is_none() {
+            return;
+        }
+        chat.send(chat::Channel::Everyone, None, &value);
+        page.dom.chat_input.set_value("");
+        // ChatInputPanel.onPress.
+        let _ = page.dom.chat_input.focus();
+    });
+}
+
+/// The name colour of `player`'s seat, from the state's settings, lightened
+/// as `ClientChat.colorizePlayernameByGUID` does.
+fn chat_color(page: &Page, player: u8) -> Option<String> {
+    let attributes = get(&page.state, "attributes");
+    let settings = get(&attributes, "settings");
+    let data = list(&settings, "PlayerData")
+        .into_iter()
+        .nth(usize::from(player).checked_sub(1)?)?;
+    let color = get(&data, "Color");
+    if color.is_undefined() || color.is_null() {
+        return None;
+    }
+    Some(chat::lightened(
+        number(&color, "r"),
+        number(&color, "g"),
+        number(&color, "b"),
+    ))
+}
+
+/// Every seat's colour as the state names it, to notice a change.
+fn chat_colors(page: &Page) -> String {
+    let attributes = get(&page.state, "attributes");
+    let settings = get(&attributes, "settings");
+    js_sys::JSON::stringify(&get(&settings, "PlayerData"))
+        .ok()
+        .and_then(|json| json.as_string())
+        .unwrap_or_default()
+}
+
+fn render_chat(shared: &Shared) {
+    let colors = chat_colors(&shared.borrow());
+    let redraw = {
+        let mut page = shared.borrow_mut();
+        let changed = page.chat_colors != colors;
+        page.chat_colors = colors;
+        changed
+    };
+    let page = shared.borrow();
+    let Some(chat) = &page.chat else {
+        return;
+    };
+    let usable = chat.you().is_some() && !chat.closed();
+    enable(&page.dom.chat_input, usable);
+    enable(&page.dom.chat_send, usable);
+    if usable {
+        page.dom.chat_input.set_max_length(chat.max_length() as i32);
+    }
+    if let Some(reason) = chat.take_error() {
+        page.dom.error.set_text_content(Some(&translate(&reason)));
+        show(&page.dom.error, true);
+    }
+    let mut fresh = chat.take_fresh();
+    let lines = &page.dom.chat_lines;
+    let at_bottom = lines.scroll_height() - lines.scroll_top() - lines.client_height() < 8;
+    if redraw {
+        // The fresh entries are among the kept ones.
+        lines.set_text_content(None);
+        fresh = chat.entries();
+    }
+    if fresh.is_empty() {
+        return;
+    }
+    let stamps = chat::setting(chat::TIMESTAMP_KEY, true);
+    for entry in fresh {
+        let line = chat::setup_line(&entry, stamps);
+        let color = entry
+            .from_player
+            .and_then(|player| chat_color(&page, player))
+            .or_else(|| Some("white".to_string()));
+        let _ = lines.append_child(&chat::render(&page.dom.document, &line, color));
+    }
+    if at_bottom {
+        lines.set_scroll_top(lines.scroll_height());
+    }
 }
 
 /// The buttons and the form the page has from the start.
@@ -778,6 +902,7 @@ fn on_message_value(page: &Shared, message: JsValue) {
                 page.state = message;
             }
             render(page);
+            render_chat(page);
         }
         "launched" => {
             page.borrow_mut().done = true;

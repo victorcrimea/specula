@@ -115,34 +115,26 @@ impl Seats {
                 table.members[index].present = true;
                 index
             }
-            None => {
-                let mut names: Vec<Nickname> = table
-                    .members
-                    .iter()
-                    .map(|member| member.nickname.clone())
-                    .collect();
-                names.push(nickname);
-                suffix_duplicates(&mut names);
-                let nickname = names.pop().expect("just pushed");
-                table.members.push(Member {
-                    cookie: cookie.to_string(),
-                    nickname,
-                    player: None,
-                    present: true,
-                    ready: Ready::No,
-                    sockets: 0,
-                    away_since: None,
-                    last_player: None,
-                    play_sockets: 0,
-                    play_away_since: None,
-                });
-                table.members.len() - 1
-            }
+            None => table.push(cookie, nickname, true),
         };
         if table.host.is_none() {
             table.host = Some(index);
         }
         table.members[index].nickname.clone()
+    }
+
+    /// Adds `cookie` as a member without a player, for chat in a running
+    /// match (M31), or finds them if they are one. Unlike `join` it never
+    /// makes them host, never marks a returning member present (host
+    /// transfer reads that), and keeps a returning member's name (D10 locks
+    /// it at launch).
+    pub fn join_observer(&self, cookie: &str, nickname: Nickname) -> (usize, Nickname) {
+        let table = &mut *self.inner.lock().unwrap();
+        let index = match table.index_of(cookie) {
+            Some(index) => index,
+            None => table.push(cookie, nickname, false),
+        };
+        (index, table.members[index].nickname.clone())
     }
 
     /// Gives `cookie` the seat of `player`, or makes them a spectator with
@@ -214,6 +206,23 @@ impl Seats {
 
     pub fn index_of(&self, cookie: &str) -> Option<usize> {
         self.inner.lock().unwrap().index_of(cookie)
+    }
+
+    /// Every member in join order with their cookie, for the chat's members
+    /// list (M32).
+    pub fn chat_members(&self) -> Vec<(String, Nickname, Option<u8>)> {
+        let table = self.inner.lock().unwrap();
+        table
+            .members
+            .iter()
+            .map(|member| {
+                (
+                    member.cookie.clone(),
+                    member.nickname.clone(),
+                    member.player,
+                )
+            })
+            .collect()
     }
 
     /// Host operations name members by index; cookies never leave the
@@ -507,5 +516,31 @@ impl Table {
         self.members
             .iter()
             .position(|member| member.cookie == cookie)
+    }
+
+    /// Adds a member with `nickname` suffixed against every earlier one
+    /// (D10); answers its index.
+    fn push(&mut self, cookie: &str, nickname: Nickname, present: bool) -> usize {
+        let mut names: Vec<Nickname> = self
+            .members
+            .iter()
+            .map(|member| member.nickname.clone())
+            .collect();
+        names.push(nickname);
+        suffix_duplicates(&mut names);
+        let nickname = names.pop().expect("just pushed");
+        self.members.push(Member {
+            cookie: cookie.to_string(),
+            nickname,
+            player: None,
+            present,
+            ready: Ready::No,
+            sockets: 0,
+            away_since: None,
+            last_player: None,
+            play_sockets: 0,
+            play_away_since: None,
+        });
+        self.members.len() - 1
     }
 }

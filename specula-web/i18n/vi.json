@@ -157,5 +157,18 @@
   "Are you sure you want to end the game for every player?": "Bạn có chắc muốn kết thúc trận cho mọi người chơi không?",
   "Claim victory? %(players)s will be resigned.": "Yêu cầu chiến thắng? %(players)s sẽ đầu hàng.",
   "%(players)s left the game. Do you want to claim victory?": "%(players)s đã rời trận. Bạn có muốn yêu cầu chiến thắng không?",
-  "Kick %(player)s? They cannot play this match again.": "Đuổi %(player)s? Người này sẽ không thể chơi trận này nữa."
+  "Kick %(player)s? They cannot play this match again.": "Đuổi %(player)s? Người này sẽ không thể chơi trận này nữa.",
+  "Hide observer chat": "Ẩn trò chuyện của người xem",
+  "Hide what observers write while you play.": "Ẩn những gì người xem viết khi bạn đang chơi.",
+  "too many messages": "quá nhiều tin nhắn",
+  "message too long": "tin nhắn quá dài",
+  "empty message": "tin nhắn trống",
+  "observers cannot use that channel": "người xem không thể dùng kênh đó",
+  "observers cannot message players": "người xem không thể nhắn tin cho người chơi",
+  "only Everyone in setup": "khi thiết lập chỉ có Mọi người",
+  "no such member": "không có thành viên đó",
+  "no addressee": "thiếu người nhận",
+  "join first": "hãy tham gia trước",
+  "the chat is closed": "cuộc trò chuyện đã đóng",
+  "invalid nickname": "biệt danh không hợp lệ"
 }

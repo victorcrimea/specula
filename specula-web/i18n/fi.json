@@ -157,5 +157,18 @@
   "Are you sure you want to end the game for every player?": "Haluatko varmasti lopettaa pelin kaikilta pelaajilta?",
   "Claim victory? %(players)s will be resigned.": "Vaadi voitto? %(players)s luovuttavat.",
   "%(players)s left the game. Do you want to claim victory?": "%(players)s poistui pelistä. Haluatko vaatia voiton?",
-  "Kick %(player)s? They cannot play this match again.": "Poistetaanko %(player)s? Hän ei voi enää pelata tätä peliä."
+  "Kick %(player)s? They cannot play this match again.": "Poistetaanko %(player)s? Hän ei voi enää pelata tätä peliä.",
+  "Hide observer chat": "Piilota tarkkailijoiden keskustelu",
+  "Hide what observers write while you play.": "Piilottaa tarkkailijoiden kirjoittamat viestit pelatessasi.",
+  "too many messages": "liikaa viestejä",
+  "message too long": "viesti on liian pitkä",
+  "empty message": "tyhjä viesti",
+  "observers cannot use that channel": "tarkkailijat eivät voi käyttää tätä kanavaa",
+  "observers cannot message players": "tarkkailijat eivät voi lähettää viestejä pelaajille",
+  "only Everyone in setup": "asetuksissa vain Kaikki",
+  "no such member": "ei tällaista jäsentä",
+  "no addressee": "vastaanottaja puuttuu",
+  "join first": "liity ensin",
+  "the chat is closed": "keskustelu on suljettu",
+  "invalid nickname": "virheellinen nimimerkki"
 }

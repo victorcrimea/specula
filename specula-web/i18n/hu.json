@@ -157,5 +157,18 @@
   "Are you sure you want to end the game for every player?": "Biztosan befejezi a játékot minden játékos számára?",
   "Claim victory? %(players)s will be resigned.": "Győzelem igénylése? %(players)s fel fogja adni.",
   "%(players)s left the game. Do you want to claim victory?": "%(players)s kilépett a játékból. Szeretné igényelni a győzelmet?",
-  "Kick %(player)s? They cannot play this match again.": "Kirúgja %(player)s játékost? Nem játszhat többet ebben a játékban."
+  "Kick %(player)s? They cannot play this match again.": "Kirúgja %(player)s játékost? Nem játszhat többet ebben a játékban.",
+  "Hide observer chat": "Megfigyelők csevegésének elrejtése",
+  "Hide what observers write while you play.": "Elrejti, amit a megfigyelők írnak, amíg te játszol.",
+  "too many messages": "túl sok üzenet",
+  "message too long": "az üzenet túl hosszú",
+  "empty message": "üres üzenet",
+  "observers cannot use that channel": "a megfigyelők nem használhatják ezt a csatornát",
+  "observers cannot message players": "a megfigyelők nem írhatnak a játékosoknak",
+  "only Everyone in setup": "a beállításnál csak Mindenki",
+  "no such member": "nincs ilyen tag",
+  "no addressee": "hiányzik a címzett",
+  "join first": "előbb csatlakozz",
+  "the chat is closed": "a csevegés le van zárva",
+  "invalid nickname": "érvénytelen becenév"
 }

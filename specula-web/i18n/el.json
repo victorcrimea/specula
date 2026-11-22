@@ -157,5 +157,18 @@
   "Are you sure you want to end the game for every player?": "Είστε βέβαιοι ότι θέλετε να τερματίσετε το παιχνίδι για όλους τους παίκτες;",
   "Claim victory? %(players)s will be resigned.": "Διεκδίκηση νίκης; Οι %(players)s θα παραδοθούν.",
   "%(players)s left the game. Do you want to claim victory?": "Ο παίκτης %(players)s αποχώρησε από το παιχνίδι. Θέλετε να διεκδικήσετε τη νίκη;",
-  "Kick %(player)s? They cannot play this match again.": "Αποβολή του %(player)s; Δεν θα μπορεί να ξαναπαίξει σε αυτό το παιχνίδι."
+  "Kick %(player)s? They cannot play this match again.": "Αποβολή του %(player)s; Δεν θα μπορεί να ξαναπαίξει σε αυτό το παιχνίδι.",
+  "Hide observer chat": "Απόκρυψη συνομιλίας παρατηρητών",
+  "Hide what observers write while you play.": "Απόκρυψη όσων γράφουν οι παρατηρητές όσο παίζεις.",
+  "too many messages": "πάρα πολλά μηνύματα",
+  "message too long": "το μήνυμα είναι πολύ μεγάλο",
+  "empty message": "κενό μήνυμα",
+  "observers cannot use that channel": "οι παρατηρητές δεν μπορούν να χρησιμοποιήσουν αυτό το κανάλι",
+  "observers cannot message players": "οι παρατηρητές δεν μπορούν να στείλουν μηνύματα σε παίκτες",
+  "only Everyone in setup": "στη ρύθμιση μόνο Όλοι",
+  "no such member": "δεν υπάρχει τέτοιο μέλος",
+  "no addressee": "δεν υπάρχει παραλήπτης",
+  "join first": "συμμετέχετε πρώτα",
+  "the chat is closed": "η συνομιλία έχει κλείσει",
+  "invalid nickname": "μη έγκυρο ψευδώνυμο"
 }

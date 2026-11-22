@@ -141,8 +141,9 @@ input[type=text] { height: 26px; box-sizing: border-box; padding: 0 6px; border:
 #spectators { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 4px; }
 #spectators li { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; min-height: 28px; }
 #spectators .host { color: rgb(150, 150, 250); }
-/* ChatPanel.xml, empty until the setup has a chat (M31, M32). */
-#chat { flex: 1; min-height: 60px; display: flex; flex-direction: column; justify-content: flex-end; padding: 4px; }
+/* ChatPanel.xml: the lines scroll above the input (M32). */
+#chat { flex: 1; min-height: 60px; display: flex; flex-direction: column; padding: 4px; }
+#chat-lines { flex: 1; overflow-y: auto; min-height: 0; overflow-wrap: anywhere; }
 #chat .input { display: flex; gap: 6px; }
 #chat .input input { flex: 1; min-width: 0; }
 
@@ -246,7 +247,8 @@ input[type=text] { height: 26px; box-sizing: border-box; padding: 0 6px; border:
 <ul id="spectators"></ul>
 </div>
 <div id="chat" class="gold-box">
-<div class="input"><input type="text" disabled><button class="red" type="button" disabled data-i18n>Send</button></div>
+<div id="chat-lines" role="log" aria-live="polite"></div>
+<form id="chat-form" class="input"><input id="chat-input" type="text" maxlength="1024" autocomplete="off" disabled><button id="chat-send" class="red" type="submit" disabled data-i18n>Send</button></form>
 </div>
 </section>
 
