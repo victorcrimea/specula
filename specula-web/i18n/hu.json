@@ -170,5 +170,20 @@
   "no addressee": "hiányzik a címzett",
   "join first": "előbb csatlakozz",
   "the chat is closed": "a csevegés le van zárva",
-  "invalid nickname": "érvénytelen becenév"
+  "invalid nickname": "érvénytelen becenév",
+  "Ban": "Tiltás",
+  "Banned": "Tiltva",
+  "Join again": "Újracsatlakozás",
+  "You were kicked from this setup.": "Kirúgtak ebből a beállításból.",
+  "You are banned from this match.": "Tiltva vagy ebből a mérkőzésből.",
+  "Ban %(name)s from this match? They cannot join it again.": "Tiltja %(name)s-et ebből a mérkőzésből? Nem csatlakozhat újra.",
+  "Ban %(player)s? They cannot play or chat in this match again.": "Tiltja %(player)s-et? Nem játszhat és nem cseveghet többé ebben a mérkőzésben.",
+  "Ban %(player)s from this match's chat?": "Tiltja %(player)s-et a mérkőzés csevegéséből?",
+  "Reserved for %(name)s": "%(name)s számára fenntartva",
+  "waiting for the players of the last game": "az előző mérkőzés játékosaira várva",
+  "Join rematch": "Csatlakozás a visszavágóhoz",
+  "Lobby": "Előszoba",
+  "you are banned from this match": "tiltva vagy ebből a mérkőzésből",
+  "that slot is reserved": "ez a hely fenntartva",
+  "the time limit is reached": "elérted az időkorlátot"
 }

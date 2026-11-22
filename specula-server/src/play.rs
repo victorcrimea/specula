@@ -12,6 +12,7 @@
 //! hosts, is the match's seat table (`seats.rs`), by the visitor's `sv`
 //! cookie.
 
+use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::collections::VecDeque;
@@ -39,6 +40,7 @@ use specula_assets::command::QueryKind;
 use rocket::tokio::sync::broadcast;
 
 use crate::detail::CONTROL_ABSENT;
+use crate::detail::CONTROL_BANNED;
 use crate::detail::CONTROL_CLAIM;
 use crate::detail::CONTROL_END_ALLOWED;
 use crate::detail::CONTROL_HOST;
@@ -49,6 +51,7 @@ use crate::observer::EngineDirs;
 use crate::pause;
 use crate::registry::MatchId;
 use crate::registry::TURN_LENGTH;
+use crate::score;
 use crate::seats::Phase;
 use crate::seats::Seats;
 use crate::settings::Choice;
@@ -66,6 +69,7 @@ const SETTINGS_VFS_PATH: &str = "config/matchsettings.mp.json";
 const UPLINK_COMMAND: u8 = 1;
 const UPLINK_QUERY: u8 = 2;
 const UPLINK_PAUSE: u8 = 3;
+const UPLINK_SUMMARY: u8 = 4;
 /// `SpeculaFeed.h`'s query methods.
 const QUERY_BUILDING_PREVIEW: u8 = 1;
 const QUERY_FOUNDATION_SNAP: u8 = 2;
@@ -89,6 +93,15 @@ const ABSENT_AFTER: Duration = Duration::from_secs(5 * 60);
 const END_FREE: Duration = Duration::from_secs(60);
 /// D17: with no human seat connected for this long the match ends.
 const NOBODY_CONNECTED_END: Duration = Duration::from_secs(5 * 60);
+/// How long a time limit waits for the capture its summary request asks for
+/// before scoring the newest it already holds (M30).
+const LIMIT_SUMMARY_WAIT: Duration = Duration::from_secs(5);
+/// How long the engine runs on after the resigns so that it processes them
+/// and writes the final summary (M30).
+const LIMIT_RESIGN_WAIT: Duration = Duration::from_secs(10);
+/// The final summary is written after the turn that saw the last resign;
+/// one poll later is enough to have it.
+const LIMIT_RESIGN_SEEN: Duration = Duration::from_secs(1);
 /// The resign the engine takes as the seat's own (`Commands.js` `resign`).
 const RESIGN_JSON: &str = r#"{"type":"resign"}"#;
 
@@ -119,6 +132,10 @@ pub fn setup_json(status: &Status) -> String {
     json.boolean("defeated", status.defeated);
     json.boolean("watch", status.watch);
     json.boolean("rematch", status.rematch);
+    json.text(
+        "next",
+        &status.next.map(|id| id.to_string()).unwrap_or_default(),
+    );
     json.raw("seat", &status.seat.unwrap_or(0).to_string());
     if let Some((wall_left, game_limit)) = status.limits {
         json.raw("wall_left_ms", &wall_left.as_millis().to_string());
@@ -166,6 +183,9 @@ pub struct Status {
     /// A running match's wall time left and game limit (`Registry::limits`),
     /// for the pages' warnings; the registry fills it in.
     pub limits: Option<(Duration, Duration)>,
+    /// The setup the visitor follows the same game into (M35), while it is
+    /// still open; the registry fills it in.
+    pub next: Option<MatchId>,
 }
 
 pub struct Play {
@@ -207,12 +227,28 @@ pub struct Play {
 struct ControlState {
     /// Kicked by the host (V77); the seat is gone from the seat table.
     kicked: BTreeSet<u8>,
+    /// The cookie of each kicked seat, since the seat table has forgotten
+    /// it, so a later ban can still reach it (D54).
+    kicked_cookie: BTreeMap<u8, String>,
+    /// Banned by a kick with `ban` (D54).
+    banned: BTreeSet<u8>,
     /// Resigned by the server for a claim or by D17, so that a resign is
     /// sent once.
     server_resigned: BTreeSet<u8>,
     /// When no human seat has been connected, from the first poll that saw
     /// it.
     nobody_since: Option<Instant>,
+    /// The time limit's scoring, once it is reached (M30).
+    limit: Option<LimitPhase>,
+}
+
+/// How far a time limit has settled the match (M30).
+#[derive(Clone)]
+enum LimitPhase {
+    /// Pauses lifted, a summary asked for after `turn`.
+    Asked { since: Instant, turn: u32 },
+    /// The losers were resigned.
+    Resigned { since: Instant, losers: Vec<u8> },
 }
 
 /// What the control rules read, taken once (`Play::facts`).
@@ -225,6 +261,7 @@ struct Facts {
     /// Not disconnected for `DISCONNECT_GRACE` or longer.
     connected: BTreeSet<u8>,
     kicked: BTreeSet<u8>,
+    banned: BTreeSet<u8>,
     /// No pause time left and no `play/command` socket for `ABSENT_AFTER`.
     absent: BTreeSet<u8>,
     game_time: Duration,
@@ -280,9 +317,6 @@ struct Inner {
 
 struct Game {
     running: bool,
-    /// The setup's settings with the random choices unresolved, which a
-    /// rematch opens a new setup from.
-    settings: Settings,
     /// What the engine started with: the resolved settings and the attributes
     /// it was given. Kept to compare with the engine's report (M21) and for
     /// the rematch's replay of the draw (M35).
@@ -290,6 +324,8 @@ struct Game {
     /// Every statistics capture of each human seat, by player number, kept
     /// after the engine exits.
     summaries: HashMap<u8, Vec<Arc<SeatCapture>>>,
+    /// The newest full capture and its turn, for the time limit's scoring.
+    last_full: Option<(u32, Arc<[u8]>)>,
 }
 
 /// One capture of a seat, and its envelope once compressed.
@@ -339,7 +375,6 @@ impl Play {
     pub fn start(
         self: &Arc<Self>,
         launch: Launch,
-        settings: Settings,
         previous: &Mutex<Option<JoinHandle<()>>>,
         generation: u64,
         on_exit: impl FnOnce() + Send + 'static,
@@ -371,9 +406,9 @@ impl Play {
         self.generation.store(generation, Ordering::SeqCst);
         self.inner.lock().unwrap().game = Some(Game {
             running: true,
-            settings,
             launch,
             summaries: HashMap::new(),
+            last_full: None,
         });
         let host = self.seats.host().unwrap_or_default();
         println!("game {generation} for {host}: {}", args.join(" "));
@@ -587,6 +622,7 @@ impl Play {
             rematch: visitor.is_some_and(|visitor| self.seats.is_host(visitor)),
             seat: seat.filter(|&seat| seat != 0),
             limits: None,
+            next: None,
         }
     }
 
@@ -600,6 +636,7 @@ impl Play {
             let Some(game) = inner.game.as_mut() else {
                 return;
             };
+            game.last_full = Some((summary.turn, Arc::clone(&summary.full)));
             for player in players {
                 let Some(view) = summary
                     .seats
@@ -774,7 +811,10 @@ impl Play {
             .copied()
             .filter(|&player| self.hub.player_state(u32::from(player)) == Some(PLAYER_ACTIVE))
             .collect();
-        let kicked = self.control.lock().unwrap().kicked.clone();
+        let (kicked, banned) = {
+            let control = self.control.lock().unwrap();
+            (control.kicked.clone(), control.banned.clone())
+        };
         let connected: BTreeSet<u8> = away
             .iter()
             .filter(|(_, away)| away.is_none_or(|away| away < crate::seats::DISCONNECT_GRACE))
@@ -799,6 +839,7 @@ impl Play {
             active,
             connected,
             kicked,
+            banned,
             absent,
             game_time: TURN_LENGTH * self.hub.turn(),
         }
@@ -831,6 +872,9 @@ impl Play {
             }
             if facts.kicked.contains(&human) {
                 flags |= CONTROL_KICKED;
+            }
+            if facts.banned.contains(&human) {
+                flags |= CONTROL_BANNED;
             }
             if facts.absent.contains(&human) {
                 flags |= CONTROL_ABSENT;
@@ -953,9 +997,10 @@ impl Play {
         Ok(())
     }
 
-    /// The host kicks a human seat out of the running game (M29, V77). The
-    /// seat is taken for good; its civ stays idle (D54).
-    pub fn kick(&self, owner: &str, player: u8) -> Result<(), &'static str> {
+    /// The host kicks a human seat out of the running game (M29, V77), with
+    /// a ban when asked (D54). The seat is taken for good; its civ stays
+    /// idle.
+    pub fn kick(&self, owner: &str, player: u8, ban: bool) -> Result<(), &'static str> {
         if !self.game_running() || !self.seats.is_host(owner) {
             return Err("only the host can kick");
         }
@@ -963,15 +1008,49 @@ impl Play {
         if !humans.contains(&player) || self.seats.host_player() == Some(player) {
             return Err("the host cannot be kicked");
         }
-        if self.control.lock().unwrap().kicked.contains(&player) {
-            return Err("already kicked");
+        // Checked and marked under one hold of the leaf lock, so two bans
+        // of a kicked seat cannot both pass; `seats` is taken after it.
+        let kicked_cookie = {
+            let mut control = self.control.lock().unwrap();
+            if control.kicked.contains(&player) {
+                if !ban {
+                    return Err("already kicked");
+                }
+                if !control.banned.insert(player) {
+                    return Err("already banned");
+                }
+                Some(control.kicked_cookie.get(&player).cloned())
+            } else {
+                None
+            }
+        };
+        if let Some(cookie) = kicked_cookie {
+            if let Some(cookie) = cookie {
+                self.seats.ban(&cookie);
+            }
+            self.tick_control();
+            println!(
+                "game {}: the host banned kicked player {player}",
+                self.generation.load(Ordering::SeqCst)
+            );
+            return Ok(());
         }
         let cookie = self
             .seats
             .cookie_of_player(player)
             .ok_or("not in this match")?;
         self.seats.set_player(&cookie, None)?;
-        self.control.lock().unwrap().kicked.insert(player);
+        {
+            let mut control = self.control.lock().unwrap();
+            control.kicked.insert(player);
+            control.kicked_cookie.insert(player, cookie.clone());
+            if ban {
+                control.banned.insert(player);
+            }
+        }
+        if ban {
+            self.seats.ban(&cookie);
+        }
         // The kicked seat's page gets its control before its stream is
         // dropped, so it can say it was kicked.
         let facts = self.facts();
@@ -988,10 +1067,164 @@ impl Play {
         self.tick_pause();
         self.tick_control();
         println!(
-            "game {}: the host kicked player {player}",
+            "game {}: the host {} player {player}",
+            self.generation.load(Ordering::SeqCst),
+            if ban { "banned" } else { "kicked" }
+        );
+        Ok(())
+    }
+
+    /// The host bans an unseated member, an observer, from the match's chat
+    /// (D54); a holder of a seat goes through `kick` instead.
+    pub fn ban_observer(&self, owner: &str, member: usize) -> Result<(), &'static str> {
+        if !self.game_running() || !self.seats.is_host(owner) {
+            return Err("only the host can ban");
+        }
+        let cookie = self.seats.cookie_at(member).ok_or("no such member")?;
+        if self.seats.is_host(&cookie) {
+            return Err("the host cannot be banned");
+        }
+        if self.seats.player_of(&cookie).is_some() {
+            return Err("use Kick for a player");
+        }
+        if self.seats.is_banned(&cookie) {
+            return Err("already banned");
+        }
+        self.seats.ban(&cookie);
+        println!(
+            "game {}: the host banned observer {member}",
             self.generation.load(Ordering::SeqCst)
         );
         Ok(())
+    }
+
+    /// Advances a reached time limit (M30, D20): lifts every pause, asks the
+    /// engine for a fresh summary, scores the active players' mutual-ally
+    /// groups at it and resigns every loser. Returns whether the engine
+    /// should be stopped now.
+    pub fn tick_limit(&self, limit: &str) -> bool {
+        if !self.game_running() {
+            return false;
+        }
+        let phase = self.control.lock().unwrap().limit.clone();
+        match phase {
+            None => {
+                let _ = self.apply_pause(|ledger| {
+                    ledger.end();
+                    Ok(())
+                });
+                let turn = self.hub.turn();
+                self.write_uplink(&[UPLINK_SUMMARY, 0, 0, 0, 0]);
+                self.control.lock().unwrap().limit = Some(LimitPhase::Asked {
+                    since: Instant::now(),
+                    turn,
+                });
+                println!(
+                    "game {}: {limit} time limit, scoring",
+                    self.generation.load(Ordering::SeqCst)
+                );
+                false
+            }
+            Some(LimitPhase::Asked { since, turn }) => {
+                let last = {
+                    let inner = self.inner.lock().unwrap();
+                    inner.game.as_ref().and_then(|game| game.last_full.clone())
+                };
+                let fresh = last.as_ref().is_some_and(|(at, _)| *at > turn);
+                if !fresh && since.elapsed() < LIMIT_SUMMARY_WAIT {
+                    return false;
+                }
+                let generation = self.generation.load(Ordering::SeqCst);
+                let Some((_, full)) = last else {
+                    println!("game {generation}: no summary, stopping undecided");
+                    return true;
+                };
+                let Some(scores) = score::scores(&full) else {
+                    println!("game {generation}: the summary cannot be read, stopping undecided");
+                    return true;
+                };
+                let captured = serde_json::from_slice::<Value>(&full)
+                    .ok()
+                    .and_then(|value| {
+                        value
+                            .get("playerStates")
+                            .and_then(Value::as_array)
+                            .map(|states| states.len().saturating_sub(1))
+                    });
+                let active = self.active_players(captured);
+                // Kicked and absent seats have left the game (D44, D54), so
+                // their idle civs never win on score: they only lose.
+                let left = self.facts().left_active();
+                let competing: Vec<u8> = active
+                    .iter()
+                    .copied()
+                    .filter(|player| !left.contains(player))
+                    .collect();
+                let outcome = score::decide(&scores, &competing);
+                let groups = score::groups(&scores, &competing);
+                let losers: Vec<u8> = match &outcome {
+                    score::Outcome::Winners(winners) => active
+                        .iter()
+                        .copied()
+                        .filter(|player| !winners.contains(player))
+                        .collect(),
+                    score::Outcome::Draw => active.clone(),
+                };
+                let shown: Vec<String> = groups
+                    .iter()
+                    .map(|(members, total)| {
+                        format!(
+                            "{}={total}",
+                            members
+                                .iter()
+                                .map(u8::to_string)
+                                .collect::<Vec<_>>()
+                                .join("+")
+                        )
+                    })
+                    .collect();
+                match &outcome {
+                    score::Outcome::Winners(winners) => println!(
+                        "game {generation}: {limit} time limit, winners {} ({})",
+                        winners
+                            .iter()
+                            .map(u8::to_string)
+                            .collect::<Vec<_>>()
+                            .join(", "),
+                        shown.join(", ")
+                    ),
+                    score::Outcome::Draw => println!(
+                        "game {generation}: {limit} time limit, draw ({})",
+                        shown.join(", ")
+                    ),
+                }
+                for player in self.mark_resigned(losers.iter().copied()) {
+                    self.send_json(player, RESIGN_JSON);
+                }
+                self.control.lock().unwrap().limit = Some(LimitPhase::Resigned {
+                    since: Instant::now(),
+                    losers: losers.clone(),
+                });
+                losers.is_empty()
+            }
+            Some(LimitPhase::Resigned { since, losers }) => {
+                let all_out = since.elapsed() >= LIMIT_RESIGN_SEEN
+                    && losers.iter().all(|player| {
+                        self.hub.player_state(u32::from(*player)) != Some(PLAYER_ACTIVE)
+                    });
+                all_out || since.elapsed() >= LIMIT_RESIGN_WAIT
+            }
+        }
+    }
+
+    /// The players still active in the engine when a time limit scores: the
+    /// capture's own players, or 1 to 8 while it has none.
+    fn active_players(&self, captured: Option<usize>) -> Vec<u8> {
+        let count = captured.unwrap_or(8);
+        (1..=count)
+            .filter_map(|index| u8::try_from(index).ok())
+            .filter(|player| self.hub.player_state(u32::from(*player)) == Some(PLAYER_ACTIVE))
+            .collect()
     }
 
     fn stop_engine(&self, game: &mut Game) {
@@ -1063,16 +1296,16 @@ impl Play {
         let host = self.seats.host()?;
         let inner = self.inner.lock().unwrap();
         let game = inner.game.as_ref()?;
-        Some((host, game.settings.clone()))
+        Some((host, rematch_settings(&game.launch)))
     }
 
     /// The settings of the game `owner` hosts, which a rematch repeats.
-    pub fn settings_of(&self, owner: &str) -> Option<Settings> {
+    pub fn rematch_settings_of(&self, owner: &str) -> Option<Settings> {
         if !self.seats.is_host(owner) {
             return None;
         }
         let inner = self.inner.lock().unwrap();
-        Some(inner.game.as_ref()?.settings.clone())
+        Some(rematch_settings(&inner.game.as_ref()?.launch))
     }
 
     pub fn set_uplink(&self, stream: Option<UnixStream>) {
@@ -1167,6 +1400,14 @@ impl Drop for Presence {
     fn drop(&mut self) {
         self.play.seats.disconnect_play(&self.cookie);
     }
+}
+
+/// The settings a rematch opens a setup from (M35): the same resolved draw,
+/// but the AI seed is drawn again, as vanilla's rematch would.
+fn rematch_settings(launch: &Launch) -> Settings {
+    let mut settings = launch.settings.clone();
+    settings.seeds.ai_seed = Choice::Random;
+    settings
 }
 
 /// The engine's command JSON for `order`, field for field as the session

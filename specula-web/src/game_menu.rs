@@ -3,6 +3,9 @@
 //! Pause, Resign, Claim victory, End game (the host's) and Exit; and the
 //! requests they and the match over popup's Rematch make of the server.
 
+use std::cell::RefCell;
+use std::rc::Rc;
+
 use wasm_bindgen::JsCast;
 use wasm_bindgen::JsValue;
 use wasm_bindgen::closure::Closure;
@@ -19,6 +22,12 @@ use crate::lang;
 /// Long enough for an engine whose game the defeat finished to have quit,
 /// so that the page stays on that match's end instead.
 const DEFEAT_SETTLE_MS: i32 = 3000;
+/// `localStorage` key of the nickname, which `play.html` keeps too.
+const NICKNAME_KEY: &str = "specula.nickname";
+/// The host's last settings, which `/new` takes (D34).
+const SETTINGS_KEY: &str = "specula.matchsettings";
+/// `/new` refuses a settings body longer than this, as `play.html` knows.
+const SETTINGS_MAX: usize = 30000;
 
 pub struct GameMenu {
     root: HtmlElement,
@@ -226,6 +235,9 @@ pub struct Status {
     /// ms as of the answer, and its game time limit in ms of the game clock.
     pub wall_left_ms: Option<f64>,
     pub game_limit_ms: Option<f64>,
+    /// The setup that this match's rematch opened for the visitor (M35),
+    /// empty for none.
+    pub next: String,
 }
 
 pub async fn status() -> Result<Status, String> {
@@ -258,7 +270,105 @@ pub async fn status() -> Result<Status, String> {
         seat: number("seat").unwrap_or(0.0) as usize,
         wall_left_ms: number("wall_left_ms"),
         game_limit_ms: number("game_limit_ms"),
+        next: js_sys::Reflect::get(&json, &"next".into())
+            .ok()
+            .and_then(|value| value.as_string())
+            .unwrap_or_default(),
     })
+}
+
+/// Starts a new game from the stored nickname and settings (M35) and opens
+/// its setup; a refusal goes into the match over popup, through `error`.
+pub fn new_match(error: Rc<RefCell<Option<String>>>) {
+    let Some(window) = web_sys::window() else {
+        return;
+    };
+    let storage = window.local_storage().ok().flatten();
+    let stored = |key: &str| -> Option<String> {
+        storage
+            .as_ref()?
+            .get_item(key)
+            .ok()
+            .flatten()
+            .filter(|value| !value.is_empty())
+    };
+    let Some(nickname) = stored(NICKNAME_KEY) else {
+        // `play.html` asks for a name; this page has no form for one.
+        let _ = window.location().set_href("/");
+        return;
+    };
+    let encoded = |text: &str| {
+        js_sys::encode_uri_component(text)
+            .as_string()
+            .unwrap_or_default()
+    };
+    let mut body = format!("nickname={}", encoded(&nickname));
+    if let Some(settings) = stored(SETTINGS_KEY)
+        && encoded(&settings).len() < SETTINGS_MAX
+    {
+        body.push_str("&settings=");
+        body.push_str(&encoded(&settings));
+    }
+    *error.borrow_mut() = None;
+    wasm_bindgen_futures::spawn_local(async move {
+        match post_form("/new", &body).await {
+            Ok(id) => {
+                if let Some(window) = web_sys::window() {
+                    let _ = window.location().set_href(&format!("/g/{id}"));
+                }
+            }
+            Err(reason) => {
+                let text = lang::format(
+                    &lang::translate("Cannot start the game: %(error)s"),
+                    &[("error", &lang::translate(&reason))],
+                );
+                *error.borrow_mut() = Some(text);
+            }
+        }
+    });
+}
+
+/// Posts a URL-encoded form to `path` (not under the match's base) and
+/// answers its body; the error is the server's reason.
+async fn post_form(path: &str, body: &str) -> Result<String, String> {
+    let window = web_sys::window().ok_or("no window")?;
+    // As `post_path`: RequestInit is not among web-sys's enabled features.
+    let fetch = js_sys::Reflect::get(&window, &"fetch".into())
+        .ok()
+        .and_then(|fetch| fetch.dyn_into::<js_sys::Function>().ok())
+        .ok_or("no fetch")?;
+    let init = js_sys::Object::new();
+    let _ = js_sys::Reflect::set(&init, &"method".into(), &"POST".into());
+    let headers = js_sys::Object::new();
+    let _ = js_sys::Reflect::set(
+        &headers,
+        &"Content-Type".into(),
+        &"application/x-www-form-urlencoded".into(),
+    );
+    let _ = js_sys::Reflect::set(&init, &"headers".into(), &headers);
+    let _ = js_sys::Reflect::set(&init, &"body".into(), &body.into());
+    let promise: js_sys::Promise = fetch
+        .call2(&window, &path.into(), &init)
+        .map_err(|_| "cannot send the request")?
+        .dyn_into()
+        .map_err(|_| "fetch gave no promise")?;
+    let response: Response = JsFuture::from(promise)
+        .await
+        .map_err(|_| "the request failed")?
+        .dyn_into()
+        .map_err(|_| "not a response")?;
+    let body = match response.text() {
+        Ok(text) => JsFuture::from(text)
+            .await
+            .ok()
+            .and_then(|text| text.as_string())
+            .unwrap_or_default(),
+        Err(_) => String::new(),
+    };
+    if response.ok() {
+        return Ok(body);
+    }
+    Err(body)
 }
 
 /// Posts `play/<action>` of the match (resign, end or rematch); the answer

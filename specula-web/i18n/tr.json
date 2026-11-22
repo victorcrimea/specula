@@ -170,5 +170,20 @@
   "no addressee": "alıcı yok",
   "join first": "önce katıl",
   "the chat is closed": "sohbet kapalı",
-  "invalid nickname": "geçersiz takma ad"
+  "invalid nickname": "geçersiz takma ad",
+  "Ban": "Yasakla",
+  "Banned": "Yasaklandı",
+  "Join again": "Yeniden katıl",
+  "You were kicked from this setup.": "Bu kurulumdan atıldınız.",
+  "You are banned from this match.": "Bu maçtan yasaklandınız.",
+  "Ban %(name)s from this match? They cannot join it again.": "%(name)s bu maçtan yasaklansın mı? Bir daha katılamaz.",
+  "Ban %(player)s? They cannot play or chat in this match again.": "%(player)s yasaklansın mı? Bu maçta bir daha oynayamaz veya sohbet edemez.",
+  "Ban %(player)s from this match's chat?": "%(player)s bu maçın sohbetinden yasaklansın mı?",
+  "Reserved for %(name)s": "%(name)s için ayrıldı",
+  "waiting for the players of the last game": "önceki maçın oyuncuları bekleniyor",
+  "Join rematch": "Rövanşa katıl",
+  "Lobby": "Lobi",
+  "you are banned from this match": "bu maçtan yasaklandınız",
+  "that slot is reserved": "bu yer ayrıldı",
+  "the time limit is reached": "süre sınırına ulaşıldı"
 }

@@ -170,5 +170,20 @@
   "no addressee": "не вказано адресата",
   "join first": "спершу приєднайтеся",
   "the chat is closed": "чат закрито",
-  "invalid nickname": "неприпустимий нікнейм"
+  "invalid nickname": "неприпустимий нікнейм",
+  "Ban": "Забанити",
+  "Banned": "Забанено",
+  "Join again": "Приєднатися знову",
+  "You were kicked from this setup.": "Вас виключили з цього налаштування.",
+  "You are banned from this match.": "Вас забанено в цьому матчі.",
+  "Ban %(name)s from this match? They cannot join it again.": "Забанити %(name)s в цьому матчі? Приєднатися знову буде неможливо.",
+  "Ban %(player)s? They cannot play or chat in this match again.": "Забанити %(player)s? Грати й спілкуватися в цьому матчі буде неможливо.",
+  "Ban %(player)s from this match's chat?": "Забанити %(player)s у чаті цього матчу?",
+  "Reserved for %(name)s": "Зарезервовано для %(name)s",
+  "waiting for the players of the last game": "очікування гравців попереднього матчу",
+  "Join rematch": "Приєднатися до матчу-реваншу",
+  "Lobby": "Лобі",
+  "you are banned from this match": "вас забанено в цьому матчі",
+  "that slot is reserved": "це місце зарезервовано",
+  "the time limit is reached": "ліміт часу досягнуто"
 }

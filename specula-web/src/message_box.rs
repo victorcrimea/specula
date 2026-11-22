@@ -40,6 +40,10 @@ pub enum Pending {
     ClaimOffer,
     /// Kick the human seat of this player number.
     Kick(u8),
+    /// Ban the kicked human seat of this player number for good (D54).
+    Ban(u8),
+    /// Ban the observer member (D54).
+    BanMember(usize),
     /// The seat was kicked; the box only says so, and OK reloads the page.
     Kicked,
     /// The seat's game is decided: Continue watching (No, Escape) or View
@@ -211,6 +215,35 @@ impl MessageBox {
             &caption,
             (&lang::translate("No"), &lang::translate("Yes")),
             Pending::Kick(player),
+        );
+    }
+
+    /// Banning player `player`, named `name` (D54).
+    pub fn confirm_ban(&mut self, player: u8, name: &str) {
+        let caption = lang::format(
+            &lang::translate("Ban %(player)s? They cannot play or chat in this match again."),
+            &[("player", name)],
+        );
+        self.open_text(
+            &lang::translate("Confirmation"),
+            &caption,
+            (&lang::translate("No"), &lang::translate("Yes")),
+            Pending::Ban(player),
+        );
+    }
+
+    /// Banning observer `member`, named `name`, from the match's chat
+    /// (D54).
+    pub fn confirm_ban_member(&mut self, member: usize, name: &str) {
+        let caption = lang::format(
+            &lang::translate("Ban %(player)s from this match's chat?"),
+            &[("player", name)],
+        );
+        self.open_text(
+            &lang::translate("Confirmation"),
+            &caption,
+            (&lang::translate("No"), &lang::translate("Yes")),
+            Pending::BanMember(member),
         );
     }
 

@@ -52,6 +52,11 @@ struct Member {
     play_sockets: u32,
     /// When the last one closed, or the launch if none was open then.
     play_away_since: Option<Instant>,
+    /// D54: the visitor may not join this match again.
+    banned: bool,
+    /// Bumped on every kick or ban, so an open setup socket can tell that
+    /// its member was removed after it opened.
+    kicks: u32,
 }
 
 /// Vanilla's ready states (`ReadyController.js`).
@@ -76,6 +81,14 @@ impl Ready {
     pub fn as_u8(self) -> u8 {
         self as u8
     }
+}
+
+/// One member as the chat's list shows them.
+pub struct ChatMember {
+    pub cookie: String,
+    pub nickname: Nickname,
+    pub player: Option<u8>,
+    pub banned: bool,
 }
 
 /// One member as the setup page shows them.
@@ -210,19 +223,92 @@ impl Seats {
 
     /// Every member in join order with their cookie, for the chat's members
     /// list (M32).
-    pub fn chat_members(&self) -> Vec<(String, Nickname, Option<u8>)> {
+    pub fn chat_members(&self) -> Vec<ChatMember> {
         let table = self.inner.lock().unwrap();
         table
             .members
             .iter()
-            .map(|member| {
-                (
-                    member.cookie.clone(),
-                    member.nickname.clone(),
-                    member.player,
-                )
+            .map(|member| ChatMember {
+                cookie: member.cookie.clone(),
+                nickname: member.nickname.clone(),
+                player: member.player,
+                banned: member.banned,
             })
             .collect()
+    }
+
+    /// The host's member index, which the pages compare to their own.
+    pub fn host_index(&self) -> Option<usize> {
+        self.inner.lock().unwrap().host
+    }
+
+    /// Every seated member's cookie, name and player number (M35).
+    pub fn seated_members(&self) -> Vec<(String, Nickname, u8)> {
+        let table = self.inner.lock().unwrap();
+        table
+            .members
+            .iter()
+            .filter_map(|member| {
+                Some((
+                    member.cookie.clone(),
+                    member.nickname.clone(),
+                    member.player?,
+                ))
+            })
+            .collect()
+    }
+
+    /// The host kicks `cookie` out of the setup, or bans them with it (D54):
+    /// a kicked visitor does not get the seat back on a return. The host
+    /// cannot be removed.
+    pub fn kick(&self, cookie: &str, ban: bool) -> Result<(), &'static str> {
+        let table = &mut *self.inner.lock().unwrap();
+        let index = table.index_of(cookie).ok_or("not in this match")?;
+        if table.host == Some(index) {
+            return Err("the host cannot be kicked");
+        }
+        let member = &mut table.members[index];
+        member.player = None;
+        member.last_player = None;
+        member.ready = Ready::No;
+        member.present = false;
+        member.kicks += 1;
+        member.banned |= ban;
+        Ok(())
+    }
+
+    /// Bans `cookie` from a running match's chat and seats (D54), where a
+    /// seat is already handled by `Play::kick`.
+    pub fn ban(&self, cookie: &str) {
+        let table = &mut *self.inner.lock().unwrap();
+        let Some(index) = table.index_of(cookie) else {
+            return;
+        };
+        table.members[index].banned = true;
+        table.members[index].kicks += 1;
+    }
+
+    pub fn is_banned(&self, cookie: &str) -> bool {
+        let table = self.inner.lock().unwrap();
+        table
+            .index_of(cookie)
+            .is_some_and(|index| table.members[index].banned)
+    }
+
+    /// How often `cookie` was kicked or banned, 0 for a non-member.
+    pub fn kicks_of(&self, cookie: &str) -> u32 {
+        let table = self.inner.lock().unwrap();
+        table
+            .index_of(cookie)
+            .map_or(0, |index| table.members[index].kicks)
+    }
+
+    /// Whether `cookie` is a member who has not left the setup.
+    pub fn is_present(&self, cookie: &str) -> bool {
+        let table = self.inner.lock().unwrap();
+        table
+            .index_of(cookie)
+            .is_some_and(|index| table.members[index].present)
     }
 
     /// Host operations name members by index; cookies never leave the
@@ -540,6 +626,8 @@ impl Table {
             last_player: None,
             play_sockets: 0,
             play_away_since: None,
+            banned: false,
+            kicks: 0,
         });
         self.members.len() - 1
     }

@@ -28,11 +28,11 @@
 //!   streams line up turn by turn.
 //! - kind 3 control: varint turn, then the control: u8 own flags (1 this
 //!   seat may end the game, 2 it may claim victory), varint n, n x {u8
-//!   player, u8 flags (1 host, 2 kicked, 4 absent)} for every human seat
-//!   at launch, by player number. Sent into the open frame whenever it
-//!   changes, paused or not. The observers' stream always carries the
-//!   empty control, `[0, 0]`, which a keyframe also has until a seat's
-//!   control is set.
+//!   player, u8 flags (1 host, 2 kicked, 4 absent, 8 banned)} for every
+//!   human seat at launch, by player number. Sent into the open frame
+//!   whenever it changes, paused or not. The observers' stream always
+//!   carries the empty control, `[0, 0]`, which a keyframe also has until a
+//!   seat's control is set.
 //!
 //! An entity's groups are kept until it is gone or a delta clears them; one
 //! a delta does not list is unchanged. A seat stops sending most groups of
@@ -155,6 +155,7 @@ pub const CONTROL_CLAIM: u8 = 2;
 pub const CONTROL_HOST: u8 = 1;
 pub const CONTROL_KICKED: u8 = 2;
 pub const CONTROL_ABSENT: u8 = 4;
+pub const CONTROL_BANNED: u8 = 8;
 const HEALTH: usize = 0;
 const CAPTURE: usize = 1;
 const SUPPLY: usize = 2;

@@ -170,5 +170,20 @@
   "no addressee": "brak adresata",
   "join first": "najpierw dołącz",
   "the chat is closed": "czat jest zamknięty",
-  "invalid nickname": "nieprawidłowy pseudonim"
+  "invalid nickname": "nieprawidłowy pseudonim",
+  "Ban": "Zablokuj",
+  "Banned": "Zablokowany",
+  "Join again": "Dołącz ponownie",
+  "You were kicked from this setup.": "Zostałeś wyrzucony z tego ustawienia.",
+  "You are banned from this match.": "Jesteś zablokowany w tym meczu.",
+  "Ban %(name)s from this match? They cannot join it again.": "Zablokować %(name)s w tym meczu? Nie będzie mógł dołączyć ponownie.",
+  "Ban %(player)s? They cannot play or chat in this match again.": "Zablokować %(player)s? Nie będzie mógł grać ani czatować w tym meczu.",
+  "Ban %(player)s from this match's chat?": "Zablokować %(player)s na czacie tego meczu?",
+  "Reserved for %(name)s": "Zarezerwowane dla %(name)s",
+  "waiting for the players of the last game": "oczekiwanie na graczy poprzedniego meczu",
+  "Join rematch": "Dołącz do rewanżu",
+  "Lobby": "Lobby",
+  "you are banned from this match": "jesteś zablokowany w tym meczu",
+  "that slot is reserved": "to miejsce jest zarezerwowane",
+  "the time limit is reached": "osiągnięto limit czasu"
 }

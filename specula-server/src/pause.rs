@@ -73,6 +73,9 @@ pub struct Ledger {
     engine: BTreeSet<u8>,
     /// Shape and time of the last report.
     reported: Option<(Shape, Instant)>,
+    /// A time limit has settled the game: no pause counts any more, so the
+    /// engine may run on for the resigns.
+    ended: bool,
 }
 
 /// A report's shape: player, flags and whether a countdown runs, per entry.
@@ -119,6 +122,17 @@ impl Ledger {
             next_order: 0,
             engine: BTreeSet::new(),
             reported: None,
+            ended: false,
+        }
+    }
+
+    /// The time limit is reached: no seat holds the engine back any more,
+    /// so it can process the resigns (M30).
+    pub fn end(&mut self) {
+        self.ended = true;
+        for account in self.accounts.values_mut() {
+            account.hold = None;
+            account.countdown = None;
         }
     }
 
@@ -126,7 +140,8 @@ impl Ledger {
     /// automatic pause while it is away with budget left or until its
     /// countdown ends (D43).
     fn holds(&self, account: &Account) -> bool {
-        account.active
+        !self.ended
+            && account.active
             && (account.hold.is_some()
                 || (!account.connected
                     && (!account.budget.is_zero() || account.countdown.is_some())))
@@ -148,7 +163,7 @@ impl Ledger {
     /// The seats whose budget `advance` spends: every away seat with budget
     /// left, all at once, else the earliest voluntary holder.
     fn charged(&self) -> Vec<u8> {
-        if self.mutual() {
+        if self.ended || self.mutual() {
             return Vec::new();
         }
         let away: Vec<u8> = self
@@ -252,6 +267,9 @@ impl Ledger {
 
     /// A seat holds a pause of its own; a second press does nothing.
     pub fn hold(&mut self, player: u8) -> Result<(), &'static str> {
+        if self.ended {
+            return Err("the time limit is reached");
+        }
         let order = self.next_order;
         let Some(account) = self.accounts.get_mut(&player) else {
             return Err("your seat is out of the game");

@@ -170,5 +170,20 @@
   "no addressee": "penerima tidak ada",
   "join first": "bergabunglah dahulu",
   "the chat is closed": "obrolan telah ditutup",
-  "invalid nickname": "nama panggilan tidak valid"
+  "invalid nickname": "nama panggilan tidak valid",
+  "Ban": "Larang",
+  "Banned": "Dilarang",
+  "Join again": "Gabung lagi",
+  "You were kicked from this setup.": "Anda dikeluarkan dari pengaturan ini.",
+  "You are banned from this match.": "Anda dilarang dari pertandingan ini.",
+  "Ban %(name)s from this match? They cannot join it again.": "Larang %(name)s dari pertandingan ini? Ia tidak dapat bergabung lagi.",
+  "Ban %(player)s? They cannot play or chat in this match again.": "Larang %(player)s? Ia tidak dapat bermain atau mengobrol di pertandingan ini lagi.",
+  "Ban %(player)s from this match's chat?": "Larang %(player)s dari obrolan pertandingan ini?",
+  "Reserved for %(name)s": "Dipesan untuk %(name)s",
+  "waiting for the players of the last game": "menunggu pemain dari pertandingan sebelumnya",
+  "Join rematch": "Gabung pertandingan ulang",
+  "Lobby": "Lobi",
+  "you are banned from this match": "anda dilarang dari pertandingan ini",
+  "that slot is reserved": "slot itu dipesan",
+  "the time limit is reached": "batas waktu telah tercapai"
 }

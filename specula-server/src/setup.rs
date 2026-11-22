@@ -46,6 +46,8 @@ pub const EMPTY_LIMIT: Duration = Duration::from_secs(15);
 pub const LEAVE_GRACE: Duration = Duration::from_secs(5);
 /// Closed setups remembered, so their page can say why.
 pub const CLOSED_KEEP: usize = 256;
+/// D62: a rematch holds each old player's slot for this long.
+pub const RESERVE_FOR: Duration = Duration::from_secs(60);
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum CloseReason {
@@ -87,6 +89,15 @@ struct RoomInner {
     /// Every open setup socket, member or not (D16 counts visitors).
     sockets: u32,
     empty_since: Option<Instant>,
+    /// The old players' slots a rematch holds (M35).
+    reserved: Vec<Reservation>,
+}
+
+struct Reservation {
+    cookie: String,
+    name: Nickname,
+    player: u8,
+    until: Instant,
 }
 
 pub enum Request {
@@ -97,11 +108,13 @@ pub enum Request {
     Move { member: usize, slot: usize },
     Unseat(usize),
     Ready(Ready),
+    Kick { member: usize, ban: bool },
     Launch,
 }
 
 impl SetupRoom {
-    pub fn new(settings: Settings) -> Self {
+    pub fn new(settings: Settings, reserved: Vec<(String, Nickname, u8)>) -> Self {
+        let until = Instant::now() + RESERVE_FOR;
         SetupRoom {
             inner: Mutex::new(RoomInner {
                 settings,
@@ -109,6 +122,15 @@ impl SetupRoom {
                 opened: Instant::now(),
                 sockets: 0,
                 empty_since: Some(Instant::now()),
+                reserved: reserved
+                    .into_iter()
+                    .map(|(cookie, name, player)| Reservation {
+                        cookie,
+                        name,
+                        player,
+                        until,
+                    })
+                    .collect(),
             }),
             revision: watch::channel(0).0,
         }
@@ -174,6 +196,7 @@ impl SetupRoom {
                 seats.reset_ready();
             }
             seats.force_host_stay();
+            prune(&mut inner, seats);
         }
         self.bump();
     }
@@ -191,10 +214,20 @@ impl SetupRoom {
         if inner.phase != Phase::Open {
             return Err("the setup is closed");
         }
-        let settings = &mut inner.settings;
+        if seats.is_banned(cookie) {
+            return Err("you are banned from this match");
+        }
+        let RoomInner {
+            settings, reserved, ..
+        } = &mut *inner;
         let member = seats.index_of(cookie);
         if member.is_none() && !matches!(request, Request::Join(_)) {
             return Err("not joined");
+        }
+        // A kicked member keeps their entry: the setup socket closes once
+        // it sees the kick, and until then nothing may be asked.
+        if member.is_some() && !matches!(request, Request::Join(_)) && !seats.is_present(cookie) {
+            return Err("join first");
         }
         let host = seats.is_host(cookie);
         let own = seats.player_of(cookie);
@@ -203,17 +236,29 @@ impl SetupRoom {
         match request {
             Request::Join(nickname) => {
                 seats.join(cookie, nickname);
-                let count = settings.player_count.players;
-                let taken = seats.take_back(cookie, |player| {
-                    let slot = usize::from(player) - 1;
-                    slot < count
-                        && settings.player_ai.get(slot).is_some_and(Option::is_none)
-                        && settings.player_removed.get(slot) != Some(&true)
+                let now = Instant::now();
+                let reserved_slot = reserved.iter().position(|hold| {
+                    hold.cookie == cookie
+                        && hold.until > now
+                        && slot_open(settings, seats, usize::from(hold.player) - 1)
                 });
-                if taken.is_some() {
+                if let Some(at) = reserved_slot {
+                    let player = reserved.remove(at).player;
+                    seats.set_player(cookie, Some(player))?;
                     settings.on_seated(catalog, &seats.players());
                 } else {
-                    reset = false;
+                    let count = settings.player_count.players;
+                    let taken = seats.take_back(cookie, |player| {
+                        let slot = usize::from(player) - 1;
+                        slot < count
+                            && settings.player_ai.get(slot).is_some_and(Option::is_none)
+                            && settings.player_removed.get(slot) != Some(&true)
+                    });
+                    if taken.is_some() {
+                        settings.on_seated(catalog, &seats.players());
+                    } else {
+                        reset = false;
+                    }
                 }
             }
             Request::Change(change) => {
@@ -226,6 +271,7 @@ impl SetupRoom {
                         | Change::Remove { index } => Some(*index),
                         _ => None,
                     };
+                    let unassign = matches!(&change, Change::Unassign { .. });
                     let victim = slot
                         .and_then(|index| u8::try_from(index + 1).ok())
                         .and_then(|player| seats.cookie_of_player(player));
@@ -238,6 +284,9 @@ impl SetupRoom {
                     // On a copy, so a refused change unseats nobody.
                     let mut trial = settings.clone();
                     trial.apply(catalog, change, &seated)?;
+                    if let Some(index) = slot.filter(|_| unassign) {
+                        reserved.retain(|hold| usize::from(hold.player) != index + 1);
+                    }
                     if let Some(victim) = victim {
                         let _ = seats.set_player(&victim, None);
                     }
@@ -253,7 +302,7 @@ impl SetupRoom {
                 }
             }
             Request::Take(slot) => {
-                let player = open_slot(settings, seats, slot)?;
+                let player = open_slot(settings, seats, slot, reserved, cookie)?;
                 if let Some(held) = own {
                     settings.swap_slots(catalog, usize::from(held) - 1, slot);
                 }
@@ -310,6 +359,15 @@ impl SetupRoom {
                 seats.set_ready(cookie, state)?;
                 reset = false;
             }
+            Request::Kick { member, ban } => {
+                if !host {
+                    return Err("only the host kicks");
+                }
+                let target = seats.cookie_at(member).ok_or("no such member")?;
+                seats.kick(&target, ban)?;
+                reserved.retain(|hold| hold.cookie != target);
+                settings.on_seated(catalog, &seats.players());
+            }
             // The registry starts the game.
             Request::Launch => return Err("not a room's request"),
         }
@@ -317,9 +375,25 @@ impl SetupRoom {
             seats.reset_ready();
         }
         seats.force_host_stay();
+        prune(&mut inner, seats);
         drop(inner);
         self.bump();
         Ok(())
+    }
+
+    /// Drops the expired reservations, so a late follower's slot is free
+    /// again (M35): answers whether any went.
+    pub fn expire_reservations(&self) -> bool {
+        let mut inner = self.inner.lock().unwrap();
+        let before = inner.reserved.len();
+        let now = Instant::now();
+        inner.reserved.retain(|hold| hold.until > now);
+        let changed = inner.reserved.len() != before;
+        drop(inner);
+        if changed {
+            self.bump();
+        }
+        changed
     }
 
     /// Checks a launch and resolves the settings (M16); the registry
@@ -331,7 +405,7 @@ impl SetupRoom {
         seats: &Seats,
         cookie: &str,
         match_id: &str,
-    ) -> Result<(Launch, Settings), &'static str> {
+    ) -> Result<Launch, &'static str> {
         let mut inner = self.inner.lock().unwrap();
         if inner.phase != Phase::Open {
             return Err("the game is starting");
@@ -339,7 +413,7 @@ impl SetupRoom {
         if !seats.is_host(cookie) {
             return Err("only the host can start the game");
         }
-        if let Some(reason) = blocker(seats) {
+        if let Some(reason) = blocker(seats, &inner.reserved) {
             return Err(reason);
         }
         let seated = seats.seated_names();
@@ -358,7 +432,7 @@ impl SetupRoom {
                 "the settings cannot start a game"
             })?;
         inner.phase = Phase::Launching;
-        Ok((launch, inner.settings.clone()))
+        Ok(launch)
     }
 
     pub fn finish_launch(&self, ok: bool) {
@@ -470,14 +544,22 @@ impl SetupRoom {
             "attributes": settings.to_init_attributes(),
             "gui": { "map_filter": settings.gui.map_filter },
             "offer": offer,
-            "launch_blocker": blocker(seats),
+            "launch_blocker": blocker(seats, &inner.reserved),
+            "reserved": inner.reserved.iter().map(|hold| json!({
+                "slot": hold.player - 1,
+                "name": hold.name.as_str(),
+            })).collect::<Vec<_>>(),
         });
         (state.to_string(), phase)
     }
 }
 
-/// Why a launch cannot start, from the seats alone (U3).
-fn blocker(seats: &Seats) -> Option<&'static str> {
+/// Why a launch cannot start, from the seats and the rematch's reservations
+/// (U3, M35).
+fn blocker(seats: &Seats, reserved: &[Reservation]) -> Option<&'static str> {
+    if !reserved.is_empty() {
+        return Some("waiting for the players of the last game");
+    }
     if seats.players().is_empty() {
         return Some("no player is seated");
     }
@@ -487,8 +569,22 @@ fn blocker(seats: &Seats) -> Option<&'static str> {
     None
 }
 
+/// Whether a rematch reservation's slot is still open for its player.
+fn slot_open(settings: &Settings, seats: &Seats, slot: usize) -> bool {
+    slot < settings.player_count.players
+        && settings.player_removed.get(slot) != Some(&true)
+        && settings.player_ai.get(slot).is_some_and(Option::is_none)
+        && u8::try_from(slot + 1).is_ok_and(|player| seats.cookie_of_player(player).is_none())
+}
+
 /// The slot's player number if a member may sit there now.
-fn open_slot(settings: &Settings, seats: &Seats, slot: usize) -> Result<u8, &'static str> {
+fn open_slot(
+    settings: &Settings,
+    seats: &Seats,
+    slot: usize,
+    reserved: &[Reservation],
+    cookie: &str,
+) -> Result<u8, &'static str> {
     if slot >= settings.player_count.players {
         return Err("no such slot");
     }
@@ -498,14 +594,46 @@ fn open_slot(settings: &Settings, seats: &Seats, slot: usize) -> Result<u8, &'st
         return Err("the slot is not open");
     }
     let player = u8::try_from(slot + 1).map_err(|_| "no such slot")?;
+    let now = Instant::now();
+    if reserved
+        .iter()
+        .any(|hold| hold.cookie != cookie && hold.player == player && hold.until > now)
+    {
+        return Err("that slot is reserved");
+    }
     if seats.cookie_of_player(player).is_some() {
         return Err("that slot is taken");
     }
     Ok(player)
 }
 
+/// Drops the reservations that no longer hold a slot (M35), so a launch
+/// waits only for a follower who can still come.
+fn prune(inner: &mut RoomInner, seats: &Seats) -> bool {
+    let before = inner.reserved.len();
+    let now = Instant::now();
+    let count = inner.settings.player_count.players;
+    let ai = inner.settings.player_ai.clone();
+    let removed = inner.settings.player_removed.clone();
+    inner.reserved.retain(|hold| {
+        let slot = usize::from(hold.player) - 1;
+        hold.until > now
+            && slot < count
+            && removed.get(slot) != Some(&true)
+            && ai.get(slot).is_some_and(Option::is_none)
+            && seats.cookie_of_player(hold.player).is_none()
+    });
+    inner.reserved.len() != before
+}
+
 pub fn closed_json(reason: CloseReason) -> String {
     json!({ "type": "closed", "reason": reason.name() }).to_string()
+}
+
+/// What a setup socket is sent when its member was kicked, or banned with
+/// the kick (D54).
+pub fn kicked_json(ban: bool) -> String {
+    json!({ "type": "kicked", "ban": ban }).to_string()
 }
 
 /// A socket's text, if it is a request.
@@ -525,6 +653,10 @@ pub fn parse(text: &str) -> Option<Request> {
         "ready" => Some(Request::Ready(Ready::from_u8(
             u8::try_from(value["state"].as_u64()?).ok()?,
         )?)),
+        "kick" => Some(Request::Kick {
+            member: index("member")?,
+            ban: value["ban"].as_bool().unwrap_or(false),
+        }),
         "launch" => Some(Request::Launch),
         _ => None,
     }

@@ -170,5 +170,20 @@
   "no addressee": "hartzailea falta da",
   "join first": "sartu lehenik",
   "the chat is closed": "txata itxita dago",
-  "invalid nickname": "ezizen baliogabea"
+  "invalid nickname": "ezizen baliogabea",
+  "Ban": "Debekatu",
+  "Banned": "Debekatuta",
+  "Join again": "Sartu berriro",
+  "You were kicked from this setup.": "Konfigurazio honetatik kanporatu zaituzte.",
+  "You are banned from this match.": "Debekatuta zaude partida honetan.",
+  "Ban %(name)s from this match? They cannot join it again.": "Debekatu %(name)s partida honetan? Ezingo da berriro sartu.",
+  "Ban %(player)s? They cannot play or chat in this match again.": "Debekatu %(player)s? Ezingo du jokatu edo berriketan aritu partida honetan.",
+  "Ban %(player)s from this match's chat?": "Debekatu %(player)s partida honetako berriketa gelan?",
+  "Reserved for %(name)s": "%(name)s(r)entzat erreserbatuta",
+  "waiting for the players of the last game": "aurreko partidako jokalariak itxaroten",
+  "Join rematch": "Sartu errebantxan",
+  "Lobby": "Ataria",
+  "you are banned from this match": "debekatuta zaude partida honetan",
+  "that slot is reserved": "postu hori erreserbatuta dago",
+  "the time limit is reached": "denbora-muga iritsi da"
 }

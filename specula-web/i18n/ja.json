@@ -170,5 +170,20 @@
   "no addressee": "宛先がありません",
   "join first": "先に参加してください",
   "the chat is closed": "チャットは閉じられています",
-  "invalid nickname": "無効なニックネーム"
+  "invalid nickname": "無効なニックネーム",
+  "Ban": "禁止",
+  "Banned": "禁止済み",
+  "Join again": "再参加",
+  "You were kicked from this setup.": "このセットアップからキックされました。",
+  "You are banned from this match.": "この試合から禁止されています。",
+  "Ban %(name)s from this match? They cannot join it again.": "%(name)sをこの試合から禁止しますか？再参加できなくなります。",
+  "Ban %(player)s? They cannot play or chat in this match again.": "%(player)sを禁止しますか？この試合でプレイもチャットもできなくなります。",
+  "Ban %(player)s from this match's chat?": "%(player)sをこの試合のチャットから禁止しますか？",
+  "Reserved for %(name)s": "%(name)s用に予約済み",
+  "waiting for the players of the last game": "前の試合のプレイヤーを待っています",
+  "Join rematch": "再戦に参加",
+  "Lobby": "ロビー",
+  "you are banned from this match": "この試合から禁止されています",
+  "that slot is reserved": "その枠は予約済みです",
+  "the time limit is reached": "時間制限に達しました"
 }

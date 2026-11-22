@@ -49,6 +49,7 @@ pub struct Controls {
     pub extended: HtmlInputElement,
     pub filter: HtmlSelectElement,
     pub to: HtmlSelectElement,
+    pub ban: HtmlButtonElement,
 }
 
 enum Item {
@@ -71,6 +72,7 @@ pub struct ChatWindow {
     history: HtmlElement,
     filter: HtmlSelectElement,
     to: HtmlSelectElement,
+    ban: HtmlButtonElement,
     input: HtmlInputElement,
     send: HtmlButtonElement,
     cancel: HtmlButtonElement,
@@ -113,6 +115,7 @@ impl ChatWindow {
             history: find("chat-history")?,
             filter: crate::element(document, "chat-filter")?,
             to: crate::element(document, "chat-to")?,
+            ban: crate::element(document, "chat-ban")?,
             input: crate::element(document, "chat-input")?,
             send: crate::element(document, "chat-send")?,
             cancel: crate::element(document, "chat-cancel")?,
@@ -150,7 +153,28 @@ impl ChatWindow {
             extended: self.extended.clone(),
             filter: self.filter.clone(),
             to: self.to.clone(),
+            ban: self.ban.clone(),
         }
+    }
+
+    /// The observer member the host's Ban may act on: the chosen addressee,
+    /// when it is an observer who is not banned yet.
+    pub fn ban_target(&self) -> Option<(usize, String)> {
+        let you = self.chat.you()?;
+        if self.chat.host() != Some(you) {
+            return None;
+        }
+        let member = self
+            .to
+            .value()
+            .strip_prefix("member:")
+            .and_then(|member| member.parse::<usize>().ok())?;
+        let entry = self
+            .chat
+            .members()
+            .into_iter()
+            .find(|entry| entry.member == member)?;
+        (entry.observer && entry.player.is_none() && !entry.banned).then_some((member, entry.name))
     }
 
     /// The chat is there to read and write: false on a replay or an ended
@@ -300,6 +324,9 @@ impl ChatWindow {
         if !self.labelled {
             self.write_labels();
         }
+        let host = self.chat.you().is_some() && self.chat.host() == self.chat.you();
+        self.ban.set_hidden(!host);
+        self.ban.set_disabled(self.ban_target().is_none());
         let can_send = self.can_write();
         if self.can_send != Some(can_send) {
             self.can_send = Some(can_send);

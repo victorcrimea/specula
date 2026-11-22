@@ -170,5 +170,20 @@
   "no addressee": "vastaanottaja puuttuu",
   "join first": "liity ensin",
   "the chat is closed": "keskustelu on suljettu",
-  "invalid nickname": "virheellinen nimimerkki"
+  "invalid nickname": "virheellinen nimimerkki",
+  "Ban": "Estä",
+  "Banned": "Estetty",
+  "Join again": "Liity uudelleen",
+  "You were kicked from this setup.": "Sinut poistettiin tästä asetuksesta.",
+  "You are banned from this match.": "Sinut on estetty tästä ottelusta.",
+  "Ban %(name)s from this match? They cannot join it again.": "Estä %(name)s tästä ottelusta? Hän ei voi liittyä siihen uudelleen.",
+  "Ban %(player)s? They cannot play or chat in this match again.": "Estä %(player)s? Hän ei voi pelata tai keskustella tässä ottelussa.",
+  "Ban %(player)s from this match's chat?": "Estä %(player)s tämän ottelun keskustelusta?",
+  "Reserved for %(name)s": "Varattu pelaajalle %(name)s",
+  "waiting for the players of the last game": "odotetaan edellisen ottelun pelaajia",
+  "Join rematch": "Liity uusintaotteluun",
+  "Lobby": "Aula",
+  "you are banned from this match": "sinut on estetty tästä ottelusta",
+  "that slot is reserved": "se paikka on varattu",
+  "the time limit is reached": "aikaraja on saavutettu"
 }

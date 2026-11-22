@@ -836,6 +836,12 @@ struct MatchOver {
     /// Closed by the viewer; it opens again when another match ends.
     closed: bool,
     shown: String,
+    /// On a follower's page (M35): when `play/status` is asked next for the
+    /// rematch setup.
+    poll_at: f64,
+    polling: Rc<Cell<bool>>,
+    /// Why New match was refused, shown in place of "Match over".
+    error: Rc<RefCell<Option<String>>>,
     /// On `/play`, where the next match is one the player starts: New
     /// match, and Rematch if the server keeps the last setup. The bar's
     /// button is then New match too.
@@ -845,7 +851,12 @@ struct MatchOver {
 struct OwnerButtons {
     new_match: HtmlButtonElement,
     rematch: HtmlButtonElement,
+    /// The follower's Join rematch (M35), shown once the setup opens.
+    join: HtmlButtonElement,
+    lobby: HtmlButtonElement,
     can_rematch: bool,
+    /// The rematch setup's id, empty until the server says one.
+    next: Rc<RefCell<String>>,
 }
 
 impl MatchOver {
@@ -871,6 +882,10 @@ impl MatchOver {
             self.popup_button.set_hidden(true);
             owner.new_match.set_hidden(false);
             owner.rematch.set_hidden(!owner.can_rematch);
+            owner.lobby.set_hidden(false);
+            if owner.can_rematch {
+                owner.join.set_hidden(true);
+            }
         } else {
             self.button.set_disabled(!self.next_ready);
             self.popup_button.set_disabled(!self.next_ready);
@@ -881,14 +896,50 @@ impl MatchOver {
     fn close(&mut self) {
         self.closed = true;
         self.popup.set_hidden(true);
+        // Seen: else `frame` would open the popup again at once.
+        *self.error.borrow_mut() = None;
     }
 
     fn frame(&mut self, now: f64) {
+        // A follower asks the server whether the host's rematch opened
+        // (M35); the host's own Rematch answers at once. It keeps asking
+        // after one did, since that setup can close again (D15, D16, D14).
+        if self.ended
+            && let Some(owner) = &self.owner
+            && !owner.can_rematch
+            && now >= self.poll_at
+            && !self.polling.get()
+        {
+            self.poll_at = now + 3000.0;
+            self.polling.set(true);
+            let next = Rc::clone(&owner.next);
+            let polling = Rc::clone(&self.polling);
+            wasm_bindgen_futures::spawn_local(async move {
+                if let Ok(status) = game_menu::status().await {
+                    *next.borrow_mut() = status.next;
+                }
+                polling.set(false);
+            });
+        }
+        if let Some(owner) = &self.owner {
+            let hidden = owner.can_rematch || owner.next.borrow().is_empty();
+            if owner.join.hidden() != hidden {
+                owner.join.set_hidden(hidden);
+            }
+        }
+        // A refusal of New match opens the popup that shows it, even after
+        // the viewer closed it; closing it again clears the refusal.
+        if self.ended && self.error.borrow().is_some() {
+            self.closed = false;
+            self.popup.set_hidden(false);
+        }
         if !self.ended || self.closed {
             return;
         }
         let left = self.switch_at - now;
-        let text = if self.owner.is_some() {
+        let text = if let Some(error) = self.error.borrow().clone() {
+            error
+        } else if self.owner.is_some() {
             lang::translate("Match over")
         } else if left > 0.0 {
             let seconds = (left / 1000.0).ceil() as u64;
@@ -911,12 +962,17 @@ impl MatchOver {
 fn owner_buttons(document: &Document, status: Option<&game_menu::Status>) -> Option<OwnerButtons> {
     let new_match = element(document, "match-over-new").ok()?;
     let rematch = element(document, "match-over-rematch").ok()?;
+    let join = element(document, "match-over-join").ok()?;
+    let lobby = element(document, "match-over-lobby").ok()?;
     let bar: HtmlElement = element(document, "current").ok()?;
     lang::set_text(&bar, "New match");
     Some(OwnerButtons {
         new_match,
         rematch,
+        join,
+        lobby,
         can_rematch: status.is_some_and(|status| status.rematch),
+        next: Rc::new(RefCell::new(String::new())),
     })
 }
 
@@ -1168,6 +1224,21 @@ impl App {
                 .get(usize::from(player))
                 .map_or_else(String::new, |player| player.name.clone());
             message_box.confirm_kick(player, &name);
+        }
+        // The same for the Ban beside it (D54).
+        if let Some(message_box) = &mut self.message_box
+            && !message_box.is_open()
+            && let Some(player) = self
+                .diplomacy_window
+                .as_ref()
+                .and_then(DiplomacyWindow::take_ban)
+        {
+            let name = self
+                .scene
+                .players
+                .get(usize::from(player))
+                .map_or_else(String::new, |player| player.name.clone());
+            message_box.confirm_ban(player, &name);
         }
         if let Some(trade_window) = &mut self.trade_window {
             trade_window.update(&trade_window::View {
@@ -2441,6 +2512,9 @@ async fn run(
             switch_at: 0.0,
             closed: false,
             shown: String::new(),
+            poll_at: 0.0,
+            polling: Rc::new(Cell::new(false)),
+            error: Rc::new(RefCell::new(None)),
             owner: if owner {
                 owner_buttons(&document, status.as_ref())
             } else {
@@ -2978,6 +3052,18 @@ fn wire_chat_window(app: &Rc<RefCell<App>>, window: &web_sys::Window) {
             && let Some(chat_window) = &mut app.chat_window
         {
             chat_window.filter_changed();
+        }
+    });
+    let target = Rc::clone(app);
+    on_click(&controls.ban, move || {
+        if let Ok(mut app) = target.try_borrow_mut()
+            && let Some((member, name)) = app.chat_window.as_ref().and_then(ChatWindow::ban_target)
+            && let Some(message_box) = &mut app.message_box
+            // As the Kick's: an open question (Resign, a Kick) is not
+            // replaced by this one.
+            && !message_box.is_open()
+        {
+            message_box.confirm_ban_member(member, &name);
         }
     });
     let target = Rc::clone(app);
@@ -3665,6 +3751,22 @@ fn wire_message_box(app: &Rc<RefCell<App>>, window: &web_sys::Window) {
             }
             Some(Pending::Kick(player)) => {
                 let action = format!("kick/{player}");
+                wasm_bindgen_futures::spawn_local(async move {
+                    if let Err(error) = game_menu::post(&action).await {
+                        web_sys::console::error_1(&error.into());
+                    }
+                })
+            }
+            Some(Pending::Ban(player)) => {
+                let action = format!("kick/{player}?ban=true");
+                wasm_bindgen_futures::spawn_local(async move {
+                    if let Err(error) = game_menu::post(&action).await {
+                        web_sys::console::error_1(&error.into());
+                    }
+                })
+            }
+            Some(Pending::BanMember(member)) => {
+                let action = format!("ban_member/{member}");
                 wasm_bindgen_futures::spawn_local(async move {
                     if let Err(error) = game_menu::post(&action).await {
                         web_sys::console::error_1(&error.into());
@@ -4996,21 +5098,44 @@ fn wire_playback(app: &Rc<RefCell<App>>) {
             app.match_over.close_button.clone(),
         )
     };
-    let owner = app
-        .borrow()
-        .match_over
-        .owner
-        .as_ref()
-        .map(|owner| (owner.new_match.clone(), owner.rematch.clone()));
-    if let Some((new_match, rematch)) = owner {
-        on_click(&new_match, open_setup);
+    let owner = {
+        let app = app.borrow();
+        app.match_over.owner.as_ref().map(|owner| {
+            (
+                owner.new_match.clone(),
+                owner.rematch.clone(),
+                owner.join.clone(),
+                owner.lobby.clone(),
+                Rc::clone(&owner.next),
+                Rc::clone(&app.match_over.error),
+            )
+        })
+    };
+    if let Some((new_match, rematch, join, lobby, next, error)) = owner {
+        let target = Rc::clone(&error);
+        on_click(&new_match, move || game_menu::new_match(Rc::clone(&target)));
         on_click(&rematch, game_menu::rematch);
+        on_click(&join, move || {
+            let id = next.borrow().clone();
+            if !id.is_empty()
+                && let Some(window) = web_sys::window()
+            {
+                let _ = window.location().set_href(&format!("/g/{id}"));
+            }
+        });
+        on_click(&lobby, || {
+            if let Some(window) = web_sys::window() {
+                let _ = window.location().set_href("/");
+            }
+        });
     }
     let target = Rc::clone(app);
     let on_current = Closure::<dyn FnMut()>::new(move || {
         let app = target.borrow();
         if app.match_over.owner.is_some() {
-            open_setup();
+            let error = Rc::clone(&app.match_over.error);
+            drop(app);
+            game_menu::new_match(error);
             return;
         }
         if app.match_over.archived {
@@ -5036,13 +5161,6 @@ fn wire_playback(app: &Rc<RefCell<App>>) {
     if let Some(copy_link) = copy_link {
         let target = Rc::clone(app);
         on_click(&copy_link, move || copy_match_link(&target));
-    }
-}
-
-/// The setup page, for a new game in place of the player's.
-fn open_setup() {
-    if let Some(window) = web_sys::window() {
-        let _ = window.location().set_href("/");
     }
 }
 

@@ -170,5 +170,20 @@
   "no addressee": "δεν υπάρχει παραλήπτης",
   "join first": "συμμετέχετε πρώτα",
   "the chat is closed": "η συνομιλία έχει κλείσει",
-  "invalid nickname": "μη έγκυρο ψευδώνυμο"
+  "invalid nickname": "μη έγκυρο ψευδώνυμο",
+  "Ban": "Αποκλεισμός",
+  "Banned": "Αποκλεισμένος",
+  "Join again": "Συμμετοχή ξανά",
+  "You were kicked from this setup.": "Σε απέβαλαν από αυτή τη ρύθμιση.",
+  "You are banned from this match.": "Είσαι αποκλεισμένος από αυτόν τον αγώνα.",
+  "Ban %(name)s from this match? They cannot join it again.": "Αποκλεισμός του χρήστη %(name)s από αυτόν τον αγώνα; Δεν θα μπορεί να ξανασυμμετάσχει.",
+  "Ban %(player)s? They cannot play or chat in this match again.": "Αποκλεισμός του χρήστη %(player)s; Δεν θα μπορεί να παίξει ή να συνομιλήσει ξανά σε αυτόν τον αγώνα.",
+  "Ban %(player)s from this match's chat?": "Αποκλεισμός του χρήστη %(player)s από τη συνομιλία αυτού του αγώνα;",
+  "Reserved for %(name)s": "Δεσμευμένο για %(name)s",
+  "waiting for the players of the last game": "αναμονή για τους παίκτες του προηγούμενου αγώνα",
+  "Join rematch": "Συμμετοχή στη ρεβάνς",
+  "Lobby": "Λόμπι",
+  "you are banned from this match": "είσαι αποκλεισμένος από αυτόν τον αγώνα",
+  "that slot is reserved": "αυτή η θέση είναι δεσμευμένη",
+  "the time limit is reached": "το χρονικό όριο έχει συμπληρωθεί"
 }

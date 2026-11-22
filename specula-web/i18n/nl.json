@@ -170,5 +170,20 @@
   "no addressee": "geen geadresseerde",
   "join first": "doe eerst mee",
   "the chat is closed": "de chat is gesloten",
-  "invalid nickname": "ongeldige bijnaam"
+  "invalid nickname": "ongeldige bijnaam",
+  "Ban": "Verbannen",
+  "Banned": "Verbannen",
+  "Join again": "Opnieuw deelnemen",
+  "You were kicked from this setup.": "Je bent uit deze setup verwijderd.",
+  "You are banned from this match.": "Je bent verbannen uit deze wedstrijd.",
+  "Ban %(name)s from this match? They cannot join it again.": "%(name)s uit deze wedstrijd verbannen? Diegene kan niet opnieuw deelnemen.",
+  "Ban %(player)s? They cannot play or chat in this match again.": "%(player)s verbannen? Diegene kan niet meer spelen of chatten in deze wedstrijd.",
+  "Ban %(player)s from this match's chat?": "%(player)s uit de chat van deze wedstrijd verbannen?",
+  "Reserved for %(name)s": "Gereserveerd voor %(name)s",
+  "waiting for the players of the last game": "wacht op de spelers van de vorige wedstrijd",
+  "Join rematch": "Deelnemen aan rematch",
+  "Lobby": "Lobby",
+  "you are banned from this match": "je bent verbannen uit deze wedstrijd",
+  "that slot is reserved": "die plaats is gereserveerd",
+  "the time limit is reached": "de tijdslimiet is bereikt"
 }

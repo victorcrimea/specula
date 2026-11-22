@@ -21,6 +21,7 @@ pub const CONTROL_CLAIM: u8 = 2;
 pub const CONTROL_HOST: u8 = 1;
 pub const CONTROL_KICKED: u8 = 2;
 pub const CONTROL_ABSENT: u8 = 4;
+pub const CONTROL_BANNED: u8 = 8;
 /// Archived matches keep it; it has no control, which a keyframe ends with
 /// from version 13.
 const DETAIL_VERSION_NO_CONTROL: u8 = 12;
@@ -343,6 +344,7 @@ fn read_control(cursor: &mut ByteReader) -> Result<Control, &'static str> {
                 host: flags & CONTROL_HOST != 0,
                 kicked: flags & CONTROL_KICKED != 0,
                 absent: flags & CONTROL_ABSENT != 0,
+                banned: flags & CONTROL_BANNED != 0,
             })
         })
         .collect::<Result<_, &'static str>>()?;
@@ -373,6 +375,9 @@ fn write_control(out: &mut Writer, control: &Control) {
         }
         if seat.absent {
             flags |= CONTROL_ABSENT;
+        }
+        if seat.banned {
+            flags |= CONTROL_BANNED;
         }
         out.u8(seat.player);
         out.u8(flags);
@@ -427,6 +432,7 @@ pub struct ControlSeat {
     pub host: bool,
     pub kicked: bool,
     pub absent: bool,
+    pub banned: bool,
 }
 
 impl Details {

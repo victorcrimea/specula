@@ -119,6 +119,8 @@ pub struct Member {
     pub player: Option<u8>,
     pub observer: bool,
     pub online: bool,
+    /// Banned from the match and its chat (D54).
+    pub banned: bool,
 }
 
 pub struct Chat {
@@ -130,6 +132,8 @@ struct Inner {
     reconnect_ms: i32,
     closed: bool,
     you: Option<usize>,
+    /// The host's member index, which only the chat ban needs.
+    host: Option<usize>,
     max_length: usize,
     members: Vec<Member>,
     live: bool,
@@ -159,6 +163,7 @@ impl Chat {
             reconnect_ms: RECONNECT_MS,
             closed: false,
             you: None,
+            host: None,
             max_length: 1024,
             members: Vec::new(),
             live: false,
@@ -218,6 +223,10 @@ impl Chat {
 
     pub fn you(&self) -> Option<usize> {
         self.inner.borrow().you
+    }
+
+    pub fn host(&self) -> Option<usize> {
+        self.inner.borrow().host
     }
 
     pub fn max_length(&self) -> usize {
@@ -376,6 +385,7 @@ fn handle(inner: &mut Inner, message: &JsValue) -> Option<String> {
         }
         "members" => {
             inner.you = number(message, "you").map(|member| member as usize);
+            inner.host = number(message, "host").map(|member| member as usize);
             let list = get(message, "members");
             let members: Vec<Member> = if js_sys::Array::is_array(&list) {
                 list.unchecked_into::<js_sys::Array>()
@@ -386,6 +396,7 @@ fn handle(inner: &mut Inner, message: &JsValue) -> Option<String> {
                         player: number(&member, "player").map(|player| player as u8),
                         observer: get(&member, "observer").as_bool().unwrap_or(false),
                         online: get(&member, "online").as_bool().unwrap_or(false),
+                        banned: get(&member, "banned").as_bool().unwrap_or(false),
                     })
                     .collect()
             } else {
@@ -398,6 +409,7 @@ fn handle(inner: &mut Inner, message: &JsValue) -> Option<String> {
                         || new.player != old.player
                         || new.observer != old.observer
                         || new.online != old.online
+                        || new.banned != old.banned
                 });
             if changed {
                 inner.members = members;

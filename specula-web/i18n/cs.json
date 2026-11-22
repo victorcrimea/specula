@@ -170,5 +170,20 @@
   "no addressee": "chybí adresát",
   "join first": "nejdřív se připoj",
   "the chat is closed": "chat je uzavřen",
-  "invalid nickname": "neplatná přezdívka"
+  "invalid nickname": "neplatná přezdívka",
+  "Ban": "Zakázat",
+  "Banned": "Zakázán",
+  "Join again": "Připojit se znovu",
+  "You were kicked from this setup.": "Byli jste vyloučeni z tohoto nastavení.",
+  "You are banned from this match.": "Jste zablokováni v tomto zápase.",
+  "Ban %(name)s from this match? They cannot join it again.": "Zablokovat %(name)s v tomto zápase? Nebude se moci znovu připojit.",
+  "Ban %(player)s? They cannot play or chat in this match again.": "Zablokovat %(player)s? Nebude moci v tomto zápase hrát ani chatovat.",
+  "Ban %(player)s from this match's chat?": "Zablokovat %(player)s v chatu tohoto zápasu?",
+  "Reserved for %(name)s": "Rezervováno pro %(name)s",
+  "waiting for the players of the last game": "čeká se na hráče předchozího zápasu",
+  "Join rematch": "Připojit se k odvetě",
+  "Lobby": "Lobby",
+  "you are banned from this match": "jste zablokováni v tomto zápase",
+  "that slot is reserved": "toto místo je rezervováno",
+  "the time limit is reached": "bylo dosaženo časového limitu"
 }

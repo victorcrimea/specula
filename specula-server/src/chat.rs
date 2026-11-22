@@ -323,23 +323,25 @@ pub fn members_json(found: &registry::Match, cookie: Option<&str>) -> String {
         .chat_members()
         .into_iter()
         .enumerate()
-        .map(|(member, (member_cookie, name, player))| {
-            let observer = match player {
+        .map(|(member, entry)| {
+            let observer = match entry.player {
                 None => true,
                 Some(player) => in_game && !is_active(&diplomacy, player),
             };
             json!({
                 "member": member,
-                "name": name.as_str(),
-                "player": player,
+                "name": entry.nickname.as_str(),
+                "player": entry.player,
                 "observer": observer,
-                "online": found.chat.is_online(&member_cookie),
+                "online": found.chat.is_online(&entry.cookie),
+                "banned": entry.banned,
             })
         })
         .collect();
     json!({
         "type": "members",
         "you": cookie.and_then(|cookie| found.seats.index_of(cookie)),
+        "host": found.seats.host_index(),
         "members": members,
     })
     .to_string()
@@ -464,6 +466,9 @@ pub fn send(
     text: &str,
 ) -> Result<(), &'static str> {
     let text = clean(text)?;
+    if found.seats.is_banned(cookie) {
+        return Err("you are banned from this match");
+    }
     let member = found.seats.index_of(cookie).ok_or("join first")?;
     let name = found.seats.nickname_of(cookie).ok_or("join first")?;
     let in_game = found.state() != MatchState::Setup;

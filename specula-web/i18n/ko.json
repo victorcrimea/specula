@@ -170,5 +170,20 @@
   "no addressee": "받는 사람이 없습니다",
   "join first": "먼저 참가하세요",
   "the chat is closed": "채팅이 닫혔습니다",
-  "invalid nickname": "잘못된 닉네임"
+  "invalid nickname": "잘못된 닉네임",
+  "Ban": "차단",
+  "Banned": "차단됨",
+  "Join again": "다시 참가",
+  "You were kicked from this setup.": "이 설정에서 추방되었습니다.",
+  "You are banned from this match.": "이 경기에서 차단되었습니다.",
+  "Ban %(name)s from this match? They cannot join it again.": "%(name)s을(를) 이 경기에서 차단할까요? 다시 참가할 수 없습니다.",
+  "Ban %(player)s? They cannot play or chat in this match again.": "%(player)s을(를) 차단할까요? 이 경기에서 플레이하거나 채팅할 수 없습니다.",
+  "Ban %(player)s from this match's chat?": "%(player)s을(를) 이 경기의 채팅에서 차단할까요?",
+  "Reserved for %(name)s": "%(name)s님을 위해 예약됨",
+  "waiting for the players of the last game": "이전 경기의 플레이어를 기다리는 중",
+  "Join rematch": "재대결 참가",
+  "Lobby": "로비",
+  "you are banned from this match": "이 경기에서 차단되었습니다",
+  "that slot is reserved": "해당 자리는 예약되어 있습니다",
+  "the time limit is reached": "시간 제한에 도달했습니다"
 }

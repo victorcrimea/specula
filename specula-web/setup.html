@@ -170,9 +170,11 @@ input[type=text] { height: 26px; box-sizing: border-box; padding: 0 6px; border:
 #error { color: rgb(255, 120, 120); margin: 0; }
 #connection { margin: 0; color: orange; }
 
-#closed { position: relative; flex: 1; display: flex; flex-direction: column; align-items: center;
+#closed, #kicked { position: relative; flex: 1; display: flex; flex-direction: column; align-items: center;
   justify-content: center; gap: 12px; text-align: center; }
-#closed h2 { margin: 0; font-size: 18px; }
+#closed h2, #kicked h2 { margin: 0; font-size: 18px; }
+.slot .name button, #spectators .take { height: 20px; padding: 0 6px; margin-left: 3px;
+  font-size: 12px; }
 
 /* AIConfigPage.xml: ModernFade under a ModernDialog. */
 #ai-config { position: fixed; inset: 0; z-index: 10; background: rgba(0, 0, 0, 0.6);
@@ -278,6 +280,11 @@ input[type=text] { height: 26px; box-sizing: border-box; padding: 0 6px; border:
 <h2 data-i18n>This setup closed.</h2>
 <p id="closed-reason"></p>
 <a class="stone" href="/" style="display: inline-flex; align-items: center; justify-content: center; text-decoration: none" data-i18n>New game</a>
+</div>
+
+<div id="kicked" hidden>
+<h2 id="kicked-text"></h2>
+<button id="kicked-rejoin" class="stone" type="button" data-i18n>Join again</button>
 </div>
 </div>
 

@@ -170,5 +170,20 @@
   "no addressee": "缺少收信人",
   "join first": "请先加入",
   "the chat is closed": "聊天已关闭",
-  "invalid nickname": "无效的昵称"
+  "invalid nickname": "无效的昵称",
+  "Ban": "封禁",
+  "Banned": "已封禁",
+  "Join again": "重新加入",
+  "You were kicked from this setup.": "你已被踢出此设置。",
+  "You are banned from this match.": "你已被封禁，无法加入此对局。",
+  "Ban %(name)s from this match? They cannot join it again.": "将 %(name)s 从此对局封禁？其将无法再次加入。",
+  "Ban %(player)s? They cannot play or chat in this match again.": "封禁 %(player)s？其将无法在此对局中游玩或聊天。",
+  "Ban %(player)s from this match's chat?": "将 %(player)s 从此对局聊天中封禁？",
+  "Reserved for %(name)s": "已为 %(name)s 保留",
+  "waiting for the players of the last game": "正在等待上一局的玩家",
+  "Join rematch": "加入再战",
+  "Lobby": "大厅",
+  "you are banned from this match": "你已被封禁，无法加入此对局",
+  "that slot is reserved": "该位置已被保留",
+  "the time limit is reached": "已达到时间限制"
 }

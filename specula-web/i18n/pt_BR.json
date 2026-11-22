@@ -170,5 +170,20 @@
   "no addressee": "falta o destinatário",
   "join first": "entre primeiro",
   "the chat is closed": "o chat está fechado",
-  "invalid nickname": "apelido inválido"
+  "invalid nickname": "apelido inválido",
+  "Ban": "Banir",
+  "Banned": "Banido",
+  "Join again": "Entrar novamente",
+  "You were kicked from this setup.": "Você foi expulso desta configuração.",
+  "You are banned from this match.": "Você está banido desta partida.",
+  "Ban %(name)s from this match? They cannot join it again.": "Banir %(name)s desta partida? Não poderá entrar novamente.",
+  "Ban %(player)s? They cannot play or chat in this match again.": "Banir %(player)s? Não poderá jogar nem conversar nesta partida.",
+  "Ban %(player)s from this match's chat?": "Banir %(player)s do chat desta partida?",
+  "Reserved for %(name)s": "Reservado para %(name)s",
+  "waiting for the players of the last game": "aguardando os jogadores da partida anterior",
+  "Join rematch": "Entrar na revanche",
+  "Lobby": "Saguão",
+  "you are banned from this match": "você está banido desta partida",
+  "that slot is reserved": "esse lugar está reservado",
+  "the time limit is reached": "o limite de tempo foi atingido"
 }

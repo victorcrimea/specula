@@ -170,5 +170,20 @@
   "no addressee": "thiếu người nhận",
   "join first": "hãy tham gia trước",
   "the chat is closed": "cuộc trò chuyện đã đóng",
-  "invalid nickname": "biệt danh không hợp lệ"
+  "invalid nickname": "biệt danh không hợp lệ",
+  "Ban": "Cấm",
+  "Banned": "Đã cấm",
+  "Join again": "Tham gia lại",
+  "You were kicked from this setup.": "Bạn đã bị đuổi khỏi thiết lập này.",
+  "You are banned from this match.": "Bạn bị cấm khỏi trận đấu này.",
+  "Ban %(name)s from this match? They cannot join it again.": "Cấm %(name)s khỏi trận đấu này? Họ sẽ không thể tham gia lại.",
+  "Ban %(player)s? They cannot play or chat in this match again.": "Cấm %(player)s? Họ sẽ không thể chơi hoặc trò chuyện trong trận đấu này nữa.",
+  "Ban %(player)s from this match's chat?": "Cấm %(player)s khỏi trò chuyện của trận đấu này?",
+  "Reserved for %(name)s": "Đã giữ chỗ cho %(name)s",
+  "waiting for the players of the last game": "đang chờ người chơi của trận trước",
+  "Join rematch": "Tham gia trận tái đấu",
+  "Lobby": "Sảnh",
+  "you are banned from this match": "bạn bị cấm khỏi trận đấu này",
+  "that slot is reserved": "chỗ đó đã được giữ",
+  "the time limit is reached": "đã đạt giới hạn thời gian"
 }

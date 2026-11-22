@@ -170,5 +170,20 @@
   "no addressee": "kein Empfänger",
   "join first": "tritt zuerst bei",
   "the chat is closed": "der Chat ist geschlossen",
-  "invalid nickname": "ungültiger Spitzname"
+  "invalid nickname": "ungültiger Spitzname",
+  "Ban": "Sperren",
+  "Banned": "Gesperrt",
+  "Join again": "Erneut beitreten",
+  "You were kicked from this setup.": "Du wurdest aus diesem Setup entfernt.",
+  "You are banned from this match.": "Du bist von diesem Spiel gesperrt.",
+  "Ban %(name)s from this match? They cannot join it again.": "%(name)s von diesem Spiel sperren? Ein erneuter Beitritt ist dann nicht mehr möglich.",
+  "Ban %(player)s? They cannot play or chat in this match again.": "%(player)s sperren? Die Person kann in diesem Spiel weder spielen noch chatten.",
+  "Ban %(player)s from this match's chat?": "%(player)s aus dem Chat dieses Spiels sperren?",
+  "Reserved for %(name)s": "Reserviert für %(name)s",
+  "waiting for the players of the last game": "wartet auf die Spieler des letzten Spiels",
+  "Join rematch": "Rückmatch beitreten",
+  "Lobby": "Lobby",
+  "you are banned from this match": "du bist von diesem Spiel gesperrt",
+  "that slot is reserved": "dieser Platz ist reserviert",
+  "the time limit is reached": "das Zeitlimit ist erreicht"
 }

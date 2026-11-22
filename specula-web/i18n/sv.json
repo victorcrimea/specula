@@ -170,5 +170,20 @@
   "no addressee": "mottagare saknas",
   "join first": "gå med först",
   "the chat is closed": "chatten är stängd",
-  "invalid nickname": "ogiltigt smeknamn"
+  "invalid nickname": "ogiltigt smeknamn",
+  "Ban": "Banna",
+  "Banned": "Bannad",
+  "Join again": "Gå med igen",
+  "You were kicked from this setup.": "Du sparkades från den här inställningen.",
+  "You are banned from this match.": "Du är bannad från den här matchen.",
+  "Ban %(name)s from this match? They cannot join it again.": "Banna %(name)s från den här matchen? Personen kan inte gå med igen.",
+  "Ban %(player)s? They cannot play or chat in this match again.": "Banna %(player)s? Personen kan inte spela eller chatta i den här matchen igen.",
+  "Ban %(player)s from this match's chat?": "Banna %(player)s från chatten i den här matchen?",
+  "Reserved for %(name)s": "Reserverad för %(name)s",
+  "waiting for the players of the last game": "väntar på spelarna från förra matchen",
+  "Join rematch": "Gå med i returmatchen",
+  "Lobby": "Lobby",
+  "you are banned from this match": "du är bannad från den här matchen",
+  "that slot is reserved": "den platsen är reserverad",
+  "the time limit is reached": "tidsgränsen är nådd"
 }

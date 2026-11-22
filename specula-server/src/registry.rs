@@ -28,9 +28,10 @@
 //! released the end, so observers see it and the history holds all of it.
 //!
 //! `watch_matches` stops an engine at L1 or L2 (D18, D19), and logs the 15,
-//! 5 and 1 minute warnings the pages show from `limits` (D20). It also stops
-//! a decided game's engine, which stays in its session otherwise, and drops
-//! the ended matches.
+//! 5 and 1 minute warnings the pages show from `limits` (D20). A reached
+//! limit first has the players scored and the losers resigned (M30), then
+//! stops the engine. It also stops a decided game's engine, which stays in
+//! its session otherwise, and drops the ended matches.
 
 use std::collections::HashMap;
 use std::collections::VecDeque;
@@ -195,6 +196,9 @@ pub struct Match {
     warned: Mutex<usize>,
     /// When the watcher first saw the game decided.
     decided: Mutex<Option<Instant>>,
+    /// The setup a rematch opened for this match (M35), once its host
+    /// started one.
+    rematch: Mutex<Option<MatchId>>,
 }
 
 impl Match {
@@ -325,6 +329,9 @@ pub struct Registry {
     inner: Mutex<Inner>,
 }
 
+/// The seated players a rematch holds slots for (M35).
+pub type Followers = Vec<(String, Nickname, u8)>;
+
 /// What an ended match leaves once it is dropped.
 struct Ended {
     owner: String,
@@ -333,6 +340,10 @@ struct Ended {
     /// The owner's player number, which a rematch keeps if it is still a
     /// slot.
     seat: Option<u8>,
+    /// The seated members at the drop, whose slots the rematch reserves.
+    players: Followers,
+    /// The setup a rematch opened for this match (M35).
+    rematch: Option<MatchId>,
 }
 
 struct Inner {
@@ -483,7 +494,8 @@ impl Registry {
 
     /// Opens a setup for `owner`, its host, seated as a player (vanilla's
     /// `onClientJoin` gives the host the first free slot). `from` is a
-    /// finished game's settings and the host's seat in it, for a rematch;
+    /// finished game's settings, the host's seat in it and the other seated
+    /// players, for a rematch; their slots are reserved for them (M35).
     /// `batch` is the host's stored settings (D34), used only when `from` is
     /// `None`. A new setup replaces the game the visitor hosts (D14), in
     /// whose slot it then runs.
@@ -491,7 +503,7 @@ impl Registry {
         self: &Arc<Self>,
         owner: &str,
         nickname: Nickname,
-        from: Option<(Settings, Option<u8>)>,
+        from: Option<(Settings, Option<u8>, Followers)>,
         batch: Option<&Value>,
     ) -> Result<MatchId, &'static str> {
         let catalog = self.catalog.as_ref().ok_or("not hosting")?;
@@ -530,20 +542,39 @@ impl Registry {
         let nickname = seats.join(owner, nickname);
         let seat = from
             .as_ref()
-            .and_then(|(settings, seat)| {
+            .and_then(|(settings, seat, _)| {
                 seat.filter(|seat| usize::from(*seat) <= settings.player_count.players)
             })
             .unwrap_or(1);
-        let settings = match from {
-            Some((mut settings, _)) => {
+        let (settings, followers) = match from {
+            Some((mut settings, _, players)) => {
                 settings.on_seated(catalog, &[seat]);
-                settings
+                (settings, players)
             }
-            None => Settings::open(catalog, batch, &[seat]).map_err(|error| {
-                eprintln!("cannot open a setup: {error}");
-                "cannot open a setup"
-            })?,
+            None => (
+                Settings::open(catalog, batch, &[seat]).map_err(|error| {
+                    eprintln!("cannot open a setup: {error}");
+                    "cannot open a setup"
+                })?,
+                Vec::new(),
+            ),
         };
+        let (reserved, dropped): (Followers, Followers) =
+            followers.into_iter().partition(|(_, _, player)| {
+                let slot = usize::from(*player) - 1;
+                *player != seat
+                    && slot < settings.player_count.players
+                    && settings.player_ai.get(slot).is_some_and(Option::is_none)
+                    && settings.player_removed.get(slot) != Some(&true)
+            });
+        // Rare (the host took the seat, or it is no slot any more), and
+        // otherwise invisible: the player just finds no slot held.
+        for (_, name, player) in &dropped {
+            println!(
+                "match {id}: no slot held for {} (player {player}), it is not open",
+                name.as_str()
+            );
+        }
         seats.set_player(owner, Some(seat))?;
         seats.force_host_stay();
         // Only now: nothing above can fail after the old game was ended.
@@ -576,7 +607,7 @@ impl Registry {
                 hub,
                 play,
                 seats,
-                room: Arc::new(SetupRoom::new(settings)),
+                room: Arc::new(SetupRoom::new(settings, reserved)),
                 chat: Arc::new(Chat::new(self.delay)),
                 state: Mutex::new(MatchState::Setup),
                 runner: Mutex::new(None),
@@ -584,6 +615,7 @@ impl Registry {
                 launched: Mutex::new(None),
                 warned: Mutex::new(0),
                 decided: Mutex::new(None),
+                rematch: Mutex::new(None),
             }),
         );
         inner.order.push(id);
@@ -603,11 +635,10 @@ impl Registry {
             .hosted(id)
             .filter(|found| found.state() == MatchState::Setup)
             .ok_or("no such setup")?;
-        let (launch, settings) =
-            found
-                .room
-                .begin_launch(catalog, &found.seats, cookie, &id.to_string())?;
-        let started = self.start_engine(id, &found, launch, settings);
+        let launch = found
+            .room
+            .begin_launch(catalog, &found.seats, cookie, &id.to_string())?;
+        let started = self.start_engine(id, &found, launch);
         found.room.finish_launch(started.is_ok());
         started
     }
@@ -617,7 +648,6 @@ impl Registry {
         id: MatchId,
         found: &Arc<Match>,
         launch: crate::settings::Launch,
-        settings: Settings,
     ) -> Result<(), &'static str> {
         let mut inner = self.inner.lock().unwrap();
         // A stop or a replacement may have closed it since the room's check.
@@ -656,7 +686,7 @@ impl Registry {
         };
         let runner = match found
             .play
-            .start(launch, settings, &found.previous, generation, on_exit)
+            .start(launch, &found.previous, generation, on_exit)
         {
             Ok(runner) => runner,
             Err(error) => {
@@ -690,28 +720,72 @@ impl Registry {
         Ok(())
     }
 
-    /// A new setup from the settings of the game `owner` hosts in `id`.
+    /// A new setup from the settings of the game `owner` hosts in `id`,
+    /// holding the other seated players' slots for them (M35).
     pub fn rematch(self: &Arc<Self>, owner: &str, id: MatchId) -> Result<MatchId, &'static str> {
-        let (settings, seat, nickname) = {
+        let (settings, seat, nickname, followers) = {
             let inner = self.inner.lock().unwrap();
             match inner.matches.get(&id) {
-                Some(found) => found.play.settings_of(owner).and_then(|settings| {
+                Some(found) => found.play.rematch_settings_of(owner).and_then(|settings| {
                     Some((
                         settings,
                         found.seats.player_of(owner),
                         found.seats.nickname_of(owner)?,
+                        found
+                            .seats
+                            .seated_members()
+                            .into_iter()
+                            .filter(|(cookie, _, _)| cookie != owner)
+                            .collect(),
                     ))
                 }),
                 None => inner
                     .ended
                     .get(&id)
                     .filter(|ended| ended.owner == owner)
-                    .map(|ended| (ended.settings.clone(), ended.seat, ended.nickname.clone())),
+                    .map(|ended| {
+                        (
+                            ended.settings.clone(),
+                            ended.seat,
+                            ended.nickname.clone(),
+                            ended.players.clone(),
+                        )
+                    }),
             }
         }
         .ok_or("no game to repeat")?;
         // D62: a rematch repeats the old game, not the host's stored copy.
-        self.open_setup(owner, nickname, Some((settings, seat)), None)
+        let new = self.open_setup(owner, nickname, Some((settings, seat, followers)), None)?;
+        let inner = &mut *self.inner.lock().unwrap();
+        if let Some(found) = inner.matches.get(&id) {
+            *found.rematch.lock().unwrap() = Some(new);
+        } else if let Some(ended) = inner.ended.get_mut(&id) {
+            ended.rematch = Some(new);
+        }
+        Ok(new)
+    }
+
+    /// The setup `visitor` follows `id` into (M35), while it is still open:
+    /// an old player's, not the host's, and not an observer's. Also after
+    /// the match was dropped.
+    pub fn rematch_of(&self, id: MatchId, visitor: &str) -> Option<MatchId> {
+        let inner = self.inner.lock().unwrap();
+        let next = match inner.matches.get(&id) {
+            Some(found) => {
+                if found.seats.player_of(visitor).is_none() || found.seats.is_host(visitor) {
+                    return None;
+                }
+                *found.rematch.lock().unwrap()
+            }
+            None => {
+                let ended = inner.ended.get(&id)?;
+                if !ended.players.iter().any(|(cookie, _, _)| cookie == visitor) {
+                    return None;
+                }
+                ended.rematch
+            }
+        }?;
+        (inner.matches.get(&next)?.state() == MatchState::Setup).then_some(next)
     }
 
     /// Whether `id` is an open setup, or one that closed (its page says why).
@@ -802,6 +876,7 @@ impl Registry {
                 let was_seated = found.seats.leave_setup(&cookie);
                 found.room.after_leave(catalog, &found.seats, was_seated);
             }
+            found.room.expire_reservations();
             if let Some(reason) = found.room.due() {
                 let inner = &mut *self.inner.lock().unwrap();
                 if found.state() == MatchState::Setup {
@@ -838,6 +913,13 @@ impl Registry {
                 && let Some(nickname) = found.seats.nickname_of(&owner)
             {
                 let seat = found.seats.player_of(&owner);
+                let players = found
+                    .seats
+                    .seated_members()
+                    .into_iter()
+                    .filter(|(cookie, _, _)| *cookie != owner)
+                    .collect();
+                let rematch = *found.rematch.lock().unwrap();
                 inner.ended.insert(
                     id,
                     Ended {
@@ -845,6 +927,8 @@ impl Registry {
                         settings,
                         nickname,
                         seat,
+                        players,
+                        rematch,
                     },
                 );
             }
@@ -914,9 +998,7 @@ impl Registry {
                         );
                     }
                 }
-                if left.is_zero() && found.play.end_at_limit() {
-                    // D20's scoring goes before this stop (M30); until then
-                    // the match ends undecided.
+                if left.is_zero() && found.play.tick_limit(limit) && found.play.end_at_limit() {
                     println!("match {id} reached the {limit} time limit, stopping its engine");
                 }
                 if found.play.decided() {

@@ -170,5 +170,20 @@
   "no addressee": "falta el destinatari",
   "join first": "uneix-te primer",
   "the chat is closed": "el xat està tancat",
-  "invalid nickname": "sobrenom no vàlid"
+  "invalid nickname": "sobrenom no vàlid",
+  "Ban": "Prohibir",
+  "Banned": "Prohibit",
+  "Join again": "Torna-hi",
+  "You were kicked from this setup.": "T'han expulsat d'aquesta configuració.",
+  "You are banned from this match.": "Estàs prohibit en aquesta partida.",
+  "Ban %(name)s from this match? They cannot join it again.": "Prohibir %(name)s en aquesta partida? No s'hi podrà tornar a unir.",
+  "Ban %(player)s? They cannot play or chat in this match again.": "Prohibir %(player)s? No podrà jugar ni xatejar en aquesta partida.",
+  "Ban %(player)s from this match's chat?": "Prohibir %(player)s al xat d'aquesta partida?",
+  "Reserved for %(name)s": "Reservat per a %(name)s",
+  "waiting for the players of the last game": "s'esperen els jugadors de la partida anterior",
+  "Join rematch": "Uneix-te a la revanxa",
+  "Lobby": "Vestíbul",
+  "you are banned from this match": "estàs prohibit en aquesta partida",
+  "that slot is reserved": "aquest lloc està reservat",
+  "the time limit is reached": "s'ha arribat al límit de temps"
 }

@@ -14,6 +14,7 @@ mod observer;
 mod pause;
 mod play;
 mod registry;
+mod score;
 mod seats;
 mod settings;
 mod setup;
@@ -248,6 +249,7 @@ async fn main() {
                 chat_socket,
                 play_action,
                 play_kick,
+                play_ban_member,
                 observer_flare,
                 play_viewer,
                 play_detail_viewer,
@@ -449,11 +451,16 @@ fn play_status(
                 rematch: rematch.unwrap_or(false),
                 seat: None,
                 limits: None,
+                next: None,
             }
         }
     };
+    let next = visitor
+        .as_deref()
+        .and_then(|visitor| registry.rematch_of(id, visitor));
     let status = play::Status {
         limits: registry.limits(id),
+        next,
         ..status
     };
     Some(Json(
@@ -571,11 +578,13 @@ fn observer_flare(
     hub.flare_from_observer(&visitor, x, z).map_err(refuse)
 }
 
-/// The host's kick of a seat from the diplomacy window (M29).
-#[rocket::post("/g/<id>/play/kick/<player>")]
+/// The host's kick of a seat from the diplomacy window (M29), with a ban
+/// when `ban=true` (D54).
+#[rocket::post("/g/<id>/play/kick/<player>?<ban>")]
 fn play_kick(
     id: MatchId,
     player: u8,
+    ban: Option<bool>,
     registry: &State<Arc<Registry>>,
     cookies: &CookieJar<'_>,
 ) -> Result<String, rocket::response::status::BadRequest<&'static str>> {
@@ -584,7 +593,25 @@ fn play_kick(
     let found = registry.hosted(id).ok_or(refuse("not in play mode"))?;
     found
         .play
-        .kick(&visitor, player)
+        .kick(&visitor, player, ban.unwrap_or(false))
+        .map(|()| String::new())
+        .map_err(refuse)
+}
+
+/// The host's ban of an observer member from the chat window (D54).
+#[rocket::post("/g/<id>/play/ban_member/<member>")]
+fn play_ban_member(
+    id: MatchId,
+    member: usize,
+    registry: &State<Arc<Registry>>,
+    cookies: &CookieJar<'_>,
+) -> Result<String, rocket::response::status::BadRequest<&'static str>> {
+    let refuse = rocket::response::status::BadRequest;
+    let visitor = usage::visitor(cookies).ok_or(refuse("no visitor cookie"))?;
+    let found = registry.hosted(id).ok_or(refuse("not in play mode"))?;
+    found
+        .play
+        .ban_observer(&visitor, member)
         .map(|()| String::new())
         .map_err(refuse)
 }
@@ -648,6 +675,10 @@ fn setup_socket(
         return Some(done_channel(socket, r#"{"type":"launched"}"#.to_string()));
     };
     let cookie = usage::visitor(cookies)?;
+    if found.seats.is_banned(&cookie) {
+        return Some(done_channel(socket, setup::kicked_json(true)));
+    }
+    let kicks = found.seats.kicks_of(&cookie);
     let registry = Arc::clone(registry);
     found.room.open_socket();
     let mut guard = SetupGuard {
@@ -664,6 +695,13 @@ fn setup_socket(
             };
             stream.send(rocket_ws::Message::text(catalog_json)).await?;
             loop {
+                if guard.found.seats.kicks_of(&cookie) != kicks {
+                    let ban = guard.found.seats.is_banned(&cookie);
+                    stream
+                        .send(rocket_ws::Message::text(setup::kicked_json(ban)))
+                        .await?;
+                    return Ok(());
+                }
                 let (state, phase) =
                     guard
                         .found

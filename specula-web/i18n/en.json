@@ -170,5 +170,20 @@
   "no addressee": "chat refusal: a private message was sent without choosing whom to send it to",
   "join first": "chat refusal: the visitor must enter a nickname before sending",
   "the chat is closed": "chat refusal: the match has ended, so the chat takes no more messages",
-  "invalid nickname": "chat refusal: the nickname stored in this browser breaks the nickname rule, so the visitor cannot chat"
+  "invalid nickname": "chat refusal: the nickname stored in this browser breaks the nickname rule, so the visitor cannot chat",
+  "Ban": "button that bans a player or observer from the match; it appears next to Kick in the diplomacy window and on the setup page's member rows",
+  "Banned": "tooltip of a Ban button for a player who is already banned",
+  "Join again": "button on a setup page after a kick: it reloads the page so the visitor can rejoin",
+  "You were kicked from this setup.": "message on a setup page after the host kicked this visitor out of it",
+  "You are banned from this match.": "message on a setup page for a visitor the host banned from the match",
+  "Ban %(name)s from this match? They cannot join it again.": "question before banning a member on the setup page; %(name)s is the member's name",
+  "Ban %(player)s? They cannot play or chat in this match again.": "question before banning a player in the diplomacy window; %(player)s is the player's name",
+  "Ban %(player)s from this match's chat?": "question before the host bans an observer from the chat; %(player)s is the observer's name",
+  "Reserved for %(name)s": "a setup slot a rematch keeps for an old player who has not joined yet; %(name)s is their name",
+  "waiting for the players of the last game": "reason Start is disabled in a setup opened by a rematch while an old player's slot is still reserved",
+  "Join rematch": "button on a player's end screen that opens the rematch setup the host opened",
+  "Lobby": "button on a player's end screen that goes to the lobby page",
+  "you are banned from this match": "server refusal shown when a banned visitor tries to join, chat or change a setup",
+  "that slot is reserved": "server refusal shown when a visitor takes a slot a rematch holds for an old player",
+  "the time limit is reached": "server refusal shown when a player tries to pause a match after its time limit ended it"
 }

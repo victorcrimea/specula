@@ -71,7 +71,10 @@ pub struct DiplomacyWindow {
     built: Option<String>,
     /// The player whose Kick was pressed, until `take_kick` takes it.
     kick_request: Rc<Cell<Option<u8>>>,
-    /// The Kick buttons' handlers, which live as long as their buttons.
+    /// The player whose Ban was pressed, until `take_ban` takes it.
+    ban_request: Rc<Cell<Option<u8>>>,
+    /// The Kick and Ban buttons' handlers, which live as long as their
+    /// buttons.
     kick_handlers: Vec<Closure<dyn FnMut()>>,
 }
 
@@ -87,6 +90,7 @@ impl DiplomacyWindow {
             close: crate::element(document, "diplomacy-close")?,
             built: None,
             kick_request: Rc::new(Cell::new(None)),
+            ban_request: Rc::new(Cell::new(None)),
             kick_handlers: Vec::new(),
         };
         window.panel.hidden(true);
@@ -113,6 +117,11 @@ impl DiplomacyWindow {
     /// The player whose Kick was pressed since the last call.
     pub fn take_kick(&self) -> Option<u8> {
         self.kick_request.take()
+    }
+
+    /// The player whose Ban was pressed since the last call.
+    pub fn take_ban(&self) -> Option<u8> {
+        self.ban_request.take()
     }
 
     /// `updatePanels` while it is open: the rows when the players, the
@@ -284,6 +293,7 @@ impl DiplomacyWindow {
             }
             if let Some(seat) = kick_row(view, id) {
                 self.kick_button(&row, player.state, seat)?;
+                self.ban_button(&row, seat)?;
             }
         }
         Ok(())
@@ -299,7 +309,7 @@ impl DiplomacyWindow {
     ) -> Result<(), String> {
         let button: HtmlButtonElement = create(&self.document, "button")?;
         let _ = button.set_attribute("class", "text center sans-bold-stroke-14 stone");
-        let _ = button.set_attribute("style", &place(440, 80));
+        let _ = button.set_attribute("style", &place(440, 56));
         lang::set_text(&button, "Kick");
         let out = seat.kicked || state != PlayerState::Active;
         button.set_disabled(out);
@@ -319,6 +329,27 @@ impl DiplomacyWindow {
         self.kick_handlers.push(handler);
         row.append_child(&button)
             .map_err(|_| "cannot add a kick button")?;
+        Ok(())
+    }
+
+    /// The host's Ban on the row of `seat` (D54): a kicked or defeated seat
+    /// can still be banned, but a banned one cannot be banned again.
+    fn ban_button(&mut self, row: &HtmlElement, seat: ControlSeat) -> Result<(), String> {
+        let button: HtmlButtonElement = create(&self.document, "button")?;
+        let _ = button.set_attribute("class", "text center sans-bold-stroke-14 stone");
+        let _ = button.set_attribute("style", &place(500, 56));
+        lang::set_text(&button, "Ban");
+        button.set_disabled(seat.banned);
+        if seat.banned {
+            set_tooltip(&button, &lang::translate("Banned"), "sessionToolTipBold");
+        }
+        let request = Rc::clone(&self.ban_request);
+        let player = seat.player;
+        let handler = Closure::<dyn FnMut()>::new(move || request.set(Some(player)));
+        button.set_onclick(Some(handler.as_ref().unchecked_ref()));
+        self.kick_handlers.push(handler);
+        row.append_child(&button)
+            .map_err(|_| "cannot add a ban button")?;
         Ok(())
     }
 
@@ -494,11 +525,12 @@ fn build_key(view: &View) -> String {
     if let Some(control) = view.control {
         for seat in &control.seats {
             key.push_str(&format!(
-                "|{}:{}{}{}",
+                "|{}:{}{}{}{}",
                 seat.player,
                 u8::from(seat.host),
                 u8::from(seat.kicked),
-                u8::from(seat.absent)
+                u8::from(seat.absent),
+                u8::from(seat.banned)
             ));
         }
     }

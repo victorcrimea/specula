@@ -9,6 +9,7 @@
 //! (`state.attributes`), what is offered from `state.offer`. Only the host's
 //! controls are enabled.
 
+use std::cell::Cell;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -295,6 +296,9 @@ struct Dom {
     room: HtmlElement,
     closed: HtmlElement,
     closed_reason: HtmlElement,
+    kicked: HtmlElement,
+    kicked_text: HtmlElement,
+    kicked_rejoin: HtmlButtonElement,
     connection: HtmlElement,
     countdown: HtmlElement,
     error: HtmlElement,
@@ -339,6 +343,10 @@ struct Row {
     gear: HtmlButtonElement,
     civ: HtmlSelectElement,
     team: HtmlSelectElement,
+    kick: HtmlButtonElement,
+    ban: HtmlButtonElement,
+    /// The member the row's Kick and Ban act on, updated each render.
+    member: Rc<Cell<Option<usize>>>,
 }
 
 struct Page {
@@ -364,6 +372,10 @@ struct Page {
     retry_ms: i32,
     /// `launched` or `closed` came: the socket is not reopened.
     done: bool,
+    /// Each spectator's Kick and Ban by member index, made once: `listen`
+    /// never frees a handler, and the list is redrawn on every state. A
+    /// member index always names the same member.
+    spectator_buttons: HashMap<usize, (HtmlButtonElement, HtmlButtonElement)>,
 }
 
 pub async fn run() -> Result<(), String> {
@@ -381,6 +393,9 @@ pub async fn run() -> Result<(), String> {
         room: by_id(&document, "page")?,
         closed: by_id(&document, "closed")?,
         closed_reason: by_id(&document, "closed-reason")?,
+        kicked: by_id(&document, "kicked")?,
+        kicked_text: by_id(&document, "kicked-text")?,
+        kicked_rejoin: by_id(&document, "kicked-rejoin")?,
         connection: by_id(&document, "connection")?,
         countdown: by_id(&document, "countdown")?,
         error: by_id(&document, "error")?,
@@ -425,6 +440,7 @@ pub async fn run() -> Result<(), String> {
         closes_at: 0.0,
         retry_ms: RETRY_MS,
         done: false,
+        spectator_buttons: HashMap::new(),
     }));
 
     // The language first, so what the page builds is translated.
@@ -654,6 +670,12 @@ fn wire_static(page: &Shared) {
             send(&shared, &change(name, JsValue::NULL));
         });
     }
+    let rejoin = page.borrow().dom.kicked_rejoin.clone();
+    listen(&rejoin, "click", move |_| {
+        if let Some(window) = web_sys::window() {
+            let _ = window.location().reload();
+        }
+    });
     wire_ai_config(page);
 
     // The countdown, from the server's count at the last state.
@@ -928,6 +950,28 @@ fn on_message_value(page: &Shared, message: JsValue) {
                 _ => "Its host opened another game.",
             };
             lang::set_text(&page.dom.closed_reason, reason);
+        }
+        "kicked" => {
+            let mut page = page.borrow_mut();
+            page.done = true;
+            page.ai_slot = None;
+            show(&page.dom.ai_config, false);
+            show(&page.dom.room, false);
+            show(&page.dom.join, false);
+            show(&page.dom.connection, false);
+            show(&page.dom.countdown, false);
+            show(&page.dom.closed, false);
+            show(&page.dom.kicked, true);
+            let ban = flag(&message, "ban");
+            lang::set_text(
+                &page.dom.kicked_text,
+                if ban {
+                    "You are banned from this match."
+                } else {
+                    "You were kicked from this setup."
+                },
+            );
+            show(&page.dom.kicked_rejoin, !ban);
         }
         "error" => {
             let page = page.borrow();
@@ -1395,6 +1439,81 @@ fn select_tab(page: &mut Page, selected: usize) {
     }
 }
 
+/// The member a row's or a spectator's buttons act on, read when pressed so
+/// a redraw does not need new handlers.
+fn member_name(page: &Page, member: usize) -> String {
+    list(&page.state, "members")
+        .iter()
+        .find(|entry| number(entry, "index") as usize == member)
+        .map(|entry| text(entry, "name"))
+        .unwrap_or_default()
+}
+
+/// The host's Kick and Ban buttons for one member (D54).
+fn member_buttons(
+    page: &Shared,
+    document: &Document,
+    member: Rc<Cell<Option<usize>>>,
+) -> (HtmlButtonElement, HtmlButtonElement) {
+    let kick: HtmlButtonElement = create(document, "button");
+    kick.set_class_name("red take");
+    kick.set_text_content(Some(&translate("Kick")));
+    let _ = kick.set_attribute("type", "button");
+    let ban: HtmlButtonElement = create(document, "button");
+    ban.set_class_name("red take");
+    ban.set_text_content(Some(&translate("Ban")));
+    let _ = ban.set_attribute("type", "button");
+    {
+        let shared = Rc::clone(page);
+        let member = Rc::clone(&member);
+        listen(&kick, "click", move |_| {
+            let Some(member) = member.get() else {
+                return;
+            };
+            send(
+                &shared,
+                &object(&[
+                    ("type", "kick".into()),
+                    ("member", (member as f64).into()),
+                    ("ban", false.into()),
+                ]),
+            );
+        });
+    }
+    {
+        let shared = Rc::clone(page);
+        let member = Rc::clone(&member);
+        listen(&ban, "click", move |_| {
+            let Some(index) = member.get() else {
+                return;
+            };
+            let text = {
+                let page = shared.borrow();
+                let name = member_name(&page, index);
+                lang::format(
+                    &translate("Ban %(name)s from this match? They cannot join it again."),
+                    &[("name", &name)],
+                )
+            };
+            let confirmed = web_sys::window()
+                .and_then(|window| window.confirm_with_message(&text).ok())
+                .unwrap_or(false);
+            if !confirmed {
+                return;
+            }
+            send(
+                &shared,
+                &object(&[
+                    ("type", "kick".into()),
+                    ("member", (index as f64).into()),
+                    ("ban", true.into()),
+                ]),
+            );
+        });
+    }
+    (kick, ban)
+}
+
 fn build_row(page: &Shared, state: &Page, index: usize) -> Row {
     let document = &state.dom.document;
     let line: HtmlElement = create(document, "div");
@@ -1407,6 +1526,14 @@ fn build_row(page: &Shared, state: &Page, index: usize) -> Row {
     };
     let name_cell = cell();
     name_cell.set_class_name("name");
+    // The name in its own span: the cell also holds the Kick and Ban
+    // buttons, which a render must not clear with the text.
+    let name: HtmlElement = create(document, "span");
+    let _ = name_cell.append_child(&name);
+    let member = Rc::new(Cell::new(None));
+    let (kick, ban) = member_buttons(page, document, Rc::clone(&member));
+    let _ = name_cell.append_child(&kick);
+    let _ = name_cell.append_child(&ban);
     let color_cell = cell();
     let who_cell = cell();
     let gear_cell = cell();
@@ -1479,6 +1606,8 @@ fn build_row(page: &Shared, state: &Page, index: usize) -> Row {
                 ])
             } else if let Some(bot) = value.strip_prefix("ai:") {
                 change_at("ai", index, bot.into())
+            } else if value == "reserved" {
+                return;
             } else if value == "removed" {
                 object(&[
                     ("type", "change".into()),
@@ -1513,7 +1642,7 @@ fn build_row(page: &Shared, state: &Page, index: usize) -> Row {
     }
     Row {
         line,
-        name: name_cell,
+        name,
         color,
         who,
         who_text,
@@ -1521,6 +1650,9 @@ fn build_row(page: &Shared, state: &Page, index: usize) -> Row {
         gear,
         civ,
         team,
+        kick,
+        ban,
+        member,
     }
 }
 
@@ -1560,6 +1692,7 @@ struct View {
     settings: JsValue,
     offer: JsValue,
     members: Vec<JsValue>,
+    reserved: Vec<JsValue>,
     you: Option<usize>,
     host: bool,
     seated: Option<usize>,
@@ -1591,6 +1724,7 @@ impl View {
             attributes,
             offer,
             members,
+            reserved: list(&state, "reserved"),
             you,
             seated,
             state,
@@ -2515,9 +2649,21 @@ fn render_players(shared: &Shared, page: &mut Page, view: &View) {
             ),
         );
 
-        // Who holds the slot: the host's list, everyone else's text.
+        // Who holds the slot: the host's list, everyone else's text. A
+        // rematch reservation (M35) holds it until its player joins or it
+        // expires.
+        let reserved_for = if human.is_none() {
+            view.reserved
+                .iter()
+                .find(|hold| number(hold, "slot") as usize == index)
+                .map(|hold| text(hold, "name"))
+        } else {
+            None
+        };
         let who_value = if let Some(human) = human {
             format!("member:{}", number(human, "index"))
+        } else if reserved_for.is_some() {
+            "reserved".to_string()
         } else if is_removed {
             "removed".to_string()
         } else if let Some(ai) = ai {
@@ -2525,10 +2671,15 @@ fn render_players(shared: &Shared, page: &mut Page, view: &View) {
         } else {
             "unassigned".to_string()
         };
-        let mut options = vec![
-            option("unassigned", &unassigned),
-            option("removed", translate("Removed")),
-        ];
+        let mut options = Vec::new();
+        if let Some(name) = &reserved_for {
+            options.push(option(
+                "reserved",
+                lang::format(&translate("Reserved for %(name)s"), &[("name", name)]),
+            ));
+        }
+        options.push(option("unassigned", &unassigned));
+        options.push(option("removed", translate("Removed")));
         for (id, name) in &ai_choices {
             options.push(option(
                 format!("ai:{id}"),
@@ -2557,6 +2708,8 @@ fn render_players(shared: &Shared, page: &mut Page, view: &View) {
             } else {
                 name
             }
+        } else if let Some(name) = &reserved_for {
+            lang::format(&translate("Reserved for %(name)s"), &[("name", name)])
         } else if is_removed {
             translate("Removed")
         } else if let Some(ai) = ai {
@@ -2564,7 +2717,7 @@ fn render_players(shared: &Shared, page: &mut Page, view: &View) {
         } else {
             unassigned.clone()
         };
-        let open = human.is_none() && ai.is_none() && !is_removed;
+        let open = human.is_none() && ai.is_none() && !is_removed && reserved_for.is_none();
         let can_take = open && view.you.is_some() && view.seated != Some(index + 1);
         show(&row.who_text, !view.host && !can_take);
         row.who_text.set_text_content(Some(&who_text));
@@ -2577,6 +2730,11 @@ fn render_players(shared: &Shared, page: &mut Page, view: &View) {
             },
         );
         show(&row.take, can_take && !view.host);
+        let member_index = human.map(|human| number(human, "index") as usize);
+        row.member.set(member_index);
+        let can_kick = view.host && member_index.is_some_and(|index| Some(index) != host_index);
+        show(&row.kick, can_kick);
+        show(&row.ban, can_kick);
 
         // `AIConfigButton`: shown for an AI's slot, which only the host changes.
         show(&row.gear, ai.is_some());
@@ -2689,7 +2847,7 @@ fn render_ai_config(page: &mut Page, view: &View) {
     dom.ai_description.set_text_content(Some(&description));
 }
 
-fn render_spectators(shared: &Shared, page: &Page, view: &View) {
+fn render_spectators(shared: &Shared, page: &mut Page, view: &View) {
     let document = &page.dom.document;
     let list_element = &page.dom.spectators;
     clear(list_element);
@@ -2708,6 +2866,13 @@ fn render_spectators(shared: &Shared, page: &Page, view: &View) {
         let name: HtmlElement = create(document, "span");
         name.set_text_content(Some(&text(member, "name")));
         let _ = item.append_child(&name);
+        if view.host && Some(index) != host_index {
+            let (kick, ban) = page.spectator_buttons.entry(index).or_insert_with(|| {
+                member_buttons(shared, document, Rc::new(Cell::new(Some(index))))
+            });
+            let _ = item.append_child(kick);
+            let _ = item.append_child(ban);
+        }
         if Some(index) == host_index {
             let tag: HtmlElement = create(document, "span");
             tag.set_class_name("host");
