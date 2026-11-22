@@ -147,6 +147,10 @@ body { cursor: var(--gui-cursor-default, default); }
    The bottom bar is 1024 px wide and centred; it sits above the playback
    bar rather than on the screen's edge. */
 :root { --panel-bottom: 44px; --gui-gold: rgb(237, 227, 167); }
+/* A seat has no playback controls, so the panels sit on the edge; the
+   bar's New match button, shown once the match ends, still needs its row. */
+:root[data-seated] { --panel-bottom: 0px; }
+:root[data-seated]:has(#current:not([hidden])) { --panel-bottom: 44px; }
 .gui-frame { box-sizing: border-box; }
 .gui-frame > .edge { position: absolute; pointer-events: none; }
 .gui-frame > .top, .gui-frame > .bottom { left: 4px; right: 4px; height: 4px;

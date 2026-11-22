@@ -2083,7 +2083,8 @@ impl App {
             copy_link.set_disabled(false);
         }
         // A stored match has no live edge to go to.
-        self.live_button.set_hidden(flags & STATUS_ARCHIVE != 0);
+        self.live_button
+            .set_hidden(seated() || flags & STATUS_ARCHIVE != 0);
         self.play_button.set_disabled(false);
         lang::set_text(
             &self.play_button,
@@ -2761,6 +2762,23 @@ async fn run(
         wire_storage_notice(&app, &document)?;
     }
     wire_playback(&app);
+    if seated {
+        // A seat always watches its own game live; "#current" stays, it
+        // carries the owner's controls.
+        // The page's CSS drops the panels to the screen's edge with the bar
+        // gone.
+        if let Some(root) = document.document_element() {
+            let _ = root.set_attribute("data-seated", "");
+        }
+        let app = app.borrow();
+        app.play_button.set_hidden(true);
+        app.speed_select.set_hidden(true);
+        app.timeline.set_hidden(true);
+        app.live_button.set_hidden(true);
+        if let Some(copy_link) = &app.copy_link {
+            copy_link.set_hidden(true);
+        }
+    }
     let bench = match page {
         Page::Map => None,
         Page::Observer => {
