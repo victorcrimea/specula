@@ -7,8 +7,9 @@
 //! perspective shows every player's stance towards every other as a
 //! matrix; a player perspective shows the engine's rows. Nothing in it
 //! can be pressed but Close, and, for the host of a game, the Kick on a
-//! human row (M29): tribute, attack and spy requests and the stance
-//! buttons send commands, which a viewer cannot.
+//! human row (M29). The tribute buttons send commands for the seat that
+//! controls the viewed player; attack and spy requests and the stance
+//! buttons send nothing.
 
 use std::cell::Cell;
 use std::rc::Rc;
@@ -20,6 +21,7 @@ use web_sys::HtmlButtonElement;
 use web_sys::HtmlElement;
 
 use crate::TURN_MS;
+use crate::barter::CODES;
 use crate::detail::Control;
 use crate::detail::ControlSeat;
 use crate::diplomacy;
@@ -32,6 +34,7 @@ use crate::stream::PlayerState;
 use crate::stream::Scene;
 use crate::stream::Stance;
 use crate::tooltip;
+use specula_assets::command::Command;
 
 /// `diplomacyDialogPanel`'s size with one player row.
 const WIDTH: i32 = 560;
@@ -45,6 +48,20 @@ const ROWS_TOP: i32 = 64;
 const MATRIX_COLUMN: i32 = 24;
 /// `getPlayerColor(id, 32)`.
 const ROW_ALPHA: f64 = 32.0 / 255.0;
+/// diplomacyPlayer[n]_tribute at 430, one 20 px iconButton per tributable
+/// resource.
+const TRIBUTE_LEFT: i32 = 430;
+const TRIBUTE_BUTTON: i32 = 20;
+/// TributeButton.prototype.DefaultAmount and MassAmount.
+const DEFAULT_AMOUNT: u32 = 100;
+const MASS_AMOUNT: u32 = 500;
+/// Kick and Ban after the tribute column, which the engine has not.
+const KICK_LEFT: i32 = 520;
+const BAN_LEFT: i32 = 580;
+/// Player-perspective widths: diplomacyDialogPanel widened by the tribute
+/// column, and room for Kick and Ban.
+const TRIBUTE_WIDTH: i32 = 640;
+const HOST_WIDTH: i32 = 700;
 /// The civ names `session-gui` writes.
 const CIVS: &str = include_str!("../civs.txt");
 
@@ -76,6 +93,18 @@ pub struct DiplomacyWindow {
     /// The Kick and Ban buttons' handlers, which live as long as their
     /// buttons.
     kick_handlers: Vec<Closure<dyn FnMut()>>,
+    /// The (receiver, resource index into `CODES`, Shift held) of the last
+    /// tribute button press, until `take_tributes` handles it.
+    tribute_request: Rc<Cell<Option<(u8, usize, bool)>>>,
+    /// `TributeButton.amount` per receiver and resource. Kept across
+    /// rebuilds, as vanilla's buttons live all session.
+    amounts: Vec<[u32; 4]>,
+    /// The tribute buttons of the current build, to refresh a tooltip
+    /// without a rebuild.
+    tribute_buttons: Vec<(u8, usize, HtmlElement)>,
+    tribute_handlers: Vec<Closure<dyn FnMut(web_sys::MouseEvent)>>,
+    /// `controlsPlayer(g_ViewedPlayer)` at the last build.
+    controls: bool,
 }
 
 impl DiplomacyWindow {
@@ -92,6 +121,11 @@ impl DiplomacyWindow {
             kick_request: Rc::new(Cell::new(None)),
             ban_request: Rc::new(Cell::new(None)),
             kick_handlers: Vec::new(),
+            tribute_request: Rc::new(Cell::new(None)),
+            amounts: Vec::new(),
+            tribute_buttons: Vec::new(),
+            tribute_handlers: Vec::new(),
+            controls: false,
         };
         window.panel.hidden(true);
         Ok(window)
@@ -124,6 +158,74 @@ impl DiplomacyWindow {
         self.ban_request.take()
     }
 
+    /// `TributeButton.onPress`: a Shift-click raises the amount, a plain
+    /// click sends it and starts again at the default.
+    pub fn take_tributes(&mut self, scene: &Scene, palette: &[u32]) -> Option<Command> {
+        let (player, index, shift) = self.tribute_request.take()?;
+        if !self.controls {
+            return None;
+        }
+        let amount = self
+            .amounts
+            .get_mut(usize::from(player))
+            .map(|amounts| &mut amounts[index])?;
+        let command = if shift {
+            *amount = next_amount(*amount);
+            None
+        } else {
+            let sent = *amount;
+            *amount = DEFAULT_AMOUNT;
+            Some(Command::Tribute {
+                player,
+                resource: CODES[index].to_string(),
+                amount: sent,
+            })
+        };
+        self.refresh_tribute_tooltip(scene, palette, player, index);
+        command
+    }
+
+    /// `onMassTributeRelease`: every amount raised to a mass amount is
+    /// sent, whether or not the window is open, as vanilla's hotkey objects
+    /// fire hidden.
+    pub fn mass_release(&mut self, scene: &Scene, palette: &[u32]) -> Vec<Command> {
+        let mut commands = Vec::new();
+        let mut reset = Vec::new();
+        for (player, amounts) in self.amounts.iter_mut().enumerate() {
+            for (index, amount) in amounts.iter_mut().enumerate() {
+                if *amount >= MASS_AMOUNT {
+                    commands.push(Command::Tribute {
+                        player: player as u8,
+                        resource: CODES[index].to_string(),
+                        amount: *amount,
+                    });
+                    *amount = DEFAULT_AMOUNT;
+                    reset.push((player as u8, index));
+                }
+            }
+        }
+        for (player, index) in reset {
+            self.refresh_tribute_tooltip(scene, palette, player, index);
+        }
+        commands
+    }
+
+    fn refresh_tribute_tooltip(&self, scene: &Scene, palette: &[u32], player: u8, index: usize) {
+        let amount = self
+            .amounts
+            .get(usize::from(player))
+            .map_or(DEFAULT_AMOUNT, |amounts| amounts[index]);
+        for (id, resource, button) in &self.tribute_buttons {
+            if *id == player && *resource == index {
+                set_tooltip(
+                    button,
+                    &tribute_tooltip(scene, palette, usize::from(player), CODES[index], amount),
+                    "sessionToolTipBold",
+                );
+            }
+        }
+    }
+
     /// `updatePanels` while it is open: the rows when the players, the
     /// palette or the perspective changed, the ceasefire counter each time.
     pub fn update(&mut self, view: &View) {
@@ -148,9 +250,18 @@ impl DiplomacyWindow {
             _ => None,
         };
         let width = match viewed {
-            Some(_) => WIDTH,
+            Some(_) if viewer_is_host(view) => HOST_WIDTH,
+            Some(_) => TRIBUTE_WIDTH,
+            None if viewer_is_host(view) => {
+                HOST_WIDTH.max(2 * MARGIN + 300 + MATRIX_COLUMN * players)
+            }
             None => WIDTH.max(2 * MARGIN + 300 + MATRIX_COLUMN * players),
         };
+        self.controls = matches!(viewed, Some(v) if view.own.map(usize::from) == Some(v));
+        if self.amounts.len() < scene.players.len() {
+            self.amounts
+                .resize(scene.players.len(), [DEFAULT_AMOUNT; 4]);
+        }
         let height = HEIGHT + ROW_HEIGHT * (players - 1).max(0);
         self.panel.style(format!(
             "--dialog-width: {width}px; --dialog-height: {height}px; --rows-top: {ROWS_TOP}px"
@@ -160,6 +271,8 @@ impl DiplomacyWindow {
         self.header.set_text_content(None);
         self.rows.set_text_content(None);
         self.kick_handlers.clear();
+        self.tribute_handlers.clear();
+        self.tribute_buttons.clear();
 
         let header = &self.header;
         self.cell(header, 0, 140, &lang::translate("Name"), "center")?;
@@ -181,6 +294,13 @@ impl DiplomacyWindow {
                     )?;
                     set_tooltip(&cell, &lang::translate(stance), "sessionToolTipBold");
                 }
+                self.cell(
+                    header,
+                    TRIBUTE_LEFT,
+                    TRIBUTE_BUTTON * CODES.len() as i32,
+                    &lang::translate("Tribute"),
+                    "center",
+                )?;
             }
             None => {
                 // A swatch of each player's displayed colour, named in its
@@ -260,7 +380,10 @@ impl DiplomacyWindow {
             };
             self.cell(&row, 250, 50, &team, "")?;
             match viewed {
-                Some(viewed) => self.stance_columns(&row, scene, id, viewed)?,
+                Some(viewed) => {
+                    self.stance_columns(&row, scene, id, viewed)?;
+                    self.tribute_buttons(&row, view, id, viewed)?;
+                }
                 None => {
                     for (column, _) in scene.players.iter().enumerate().skip(1) {
                         if column == id {
@@ -309,7 +432,7 @@ impl DiplomacyWindow {
     ) -> Result<(), String> {
         let button: HtmlButtonElement = create(&self.document, "button")?;
         let _ = button.set_attribute("class", "text center sans-bold-stroke-14 stone");
-        let _ = button.set_attribute("style", &place(440, 56));
+        let _ = button.set_attribute("style", &place(KICK_LEFT, 56));
         lang::set_text(&button, "Kick");
         let out = seat.kicked || state != PlayerState::Active;
         button.set_disabled(out);
@@ -337,7 +460,7 @@ impl DiplomacyWindow {
     fn ban_button(&mut self, row: &HtmlElement, seat: ControlSeat) -> Result<(), String> {
         let button: HtmlButtonElement = create(&self.document, "button")?;
         let _ = button.set_attribute("class", "text center sans-bold-stroke-14 stone");
-        let _ = button.set_attribute("style", &place(500, 56));
+        let _ = button.set_attribute("style", &place(BAN_LEFT, 56));
         lang::set_text(&button, "Ban");
         button.set_disabled(seat.banned);
         if seat.banned {
@@ -350,6 +473,68 @@ impl DiplomacyWindow {
         self.kick_handlers.push(handler);
         row.append_child(&button)
             .map_err(|_| "cannot add a ban button")?;
+        Ok(())
+    }
+
+    /// `TributeButtonManager` and `TributeButton`: one button per
+    /// tributable resource on the row of another active player, enabled
+    /// only for the seat that controls the viewed player.
+    fn tribute_buttons(
+        &mut self,
+        row: &HtmlElement,
+        view: &View,
+        id: usize,
+        viewed: usize,
+    ) -> Result<(), String> {
+        let scene = view.scene;
+        let Some(player) = scene.players.get(id) else {
+            return Ok(());
+        };
+        // `isInactive`; the tribute ignores a ceasefire.
+        let viewed_state = scene.players.get(viewed).map(|viewed| viewed.state);
+        if id == viewed
+            || viewed_state != Some(PlayerState::Active)
+            || player.state != PlayerState::Active
+        {
+            return Ok(());
+        }
+        // In 0.28 every resource in simulation/data/resources/ is
+        // "tributable", so this is `GetTributableCodes()`.
+        for (index, code) in CODES.iter().enumerate() {
+            let button: HtmlButtonElement = create(&self.document, "button")?;
+            let _ = button.set_attribute("class", "tribute");
+            let _ = button.set_attribute(
+                "style",
+                &place(TRIBUTE_LEFT + TRIBUTE_BUTTON * index as i32, TRIBUTE_BUTTON),
+            );
+            let icon: HtmlElement = create(&self.document, "div")?;
+            let _ = icon.set_attribute("class", "icon");
+            let _ = icon.set_attribute(
+                "style",
+                &format!("background-image: var(--gui-resource-{code})"),
+            );
+            button
+                .append_child(&icon)
+                .map_err(|_| "cannot add a tribute icon")?;
+            button.set_disabled(!self.controls);
+            let amount = self.amounts.get(id).map_or(DEFAULT_AMOUNT, |a| a[index]);
+            set_tooltip(
+                &button,
+                &tribute_tooltip(scene, view.palette, id, code, amount),
+                "sessionToolTipBold",
+            );
+            let request = Rc::clone(&self.tribute_request);
+            let handler = Closure::<dyn FnMut(web_sys::MouseEvent)>::new(
+                move |event: web_sys::MouseEvent| {
+                    request.set(Some((id as u8, index, event.shift_key())));
+                },
+            );
+            button.set_onclick(Some(handler.as_ref().unchecked_ref()));
+            self.tribute_handlers.push(handler);
+            row.append_child(&button)
+                .map_err(|_| "cannot add a tribute button")?;
+            self.tribute_buttons.push((id as u8, index, button.into()));
+        }
         Ok(())
     }
 
@@ -434,6 +619,44 @@ impl DiplomacyWindow {
     }
 }
 
+/// `TributeButton.nextAmount`.
+fn next_amount(amount: u32) -> u32 {
+    MASS_AMOUNT * (amount / MASS_AMOUNT + 1)
+}
+
+/// `TributeButton.prototype.Tooltip`.
+fn tribute_tooltip(scene: &Scene, palette: &[u32], id: usize, code: &str, amount: u32) -> String {
+    let name = scene.players.get(id).map_or("", |player| &player.name);
+    lang::format(
+        &lang::translate(
+            "Tribute %(resourceAmount)s %(resourceType)s to %(playerName)s. Shift-click to tribute %(greaterAmount)s.",
+        ),
+        &[
+            ("resourceAmount", &amount.to_string()),
+            ("greaterAmount", &next_amount(amount).to_string()),
+            (
+                "resourceType",
+                &lang::translate_context(
+                    "withinSentence",
+                    tooltip::resource_data(code).map_or(code, |(name, _)| name),
+                ),
+            ),
+            ("playerName", &tooltip::colored(name, &rgb(palette, id))),
+        ],
+    )
+}
+
+/// Whether the viewer is the host of the game.
+fn viewer_is_host(view: &View) -> bool {
+    let (Some(control), Some(own)) = (view.control, view.own) else {
+        return false;
+    };
+    control
+        .seats
+        .iter()
+        .any(|seat| seat.player == own && seat.host)
+}
+
 fn place(left: i32, width: i32) -> String {
     format!("left: {left}px; width: {width}px")
 }
@@ -443,11 +666,7 @@ fn place(left: i32, width: i32) -> String {
 fn kick_row(view: &View, id: usize) -> Option<ControlSeat> {
     let control = view.control?;
     let own = view.own?;
-    let host = control
-        .seats
-        .iter()
-        .any(|seat| seat.player == own && seat.host);
-    if !host || usize::from(own) == id {
+    if !viewer_is_host(view) || usize::from(own) == id {
         return None;
     }
     control

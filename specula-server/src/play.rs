@@ -1810,6 +1810,17 @@ fn order_json(order: &Order) -> String {
             }
             out.raw("tradingGoods", &shares.finish());
         }
+        Order::Tribute {
+            player,
+            resource,
+            amount,
+        } => {
+            out.text("type", "tribute");
+            out.raw("player", &player.to_string());
+            let mut amounts = Json::new();
+            amounts.raw(resource, &amount.to_string());
+            out.raw("amounts", &amounts.finish());
+        }
         Order::DropsiteSharing { shared, entities } => {
             out.text("type", "set-dropsite-sharing");
             out.entities("entities", entities);

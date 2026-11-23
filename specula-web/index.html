@@ -817,6 +817,10 @@ body:not([data-debug="storage"]) #stats-storage { display: none; }
 #diplomacy-rows > .row > button { position: absolute; top: 0; height: 20px; padding: 0; border: 0;
   color: white; font-family: inherit; }
 #diplomacy-rows > .row > button:disabled { color: rgba(210, 210, 210, 0.627); filter: brightness(0.75); }
+/* diplomacyPlayer[n]_tribute[r]: an iconButton with the resource icon stretched over it. */
+#diplomacy-rows > .row > button.tribute { width: 20px; background: var(--gui-portrait-black) 0 0 / 100% 100%; }
+#diplomacy-rows > .row > button.tribute > .icon { position: absolute; inset: 0; background: none 0 0 / 100% 100% no-repeat; pointer-events: none; }
+#diplomacy-rows > .row > button.tribute:enabled:hover::after { content: ""; position: absolute; inset: 0; background: rgb(42, 42, 42); mix-blend-mode: plus-lighter; pointer-events: none; }
 #diplomacy-header .swatch { width: 12px; height: 12px; margin-top: 2px;
   box-shadow: 0 0 0 1px black; }
 #diplomacy-window .stone, #match-summary .stone, #chat-window .stone { background: var(--gui-stone-button) 0 0 / 100% 100%; }

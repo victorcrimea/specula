@@ -16,7 +16,7 @@ use crate::bytes::ByteReader;
 
 /// The version of this format, which the server sends as the first byte of
 /// its seat message; a page on another version must reload.
-pub const COMMAND_VERSION: u8 = 7;
+pub const COMMAND_VERSION: u8 = 8;
 
 pub const QUEUED: u8 = 1;
 pub const PUSH_FRONT: u8 = 2;
@@ -63,6 +63,7 @@ const LOCK_GATE: u8 = 38;
 const PACK: u8 = 39;
 const CANCEL_PACK: u8 = 40;
 const UNLOAD_TEMPLATE: u8 = 41;
+const TRIBUTE: u8 = 42;
 
 /// Above every command kind.
 pub const QUERY_TAG: u8 = 0x80;
@@ -260,6 +261,12 @@ pub enum Command {
     /// The share in percent of each resource code the traders carry.
     SetTradingGoods {
         goods: Vec<(String, u8)>,
+    },
+    /// "tribute": `amount` of resource `resource` to player `player`.
+    Tribute {
+        player: u8,
+        resource: String,
+        amount: u32,
     },
     /// "setup-trade-route": the market becomes the traders' origin, or
     /// their destination once they have one.
@@ -554,7 +561,7 @@ impl Command {
                 ids.push(start_snapped);
                 ids.push(end_snapped);
             }
-            Command::Barter { .. } | Command::SetTradingGoods { .. } => {}
+            Command::Barter { .. } | Command::SetTradingGoods { .. } | Command::Tribute { .. } => {}
         }
         ids.retain(|id| **id != 0);
         ids
@@ -758,6 +765,16 @@ impl Command {
                     out.text(code);
                     out.0.push(*percent);
                 }
+            }
+            Command::Tribute {
+                player,
+                resource,
+                amount,
+            } => {
+                out.0.push(TRIBUTE);
+                out.0.push(*player);
+                out.text(resource);
+                out.varint(u64::from(*amount));
             }
             Command::DropsiteSharing { shared, entities } => {
                 out.0
@@ -1049,6 +1066,11 @@ impl Command {
                     .collect::<Result<_, &'static str>>()?;
                 Command::SetTradingGoods { goods }
             }
+            TRIBUTE => Command::Tribute {
+                player: input.u8()?,
+                resource: input.text()?,
+                amount: input.varint_u32()?,
+            },
             DROPSITE_SHARING => Command::DropsiteSharing {
                 shared: input.u8()? != 0,
                 entities: entities(&mut input)?,

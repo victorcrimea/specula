@@ -1383,6 +1383,11 @@ impl App {
                 .map_or_else(String::new, |player| player.name.clone());
             message_box.confirm_ban(player, &name);
         }
+        let tribute = self
+            .diplomacy_window
+            .as_mut()
+            .and_then(|window| window.take_tributes(&self.scene, &self.palette));
+        self.send_trade_order(tribute);
         if let Some(trade_window) = &mut self.trade_window {
             trade_window.update(&trade_window::View {
                 scene: &self.scene,
@@ -1448,7 +1453,21 @@ impl App {
         );
     }
 
-    /// An order from the trade dialog, for the player of `/play`.
+    /// session.masstribute is the same Shift as session.massbarter, so its
+    /// release is handled where that is tracked, which exists only on
+    /// `Page::Observer`, as the diplomacy window does.
+    fn release_mass_tribute(&mut self) {
+        let Some(window) = &mut self.diplomacy_window else {
+            return;
+        };
+        for command in window.mass_release(&self.scene, &self.palette) {
+            if let Some(uplink) = &self.uplink {
+                uplink.send(&command);
+            }
+        }
+    }
+
+    /// An order from the trade or diplomacy dialog, for the player of `/play`.
     fn send_trade_order(&self, order: Option<Command>) {
         if let (Some(order), Some(uplink)) = (order, &self.uplink) {
             uplink.send(&order);
@@ -3561,6 +3580,9 @@ fn wire_trade_window(app: &Rc<RefCell<App>>, window: &web_sys::Window) {
             if !shift && let Some(details) = &mut app.details {
                 details.flush_batch();
             }
+            if !shift {
+                app.release_mass_tribute();
+            }
             app.mass_barter = shift;
             app.details_dirty = true;
         }
@@ -3602,6 +3624,7 @@ fn wire_trade_window(app: &Rc<RefCell<App>>, window: &web_sys::Window) {
             if let Some(details) = &mut app.details {
                 details.flush_batch();
             }
+            app.release_mass_tribute();
             app.mass_barter = false;
             app.details_dirty = true;
         }
