@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <script src="/i18n.js"></script>
+<script src="/nickname-hint.js"></script>
 <link rel="stylesheet" href="/gui/session.css?v=SESSION">
 <title data-i18n>Match Setup</title>
 <style>
@@ -138,6 +139,16 @@ input[type=text] { height: 26px; box-sizing: border-box; padding: 0 6px; border:
 #spectators-box { padding: 6px 10px 10px; max-height: 40%; overflow: auto; }
 #spectators-box h2 { margin: 0 0 6px; font-size: 14px; }
 #join { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; margin: 0 0 8px; }
+/* The nickname rule's (i) and its tip, a dark box between gold lines as
+   vanilla's tooltips are. */
+.nickname-hint { display: inline-flex; align-items: center; gap: 6px; }
+.hint-icon { width: 18px; height: 18px; padding: 0; border: 1px solid var(--gold); border-radius: 50%;
+  background: var(--dark); color: var(--gold); font: italic 700 12px/16px serif; cursor: help; }
+.hint-icon:hover, .hint-icon[aria-expanded=true] { background: var(--gold); color: black; }
+.hint-tip { position: fixed; z-index: 20; max-width: min(300px, calc(100vw - 16px)); box-sizing: border-box;
+  padding: 6px 10px; font-weight: 400; color: white;
+  background: var(--gui-gold-line) 0 0 / 100% 1px no-repeat,
+    var(--gui-gold-line) 0 100% / 100% 1px no-repeat, rgba(12, 12, 12, 0.92); }
 #spectators { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 4px; }
 #spectators li { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; min-height: 28px; }
 #spectators .host { color: rgb(150, 150, 250); }
@@ -243,7 +254,7 @@ input[type=text] { height: 26px; box-sizing: border-box; padding: 0 6px; border:
 <div id="spectators-box" class="gold-box">
 <h2 data-i18n>Spectators</h2>
 <form id="join" hidden>
-<label title="3 to 20 letters, digits, dots, hyphens or underscores, with at least one letter." data-i18n-attrs="title"><span data-i18n>Nickname</span> <input id="nickname" type="text" required minlength="3" maxlength="20" pattern="(?=.*[A-Za-z])[A-Za-z0-9._\-]+" autocomplete="nickname" spellcheck="false"></label>
+<span class="nickname-hint"><label><span data-i18n>Nickname</span> <input id="nickname" type="text" required minlength="3" maxlength="20" pattern="(?=.*[A-Za-z])[A-Za-z0-9._\-]+" autocomplete="nickname" spellcheck="false" aria-describedby="nickname-rule"></label><button class="hint-icon" type="button" aria-label="3 to 20 letters, digits, dots, hyphens or underscores, with at least one letter." aria-controls="nickname-rule" aria-expanded="false" data-i18n-attrs="aria-label">i</button><span id="nickname-rule" class="hint-tip" role="tooltip" hidden data-i18n>3 to 20 letters, digits, dots, hyphens or underscores, with at least one letter.</span></span>
 <button id="join-button" class="red" type="submit" data-i18n>Join</button>
 </form>
 <ul id="spectators"></ul>
