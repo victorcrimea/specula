@@ -820,6 +820,9 @@ pub struct Field {
     /// `tree_bounds`' pieces, once every piece of the tree has arrived.
     bounds: HashMap<ModelKey, Vec<(Vec3, Vec3)>>,
     camera: Rc<RefCell<Camera>>,
+    /// The seat's player and starting camera, until the camera has moved
+    /// to them; the seat arrives after the first scene.
+    seat_start: Option<(usize, Option<[f32; 2]>)>,
     instances: wgpu::Buffer,
     groups: HashMap<GroupKey, Vec<u8>>,
     /// Each cascade's shadow casters, as `CULL_SHADOWS_CASCADE_0` and on
@@ -1571,6 +1574,7 @@ impl Field {
             models: HashMap::new(),
             bounds: HashMap::new(),
             camera,
+            seat_start: None,
             instances,
             groups: HashMap::new(),
             shadow_instances,
@@ -4481,6 +4485,10 @@ impl View for Field {
         self.all_status_bars = shown;
     }
 
+    fn start_at_seat(&mut self, seat: usize, camera: Option<[f32; 2]>) {
+        self.seat_start = Some((seat, camera));
+    }
+
     fn set_perspective(&mut self, perspective: Perspective, controls: bool) {
         self.selection.set_viewer(perspective.player(), controls);
         if perspective != self.perspective {
@@ -4800,9 +4808,13 @@ impl View for Field {
         self.borders
             .set_territory(&scene.territory, scene.territory_generation, palette);
         let mut camera = self.camera.borrow_mut();
-        if !camera.placed && scene.map_size > 0 {
+        if scene.map_size > 0 && (!camera.placed || self.seat_start.is_some()) {
             camera.placed = true;
-            camera.target = start_point(scene);
+            let seat = self.seat_start.take();
+            camera.target = start_point(scene, seat);
+            if seat.is_some() {
+                camera.follow = None;
+            }
         }
     }
 
@@ -6541,10 +6553,13 @@ fn decay(
     (depth <= total).then_some((depth, tilt))
 }
 
-/// Where the camera starts: the first player's civic centre, else the
-/// middle of what the players own, else the map's centre. The centre alone
-/// can be open sea.
-fn start_point(scene: &Scene) -> [f32; 2] {
+/// Where the camera starts. A seated player's: the map's starting camera,
+/// else their civic centre, else their first entity in load order (a
+/// nomad), as the engine's `m_StartingCameraTarget` and `HasStartingCamera`
+/// do. An observer's: the first player's civic centre, else the middle of
+/// what the players own, else the map's centre. The centre alone can be
+/// open sea.
+fn start_point(scene: &Scene, seat: Option<(usize, Option<[f32; 2]>)>) -> [f32; 2] {
     let at = |dot: &Dot| {
         [
             dot.x as f32 / POSITION_UNITS_PER_METRE,
@@ -6557,6 +6572,20 @@ fn start_point(scene: &Scene) -> [f32; 2] {
             .get(dot.template as usize)
             .map_or("", String::as_str)
     };
+    if let Some((seat, camera)) = seat {
+        if let Some(camera) = camera {
+            return camera;
+        }
+        let own = |dot: &&Dot| usize::try_from(dot.owner).is_ok_and(|owner| owner == seat);
+        let centre = scene
+            .dots
+            .values()
+            .filter(own)
+            .find(|dot| template(dot).ends_with("civil_centre"));
+        if let Some(dot) = centre.or_else(|| scene.dots.values().find(own)) {
+            return at(dot);
+        }
+    }
     let centre = scene
         .dots
         .values()

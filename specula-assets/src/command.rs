@@ -16,7 +16,7 @@ use crate::bytes::ByteReader;
 
 /// The version of this format, which the server sends as the first byte of
 /// its seat message; a page on another version must reload.
-pub const COMMAND_VERSION: u8 = 6;
+pub const COMMAND_VERSION: u8 = 7;
 
 pub const QUEUED: u8 = 1;
 pub const PUSH_FRONT: u8 = 2;

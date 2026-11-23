@@ -979,7 +979,8 @@ fn play_data(
 
 /// The player's orders (`specula_assets::command`). The server first sends
 /// the format version and the player number the visitor commands, 0 for
-/// none. The seat is the one held when the socket opened: orders are
+/// none, then the seat's starting camera (x and z, f32 LE) when the map
+/// gives one. The seat is the one held when the socket opened: orders are
 /// dropped once the visitor no longer holds it. A query's reply goes only
 /// to the connection that asked.
 #[rocket::get("/g/<id>/play/command")]
@@ -1003,12 +1004,12 @@ fn play_command(
                 .and(visitor.as_deref())
                 .map(|cookie| play.present(cookie));
             let mut replies = play.replies();
-            stream
-                .send(rocket_ws::Message::binary(vec![
-                    COMMAND_VERSION,
-                    bound.unwrap_or(0),
-                ]))
-                .await?;
+            let mut hello = vec![COMMAND_VERSION, bound.unwrap_or(0)];
+            if let Some([x, z]) = bound.and_then(|seat| play.starting_camera(seat)) {
+                hello.extend_from_slice(&x.to_le_bytes());
+                hello.extend_from_slice(&z.to_le_bytes());
+            }
+            stream.send(rocket_ws::Message::binary(hello)).await?;
             loop {
                 let message = rocket::tokio::select! {
                     reply = replies.recv() => match reply {

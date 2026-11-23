@@ -33,6 +33,8 @@ struct Inner {
     socket: Option<WebSocket>,
     /// The player commanded, 0 for none (yet).
     seat: Rc<Cell<u8>>,
+    /// The map's starting camera of the seat, x and z, when it has one.
+    starting_camera: Rc<Cell<Option<[f32; 2]>>>,
     next_query: u32,
     /// Query id and result, as they came.
     replies: Rc<RefCell<Vec<(u32, JsValue)>>>,
@@ -51,6 +53,7 @@ impl Uplink {
         let inner = Rc::new(RefCell::new(Inner {
             socket: None,
             seat: Rc::new(Cell::new(0)),
+            starting_camera: Rc::new(Cell::new(None)),
             next_query: 1,
             replies: Rc::new(RefCell::new(Vec::new())),
             reconnect_ms: RECONNECT_MS,
@@ -66,6 +69,10 @@ impl Uplink {
             0 => None,
             seat => Some(i32::from(seat)),
         }
+    }
+
+    pub fn starting_camera(&self) -> Option<[f32; 2]> {
+        self.inner.borrow().starting_camera.get()
     }
 
     /// Dropped while the socket is not open: an order is worth giving only
@@ -124,6 +131,7 @@ fn connect(inner: &Weak<RefCell<Inner>>) {
     };
     socket.set_binary_type(BinaryType::Arraybuffer);
     let seat = Rc::clone(&strong.borrow().seat);
+    let starting_camera = Rc::clone(&strong.borrow().starting_camera);
     let replies = Rc::clone(&strong.borrow().replies);
     let on_message = Closure::<dyn FnMut(MessageEvent)>::new(move |event: MessageEvent| {
         if let Some(text) = event.data().as_string() {
@@ -143,11 +151,18 @@ fn connect(inner: &Weak<RefCell<Inner>>) {
         };
         let bytes = js_sys::Uint8Array::new(&buffer).to_vec();
         match bytes.as_slice() {
-            [COMMAND_VERSION, player] => seat.set(*player),
+            [COMMAND_VERSION, player, rest @ ..] if rest.is_empty() || rest.len() == 8 => {
+                let float = |at: usize| {
+                    f32::from_le_bytes([rest[at], rest[at + 1], rest[at + 2], rest[at + 3]])
+                };
+                starting_camera.set((!rest.is_empty()).then(|| [float(0), float(4)]));
+                seat.set(*player);
+            }
             // A server on another format: this page's orders would be
             // misread, so it gives none until reloaded.
             _ => {
                 seat.set(0);
+                starting_camera.set(None);
                 web_sys::console::error_1(&"the server speaks another command format".into());
             }
         }
@@ -160,6 +175,7 @@ fn connect(inner: &Weak<RefCell<Inner>>) {
         let wait = {
             let mut inner = strong.borrow_mut();
             inner.seat.set(0);
+            inner.starting_camera.set(None);
             inner.socket = None;
             let wait = inner.reconnect_ms;
             inner.reconnect_ms = (wait * 2).min(RECONNECT_MAX_MS);

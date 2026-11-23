@@ -294,6 +294,9 @@ trait View {
     /// selection follow, where it picks any; `controls` on `/play`, whose
     /// player is not an observer.
     fn set_perspective(&mut self, _perspective: Perspective, _controls: bool) {}
+    /// Moves the camera to the seat's base the next scene, once, where it
+    /// has a camera: `camera` is the map's starting camera for the seat.
+    fn start_at_seat(&mut self, _seat: usize, _camera: Option<[f32; 2]>) {}
     /// Whether the attack, aura and heal range overlays are drawn, where it
     /// draws any. Its own keys toggle them too, hence the getter.
     fn set_ranges(&mut self, _ranges: [bool; 3]) {}
@@ -1501,6 +1504,8 @@ impl App {
         let players = self.scene.players.len();
         if self.seat_shown != Some(seat) && usize::try_from(seat).is_ok_and(|seat| seat < players) {
             self.seat_shown = Some(seat);
+            let camera = self.uplink.as_ref().and_then(Uplink::starting_camera);
+            self.renderer.start_at_seat(seat as usize, camera);
             self.perspective = Perspective::Player(seat as usize);
             self.perspective_select.set_value(&seat.to_string());
             self.update_palette();

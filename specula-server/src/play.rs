@@ -492,6 +492,20 @@ impl Play {
         self.seats.player_of(visitor?)
     }
 
+    /// Where the map puts `seat`'s camera at the start (x, z), as the engine
+    /// hands it to `SetStartingCamera`; none when the map gives no such
+    /// camera, so the page falls back on the seat's base as vanilla does.
+    pub fn starting_camera(&self, seat: u8) -> Option<[f32; 2]> {
+        let index = usize::from(seat.checked_sub(1)?);
+        let inner = self.inner.lock().unwrap();
+        let attributes = &inner.game.as_ref()?.launch.attributes;
+        let position = &attributes["settings"]["PlayerData"][index]["StartingCamera"]["Position"];
+        Some([
+            position["x"].as_f64()? as f32,
+            position["z"].as_f64()? as f32,
+        ])
+    }
+
     /// An id for one command socket.
     pub fn connection(&self) -> u64 {
         self.next_connection.fetch_add(1, Ordering::Relaxed)
