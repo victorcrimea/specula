@@ -1,8 +1,8 @@
-//! The viewer stream, wire format v26: messages for each keyframe, turn or
+//! The viewer stream, wire format v27: messages for each keyframe, turn or
 //! match end, varints and zigzag as in `wire.rs`, positions and heights in
 //! 1/16 m, carried brotli-compressed as below.
 //!
-//! - kind 1 keyframe: varint turn, u8 wire version (26; a viewer stops
+//! - kind 1 keyframe: varint turn, u8 wire version (27; a viewer stops
 //!   at any other, since nothing after it would read right), u64 match id, f32 game speed (the
 //!   match's sim rate), varint delay in ms (how long after the game the
 //!   server shows it), varint first turn of the match's history, varint
@@ -72,6 +72,20 @@
 //!   f32 x, f32 z (metres; target and position 0 for a note 2).
 //!   It is sent at once to the seat of the player it is for and to no
 //!   observer; it sits in the frame like a flare and is never in a keyframe.
+//! - kind 7 event (v27): varint turn, varint length, that many bytes of a
+//!   UTF-8 JSON object (a defeat, win, phase, tribute, barter, diplomacy,
+//!   AI chat or network line, which the client formats). It is sent at once
+//!   to the seats it is for and, with the delay, to the observers. It sits
+//!   in the frame like a flare and is never in a keyframe or the history
+//!   (CONTROL-IMPL V105).
+//!
+//! The players section (a keyframe's and a delta's player table) ends with
+//! the engine's time notes (v27): varint count, then count x {varint end
+//! ms, varint players count, zigzag each player, varint length, JSON
+//! bytes}.
+//!
+//! The observers' flare envelope ends with the sender's chat nickname: a
+//! varint length and the UTF-8 bytes (length 0 for none).
 //!
 //! A delta moves the entities as a viewer would, and lists only the
 //! entities whose result would be wrong. A delta applies in this order:
@@ -362,6 +376,7 @@ use crate::feed::SoundTarget;
 use crate::feed::TemplateDetails;
 use crate::feed::Terrain;
 use crate::feed::Territory;
+use crate::feed::TimeNote;
 use crate::flare;
 use crate::history::History;
 use crate::limit;
@@ -386,6 +401,7 @@ const MESSAGE_ENDED: u8 = 3;
 const MESSAGE_PAUSE: u8 = 4;
 const MESSAGE_FLARE: u8 = 5;
 const MESSAGE_NOTIFICATION: u8 = 6;
+const MESSAGE_EVENT: u8 = 7;
 const CHANGED_POSITION: u64 = 1;
 const CHANGED_COLOR: u64 = 2;
 const CHANGED_ICON: u64 = 4;
@@ -1394,7 +1410,9 @@ impl Stream {
         }
     }
 
-    fn set_players(&mut self, players: Players) {
+    fn set_players(&mut self, mut players: Players) {
+        // The players record does not carry the time notes (kind 31 does).
+        players.time_notes = std::mem::take(&mut self.players.time_notes);
         if self.players != players {
             self.players = players;
             self.players_changed = true;
@@ -1723,6 +1741,15 @@ impl Stream {
         self.visual.push(&out.0, None)
     }
 
+    fn event_message(&mut self, turn: u32, json: &str) -> io::Result<TrackOp> {
+        let mut out = Writer::default();
+        out.u8(MESSAGE_EVENT);
+        out.varint(u64::from(turn));
+        out.varint(json.len() as u64);
+        out.0.extend_from_slice(json.as_bytes());
+        self.visual.push(&out.0, None)
+    }
+
     /// The final keyframes of an ending match, and the tails of its frames.
     fn finish(&mut self, common: &Common, turn: u32) -> (Ended, Vec<u8>, Vec<u8>) {
         // A match that ends while paused is over, not paused.
@@ -1789,6 +1816,8 @@ struct State {
     /// Every player's LOS, as the feed has it.
     los: Los,
     has_turn: bool,
+    /// `settings.LockTeams` of the running match.
+    lock_teams: bool,
     /// Set when a new observer connects: its entity ids belong to another
     /// match, so its first turn must replace, not patch, what viewers have.
     new_feed: bool,
@@ -1821,6 +1850,116 @@ impl State {
             map_size: self.map_size,
             terrain_id: self.terrain.as_ref().map_or(0, |(id, _)| *id),
         }
+    }
+}
+
+/// Who an event is for, from vanilla's chat formats: the indices of the
+/// seats and whether the observers get it. An AI chat line has its
+/// addressee command stripped and its channel added, as the engine sends
+/// every client the whole line and each filters it. None drops the event.
+fn route_event(state: &State, event: &mut serde_json::Value) -> Option<(Vec<usize>, bool)> {
+    let players = &state.observer.players;
+    let number = |value: &serde_json::Value, key: &str| value.get(key)?.as_i64();
+    let first = event.get("players")?.get(0)?.as_i64()?;
+    let seats_where = |keep: &dyn Fn(usize) -> bool| -> Vec<usize> {
+        state
+            .seats
+            .iter()
+            .enumerate()
+            .filter(|(_, seat)| keep(seat.player as usize))
+            .map(|(index, _)| index)
+            .collect()
+    };
+    let ally =
+        |a: i64, b: i64| a >= 0 && b >= 0 && seat::mutual_ally(players, a as usize, b as usize);
+    let kind = event.get("type")?.as_str()?.to_string();
+    match kind.as_str() {
+        "defeat" | "won" => Some((seats_where(&|_| true), true)),
+        "phase" => Some((
+            seats_where(&|seat| seat as i64 == first || ally(first, seat as i64)),
+            true,
+        )),
+        "tribute" => {
+            let donator = number(event, "donator")?;
+            let locked = state.lock_teams;
+            Some((
+                seats_where(&|seat| {
+                    let seat = seat as i64;
+                    seat == first
+                        || seat == donator
+                        || (locked && ally(seat, first) && ally(seat, donator))
+                }),
+                true,
+            ))
+        }
+        "barter" => Some((Vec::new(), true)),
+        "diplomacy" => {
+            let target = number(event, "targetPlayer")?;
+            Some((
+                seats_where(&|seat| seat as i64 == first || seat as i64 == target),
+                true,
+            ))
+        }
+        "aichat" => {
+            let message = event.get("message")?.as_str()?.to_string();
+            let enemy = |seat: usize| {
+                first >= 0
+                    && players
+                        .players
+                        .get(first as usize)
+                        .and_then(|player| player.stances.get(seat))
+                        == Some(&crate::chat::STANCE_ENEMY)
+            };
+            let (channel, text, seats, observers) = if let Some(rest) =
+                message.strip_prefix("/allies ")
+            {
+                (
+                    "allies",
+                    rest.to_string(),
+                    seats_where(&|seat| seat as i64 != first && ally(first, seat as i64)),
+                    false,
+                )
+            } else if let Some(rest) = message.strip_prefix("/enemies ") {
+                (
+                    "enemies",
+                    rest.to_string(),
+                    seats_where(&|seat| seat as i64 != first && enemy(seat)),
+                    false,
+                )
+            } else if let Some(rest) = message.strip_prefix("/observers ") {
+                ("observers", rest.to_string(), Vec::new(), true)
+            } else if let Some(rest) = message.strip_prefix("/msg ") {
+                // As vanilla's matchUsername: the longest name that is
+                // followed by a space.
+                let (name, text) = players
+                    .players
+                    .iter()
+                    .skip(1)
+                    .filter(|player| !player.name.is_empty())
+                    .filter_map(|player| {
+                        let text = rest.strip_prefix(player.name.as_str())?.strip_prefix(' ')?;
+                        Some((player.name.as_str(), text))
+                    })
+                    .max_by_key(|(name, _)| name.len())?;
+                let target = players
+                    .players
+                    .iter()
+                    .position(|player| player.name == name)?;
+                (
+                    "private",
+                    text.to_string(),
+                    seats_where(&|seat| seat == target),
+                    false,
+                )
+            } else {
+                ("everyone", message, seats_where(&|_| true), true)
+            };
+            let object = event.as_object_mut()?;
+            object.insert("message".into(), text.into());
+            object.insert("channel".into(), channel.into());
+            Some((seats, observers))
+        }
+        _ => None,
     }
 }
 
@@ -1935,6 +2074,7 @@ impl Hub {
                 ground: None,
                 los: Los::default(),
                 has_turn: false,
+                lock_teams: false,
                 new_feed: true,
                 ended: false,
                 feed_activity: None,
@@ -2098,6 +2238,24 @@ impl Hub {
         self.state.lock().unwrap().observer.set_players(players);
     }
 
+    /// The engine's time notes, which the players record does not carry.
+    pub fn set_time_notifications(&self, notes: Vec<TimeNote>) {
+        let observer = &mut self.state.lock().unwrap().observer;
+        let mut players = observer.players.clone();
+        players.time_notes = notes;
+        observer.set_players(players);
+    }
+
+    /// Whether the match locks the teams (`settings.LockTeams`), which
+    /// widens who is told of a tribute.
+    pub fn set_lock_teams(&self, json: &[u8]) {
+        let locked = serde_json::from_slice::<serde_json::Value>(json)
+            .ok()
+            .and_then(|value| value.pointer("/settings/LockTeams")?.as_bool())
+            .unwrap_or(false);
+        self.state.lock().unwrap().lock_teams = locked;
+    }
+
     /// The latest turn the feed gave, which viewers may not see yet.
     pub fn turn(&self) -> u32 {
         self.state.lock().unwrap().turn
@@ -2221,6 +2379,60 @@ impl Hub {
         }
     }
 
+    /// The chat lines of the other typed notifications (defeat, phase,
+    /// tribute, ...), as the engine's JSON array: at once to the seats each
+    /// is for and, with the delay, to the observers. Never keyframed.
+    pub fn notify_events(&self, json: &[u8]) {
+        let Ok(serde_json::Value::Array(events)) = serde_json::from_slice(json) else {
+            return;
+        };
+        let mut state = self.state.lock().unwrap();
+        if !state.has_turn || state.ended {
+            return;
+        }
+        let turn = state.turn;
+        for mut event in events {
+            let Some((seats, observers)) = route_event(&state, &mut event) else {
+                continue;
+            };
+            self.send_event(&mut state, turn, &event.to_string(), &seats, observers);
+        }
+    }
+
+    /// A line about the network (a seat left or rejoined, a kick or ban),
+    /// for every seat at once and the observers after the delay.
+    pub fn notify_network(&self, json: String) {
+        let mut state = self.state.lock().unwrap();
+        if !state.has_turn || state.ended {
+            return;
+        }
+        let turn = state.turn;
+        let seats: Vec<usize> = (0..state.seats.len()).collect();
+        self.send_event(&mut state, turn, &json, &seats, true);
+    }
+
+    fn send_event(
+        &self,
+        state: &mut State,
+        turn: u32,
+        text: &str,
+        seats: &[usize],
+        observers: bool,
+    ) {
+        for index in seats {
+            if let Err(error) = state.seats[*index].event(turn, text) {
+                eprintln!("cannot encode an event: {error}");
+            }
+        }
+        if !observers {
+            return;
+        }
+        match state.observer.event_message(turn, text) {
+            Ok(op) => self.queue(state, Release::Flare(op)),
+            Err(error) => eprintln!("cannot encode an event: {error}"),
+        }
+    }
+
     /// The pause ledger, as `Play`'s ledger reports it. Unlike `set_pause`
     /// it leaves `feed_activity` alone: no engine pauser changed.
     pub fn set_ledger(&self, entries: &[pause::Entry]) {
@@ -2281,7 +2493,13 @@ impl Hub {
 
     /// An observer's flare, for the other observers only, at once and
     /// never stored (D51).
-    pub fn flare_from_observer(&self, visitor: &str, x: f32, z: f32) -> Result<(), &'static str> {
+    pub fn flare_from_observer(
+        &self,
+        visitor: &str,
+        name: Option<&str>,
+        x: f32,
+        z: f32,
+    ) -> Result<(), &'static str> {
         let mut state = self.state.lock().unwrap();
         check_flare(&state, x, z)?;
         if !state.flares.allow(
@@ -2293,7 +2511,7 @@ impl Hub {
         ) {
             return Err("too many flares");
         }
-        state.shown.side(envelope_flare(x, z).into());
+        state.shown.side(envelope_flare(x, z, name).into());
         Ok(())
     }
 
@@ -3025,11 +3243,14 @@ fn envelope_starts(wait: Duration) -> Message {
 }
 
 /// An observer's flare, which only the observers' socket carries.
-fn envelope_flare(x: f32, z: f32) -> Vec<u8> {
+fn envelope_flare(x: f32, z: f32, name: Option<&str>) -> Vec<u8> {
+    let name = name.unwrap_or("");
     let mut out = Writer::default();
     out.u8(ENVELOPE_FLARE);
     out.f32(x);
     out.f32(z);
+    out.varint(name.len() as u64);
+    out.0.extend_from_slice(name.as_bytes());
     out.0
 }
 
@@ -3690,6 +3911,16 @@ fn write_players(out: &mut Writer, players: &Players) {
         out.u8(u8::from(player.battle));
     }
     out.varint(u64::from(players.ceasefire_end));
+    out.varint(players.time_notes.len() as u64);
+    for note in &players.time_notes {
+        out.varint(u64::from(note.end));
+        out.varint(note.players.len() as u64);
+        for player in &note.players {
+            out.zigzag(i64::from(*player));
+        }
+        out.varint(note.json.len() as u64);
+        out.0.extend_from_slice(note.json.as_bytes());
+    }
 }
 
 /// Run-length coded: a territory is a few large areas of one value.

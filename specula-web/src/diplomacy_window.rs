@@ -488,7 +488,7 @@ pub(crate) fn civ_name(civ: &str) -> String {
         .map_or_else(|| civ.to_string(), |(_, name)| lang::translate(name))
 }
 
-fn scene_ms(scene: &Scene) -> f64 {
+pub(crate) fn scene_ms(scene: &Scene) -> f64 {
     f64::from(scene.turn) * TURN_MS
 }
 

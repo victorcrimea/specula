@@ -1440,6 +1440,9 @@ impl Seat {
             player.battle = false;
             player.shared_los = false;
         }
+        // Only its own countdowns; the observers' are not for a seat.
+        let me = self.player as i32;
+        players.time_notes.retain(|note| note.players.contains(&me));
         self.stream.set_players(players);
     }
 
@@ -1754,6 +1757,14 @@ impl Seat {
     /// Tells the seat's viewers a notification for its player.
     pub fn notification(&mut self, turn: u32, note: &Note) -> io::Result<()> {
         let visual = self.stream.notification_message(turn, note)?;
+        self.shown
+            .apply(Release::Flare(visual), None, self.shown.match_id);
+        Ok(())
+    }
+
+    /// Tells the seat's viewers an event line (`Hub::notify_events`).
+    pub fn event(&mut self, turn: u32, json: &str) -> io::Result<()> {
+        let visual = self.stream.event_message(turn, json)?;
         self.shown
             .apply(Release::Flare(visual), None, self.shown.match_id);
         Ok(())

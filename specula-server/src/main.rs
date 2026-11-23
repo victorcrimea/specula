@@ -575,7 +575,18 @@ fn observer_flare(
         .resolve(id)
         .and_then(|found| found.hub)
         .ok_or(refuse("no match"))?;
-    hub.flare_from_observer(&visitor, x, z).map_err(refuse)
+    // The chat's nickname, if the visitor ever joined it; a broadcast has
+    // no chat, so its observers are nameless.
+    let name = registry
+        .hosted(id)
+        .and_then(|found| found.seats.nickname_of(&visitor));
+    hub.flare_from_observer(
+        &visitor,
+        name.as_ref().map(nickname::Nickname::as_str),
+        x,
+        z,
+    )
+    .map_err(refuse)
 }
 
 /// The host's kick of a seat from the diplomacy window (M29), with a ban
@@ -1516,8 +1527,11 @@ pub(crate) fn serve(
             }
             Record::Pause(players) => hub.set_pause(&players),
             Record::Notifications(notes) => hub.notify(&notes),
+            Record::Events(json) => hub.notify_events(&json),
+            Record::TimeNotifications(notes) => hub.set_time_notifications(notes),
             Record::KeepAlive => hub.feed_alive(),
             Record::InitAttributes(json) => {
+                hub.set_lock_teams(&json);
                 // The broadcast has no game to compare with.
                 if let Some(play) = play {
                     play.check_attributes(&json);

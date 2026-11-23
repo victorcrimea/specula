@@ -69,7 +69,7 @@ const BROTLI_QUALITY: u32 = 11;
 const BROTLI_WINDOW_BITS: u32 = 22;
 
 /// (custom property key, path under `UI`), copied as they are.
-const TEXTURES: [(&str, &str); 121] = [
+const TEXTURES: [(&str, &str); 122] = [
     ("hud-panels", "session/hud_panels.png"),
     ("line-horiz", "global/border/line_horiz.png"),
     ("line-vert", "global/border/line_vert.png"),
@@ -186,6 +186,8 @@ const TEXTURES: [(&str, &str); 121] = [
     ("icon-xp", "session/icons/promote.png"),
     // gui/session/setup.xml's, before the chat's attack line.
     ("icon-focusattacked", "session/icons/focus-attacked.png"),
+    // gui/session/setup.xml's, before the chat's flare line.
+    ("icon-focusflare", "session/icons/focus-flare.png"),
     ("icon-food_fish", "session/icons/resources/fish_small.png"),
     ("icon-food_fruit", "session/icons/resources/fruit_small.png"),
     ("icon-food_grain", "session/icons/resources/grain_small.png"),

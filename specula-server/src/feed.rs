@@ -43,6 +43,8 @@ const RECORD_PAUSE: u8 = 26;
 const RECORD_KEEPALIVE: u8 = 27;
 const RECORD_INIT_ATTRIBUTES: u8 = 28;
 const RECORD_NOTIFICATIONS: u8 = 29;
+const RECORD_EVENTS: u8 = 30;
+const RECORD_TIME_NOTIFICATIONS: u8 = 31;
 const ENTITY_SIZE: usize = 84;
 const ENTITY_SIZE_V14: usize = 74;
 const SOUND_SIZE: usize = 29;
@@ -232,6 +234,21 @@ pub struct Players {
     /// When the ceasefire ends, in simulation milliseconds; 0 for none or
     /// a hook that does not send it.
     pub ceasefire_end: u32,
+    /// The engine's pending time texts, which kind 31 sets and the players
+    /// record leaves alone; so `decode_players` leaves it empty.
+    pub time_notes: Vec<TimeNote>,
+}
+
+/// One entry of the engine's time notification list.
+#[derive(Clone, PartialEq, Eq)]
+pub struct TimeNote {
+    /// `endTime`, in simulation milliseconds.
+    pub end: u32,
+    /// Who sees it; -1 is the observers.
+    pub players: Vec<i32>,
+    /// Compact JSON of `message`, `parameters`, `translateMessage` and
+    /// `translateParameters`, which only the client reads.
+    pub json: String,
 }
 
 /// A player as `GuiInterface.GetSimulationState` reports it; index 0 is
@@ -784,12 +801,17 @@ pub enum Record {
     /// Kind 29: what the session GUI would tell a player, before the turn
     /// record it belongs to.
     Notifications(Vec<Note>),
+    /// Kind 30: what the session GUI would put in the chat (JSON array),
+    /// before the turn record it belongs to.
+    Events(Vec<u8>),
+    /// Kind 31: the time notification list, whenever it changed.
+    TimeNotifications(Vec<TimeNote>),
 }
 
 /// A notification for one player.
 #[derive(Clone, Copy)]
 pub struct Note {
-    /// 1 attacked, 2 auto-queue stopped.
+    /// 1 attacked, 2 auto-queue stopped (old hooks; ignored).
     pub kind: u8,
     pub player: u8,
     /// The attacker's owner, Gaia 0.
@@ -987,6 +1009,8 @@ pub fn read_record(reader: &mut impl Read, version: u32) -> io::Result<Option<Re
             RECORD_KEEPALIVE => return Ok(Some(Record::KeepAlive)),
             RECORD_INIT_ATTRIBUTES => return Ok(Some(Record::InitAttributes(payload))),
             RECORD_NOTIFICATIONS => return decode_notifications(&payload).map(Some),
+            RECORD_EVENTS => return Ok(Some(Record::Events(payload))),
+            RECORD_TIME_NOTIFICATIONS => return decode_time_notifications(&payload).map(Some),
             RECORD_QUERY_REPLY => {
                 let mut cursor = Cursor(&payload);
                 let id = cursor.u32()?;
@@ -1239,7 +1263,43 @@ fn decode_players(payload: &[u8], version: u32) -> io::Result<Record> {
     Ok(Record::Players(Players {
         players,
         ceasefire_end,
+        time_notes: Vec::new(),
     }))
+}
+
+fn decode_time_notifications(payload: &[u8]) -> io::Result<Record> {
+    let list: Vec<serde_json::Value> = serde_json::from_slice(payload)
+        .map_err(|error| invalid(format!("time notifications: {error}")))?;
+    let mut notes = Vec::with_capacity(list.len());
+    for entry in &list {
+        let Some(end) = entry.get("endTime").and_then(serde_json::Value::as_f64) else {
+            continue;
+        };
+        let Some(players) = entry.get("players").and_then(serde_json::Value::as_array) else {
+            continue;
+        };
+        let mut shown = serde_json::Map::new();
+        for key in [
+            "message",
+            "parameters",
+            "translateMessage",
+            "translateParameters",
+        ] {
+            if let Some(value) = entry.get(key) {
+                shown.insert(key.to_string(), value.clone());
+            }
+        }
+        notes.push(TimeNote {
+            end: end.max(0.0) as u32,
+            players: players
+                .iter()
+                .filter_map(serde_json::Value::as_i64)
+                .map(|player| player as i32)
+                .collect(),
+            json: serde_json::Value::Object(shown).to_string(),
+        });
+    }
+    Ok(Record::TimeNotifications(notes))
 }
 
 fn decode_territory(payload: &[u8]) -> io::Result<Record> {

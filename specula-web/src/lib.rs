@@ -23,6 +23,7 @@ mod los;
 mod march;
 mod message_box;
 mod minimap;
+mod notices;
 mod opfs;
 mod orders;
 mod overlay;
@@ -672,6 +673,8 @@ struct App {
     chat_hide_observers: bool,
     /// gui.session.notifications.attack.
     chat_notify_attack: bool,
+    /// The other gui.session.notifications.* settings.
+    notice_settings: notices::Settings,
     /// Only the 3D page has the Barter & Trade dialog.
     trade_window: Option<TradeWindow>,
     /// session.massbarter (Shift) is held.
@@ -1060,42 +1063,96 @@ impl TimeLimit {
 }
 
 /// `TimeNotificationOverlay`: the engine's untyped notifications for the
-/// seat's player, each shown until its end in game time, so a pause holds
-/// it. Of them the feed has only the stopped auto-queue.
+/// viewed player, each shown until its end in game time, so a pause holds
+/// it. They are keyframed state (`Scene::time_notes`), so a page that
+/// opens late has them.
 struct TimeNotifications {
     /// None on an older cached page without the element.
     element: Option<HtmlElement>,
-    /// The engine's message, translated as it is shown, and its end in
-    /// simulation ms.
-    notes: Vec<(&'static str, f64)>,
+    /// The scene's notes, parsed once for as long as they stay the same.
+    parsed: Vec<(stream::TimeNote, JsValue)>,
+    /// What the element was last written for: the lines and the whole
+    /// seconds left, so it is rewritten only when it would read differently.
     shown: String,
 }
 
 impl TimeNotifications {
-    /// `AddTimeNotification`'s default duration.
-    const DURATION_MS: f64 = 10_000.0;
-
-    fn push(&mut self, message: &'static str, turn: u32) {
-        self.notes
-            .push((message, f64::from(turn) * TURN_MS + Self::DURATION_MS));
-    }
-
-    fn frame(&mut self, turn: u32) {
+    fn frame(&mut self, scene: &Scene, viewed: i32, ctx: &notices::Context) {
         let Some(element) = &self.element else {
             return;
         };
-        let time = f64::from(turn) * TURN_MS;
-        self.notes.retain(|(_, end)| *end > time);
-        let text = self
-            .notes
+        let same = self.parsed.len() == scene.time_notes.len()
+            && self
+                .parsed
+                .iter()
+                .zip(&scene.time_notes)
+                .all(|((held, _), note)| held == note);
+        if !same {
+            self.parsed = scene
+                .time_notes
+                .iter()
+                .map(|note| {
+                    let json = js_sys::JSON::parse(&note.json).unwrap_or(JsValue::UNDEFINED);
+                    (note.clone(), json)
+                })
+                .collect();
+        }
+        let now = diplomacy_window::scene_ms(scene);
+        // `AddTimeNotification` keeps them by end time, the latest first.
+        let mut shown: Vec<&(stream::TimeNote, JsValue)> = self
+            .parsed
             .iter()
-            .map(|(message, _)| lang::translate(message))
+            .filter(|(note, _)| note.players.contains(&viewed) && f64::from(note.end_ms) > now)
+            .collect();
+        shown.sort_by_key(|(note, _)| std::cmp::Reverse(note.end_ms));
+        let lines: Vec<Vec<notices::Piece>> = shown
+            .iter()
+            .map(|(note, json)| notices::time_line(json, f64::from(note.end_ms) - now, ctx))
+            .collect();
+        let key = lines
+            .iter()
+            .map(|pieces| {
+                pieces
+                    .iter()
+                    .map(|piece| match piece {
+                        notices::Piece::Text(text) => text.clone(),
+                        notices::Piece::Name { text, color } => format!("{text}{color}"),
+                        notices::Piece::Icon(name) => (*name).to_string(),
+                    })
+                    .collect::<String>()
+            })
             .collect::<Vec<_>>()
             .join("\n");
-        if text != self.shown {
-            element.set_text_content(Some(&text));
-            element.set_hidden(text.is_empty());
-            self.shown = text;
+        if key == self.shown {
+            return;
+        }
+        self.shown = key;
+        element.set_text_content(None);
+        element.set_hidden(lines.is_empty());
+        let Some(document) = element.owner_document() else {
+            return;
+        };
+        for pieces in &lines {
+            let Ok(line) = document.create_element("div") else {
+                continue;
+            };
+            for piece in pieces {
+                let Ok(span) = document.create_element("span") else {
+                    continue;
+                };
+                match piece {
+                    notices::Piece::Text(text) => span.set_text_content(Some(text)),
+                    notices::Piece::Name { text, color } => {
+                        span.set_text_content(Some(text));
+                        if let Some(span) = span.dyn_ref::<HtmlElement>() {
+                            let _ = span.style().set_property("color", color);
+                        }
+                    }
+                    notices::Piece::Icon(_) => {}
+                }
+                let _ = line.append_child(&span);
+            }
+            let _ = element.append_child(&line);
         }
     }
 }
@@ -1229,7 +1286,21 @@ impl App {
                 self.match_over.ended || self.match_over.archived,
             );
         }
-        self.time_notifications.frame(self.scene.turn);
+        {
+            let seat = self.uplink.as_ref().and_then(Uplink::seat);
+            let viewed = match (seat, self.perspective) {
+                (Some(seat), _) => seat,
+                (None, Perspective::Player(player)) => player as i32,
+                (None, Perspective::Observer) => -1,
+            };
+            let ctx = notice_context(
+                &self.scene,
+                &self.palette,
+                self.notice_settings,
+                seat.and_then(|seat| u8::try_from(seat).ok()),
+            );
+            self.time_notifications.frame(&self.scene, viewed, &ctx);
+        }
         if let Some(warmup) = &mut self.warmup {
             let index_loaded = self
                 .renderer
@@ -1490,7 +1561,7 @@ impl App {
     }
 
     /// `handleFlare`: a flare from the stream, subject to the receive limit.
-    fn accept_flare(&mut self, sender: u8, x: f32, z: f32) {
+    fn accept_flare(&mut self, sender: u8, observer_name: Option<String>, x: f32, z: f32) {
         let allowed = {
             let Some(flares) = self.flares.as_mut() else {
                 return;
@@ -1513,6 +1584,17 @@ impl App {
             return;
         }
         self.show_flare(sender, x, z);
+        let seat = self
+            .uplink
+            .as_ref()
+            .and_then(Uplink::seat)
+            .and_then(|seat| u8::try_from(seat).ok());
+        let ctx = notice_context(&self.scene, &self.palette, self.notice_settings, seat);
+        if let Some(notice) = notices::flare(sender, observer_name.as_deref(), x, z, &ctx)
+            && let Some(chat_window) = &mut self.chat_window
+        {
+            chat_window.push_notice(page_now(), notice);
+        }
     }
 
     fn give_orders(&mut self) {
@@ -2619,7 +2701,7 @@ async fn run(
         time_limit,
         time_notifications: TimeNotifications {
             element: element(&document, "notification-text").ok(),
-            notes: Vec::new(),
+            parsed: Vec::new(),
             shown: String::new(),
         },
         last_attack: None,
@@ -2638,6 +2720,7 @@ async fn run(
         chat_nick: chat::setting(chat::NICK_KEY, true),
         chat_hide_observers: chat::setting(chat::HIDE_OBSERVERS_KEY, false),
         chat_notify_attack: chat::setting(chat::NOTIFY_ATTACK_KEY, true),
+        notice_settings: stored_notice_settings(),
         trade_window,
         mass_barter: false,
         message_box,
@@ -3305,7 +3388,7 @@ fn wire_chat_window(app: &Rc<RefCell<App>>, window: &web_sys::Window) {
         return;
     };
     type Setting = (&'static str, &'static str, bool, fn(&mut App, bool));
-    let settings: [Setting; 4] = [
+    let settings: [Setting; 6] = [
         ("chat-timestamp", chat::TIMESTAMP_KEY, true, |app, on| {
             app.chat_timestamps = on
         }),
@@ -3324,6 +3407,18 @@ fn wire_chat_window(app: &Rc<RefCell<App>>, window: &web_sys::Window) {
             true,
             |app, on| app.chat_notify_attack = on,
         ),
+        (
+            "chat-notify-tribute",
+            chat::NOTIFY_TRIBUTE_KEY,
+            true,
+            |app, on| app.notice_settings.tribute = on,
+        ),
+        (
+            "chat-notify-barter",
+            chat::NOTIFY_BARTER_KEY,
+            true,
+            |app, on| app.notice_settings.barter = on,
+        ),
     ];
     for (id, key, default, apply) in settings {
         // An older page lacks the tab; the chat still works.
@@ -3338,6 +3433,34 @@ fn wire_chat_window(app: &Rc<RefCell<App>>, window: &web_sys::Window) {
             chat::store_setting(key, on);
             if let Ok(mut app) = target.try_borrow_mut() {
                 apply(&mut app, on);
+            }
+        });
+    }
+    for (id, key, default, allowed) in [
+        (
+            "chat-notify-flare",
+            chat::NOTIFY_FLARE_KEY,
+            "always",
+            ["never", "observer", "always"],
+        ),
+        (
+            "chat-notify-phase",
+            chat::NOTIFY_PHASE_KEY,
+            "completed",
+            ["none", "completed", "all"],
+        ),
+    ] {
+        let Ok(select) = element::<web_sys::HtmlSelectElement>(&document, id) else {
+            continue;
+        };
+        select.set_value(chat::choice(key, default, &allowed));
+        let target = Rc::clone(app);
+        let box_ = select.clone();
+        on_change(&select, move || {
+            let value = box_.value();
+            chat::store_choice(key, &value);
+            if let Ok(mut app) = target.try_borrow_mut() {
+                app.notice_settings = stored_notice_settings();
             }
         });
     }
@@ -5443,7 +5566,7 @@ fn connect(app: &Rc<RefCell<App>>) {
             }
             Some((&POST_DETAIL, message)) => receive_detail(&receiver, message),
             Some((&POST_FLARE, rest)) => match stream::read_observer_flare(rest) {
-                Ok((x, z)) => receiver.borrow_mut().accept_flare(0, x, z),
+                Ok((x, z, name)) => receiver.borrow_mut().accept_flare(0, name, x, z),
                 Err(error) => {
                     web_sys::console::error_1(&format!("bad flare envelope: {error}").into())
                 }
@@ -5599,6 +5722,10 @@ fn receive(app_rc: &Rc<RefCell<App>>, turn_ms: f64, message: &[u8]) {
         receive_notification(app_rc, message);
         return;
     }
+    if stream::is_event(message) {
+        receive_event(app_rc, message);
+        return;
+    }
     let app = &mut *app_rc.borrow_mut();
     match app.scene.apply(message, app.progress) {
         // Not a turn: nothing moves, the veil only comes or goes.
@@ -5691,11 +5818,88 @@ fn receive(app_rc: &Rc<RefCell<App>>, turn_ms: f64, message: &[u8]) {
     }
 }
 
+fn stored_notice_settings() -> notices::Settings {
+    notices::Settings {
+        tribute: chat::setting(chat::NOTIFY_TRIBUTE_KEY, true),
+        barter: chat::setting(chat::NOTIFY_BARTER_KEY, true),
+        flare: match chat::choice(
+            chat::NOTIFY_FLARE_KEY,
+            "always",
+            &["never", "observer", "always"],
+        ) {
+            "never" => notices::FlareSetting::Never,
+            "observer" => notices::FlareSetting::Observer,
+            _ => notices::FlareSetting::Always,
+        },
+        phase: match chat::choice(
+            chat::NOTIFY_PHASE_KEY,
+            "completed",
+            &["none", "completed", "all"],
+        ) {
+            "none" => notices::PhaseSetting::None,
+            "all" => notices::PhaseSetting::All,
+            _ => notices::PhaseSetting::Completed,
+        },
+    }
+}
+
+/// What the notification formats need of the page: the seat's player (none
+/// for an observer), the names and colours.
+fn notice_context<'a>(
+    scene: &'a Scene,
+    palette: &'a [u32],
+    settings: notices::Settings,
+    seat: Option<u8>,
+) -> notices::Context<'a> {
+    notices::Context {
+        own: seat,
+        observer: seat.is_none(),
+        names: scene
+            .players
+            .iter()
+            .map(|player| player.name.as_str())
+            .collect(),
+        palette,
+        settings,
+    }
+}
+
+/// An event the engine's notifications became (kind 7): a chat line,
+/// shown to a live viewer only (CONTROL-IMPL.md V105).
+fn receive_event(app: &Rc<RefCell<App>>, message: &[u8]) {
+    let json = match stream::read_event(message) {
+        Ok((_, json)) => json,
+        Err(error) => {
+            web_sys::console::error_1(&format!("bad event message: {error}").into());
+            return;
+        }
+    };
+    let app = &mut *app.borrow_mut();
+    if !app.live {
+        return;
+    }
+    let Ok(json) = js_sys::JSON::parse(&json) else {
+        return;
+    };
+    let seat = app
+        .uplink
+        .as_ref()
+        .and_then(Uplink::seat)
+        .and_then(|seat| u8::try_from(seat).ok());
+    let ctx = notice_context(&app.scene, &app.palette, app.notice_settings, seat);
+    let Some(notice) = notices::event(&json, &ctx) else {
+        return;
+    };
+    if let Some(chat_window) = &mut app.chat_window {
+        chat_window.push_notice(page_now(), notice);
+    }
+}
+
 /// A player's flare from the stream: a mutual ally's or, on the observer
 /// page, any player's.
 fn receive_flare(app: &Rc<RefCell<App>>, message: &[u8]) {
     match stream::read_flare(message) {
-        Ok((sender, x, z)) => app.borrow_mut().accept_flare(sender, x, z),
+        Ok((sender, x, z)) => app.borrow_mut().accept_flare(sender, None, x, z),
         Err(error) => web_sys::console::error_1(&format!("bad flare message: {error}").into()),
     }
 }
@@ -5715,45 +5919,38 @@ fn receive_notification(app: &Rc<RefCell<App>>, message: &[u8]) {
     if !app.live {
         return;
     }
-    match note.kind {
-        // `g_NotificationsTypes.attack`.
-        stream::NOTE_ATTACKED => {
-            let attack = chat_window::Attack {
-                target: note.target,
-                unit: note.unit,
-                x: note.x,
-                z: note.z,
-            };
-            app.last_attack = Some(attack);
-            if !app.chat_notify_attack {
-                return;
-            }
-            let attacker = app
-                .scene
-                .players
-                .get(usize::from(note.attacker))
-                .map_or("", |player| player.name.as_str());
-            // `colorizePlayernameByID`, Gaia's own colour included.
-            let color = app
-                .palette
-                .get(usize::from(note.attacker))
-                .copied()
-                .unwrap_or(0xFFFF_FFFF);
-            if let Some(chat_window) = &mut app.chat_window {
-                chat_window.push_attack(
-                    page_now(),
-                    note.domestic,
-                    attacker,
-                    &panel::css_color(color, 1.0),
-                    attack,
-                );
-            }
+    // `g_NotificationsTypes.attack`; kind 2 (auto-queue) is retired.
+    if note.kind == stream::NOTE_ATTACKED {
+        let attack = chat_window::Attack {
+            target: note.target,
+            unit: note.unit,
+            x: note.x,
+            z: note.z,
+        };
+        app.last_attack = Some(attack);
+        if !app.chat_notify_attack {
+            return;
         }
-        // The engine's own text, translated by the baked language files.
-        stream::NOTE_AUTOQUEUE_STOPPED => app
-            .time_notifications
-            .push("Could not auto-queue unit, de-activating.", note.turn),
-        _ => {}
+        let attacker = app
+            .scene
+            .players
+            .get(usize::from(note.attacker))
+            .map_or("", |player| player.name.as_str());
+        // `colorizePlayernameByID`, Gaia's own colour included.
+        let color = app
+            .palette
+            .get(usize::from(note.attacker))
+            .copied()
+            .unwrap_or(0xFFFF_FFFF);
+        if let Some(chat_window) = &mut app.chat_window {
+            chat_window.push_attack(
+                page_now(),
+                note.domestic,
+                attacker,
+                &panel::css_color(color, 1.0),
+                attack,
+            );
+        }
     }
 }
 

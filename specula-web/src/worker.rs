@@ -27,7 +27,8 @@
 //! u8 1 while it is followed; or u8 `POST_DETAIL`,
 //! then a detail stream message (`detail.rs`), none to clear the details;
 //! or u8 `POST_STARTS`, u32 ms until the server shows the match's first
-//! turn, while it holds them all back; or u8 `POST_FLARE`, f32 x, f32 z, an
+//! turn, while it holds them all back; or u8 `POST_FLARE`, f32 x, f32 z, varint
+//! length and the UTF-8 chat nickname of the sender (length 0 for none), an
 //! observer's flare, at once.
 //!
 //! A page opened with `?t=<seconds>` (a copied link) names a moment of the

@@ -595,9 +595,11 @@ impl Play {
             match event {
                 pause::Event::Disconnected(player) => {
                     println!("game {generation}: player {player} disconnected");
+                    self.network_event("left", Some(player), self.player_name(player));
                 }
                 pause::Event::Reconnected(player) => {
                     println!("game {generation}: player {player} reconnected");
+                    self.network_event("rejoined", Some(player), self.player_name(player));
                 }
                 pause::Event::Spent(player) => {
                     println!("game {generation}: player {player} ran out of pause time");
@@ -612,6 +614,30 @@ impl Play {
             self.hub.set_ledger(&entries);
         }
         result
+    }
+
+    /// The chat nickname of the member who holds a seat, empty for none.
+    fn player_name(&self, player: u8) -> String {
+        self.seats
+            .cookie_of_player(player)
+            .and_then(|cookie| self.seats.nickname_of(&cookie))
+            .map(|name| name.as_str().to_string())
+            .unwrap_or_default()
+    }
+
+    /// Tells the pages a network line (left, rejoined, kicked, banned). The
+    /// name is gathered by the caller, since `Seats` is not locked while the
+    /// hub is.
+    fn network_event(&self, event: &str, player: Option<u8>, name: String) {
+        self.hub.notify_network(
+            serde_json::json!({
+                "type": "network",
+                "event": event,
+                "player": player,
+                "name": name,
+            })
+            .to_string(),
+        );
     }
 
     /// Advances the ledger once a poll while a game can be paused.
@@ -1073,9 +1099,16 @@ impl Play {
             }
         };
         if let Some(cookie) = kicked_cookie {
+            let mut name = String::new();
             if let Some(cookie) = cookie {
+                name = self
+                    .seats
+                    .nickname_of(&cookie)
+                    .map(|name| name.as_str().to_string())
+                    .unwrap_or_default();
                 self.seats.ban(&cookie);
             }
+            self.network_event("banned", Some(player), name);
             self.tick_control();
             println!(
                 "game {}: the host banned kicked player {player}",
@@ -1087,6 +1120,11 @@ impl Play {
             .seats
             .cookie_of_player(player)
             .ok_or("not in this match")?;
+        let name = self
+            .seats
+            .nickname_of(&cookie)
+            .map(|name| name.as_str().to_string())
+            .unwrap_or_default();
         self.seats.set_player(&cookie, None)?;
         {
             let mut control = self.control.lock().unwrap();
@@ -1114,6 +1152,7 @@ impl Play {
         self.hub.set_seats(remaining);
         self.tick_pause();
         self.tick_control();
+        self.network_event(if ban { "banned" } else { "kicked" }, Some(player), name);
         println!(
             "game {}: the host {} player {player}",
             self.generation.load(Ordering::SeqCst),
@@ -1138,7 +1177,13 @@ impl Play {
         if self.seats.is_banned(&cookie) {
             return Err("already banned");
         }
+        let name = self
+            .seats
+            .nickname_of(&cookie)
+            .map(|name| name.as_str().to_string())
+            .unwrap_or_default();
         self.seats.ban(&cookie);
+        self.network_event("banned", None, name);
         println!(
             "game {}: the host banned observer {member}",
             self.generation.load(Ordering::SeqCst)

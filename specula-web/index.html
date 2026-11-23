@@ -1528,6 +1528,18 @@ body:not([data-debug="storage"]) #stats-storage { display: none; }
 <label title="Receive audio notification when someone types your nick." data-i18n-attrs="title"><span data-i18n>Nick notification</span> <input id="chat-nick" type="checkbox"></label>
 <label id="chat-hide-observers-setting" title="Hide what observers write while you play." data-i18n-attrs="title"><span data-i18n>Hide observer chat</span> <input id="chat-hide-observers" type="checkbox"></label>
 <label id="chat-notify-attack-setting" title="Show a chat notification if you are attacked by another player." data-i18n-attrs="title"><span data-i18n>Chat notification attack</span> <input id="chat-notify-attack" type="checkbox"></label>
+<label title="Show a chat notification if an ally tributes resources to another team member if teams are locked, and all tributes in observer mode." data-i18n-attrs="title"><span data-i18n>Chat notification tribute</span> <input id="chat-notify-tribute" type="checkbox"></label>
+<label title="Show a chat notification to observers when a player bartered resources." data-i18n-attrs="title"><span data-i18n>Chat notification barter</span> <input id="chat-notify-barter" type="checkbox"></label>
+<label title="Show a chat notification when a player sends a flare." data-i18n-attrs="title"><span data-i18n>Chat notification flare</span> <select id="chat-notify-flare">
+<option value="never" title="Disable flare chat notifications." data-i18n data-i18n-attrs="title">Never</option>
+<option value="observer" title="Only show flare chat notifications when you are observer." data-i18n data-i18n-attrs="title">Only as observer</option>
+<option value="always" title="Always show flare chat notifications &#8211; as player and as observer." data-i18n data-i18n-attrs="title">Always</option>
+</select></label>
+<label title="Show a chat notification if you or an ally have started, aborted or completed a new phase, and phases of all players in observer mode." data-i18n-attrs="title"><span data-i18n>Chat notification phase</span> <select id="chat-notify-phase">
+<option value="none" data-i18n>Disable</option>
+<option value="completed" data-i18n>Completed</option>
+<option value="all" data-i18n>All displayed</option>
+</select></label>
 </div>
 <div class="pane" role="tabpanel" id="pane-language" aria-labelledby="tab-language" hidden>
 <label data-i18n>Language <select id="language">

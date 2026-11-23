@@ -28,6 +28,7 @@ const MESSAGE_ENDED: u8 = 3;
 const MESSAGE_PAUSE: u8 = 4;
 const MESSAGE_FLARE: u8 = 5;
 const MESSAGE_NOTIFICATION: u8 = 6;
+const MESSAGE_EVENT: u8 = 7;
 const CHANGED_POSITION: u64 = 1;
 const CHANGED_COLOR: u64 = 2;
 const CHANGED_ICON: u64 = 4;
@@ -49,6 +50,17 @@ const CHANGED_CAPTURE: u64 = 131072;
 const CHANGED_RANGES: u64 = 262144;
 const CHANGED_MIRAGE: u64 = 524288;
 const CHANGED_CHOSEN: u64 = 1048576;
+/// One entry of the engine's time notification list.
+#[derive(Clone, PartialEq)]
+pub struct TimeNote {
+    /// `endTime`, simulation ms.
+    pub end_ms: u32,
+    /// Who it is for; -1 is the observers.
+    pub players: Vec<i32>,
+    /// JSON of the message and its parameters.
+    pub json: String,
+}
+
 /// The oldest stored matches still read: before them templates had no
 /// supply types, gather rates, dropsite types and attack types.
 const OLDEST_WIRE: u8 = 19;
@@ -58,6 +70,8 @@ const LOS_WIRE: u8 = 22;
 /// From v23: the keyframe ends with the players who have the game paused.
 const PAUSE_WIRE: u8 = 23;
 /// From v24: a keyframe and a pause message end with the pause ledger.
+/// From v27: the player table ends with the engine's time notes.
+const TIME_NOTES_WIRE: u8 = 27;
 const LEDGER_WIRE: u8 = 24;
 /// A ledger line's seat holds a voluntary pause.
 pub const LEDGER_HOLDS: u8 = 1;
@@ -570,6 +584,9 @@ pub struct Scene {
     /// When the ceasefire ends, in simulation ms (a turn is `TURN_MS`); 0
     /// for none. It travels with the player table.
     pub ceasefire_end: u32,
+    /// The engine's time texts, with the players they are for; they travel
+    /// with the player table, from v27.
+    pub time_notes: Vec<TimeNote>,
     /// Set whenever a message replaces `players`; the reader clears it.
     pub players_changed: bool,
     pub territory: Territory,
@@ -713,7 +730,7 @@ impl Scene {
             MESSAGE_KEYFRAME => self.apply_keyframe(&mut cursor)?,
             MESSAGE_DELTA => self.apply_delta(&mut cursor, progress)?,
             MESSAGE_PAUSE => self.apply_pause(&mut cursor)?,
-            MESSAGE_FLARE | MESSAGE_NOTIFICATION => {
+            MESSAGE_FLARE | MESSAGE_NOTIFICATION | MESSAGE_EVENT => {
                 cursor.0 = &[];
             }
             _ => return Err("unknown message kind"),
@@ -1136,6 +1153,27 @@ impl Scene {
             });
         }
         self.ceasefire_end = cursor.varint()? as u32;
+        self.time_notes.clear();
+        if self.wire_version >= TIME_NOTES_WIRE {
+            let count = cursor.varint()?;
+            for _ in 0..count {
+                let end_ms = cursor.varint()? as u32;
+                let listed = cursor.varint()?;
+                let mut players = Vec::new();
+                for _ in 0..listed {
+                    players.push(cursor.zigzag()?);
+                }
+                let length = cursor.varint()? as usize;
+                let json = std::str::from_utf8(cursor.take(length)?)
+                    .map_err(|_| "time note not UTF-8")?
+                    .to_string();
+                self.time_notes.push(TimeNote {
+                    end_ms,
+                    players,
+                    json,
+                });
+            }
+        }
         self.players_changed = true;
         Ok(())
     }
@@ -1234,6 +1272,16 @@ impl Scene {
             out.u8(u8::from(player.battle));
         }
         out.varint(u64::from(self.ceasefire_end));
+        out.varint(self.time_notes.len() as u64);
+        for note in &self.time_notes {
+            out.varint(u64::from(note.end_ms));
+            out.varint(note.players.len() as u64);
+            for player in &note.players {
+                out.zigzag(*player);
+            }
+            out.varint(note.json.len() as u64);
+            out.0.extend_from_slice(note.json.as_bytes());
+        }
         out.varint(u64::from(self.territory.width));
         out.varint(u64::from(self.territory.height));
         for run in self.territory.tiles.chunk_by(|a, b| a == b) {
@@ -1721,20 +1769,22 @@ pub fn is_notification(message: &[u8]) -> bool {
     message.first() == Some(&MESSAGE_NOTIFICATION)
 }
 
-/// A message that is no turn and is in no keyframe: a flare or a
-/// notification.
+pub fn is_event(message: &[u8]) -> bool {
+    message.first() == Some(&MESSAGE_EVENT)
+}
+
+/// A message that is no turn and is in no keyframe: a flare, a
+/// notification or an event.
 pub fn is_transient(message: &[u8]) -> bool {
-    is_flare(message) || is_notification(message)
+    is_flare(message) || is_notification(message) || is_event(message)
 }
 
 pub const NOTE_ATTACKED: u8 = 1;
-pub const NOTE_AUTOQUEUE_STOPPED: u8 = 2;
 const NOTE_DOMESTIC: u8 = 1;
 const NOTE_UNIT: u8 = 2;
 
 /// What the session GUI would tell the player.
 pub struct Note {
-    pub turn: u32,
     pub kind: u8,
     /// The attacker's owner, Gaia 0.
     pub attacker: u8,
@@ -1751,7 +1801,7 @@ pub struct Note {
 pub fn read_notification(message: &[u8]) -> Result<Note, &'static str> {
     let (_, body) = message.split_first().ok_or("empty message")?;
     let mut cursor = ByteReader(body);
-    let turn = u32::try_from(cursor.varint()?).map_err(|_| "turn out of range")?;
+    cursor.varint()?;
     let kind = cursor.u8()?;
     let attacker = cursor.u8()?;
     let flags = cursor.u8()?;
@@ -1762,7 +1812,6 @@ pub fn read_notification(message: &[u8]) -> Result<Note, &'static str> {
         return Err("trailing bytes");
     }
     Ok(Note {
-        turn,
         kind,
         attacker,
         domestic: flags & NOTE_DOMESTIC != 0,
@@ -1771,6 +1820,21 @@ pub fn read_notification(message: &[u8]) -> Result<Note, &'static str> {
         x,
         z,
     })
+}
+
+/// An event's turn and its JSON object.
+pub fn read_event(message: &[u8]) -> Result<(u32, String), &'static str> {
+    let (_, body) = message.split_first().ok_or("empty message")?;
+    let mut cursor = ByteReader(body);
+    let turn = u32::try_from(cursor.varint()?).map_err(|_| "turn out of range")?;
+    let length = cursor.varint()? as usize;
+    let json = std::str::from_utf8(cursor.take(length)?)
+        .map_err(|_| "event not UTF-8")?
+        .to_string();
+    if !cursor.0.is_empty() {
+        return Err("trailing bytes");
+    }
+    Ok((turn, json))
 }
 
 /// A flare's sender player, position in metres.
@@ -1787,15 +1851,20 @@ pub fn read_flare(message: &[u8]) -> Result<(u8, f32, f32), &'static str> {
     Ok((sender, x, z))
 }
 
-/// An observer's flare: its position in metres.
-pub fn read_observer_flare(body: &[u8]) -> Result<(f32, f32), &'static str> {
+/// An observer's flare: its position in metres and the sender's chat
+/// nickname, if it has one.
+pub fn read_observer_flare(body: &[u8]) -> Result<(f32, f32, Option<String>), &'static str> {
     let mut cursor = ByteReader(body);
     let x = f32::from_bits(cursor.u32()?);
     let z = f32::from_bits(cursor.u32()?);
+    let length = cursor.varint()? as usize;
+    let name = std::str::from_utf8(cursor.take(length)?)
+        .map_err(|_| "nickname not UTF-8")?
+        .to_string();
     if !cursor.0.is_empty() {
         return Err("trailing bytes");
     }
-    Ok((x, z))
+    Ok((x, z, (!name.is_empty()).then_some(name)))
 }
 
 pub fn is_ended(message: &[u8]) -> bool {

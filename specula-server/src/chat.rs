@@ -47,7 +47,7 @@ pub const MAX_FRAME: usize = 16 * 1024;
 pub const LOG_KEEP: usize = 500;
 /// As `feed::Player::state` and `feed::Player::stances`.
 const PLAYER_ACTIVE: u8 = 0;
-const STANCE_ENEMY: u8 = 0;
+pub(crate) const STANCE_ENEMY: u8 = 0;
 const STANCE_ALLY: u8 = 1;
 
 #[derive(Clone, Copy, PartialEq, Eq)]

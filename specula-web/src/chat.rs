@@ -31,6 +31,14 @@ pub const NICK_KEY: &str = "specula.chat.nick";
 pub const HIDE_OBSERVERS_KEY: &str = "specula.chat.hideobservers";
 /// `gui.session.notifications.attack`, on unless turned off.
 pub const NOTIFY_ATTACK_KEY: &str = "specula.chat.notifyattack";
+/// `gui.session.notifications.tribute`, on unless turned off.
+pub const NOTIFY_TRIBUTE_KEY: &str = "specula.chat.notifytribute";
+/// `gui.session.notifications.barter`, on unless turned off.
+pub const NOTIFY_BARTER_KEY: &str = "specula.chat.notifybarter";
+/// `gui.session.notifications.flare`: never, observer or always (default).
+pub const NOTIFY_FLARE_KEY: &str = "specula.chat.notifyflare";
+/// `gui.session.notifications.phase`: none, completed (default) or all.
+pub const NOTIFY_PHASE_KEY: &str = "specula.chat.notifyphase";
 /// `chat.session.extended`, on unless turned off.
 pub const EXTENDED_KEY: &str = "specula.chat.extended";
 /// The key `play.html` and the setup page keep the nickname under.
@@ -58,6 +66,27 @@ pub fn setting(key: &str, default: bool) -> bool {
         .and_then(|window| window.local_storage().ok().flatten())
         .and_then(|storage| storage.get_item(key).ok().flatten())
         .map_or(default, |text| text == "1")
+}
+
+/// A stored choice among `allowed`, else `default`.
+pub fn choice(key: &str, default: &'static str, allowed: &[&'static str]) -> &'static str {
+    let stored = web_sys::window()
+        .and_then(|window| window.local_storage().ok().flatten())
+        .and_then(|storage| storage.get_item(key).ok().flatten());
+    allowed
+        .iter()
+        .copied()
+        .find(|value| Some(*value) == stored.as_deref())
+        .unwrap_or(default)
+}
+
+pub fn store_choice(key: &str, value: &str) {
+    // Best effort, as `store_setting`.
+    if let Some(storage) =
+        web_sys::window().and_then(|window| window.local_storage().ok().flatten())
+    {
+        let _ = storage.set_item(key, value);
+    }
 }
 
 pub fn store_setting(key: &str, on: bool) {

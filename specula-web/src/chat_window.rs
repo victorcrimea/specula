@@ -4,8 +4,8 @@
 //!
 //! What differs from the engine: the addressee list is the server's members
 //! (`chat::Chat::members`), the lines carry the server's send time, and of
-//! the game and network notifications only the attack line is there, since
-//! the server sends no others (CONTROL-IMPL.md V95).
+//! the engine's notifications the lines are those of `notices.rs`, live
+//! only (CONTROL-IMPL.md V95, V105).
 
 use std::cell::Cell;
 use std::collections::VecDeque;
@@ -24,6 +24,9 @@ use crate::chat;
 use crate::chat::Channel;
 use crate::chat::Entry;
 use crate::lang;
+use crate::notices::Filter;
+use crate::notices::Notice;
+use crate::notices::Piece;
 use crate::panel::create;
 use crate::panel::css_color;
 
@@ -35,7 +38,7 @@ const OVERLAY_LINES: usize = 20;
 /// `ChatOverlay.chatTimeout`.
 const OVERLAY_MS: f64 = 30_000.0;
 /// `ChatHistory.Filters` that the server has messages for, in their order.
-const FILTERS: [(&str, &str); 7] = [
+const FILTERS: [(&str, &str); 9] = [
     ("all", "Chat and notifications"),
     ("chat", "Chat messages"),
     ("player", "Players chat"),
@@ -43,6 +46,8 @@ const FILTERS: [(&str, &str); 7] = [
     ("enemy", "Enemy chat"),
     ("observer", "Observer chat"),
     ("private", "Private chat"),
+    ("gamenotifications", "Game notifications"),
+    ("chatnotifications", "Network notifications"),
 ];
 
 /// Where `ChatMessageFormatSimulation.attack`'s line and the
@@ -61,6 +66,7 @@ const FOCUS_ATTRIBUTE: &str = "data-focus";
 /// Stand-ins for the parts of a translated line that are not text.
 const ICON_MARK: char = '\u{E000}';
 const ATTACKER_MARK: char = '\u{E001}';
+const TEXT_MARK: char = '\u{E002}';
 
 /// What the page wires listeners to.
 pub struct Controls {
@@ -90,6 +96,8 @@ enum Item {
         color: String,
         received_ms: f64,
     },
+    /// A line of `notices.rs`, as the engine's history keeps it.
+    Notice { notice: Notice, received_ms: f64 },
 }
 
 /// `#chat-window` and `#chat-overlay`.
@@ -251,6 +259,92 @@ impl ChatWindow {
         });
         self.trim_items();
         self.history_dirty = true;
+    }
+
+    /// A notification line (`notices.rs`) in the overlay and the history; a
+    /// focus place makes a click on the overlay line move the camera.
+    pub fn push_notice(&mut self, now: f64, notice: Notice) {
+        let line = self.notice_line(&notice, None);
+        if let Some(focus) = notice.focus {
+            let _ = line.set_attribute(
+                FOCUS_ATTRIBUTE,
+                &format!(
+                    "{} {} {} {}",
+                    focus.target,
+                    u8::from(focus.unit),
+                    focus.x,
+                    focus.z
+                ),
+            );
+            let _ = line.set_attribute(
+                crate::tooltip::ATTRIBUTE,
+                &lang::translate("Click to focus on the flare's location."),
+            );
+            let _ = line.set_attribute("class", "focus");
+        }
+        self.push_overlay(now, line);
+        self.items.push(Item::Notice {
+            notice,
+            received_ms: js_sys::Date::now(),
+        });
+        self.trim_items();
+        self.history_dirty = true;
+    }
+
+    /// Whether a line is showing in the overlay, which a closed chat hides
+    /// otherwise.
+    fn overlay_busy(&self) -> bool {
+        !self.overlay_lines.is_empty()
+    }
+
+    fn notice_line(&self, notice: &Notice, time: Option<f64>) -> HtmlElement {
+        let root: HtmlElement = create(&self.document, "div").expect("a div");
+        let span = |text: &str| {
+            let span: HtmlElement = create(&self.document, "span").expect("a span");
+            span.set_text_content(Some(text));
+            span
+        };
+        let mut suffix = String::new();
+        if let Some(time) = time {
+            // The engine's one template for the stamp, with the line itself
+            // standing in as a mark so that its pieces stay pieces.
+            let stamped = lang::format(
+                &lang::translate("%(time)s %(message)s"),
+                &[
+                    ("time", &chat::stamp(time)),
+                    ("message", &TEXT_MARK.to_string()),
+                ],
+            );
+            let (before, after) = stamped.split_once(TEXT_MARK).unwrap_or((&stamped, ""));
+            if !before.is_empty() {
+                let _ = root.append_child(&span(before));
+            }
+            suffix = after.to_string();
+        }
+        for piece in &notice.pieces {
+            match piece {
+                Piece::Text(text) => {
+                    let _ = root.append_child(&span(text));
+                }
+                Piece::Name { text, color } => {
+                    let name = span(text);
+                    let _ = name.style().set_property("color", color);
+                    let _ = root.append_child(&name);
+                }
+                Piece::Icon(variable) => {
+                    let icon = span("");
+                    let _ = icon.set_attribute("class", "icon");
+                    let _ = icon
+                        .style()
+                        .set_property("background-image", &format!("var({variable})"));
+                    let _ = root.append_child(&icon);
+                }
+            }
+        }
+        if !suffix.is_empty() {
+            let _ = root.append_child(&span(&suffix));
+        }
+        root
     }
 
     /// The attack text with its icon and the attacker's coloured name, after
@@ -483,7 +577,9 @@ impl ChatWindow {
         timestamps: bool,
     ) -> bool {
         let mut ring = false;
-        self.overlay.set_hidden(self.chat.closed());
+        // The broadcast's chat is closed, yet its notification lines show.
+        self.overlay
+            .set_hidden(self.chat.closed() && !self.overlay_busy());
         while let Some((expires, line)) = self.overlay_lines.front() {
             if *expires > now {
                 break;
@@ -735,13 +831,36 @@ impl ChatWindow {
                         let _ = self.history.append_child(&element);
                     }
                 }
+                Item::Notice {
+                    notice,
+                    received_ms,
+                } => {
+                    // As `ChatHistory.Filters`: an AI's line has a guid, so
+                    // it is a message; the AI is no "player" in them.
+                    let kept = matches!(
+                        (filter.as_str(), notice.filter),
+                        ("all", _)
+                            | ("gamenotifications", Filter::Game)
+                            | ("chatnotifications", Filter::Network)
+                            | ("chat", Filter::Chat(_))
+                            | ("ally", Filter::Chat(Channel::Allies))
+                            | ("enemy", Filter::Chat(Channel::Enemies))
+                            | ("observer", Filter::Chat(Channel::Observers))
+                            | ("private", Filter::Chat(Channel::Private))
+                    );
+                    if kept {
+                        let time = timestamps.then_some(*received_ms);
+                        let line = self.notice_line(notice, time);
+                        let _ = self.history.append_child(&line);
+                    }
+                }
                 Item::Attack {
                     domestic,
                     attacker,
                     color,
                     received_ms,
                 } => {
-                    if filter == "all" {
+                    if filter == "all" || filter == "gamenotifications" {
                         let time = timestamps.then_some(*received_ms);
                         let line = self.attack_line(*domestic, attacker, color, time);
                         let _ = self.history.append_child(&line);
