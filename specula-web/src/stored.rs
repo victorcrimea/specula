@@ -20,24 +20,33 @@ const CACHE_NAME: &str = "specula-assets";
 const PRUNED_KEY: &str = "specula-assets-pruned";
 
 /// The file's bytes, and whether they came from the Cache API.
-pub async fn fetch(url: &str) -> Result<(Vec<u8>, bool), String> {
+/// `going_out` runs just before a request is made, so the caller can tell
+/// a network download from a stored file, which is only known after the
+/// lookup.
+pub async fn fetch(url: &str, going_out: impl FnOnce()) -> Result<(Vec<u8>, bool), String> {
     let Some(cache) = open().await else {
+        going_out();
         return Ok((crate::fetch_bytes(url).await?, false));
     };
     if let Some(bytes) = stored(&cache, url).await {
         return Ok((bytes, true));
     }
+    going_out();
     let bytes = crate::fetch_bytes(url).await?;
     put(&cache, url, &bytes);
     Ok((bytes, false))
 }
 
+/// Whether the Cache API can be used at all.
+pub fn usable() -> bool {
+    web_sys::window().is_some_and(|window| window.is_secure_context() && window.caches().is_ok())
+}
+
 async fn open() -> Option<Cache> {
-    let window = web_sys::window()?;
-    if !window.is_secure_context() {
+    if !usable() {
         return None;
     }
-    let caches = window.caches().ok()?;
+    let caches = web_sys::window()?.caches().ok()?;
     JsFuture::from(caches.open(CACHE_NAME))
         .await
         .ok()?

@@ -90,7 +90,7 @@ use web_sys::Worker;
 use web_sys::WorkerOptions;
 use web_sys::WorkerType;
 
-use crate::assets::Progress;
+use crate::assets::Downloads;
 use crate::assets::Store;
 use crate::audio::Audio;
 use crate::audio::DEFAULT_VOLUME;
@@ -360,9 +360,9 @@ trait View {
     fn max_texture_tiers(&self) -> usize {
         TEXTURE_TIER_SIDES.len()
     }
-    /// Downloads to show on the loading bar.
-    fn progress(&self) -> Progress {
-        Progress::Idle
+    /// Downloads, for the download indicator and the benchmark.
+    fn downloads(&self) -> Downloads {
+        Downloads::default()
     }
     /// What the stream has brought for the shown match, for statistics.
     fn set_stream_bytes(&mut self, _bytes: StreamBytes) {}
@@ -506,44 +506,63 @@ enum Page {
     Observer,
 }
 
-/// The observer page's download bar, `#loading` with `#loading-fill` and
-/// `#loading-text`.
+/// A finished request and the next one's Cache API lookup leave a frame or
+/// two with nothing on the network, which must not blink the chip.
+const LOADING_LINGER_MS: f64 = 500.0;
+
+/// The observer page's download chip, `#loading` with `#loading-text`.
 struct LoadingBar {
     bar: HtmlElement,
-    fill: HtmlElement,
     text: HtmlElement,
+    /// Without the Cache API a request may still be an HTTP cache hit.
+    delay_ms: f64,
+    /// Since when requests have been on the network without a pause.
+    busy_since: Option<f64>,
+    /// When the last request finished, so a gap between two does not blink.
+    idle_since: Option<f64>,
+    /// `Downloads::bytes` when this burst started.
+    base: u64,
     /// What is shown, so the DOM is touched only on change.
     shown: String,
 }
 
 impl LoadingBar {
-    fn show(&mut self, progress: Progress) {
-        let (label, width, busy) = match progress {
-            Progress::Idle => (String::new(), 0.0, false),
-            Progress::Starting => (lang::translate("Loading the model index"), 0.0, true),
-            Progress::Bytes { done, total } => (
-                lang::format(
-                    &lang::translate("Loading models %(done)s / %(total)s MB"),
-                    &[
-                        ("done", &format!("{:.1}", done as f64 / 1e6)),
-                        ("total", &format!("{:.1}", total as f64 / 1e6)),
-                    ],
-                ),
-                done as f64 / total.max(1) as f64 * 100.0,
-                true,
-            ),
+    fn show(&mut self, downloads: Downloads, now: f64) {
+        if downloads.in_flight > 0 {
+            self.idle_since = None;
+            if self.busy_since.is_none() {
+                self.busy_since = Some(now);
+                self.base = downloads.bytes;
+            }
+        } else if self.idle_since.is_none() {
+            self.idle_since = Some(now);
+        }
+        if self
+            .idle_since
+            .is_some_and(|since| now - since >= LOADING_LINGER_MS)
+        {
+            self.busy_since = None;
+        }
+        let visible = self
+            .busy_since
+            .is_some_and(|since| now - since >= self.delay_ms);
+        let label = if visible {
+            lang::format(
+                &lang::translate("Downloading %(done)s MB"),
+                &[(
+                    "done",
+                    &format!("{:.1}", (downloads.bytes - self.base) as f64 / 1e6),
+                )],
+            )
+        } else {
+            String::new()
         };
-        let key = format!("{label}|{width:.0}");
+        let key = format!("{visible}|{label}");
         if key == self.shown {
             return;
         }
         self.shown = key;
-        let _ = self
-            .bar
-            .set_attribute("style", if busy { "" } else { "display: none" });
-        let _ = self
-            .fill
-            .set_attribute("style", &format!("width: {width:.0}%"));
+        self.bar.set_hidden(!visible);
         self.text.set_text_content(Some(&label));
     }
 }
@@ -1184,7 +1203,7 @@ impl App {
             self.renderer.move_to(x, z);
         }
         if let Some(loading) = &mut self.loading {
-            loading.show(self.renderer.progress());
+            loading.show(self.renderer.downloads(), now);
         }
         self.renderer.set_stream_bytes(self.stream_bytes);
         let progress = ((now - self.turn_start) / self.turn_interval).clamp(0.0, 1.0) as f32;
@@ -2331,8 +2350,11 @@ async fn run(
         Page::Map => None,
         Page::Observer => Some(LoadingBar {
             bar: element(&document, "loading")?,
-            fill: element(&document, "loading-fill")?,
             text: element(&document, "loading-text")?,
+            delay_ms: if stored::usable() { 0.0 } else { 1000.0 },
+            busy_since: None,
+            idle_since: None,
+            base: 0,
             shown: String::new(),
         }),
     };

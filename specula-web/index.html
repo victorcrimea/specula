@@ -31,14 +31,15 @@ body { cursor: var(--gui-cursor-default, default); }
 #controls button[aria-pressed="true"], #playback button[aria-pressed="true"] {
   border-color: #8fa3b0; }
 #controls select:disabled, #playback :disabled { opacity: 0.5; }
-#loading { position: fixed; left: 50%; top: calc(var(--top-height) + 44px); width: min(240px, calc(100vw - 200px));
-  transform: translateX(-50%); padding: 3px 6px; border: 1px solid #3a4248;
-  border-radius: 4px; background: rgba(15, 18, 20, 0.85);
-  font: 11px system-ui, sans-serif; color: #e6e9eb; white-space: nowrap;
-  overflow: hidden; text-overflow: ellipsis; box-sizing: border-box; }
-#loading-track { height: 3px; margin-top: 2px; border-radius: 2px; background: #2a3035;
-  overflow: hidden; }
-#loading-fill { height: 100%; width: 0; background: #8fa3b0; transition: width 0.2s; }
+#loading { position: fixed; right: 12px; bottom: calc(var(--panel-bottom) + 6px);
+  pointer-events: none; font: 11px system-ui, sans-serif; color: #e6e9eb;
+  opacity: 0.55; text-shadow: 0 0 2px black; white-space: nowrap; text-align: right; }
+#loading[hidden] { display: none; }
+#loading-track { width: 64px; height: 2px; margin: 2px 0 0 auto; overflow: hidden;
+  border-radius: 1px; background: rgba(143, 163, 176, 0.25); position: relative; }
+#loading-track::after { content: ""; position: absolute; top: 0; bottom: 0;
+  width: 40%; background: #8fa3b0; animation: loading-slide 1.2s ease-in-out infinite; }
+@keyframes loading-slide { from { left: -40%; } to { left: 100%; } }
 #view { touch-action: none; }
 /* The engine's bandbox sprite: black outside, white inside. */
 #bandbox { position: fixed; box-sizing: border-box; border: 1px solid black;
@@ -1051,7 +1052,8 @@ body:not([data-debug="storage"]) #stats-storage { display: none; }
 #settings .presets .button[hidden] { display: none; }
 #bench-status { margin: 0; font-size: 12px; color: #8fa3b0; }
 #bench-status:empty { display: none; }
-@media (prefers-reduced-motion: reduce) { #settings, #settings.open { transition: none; } }
+@media (prefers-reduced-motion: reduce) { #settings, #settings.open { transition: none; }
+  #loading-track::after { animation: none; left: 0; width: 100%; opacity: 0.5; } }
 /* The engine's session tooltips (gui/common/setup.xml): the
    BackgroundSessionTooltip sprite, darkbrown with a 1 px gold edge,
    buffer_zone 4, maxwidth 400, white text; the wasm sets the font and
@@ -1255,9 +1257,9 @@ body:not([data-debug="storage"]) #stats-storage { display: none; }
 <div id="research" hidden></div>
 <pre id="errors" aria-live="polite"></pre>
 </div>
-<div id="loading" role="status">
-<span id="loading-text">Loading</span>
-<div id="loading-track"><div id="loading-fill"></div></div>
+<div id="loading" role="status" hidden>
+<span id="loading-text"></span>
+<div id="loading-track"></div>
 </div>
 <div id="playback">
 <button id="play" type="button" disabled data-i18n>Pause</button>

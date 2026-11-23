@@ -57,8 +57,8 @@ use crate::StreamBytes;
 use crate::TURN_MS;
 use crate::View;
 use crate::assets;
+use crate::assets::Downloads;
 use crate::assets::Get;
-use crate::assets::Progress;
 use crate::assets::Store;
 use crate::bench::BenchInfo;
 use crate::bench::CameraPose;
@@ -4626,8 +4626,8 @@ impl View for Field {
         self.fancy_water = on;
     }
 
-    fn progress(&self) -> Progress {
-        self.store.borrow().progress()
+    fn downloads(&self) -> Downloads {
+        self.store.borrow().downloads()
     }
 
     fn set_stream_bytes(&mut self, bytes: StreamBytes) {

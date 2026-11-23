@@ -28,7 +28,6 @@ use web_sys::HtmlOptionElement;
 use web_sys::HtmlSelectElement;
 
 use crate::App;
-use crate::assets::Progress;
 use crate::element;
 use crate::lang;
 use crate::timing;
@@ -575,7 +574,7 @@ impl Bench {
             }
             Phase::Settle { frames, since } => {
                 *frames += 1;
-                let loaded = matches!(app.borrow().renderer.progress(), Progress::Idle);
+                let loaded = !app.borrow().renderer.downloads().busy;
                 let waited = now - *since > SETTLE_LIMIT_MS;
                 if *frames >= WARMUP_FRAMES && (loaded || waited) {
                     timing::start_samples();

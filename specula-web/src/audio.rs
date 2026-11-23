@@ -510,7 +510,7 @@ async fn load(
 ) {
     let url = format!("/assets/{}", Kind::Sound.file_name(file.hash));
     let decoded = async {
-        let (bytes, _) = crate::stored::fetch(&url).await?;
+        let (bytes, _) = crate::stored::fetch(&url, || {}).await?;
         let array = js_sys::Uint8Array::from(&bytes[..]);
         let promise = context
             .decode_audio_data(&array.buffer())

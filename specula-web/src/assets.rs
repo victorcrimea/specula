@@ -10,6 +10,7 @@
 //! comes in tiers, each fetched once the smaller one is in, up to the
 //! viewer's texture quality.
 
+use std::cell::Cell;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -63,15 +64,15 @@ pub struct Stats {
     pub cached: u64,
 }
 
-/// What the page's loading bar shows.
-pub enum Progress {
-    Idle,
-    /// The index is on its way; sizes are not known yet.
-    Starting,
-    Bytes {
-        done: u64,
-        total: u64,
-    },
+/// What the page's download indicator and the benchmark read.
+#[derive(Clone, Copy, Default)]
+pub struct Downloads {
+    /// Anything asked for and not yet in, the index included, cached or not.
+    pub busy: bool,
+    /// Requests on the network now, after a Cache API miss.
+    pub in_flight: usize,
+    /// File bytes that came over the network since the page loaded.
+    pub bytes: u64,
 }
 
 enum Slot<T> {
@@ -155,6 +156,8 @@ pub struct Store {
     /// Bytes asked for and arrived since the queue was last empty.
     queued_bytes: u64,
     done_bytes: u64,
+    network_in_flight: usize,
+    network_bytes: u64,
     stats: Stats,
 }
 
@@ -189,16 +192,20 @@ impl Store {
         }
     }
 
-    pub fn progress(&self) -> Progress {
-        if self.index.is_none() && !self.index_failed {
-            Progress::Starting
-        } else if self.queued_bytes == 0 {
-            Progress::Idle
-        } else {
-            Progress::Bytes {
-                done: self.done_bytes,
-                total: self.queued_bytes,
-            }
+    fn network_started(&mut self) {
+        self.network_in_flight += 1;
+    }
+
+    fn network_finished(&mut self, bytes: u64) {
+        self.network_in_flight -= 1;
+        self.network_bytes += bytes;
+    }
+
+    pub fn downloads(&self) -> Downloads {
+        Downloads {
+            busy: (self.index.is_none() && !self.index_failed) || self.queued_bytes != 0,
+            in_flight: self.network_in_flight,
+            bytes: self.network_bytes,
         }
     }
 
@@ -667,7 +674,20 @@ pub fn pump(store: &Rc<RefCell<Store>>) {
 
 async fn fetch(store: Rc<RefCell<Store>>, job: Job) {
     let url = format!("/assets/{}", job.kind.file_name(job.file.hash));
-    let bytes = crate::stored::fetch(&url).await;
+    let went_out = Cell::new(false);
+    let bytes = crate::stored::fetch(&url, || {
+        went_out.set(true);
+        store.borrow_mut().network_started();
+    })
+    .await;
+    if went_out.get() {
+        let size = if bytes.is_ok() {
+            u64::from(job.file.size)
+        } else {
+            0
+        };
+        store.borrow_mut().network_finished(size);
+    }
     let bytes = bytes.map(|(bytes, stored)| {
         let size = u64::from(job.file.size);
         let mut state = store.borrow_mut();
@@ -754,9 +774,17 @@ async fn fetch_index(store: &Rc<RefCell<Store>>) -> Result<(Index, String), Stri
         return Err(format!("{POINTER} names {name:?}, not an index"));
     }
     let url = format!("/{name}");
-    let (bytes, stored) = crate::stored::fetch(&url)
-        .await
-        .map_err(|error| format!("{url}: {error}"))?;
+    let went_out = Cell::new(false);
+    let fetched = crate::stored::fetch(&url, || {
+        went_out.set(true);
+        store.borrow_mut().network_started();
+    })
+    .await;
+    if went_out.get() {
+        let size = fetched.as_ref().map_or(0, |(bytes, _)| bytes.len() as u64);
+        store.borrow_mut().network_finished(size);
+    }
+    let (bytes, stored) = fetched.map_err(|error| format!("{url}: {error}"))?;
     if stored {
         store.borrow_mut().count_stored(bytes.len() as u64);
     } else {
