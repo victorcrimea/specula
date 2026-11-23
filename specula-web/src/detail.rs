@@ -22,6 +22,9 @@ pub const CONTROL_HOST: u8 = 1;
 pub const CONTROL_KICKED: u8 = 2;
 pub const CONTROL_ABSENT: u8 = 4;
 pub const CONTROL_BANNED: u8 = 8;
+/// Archived matches keep it; it has no spy cost fields, which a player
+/// carries from version 14.
+const DETAIL_VERSION_NO_SPY: u8 = 13;
 /// Archived matches keep it; it has no control, which a keyframe ends with
 /// from version 13.
 const DETAIL_VERSION_NO_CONTROL: u8 = 12;
@@ -191,7 +194,7 @@ impl Commands {
 }
 
 /// What a player's panels read that is not an entity's.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct PlayerGui {
     /// 1-based formation template strings the civ may use.
     pub formations: Vec<u32>,
@@ -205,6 +208,32 @@ pub struct PlayerGui {
     /// `GetTraderNumber`: land total, trading, garrisoned; ship total,
     /// trading.
     pub traders: [u16; 5],
+    /// `GetSpyCostMultiplier`.
+    pub spy_multiplier: f32,
+    /// `SPY_REQUIREMENTS_MET` and `SPY_DISABLED` of the spy template.
+    pub spy_flags: u8,
+    /// `VisionSharing.FailureCostRatio` of the spy template.
+    pub spy_failure_ratio: f32,
+}
+
+impl PlayerGui {
+    pub const SPY_REQUIREMENTS_MET: u8 = 1;
+    pub const SPY_DISABLED: u8 = 2;
+}
+
+impl Default for PlayerGui {
+    fn default() -> Self {
+        PlayerGui {
+            formations: Vec::new(),
+            prices: Vec::new(),
+            can_barter: false,
+            trading_goods: Vec::new(),
+            traders: [0; 5],
+            spy_multiplier: 1.0,
+            spy_flags: 0,
+            spy_failure_ratio: 0.0,
+        }
+    }
 }
 
 /// A rally point and the line to it, in `RALLY_UNITS_PER_METRE`.
@@ -462,6 +491,7 @@ impl Details {
         if !matches!(
             version,
             DETAIL_VERSION
+                | DETAIL_VERSION_NO_SPY
                 | DETAIL_VERSION_NO_CONTROL
                 | DETAIL_VERSION_NO_TRADE_GAIN
                 | DETAIL_VERSION_NO_TRADE_ROUTE
@@ -621,6 +651,11 @@ impl Details {
                         *count = u16::try_from(cursor.varint()?).unwrap_or(u16::MAX);
                     }
                 }
+                if self.version > DETAIL_VERSION_NO_SPY {
+                    player.spy_multiplier = cursor.f32()?;
+                    player.spy_flags = cursor.u8()?;
+                    player.spy_failure_ratio = cursor.f32()?;
+                }
                 Ok(player)
             })
             .collect::<Result<_, &'static str>>()?;
@@ -734,6 +769,11 @@ impl Details {
                     for count in player.traders {
                         out.varint(u64::from(count));
                     }
+                }
+                if self.version > DETAIL_VERSION_NO_SPY {
+                    out.f32(player.spy_multiplier);
+                    out.u8(player.spy_flags);
+                    out.f32(player.spy_failure_ratio);
                 }
             }
         }

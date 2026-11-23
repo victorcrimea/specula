@@ -69,7 +69,7 @@ const BROTLI_QUALITY: u32 = 11;
 const BROTLI_WINDOW_BITS: u32 = 22;
 
 /// (custom property key, path under `UI`), copied as they are.
-const TEXTURES: [(&str, &str); 122] = [
+const TEXTURES: [(&str, &str); 124] = [
     ("hud-panels", "session/hud_panels.png"),
     ("line-horiz", "global/border/line_horiz.png"),
     ("line-vert", "global/border/line_vert.png"),
@@ -270,6 +270,8 @@ const TEXTURES: [(&str, &str); 122] = [
     ("command-autoqueue-off", "session/icons/autoqueue-off.png"),
     ("diplomacy", "session/icons/diplomacy.png"),
     ("diplomacy-on", "session/icons/diplomacy-on.png"),
+    ("attack-request", "session/icons/attack-request.png"),
+    ("bribes", "session/icons/bribes.png"),
     ("victory", "session/icons/victory.png"),
     ("defeat", "session/icons/defeat.png"),
     ("stone-button", "global/button/button_stone_unselected.png"),

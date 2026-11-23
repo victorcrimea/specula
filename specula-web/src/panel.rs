@@ -630,28 +630,44 @@ impl View<'_> {
     /// A template's `GetTemplateData` for `player`; `name` is the 1-based
     /// string of its name.
     fn template_data(&self, name: u32, player: i32) -> Option<JsValue> {
-        let hash = self
-            .scene
-            .details
-            .data
-            .get(&DataKey::Template { name, player })?;
-        self.data.get(*hash)
+        template_data_of(self.scene, self.data, name, player)
     }
 
     /// A technology's data for `player`'s civ; `name` is its 1-based
     /// string.
     pub(crate) fn technology_data(&self, name: u32, player: i32) -> Option<JsValue> {
-        let civ = usize::try_from(player)
-            .ok()
-            .and_then(|player| self.scene.players.get(player))?;
-        let civ = string_index(self.scene, &civ.civ)?;
-        let hash = self
-            .scene
-            .details
-            .data
-            .get(&DataKey::Technology { name, civ })?;
-        self.data.get(*hash)
+        technology_data_of(self.scene, self.data, name, player)
     }
+}
+
+/// A template's `GetTemplateData` for `player`; `name` is the 1-based string
+/// of its name.
+pub(crate) fn template_data_of(
+    scene: &Scene,
+    data: &DataFiles,
+    name: u32,
+    player: i32,
+) -> Option<JsValue> {
+    let hash = scene
+        .details
+        .data
+        .get(&DataKey::Template { name, player })?;
+    data.get(*hash)
+}
+
+/// A technology's data for `player`'s civ; `name` is its 1-based string.
+pub(crate) fn technology_data_of(
+    scene: &Scene,
+    data: &DataFiles,
+    name: u32,
+    player: i32,
+) -> Option<JsValue> {
+    let civ = usize::try_from(player)
+        .ok()
+        .and_then(|player| scene.players.get(player))?;
+    let civ = string_index(scene, &civ.civ)?;
+    let hash = scene.details.data.get(&DataKey::Technology { name, civ })?;
+    data.get(*hash)
 }
 
 impl DetailsPanel {
@@ -2900,11 +2916,19 @@ fn needed_amounts(
 
 /// `resourcesToAlphaMask`'s tint of what `needed_amounts` found.
 fn needed(short: &[(String, f64)]) -> Modifier {
+    match needed_alpha(short) {
+        Some(alpha) => Modifier::Needed(alpha),
+        None => Modifier::None,
+    }
+}
+
+/// `resourcesToAlphaMask`'s alpha of what `needed_amounts` found.
+pub(crate) fn needed_alpha(short: &[(String, f64)]) -> Option<f64> {
     if short.is_empty() {
-        return Modifier::None;
+        return None;
     }
     let total: f64 = short.iter().map(|(_, amount)| amount).sum();
-    Modifier::Needed(NEEDED_ALPHA_MAX.min((total / 10.0).round() + NEEDED_ALPHA_BASE) / 255.0)
+    Some(NEEDED_ALPHA_MAX.min((total / 10.0).round() + NEEDED_ALPHA_BASE) / 255.0)
 }
 
 /// `formatBatchTrainingString`: the batch line vanilla appends to training tooltips.

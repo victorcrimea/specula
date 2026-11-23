@@ -2,8 +2,9 @@
 //! show beyond the status bars, for every entity, sent only to viewers that
 //! have something selected. Varints and zigzag as in `wire.rs`.
 //!
-//! - kind 1 keyframe: varint turn, u8 detail version (13; a viewer also
-//!   reads 12, which had no control, 8, which had no cleared masks, 7, which also had no stances,
+//! - kind 1 keyframe: varint turn, u8 detail version (14; a viewer also
+//!   reads 13, which had no spy cost fields, 12, which had no control, 8,
+//!   which had no cleared masks, 7, which also had no stances,
 //!   formations, commands or upgrades and no player table, 6, which had no buildable lists, 5, which also had no stats, 4,
 //!   which also had no data table, 3, which also had no rally points,
 //!   2, whose lists are also of names only, and 1, which also had no
@@ -118,7 +119,10 @@
 //!
 //! The player table (the hook's kind 21): varint n, n x {varint f, f x
 //! varint formation template the civ may use, varint m, m x {varint
-//! resource code, f32 buy price, f32 sell price}}; index 0 is gaia.
+//! resource code, f32 buy price, f32 sell price}}; index 0 is gaia. From
+//! version 14 each player ends with f32 spy cost multiplier, u8 spy flags
+//! (1 requirements met, 2 the template is disabled), f32 failed bribe cost
+//! ratio.
 //!
 //! Reckoning: while the first item of a queue is not paused, its time
 //! remaining goes down by 200 ms a turn from the turn it was sent; while a
@@ -886,6 +890,9 @@ fn write_players(out: &mut Writer, players: &[PlayerGui]) {
         for count in player.traders {
             out.varint(u64::from(count));
         }
+        out.f32(player.spy_multiplier);
+        out.u8(player.spy_flags);
+        out.f32(player.spy_failure_ratio);
     }
 }
 

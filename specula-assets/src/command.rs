@@ -16,7 +16,7 @@ use crate::bytes::ByteReader;
 
 /// The version of this format, which the server sends as the first byte of
 /// its seat message; a page on another version must reload.
-pub const COMMAND_VERSION: u8 = 8;
+pub const COMMAND_VERSION: u8 = 9;
 
 pub const QUEUED: u8 = 1;
 pub const PUSH_FRONT: u8 = 2;
@@ -64,6 +64,14 @@ const PACK: u8 = 39;
 const CANCEL_PACK: u8 = 40;
 const UNLOAD_TEMPLATE: u8 = 41;
 const TRIBUTE: u8 = 42;
+const DIPLOMACY: u8 = 43;
+const ATTACK_REQUEST: u8 = 44;
+const SPY_REQUEST: u8 = 45;
+
+/// The stance codes the wire player table uses.
+pub const DIPLOMACY_ENEMY: u8 = 0;
+pub const DIPLOMACY_ALLY: u8 = 1;
+pub const DIPLOMACY_NEUTRAL: u8 = 2;
 
 /// Above every command kind.
 pub const QUERY_TAG: u8 = 0x80;
@@ -267,6 +275,20 @@ pub enum Command {
         player: u8,
         resource: String,
         amount: u32,
+    },
+    /// "diplomacy": our stance towards `player`, a `DIPLOMACY_*` code.
+    Diplomacy {
+        player: u8,
+        stance: u8,
+    },
+    /// "attack-request" against `player`; the server fills `source` with
+    /// the seat's own player.
+    AttackRequest {
+        player: u8,
+    },
+    /// "spy-request" against `player`.
+    SpyRequest {
+        player: u8,
     },
     /// "setup-trade-route": the market becomes the traders' origin, or
     /// their destination once they have one.
@@ -561,7 +583,12 @@ impl Command {
                 ids.push(start_snapped);
                 ids.push(end_snapped);
             }
-            Command::Barter { .. } | Command::SetTradingGoods { .. } | Command::Tribute { .. } => {}
+            Command::Barter { .. }
+            | Command::SetTradingGoods { .. }
+            | Command::Tribute { .. }
+            | Command::Diplomacy { .. }
+            | Command::AttackRequest { .. }
+            | Command::SpyRequest { .. } => {}
         }
         ids.retain(|id| **id != 0);
         ids
@@ -775,6 +802,15 @@ impl Command {
                 out.0.push(*player);
                 out.text(resource);
                 out.varint(u64::from(*amount));
+            }
+            Command::Diplomacy { player, stance } => {
+                out.0.extend_from_slice(&[DIPLOMACY, *player, *stance]);
+            }
+            Command::AttackRequest { player } => {
+                out.0.extend_from_slice(&[ATTACK_REQUEST, *player]);
+            }
+            Command::SpyRequest { player } => {
+                out.0.extend_from_slice(&[SPY_REQUEST, *player]);
             }
             Command::DropsiteSharing { shared, entities } => {
                 out.0
@@ -1070,6 +1106,20 @@ impl Command {
                 player: input.u8()?,
                 resource: input.text()?,
                 amount: input.varint_u32()?,
+            },
+            DIPLOMACY => {
+                let player = input.u8()?;
+                let stance = input.u8()?;
+                if stance > DIPLOMACY_NEUTRAL {
+                    return Err("unknown stance");
+                }
+                Command::Diplomacy { player, stance }
+            }
+            ATTACK_REQUEST => Command::AttackRequest {
+                player: input.u8()?,
+            },
+            SPY_REQUEST => Command::SpyRequest {
+                player: input.u8()?,
             },
             DROPSITE_SHARING => Command::DropsiteSharing {
                 shared: input.u8()? != 0,

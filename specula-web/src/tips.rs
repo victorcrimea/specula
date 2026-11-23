@@ -27,7 +27,7 @@ use crate::tooltip::unit_font;
 /// tooltips.js' `g_Indent`.
 const INDENT: &str = "    ";
 /// `g_ResourceData.GetCodes()` for the public mod, by `order`.
-const RESOURCES: [&str; 4] = ["food", "wood", "stone", "metal"];
+pub(crate) const RESOURCES: [&str; 4] = ["food", "wood", "stone", "metal"];
 /// Each resource's `subtypes` in simulation/data/resources/, ruins left
 /// out as `getGatherTooltip` does.
 const SUBTYPES: [(&str, &[&str]); 4] = [

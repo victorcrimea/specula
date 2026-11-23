@@ -32,6 +32,8 @@ use serde_json::Value;
 
 use specula_assets::command::ALLOW_CAPTURE;
 use specula_assets::command::Command as Order;
+use specula_assets::command::DIPLOMACY_ALLY;
+use specula_assets::command::DIPLOMACY_NEUTRAL;
 use specula_assets::command::PUSH_FRONT;
 use specula_assets::command::QUEUED;
 use specula_assets::command::Query;
@@ -1407,7 +1409,7 @@ impl Play {
 
     /// Posts `order` for `player`; dropped when no engine is connected.
     pub fn send(&self, player: u8, order: &Order) {
-        self.send_json(player, &order_json(order));
+        self.send_json(player, &order_json(order, player));
     }
 
     fn send_json(&self, player: u8, json: &str) {
@@ -1505,8 +1507,10 @@ fn rematch_settings(launch: &Launch) -> Settings {
 
 /// The engine's command JSON for `order`, field for field as the session
 /// GUI posts it (`gui/session/unit_actions.js`, `input.js`,
-/// `selection_panels_helpers.js`).
-fn order_json(order: &Order) -> String {
+/// `selection_panels_helpers.js`). `sender` fills the "attack-request"'s
+/// `source`: the engine hands the AI the command's, so the server fills it
+/// in rather than trusting the page.
+fn order_json(order: &Order, sender: u8) -> String {
     let mut out = Json::new();
     match order {
         Order::Walk {
@@ -1820,6 +1824,25 @@ fn order_json(order: &Order) -> String {
             let mut amounts = Json::new();
             amounts.raw(resource, &amount.to_string());
             out.raw("amounts", &amounts.finish());
+        }
+        Order::Diplomacy { player, stance } => {
+            out.text("type", "diplomacy");
+            out.raw("player", &player.to_string());
+            let to = match *stance {
+                DIPLOMACY_ALLY => "ally",
+                DIPLOMACY_NEUTRAL => "neutral",
+                _ => "enemy",
+            };
+            out.text("to", to);
+        }
+        Order::AttackRequest { player } => {
+            out.text("type", "attack-request");
+            out.raw("source", &sender.to_string());
+            out.raw("player", &player.to_string());
+        }
+        Order::SpyRequest { player } => {
+            out.text("type", "spy-request");
+            out.raw("player", &player.to_string());
         }
         Order::DropsiteSharing { shared, entities } => {
             out.text("type", "set-dropsite-sharing");

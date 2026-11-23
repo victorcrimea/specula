@@ -511,6 +511,10 @@ enum Page {
 /// two with nothing on the network, which must not blink the chip.
 const LOADING_LINGER_MS: f64 = 500.0;
 
+/// How long a bribed unit is waited for: a few turns, as the spy-response
+/// comes before the turn that shows it.
+const PENDING_FOLLOW_MS: f64 = 5000.0;
+
 /// The observer page's download chip, `#loading` with `#loading-text`.
 struct LoadingBar {
     bar: HtmlElement,
@@ -687,6 +691,10 @@ struct App {
     pause_overlay: Option<PauseOverlay>,
     /// On `/play`: the seat was reported resigned, beaten or victorious.
     finish_noticed: bool,
+    /// On `/play`: a bribed unit to follow and until when, in page ms. The
+    /// spy-response comes ahead of the turn that shows the unit, and the
+    /// camera drops a follow of an entity it does not have.
+    pending_follow: Option<(u32, f64)>,
     /// On `/play`: the claim-victory popup was offered on this page.
     claim_offered: bool,
     /// On `/play`: the seat's kick was noticed, which its popup says once.
@@ -1339,6 +1347,7 @@ impl App {
             ranges.show(self.renderer.ranges());
         }
         self.follow_selection();
+        self.follow_pending();
         self.update_top(now);
         // Field borrows only, as the window is borrowed mutably too.
         let control = Some(&self.scene.details.control).filter(|control| !control.seats.is_empty());
@@ -1350,6 +1359,7 @@ impl App {
                 perspective: self.perspective,
                 control,
                 own,
+                data: &self.data_files,
             });
         }
         // A Kick asks once no other box is open, which it must not replace;
@@ -1388,6 +1398,14 @@ impl App {
             .as_mut()
             .and_then(|window| window.take_tributes(&self.scene, &self.palette));
         self.send_trade_order(tribute);
+        let requests = self
+            .diplomacy_window
+            .as_mut()
+            .map(DiplomacyWindow::take_requests)
+            .unwrap_or_default();
+        for order in requests {
+            self.send_trade_order(Some(order));
+        }
         if let Some(trade_window) = &mut self.trade_window {
             trade_window.update(&trade_window::View {
                 scene: &self.scene,
@@ -1824,6 +1842,19 @@ impl App {
     }
 
     /// Asks for the detail stream while something is selected.
+    /// Follows `pending_follow` once the scene has the unit.
+    fn follow_pending(&mut self) {
+        let Some((id, until)) = self.pending_follow else {
+            return;
+        };
+        if self.scene.dots.contains_key(&id) {
+            self.renderer.follow(id);
+            self.pending_follow = None;
+        } else if page_now() > until {
+            self.pending_follow = None;
+        }
+    }
+
     fn follow_selection(&mut self) {
         let selected = self.renderer.selected();
         // The player's idle units are counted and found from it. Not before
@@ -2746,6 +2777,7 @@ async fn run(
         game_menu,
         pause_overlay,
         finish_noticed: status.as_ref().is_some_and(|status| status.defeated),
+        pending_follow: None,
         claim_offered: false,
         kicked_noticed: false,
         watch_asked: Rc::new(Cell::new(false)),
@@ -5909,6 +5941,33 @@ fn receive_event(app: &Rc<RefCell<App>>, message: &[u8]) {
         .as_ref()
         .and_then(Uplink::seat)
         .and_then(|seat| u8::try_from(seat).ok());
+    let field = |name: &str| js_sys::Reflect::get(&json, &name.into()).ok();
+    // `messages.js` "spy-response": the window takes the answer, and a
+    // bribed unit turns the camera to follow it, as vanilla.
+    if field("type").and_then(|kind| kind.as_string()).as_deref() == Some("spy-response") {
+        let target = field("target")
+            .and_then(|target| target.as_f64())
+            .map(|target| target as u8);
+        let entity = field("entity")
+            .and_then(|entity| entity.as_f64())
+            .map_or(0, |entity| entity as u32);
+        let requester = field("players")
+            .and_then(|players| js_sys::Reflect::get(&players, &JsValue::from_f64(0.0)).ok())
+            .and_then(|player| player.as_f64())
+            .map(|player| player as u8);
+        if let Some(window) = &mut app.diplomacy_window
+            && let Some(target) = target
+        {
+            window.spy_response(target);
+        }
+        if entity != 0 && requester == seat {
+            if let Some(window) = &mut app.diplomacy_window {
+                window.set_open(false);
+            }
+            app.pending_follow = Some((entity, page_now() + PENDING_FOLLOW_MS));
+        }
+        return;
+    }
     let ctx = notice_context(&app.scene, &app.palette, app.notice_settings, seat);
     let Some(notice) = notices::event(&json, &ctx) else {
         return;

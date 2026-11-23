@@ -82,7 +82,8 @@
 //! The players section (a keyframe's and a delta's player table) ends with
 //! the engine's time notes (v27): varint count, then count x {varint end
 //! ms, varint players count, zigzag each player, varint length, JSON
-//! bytes}.
+//! bytes}; then (v28) u8 lock teams (1: `settings.LockTeams`), n x u8
+//! shared LOS (1: `hasSharedLos`; a seat is told only its own).
 //!
 //! The observers' flare envelope ends with the sender's chat nickname: a
 //! varint length and the UTF-8 bytes (length 0 for none).
@@ -1410,9 +1411,7 @@ impl Stream {
         }
     }
 
-    fn set_players(&mut self, mut players: Players) {
-        // The players record does not carry the time notes (kind 31 does).
-        players.time_notes = std::mem::take(&mut self.players.time_notes);
+    fn set_players(&mut self, players: Players) {
         if self.players != players {
             self.players = players;
             self.players_changed = true;
@@ -1900,6 +1899,9 @@ fn route_event(state: &State, event: &mut serde_json::Value) -> Option<(Vec<usiz
                 true,
             ))
         }
+        // Only the requester is told, as `messages.js` acts on it for the
+        // viewed player; observers have none.
+        "spy-response" => Some((seats_where(&|seat| seat as i64 == first), false)),
         "aichat" => {
             let message = event.get("message")?.as_str()?.to_string();
             let enemy = |seat: usize| {
@@ -2234,8 +2236,12 @@ impl Hub {
             .insert(template);
     }
 
-    pub fn set_players(&self, players: Players) {
-        self.state.lock().unwrap().observer.set_players(players);
+    pub fn set_players(&self, mut players: Players) {
+        let mut state = self.state.lock().unwrap();
+        players.lock_teams = state.lock_teams;
+        // The players record does not carry the time notes (kind 31 does).
+        players.time_notes = state.observer.players.time_notes.clone();
+        state.observer.set_players(players);
     }
 
     /// The engine's time notes, which the players record does not carry.
@@ -2253,7 +2259,15 @@ impl Hub {
             .ok()
             .and_then(|value| value.pointer("/settings/LockTeams")?.as_bool())
             .unwrap_or(false);
-        self.state.lock().unwrap().lock_teams = locked;
+        let mut state = self.state.lock().unwrap();
+        state.lock_teams = locked;
+        // The seats read the players through the observer, so its copy
+        // carries the lock; the equality check flags it for the streams.
+        if state.observer.players.lock_teams != locked {
+            let mut players = state.observer.players.clone();
+            players.lock_teams = locked;
+            state.observer.set_players(players);
+        }
     }
 
     /// The latest turn the feed gave, which viewers may not see yet.
@@ -2395,6 +2409,22 @@ impl Hub {
             let Some((seats, observers)) = route_event(&state, &mut event) else {
                 continue;
             };
+            // A seat names entities by handle, and the bribed unit is
+            // usually not seen yet, so each told seat gets its own copy.
+            let entity = event.get("entity").and_then(serde_json::Value::as_u64);
+            if event.get("type").and_then(serde_json::Value::as_str) == Some("spy-response")
+                && let Some(entity) = entity.filter(|entity| *entity != 0)
+            {
+                for index in seats {
+                    let handle = state.seats[index].handle_of(entity as u32);
+                    let mut copy = event.clone();
+                    copy["entity"] = handle.into();
+                    if let Err(error) = state.seats[index].event(turn, &copy.to_string()) {
+                        eprintln!("cannot encode an event: {error}");
+                    }
+                }
+                continue;
+            }
             self.send_event(&mut state, turn, &event.to_string(), &seats, observers);
         }
     }
@@ -3920,6 +3950,10 @@ fn write_players(out: &mut Writer, players: &Players) {
         }
         out.varint(note.json.len() as u64);
         out.0.extend_from_slice(note.json.as_bytes());
+    }
+    out.u8(u8::from(players.lock_teams));
+    for player in &players.players {
+        out.u8(u8::from(player.shared_los));
     }
 }
 

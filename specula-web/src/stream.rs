@@ -72,6 +72,9 @@ const PAUSE_WIRE: u8 = 23;
 /// From v24: a keyframe and a pause message end with the pause ledger.
 /// From v27: the player table ends with the engine's time notes.
 const TIME_NOTES_WIRE: u8 = 27;
+/// From v28: the player table ends with the team lock and each player's
+/// shared LOS.
+const LOCK_WIRE: u8 = 28;
 const LEDGER_WIRE: u8 = 24;
 /// A ledger line's seat holds a voluntary pause.
 pub const LEDGER_HOLDS: u8 = 1;
@@ -587,6 +590,9 @@ pub struct Scene {
     /// The engine's time texts, with the players they are for; they travel
     /// with the player table, from v27.
     pub time_notes: Vec<TimeNote>,
+    /// `teamLocked`: the same for every player, since `LockTeams` locks them
+    /// all in `simulation/helpers/Player.js`; from v28.
+    pub lock_teams: bool,
     /// Set whenever a message replaces `players`; the reader clears it.
     pub players_changed: bool,
     pub territory: Territory,
@@ -692,6 +698,8 @@ pub struct Player {
     pub civ: String,
     /// `BattleDetection` reports a battle.
     pub battle: bool,
+    /// `hasSharedLos`; a seat is told only its own, from v28.
+    pub shared_los: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1150,6 +1158,7 @@ impl Scene {
                 stances,
                 civ,
                 battle,
+                shared_los: false,
             });
         }
         self.ceasefire_end = cursor.varint()? as u32;
@@ -1172,6 +1181,13 @@ impl Scene {
                     players,
                     json,
                 });
+            }
+        }
+        self.lock_teams = false;
+        if self.wire_version >= LOCK_WIRE {
+            self.lock_teams = cursor.u8()? != 0;
+            for player in &mut self.players {
+                player.shared_los = cursor.u8()? != 0;
             }
         }
         self.players_changed = true;
@@ -1281,6 +1297,10 @@ impl Scene {
             }
             out.varint(note.json.len() as u64);
             out.0.extend_from_slice(note.json.as_bytes());
+        }
+        out.u8(u8::from(self.lock_teams));
+        for player in &self.players {
+            out.u8(u8::from(player.shared_los));
         }
         out.varint(u64::from(self.territory.width));
         out.varint(u64::from(self.territory.height));

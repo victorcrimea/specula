@@ -234,6 +234,9 @@ pub struct Players {
     /// When the ceasefire ends, in simulation milliseconds; 0 for none or
     /// a hook that does not send it.
     pub ceasefire_end: u32,
+    /// `settings.LockTeams` of the match, which the players record does
+    /// not carry; the hub sets it.
+    pub lock_teams: bool,
     /// The engine's pending time texts, which kind 31 sets and the players
     /// record leaves alone; so `decode_players` leaves it empty.
     pub time_notes: Vec<TimeNote>,
@@ -601,7 +604,35 @@ pub struct PlayerGui {
     /// `GetTraderNumber`: land total, trading, garrisoned; ship total,
     /// trading.
     pub traders: [u16; 5],
+    /// `GetSpyCostMultiplier`.
+    pub spy_multiplier: f32,
+    /// `SPY_REQUIREMENTS_MET` and `SPY_DISABLED` of the spy template.
+    pub spy_flags: u8,
+    /// `VisionSharing.FailureCostRatio` of the spy template.
+    pub spy_failure_ratio: f32,
+    /// The spy template's technologies, string record indices; the same
+    /// list on every player.
+    pub spy_techs: Vec<u32>,
 }
+
+impl Default for PlayerGui {
+    fn default() -> Self {
+        PlayerGui {
+            formations: Vec::new(),
+            prices: Vec::new(),
+            can_barter: false,
+            trading_goods: Vec::new(),
+            traders: [0; 5],
+            spy_multiplier: 1.0,
+            spy_flags: 0,
+            spy_failure_ratio: 0.0,
+            spy_techs: Vec::new(),
+        }
+    }
+}
+
+pub const SPY_REQUIREMENTS_MET: u8 = 1;
+pub const SPY_DISABLED: u8 = 2;
 
 /// A player's top panel numbers; index 0 is gaia.
 pub struct Economy {
@@ -1263,6 +1294,7 @@ fn decode_players(payload: &[u8], version: u32) -> io::Result<Record> {
     Ok(Record::Players(Players {
         players,
         ceasefire_end,
+        lock_teams: false,
         time_notes: Vec::new(),
     }))
 }
@@ -1885,13 +1917,14 @@ fn decode_production_list(payload: &[u8]) -> io::Result<Record> {
 
 fn decode_player_gui(payload: &[u8]) -> io::Result<Record> {
     // An engine built before the trade dialog's fields sends none, and the
-    // feed version did not change with them.
-    decode_player_gui_fields(payload, true)
-        .or_else(|_| decode_player_gui_fields(payload, false))
+    // feed version did not change with them; nor did it for the spy block.
+    decode_player_gui_fields(payload, true, true)
+        .or_else(|_| decode_player_gui_fields(payload, true, false))
+        .or_else(|_| decode_player_gui_fields(payload, false, false))
         .map(Record::PlayerGui)
 }
 
-fn decode_player_gui_fields(payload: &[u8], trade: bool) -> io::Result<Vec<PlayerGui>> {
+fn decode_player_gui_fields(payload: &[u8], trade: bool, spy: bool) -> io::Result<Vec<PlayerGui>> {
     let mut cursor = Cursor(payload);
     let count = cursor.u32()?;
     let mut players = Vec::new();
@@ -1905,9 +1938,7 @@ fn decode_player_gui_fields(payload: &[u8], trade: bool) -> io::Result<Vec<Playe
         let mut player = PlayerGui {
             formations,
             prices,
-            can_barter: false,
-            trading_goods: Vec::new(),
-            traders: [0; 5],
+            ..PlayerGui::default()
         };
         if trade {
             player.can_barter = cursor.u8()? != 0;
@@ -1919,6 +1950,28 @@ fn decode_player_gui_fields(payload: &[u8], trade: bool) -> io::Result<Vec<Playe
             }
         }
         players.push(player);
+    }
+    if spy {
+        let failure_ratio = cursor.f32()?;
+        let techs = (0..cursor.u16()?)
+            .map(|_| cursor.u32())
+            .collect::<io::Result<Vec<_>>>()?;
+        let listed = cursor.u32()? as usize;
+        if listed != players.len() {
+            return Err(invalid(
+                "player GUI spy block length does not match its players",
+            ));
+        }
+        for player in &mut players {
+            player.spy_multiplier = cursor.f32()?;
+            let flags = cursor.u8()?;
+            if flags & !(SPY_REQUIREMENTS_MET | SPY_DISABLED) != 0 {
+                return Err(invalid("unknown spy flag"));
+            }
+            player.spy_flags = flags;
+            player.spy_failure_ratio = failure_ratio;
+            player.spy_techs = techs.clone();
+        }
     }
     if !cursor.0.is_empty() {
         return Err(invalid("player GUI record has trailing bytes"));

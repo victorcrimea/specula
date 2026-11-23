@@ -1,15 +1,15 @@
 //! The diplomacy window, a port of gui/session/diplomacy/
 //! (`DiplomacyDialog`, `DiplomacyPlayerText`, `StanceButton`,
+//! `AttackRequestButton`, `SpyRequestButton`,
 //! `DiplomacyDialogCeasefireCounter`) into the page's `#diplomacy-window`,
 //! in the engine's pixels.
 //!
 //! The engine does not open it for observers. Here the Observer
 //! perspective shows every player's stance towards every other as a
-//! matrix; a player perspective shows the engine's rows. Nothing in it
-//! can be pressed but Close, and, for the host of a game, the Kick on a
-//! human row (M29). The tribute buttons send commands for the seat that
-//! controls the viewed player; attack and spy requests and the stance
-//! buttons send nothing.
+//! matrix; a player perspective shows the engine's rows. The seat that
+//! controls the viewed player can change the stance, tribute, request an
+//! attack and bribe a unit; others see them disabled. Kick and Ban are for
+//! the host (M29, D54).
 
 use std::cell::Cell;
 use std::rc::Rc;
@@ -24,17 +24,24 @@ use crate::TURN_MS;
 use crate::barter::CODES;
 use crate::detail::Control;
 use crate::detail::ControlSeat;
+use crate::detail::PlayerGui;
 use crate::diplomacy;
 use crate::diplomacy::Perspective;
 use crate::lang;
+use crate::panel;
 use crate::panel::Out;
 use crate::panel::create;
 use crate::panel::css_color;
 use crate::stream::PlayerState;
 use crate::stream::Scene;
 use crate::stream::Stance;
+use crate::tips;
+use crate::tips::DataFiles;
 use crate::tooltip;
 use specula_assets::command::Command;
+use specula_assets::command::DIPLOMACY_ALLY;
+use specula_assets::command::DIPLOMACY_ENEMY;
+use specula_assets::command::DIPLOMACY_NEUTRAL;
 
 /// `diplomacyDialogPanel`'s size with one player row.
 const WIDTH: i32 = 560;
@@ -55,13 +62,23 @@ const TRIBUTE_BUTTON: i32 = 20;
 /// TributeButton.prototype.DefaultAmount and MassAmount.
 const DEFAULT_AMOUNT: u32 = 100;
 const MASS_AMOUNT: u32 = 500;
-/// Kick and Ban after the tribute column, which the engine has not.
-const KICK_LEFT: i32 = 520;
-const BAN_LEFT: i32 = 580;
+/// diplomacyPlayerAlly/Neutral/Enemy at 360, 380 and 400.
+const STANCE_LEFT: i32 = 360;
+const STANCE_BUTTON: i32 = 20;
+/// diplomacyAttackRequest and diplomacySpyRequest at 100%-58 and 100%-30 of
+/// the 576 px row of the 640 px dialog; REQUEST_BUTTON is their 20 px.
+const ATTACK_LEFT: i32 = 518;
+const SPY_LEFT: i32 = 546;
+const REQUEST_BUTTON: i32 = 20;
+/// Kick and Ban after the request column, which the engine has not.
+const KICK_LEFT: i32 = 580;
+const BAN_LEFT: i32 = 640;
 /// Player-perspective widths: diplomacyDialogPanel widened by the tribute
-/// column, and room for Kick and Ban.
+/// and request columns, and room for Kick and Ban.
 const TRIBUTE_WIDTH: i32 = 640;
-const HOST_WIDTH: i32 = 700;
+const HOST_WIDTH: i32 = 760;
+/// `SpyRequestButton.prototype.TemplateName`.
+const SPY_TEMPLATE: &str = "special/spy";
 /// The civ names `session-gui` writes.
 const CIVS: &str = include_str!("../civs.txt");
 
@@ -73,6 +90,17 @@ pub struct View<'a> {
     /// The seats' control, and the visitor's own seat on `/play`.
     pub control: Option<&'a Control>,
     pub own: Option<u8>,
+    /// The JSON the data table names.
+    pub data: &'a DataFiles,
+}
+
+/// A spy request button of the current build, refreshed each update.
+struct SpyButton {
+    target: u8,
+    button: HtmlButtonElement,
+    icon: HtmlElement,
+    tint: HtmlElement,
+    tooltip: String,
 }
 
 /// `#diplomacy-window`.
@@ -103,6 +131,23 @@ pub struct DiplomacyWindow {
     /// without a rebuild.
     tribute_buttons: Vec<(u8, usize, HtmlElement)>,
     tribute_handlers: Vec<Closure<dyn FnMut(web_sys::MouseEvent)>>,
+    /// The row player and the `DIPLOMACY_*` code of the last stance press,
+    /// until `take_requests` takes it.
+    stance_request: Rc<Cell<Option<(u8, u8)>>>,
+    /// The player of the last attack request press.
+    attack_request: Rc<Cell<Option<u8>>>,
+    /// The player of the last spy request press.
+    spy_request: Rc<Cell<Option<u8>>>,
+    /// The stance, attack and spy buttons' handlers, which live as long as
+    /// their buttons.
+    request_handlers: Vec<Closure<dyn FnMut()>>,
+    /// `SpyRequestButton.spyRequests` of the seat's player: the targets
+    /// whose bribe was sent and not yet answered.
+    spy_pending: Vec<u8>,
+    /// The `scene.match_id` `spy_pending` belongs to.
+    spy_match: u64,
+    /// The spy buttons of the current build, refreshed every update.
+    spy_buttons: Vec<SpyButton>,
     /// `controlsPlayer(g_ViewedPlayer)` at the last build.
     controls: bool,
 }
@@ -125,6 +170,13 @@ impl DiplomacyWindow {
             amounts: Vec::new(),
             tribute_buttons: Vec::new(),
             tribute_handlers: Vec::new(),
+            stance_request: Rc::new(Cell::new(None)),
+            attack_request: Rc::new(Cell::new(None)),
+            spy_request: Rc::new(Cell::new(None)),
+            request_handlers: Vec::new(),
+            spy_pending: Vec::new(),
+            spy_match: 0,
+            spy_buttons: Vec::new(),
             controls: false,
         };
         window.panel.hidden(true);
@@ -232,6 +284,10 @@ impl DiplomacyWindow {
         if !self.is_open() {
             return;
         }
+        if self.spy_match != view.scene.match_id {
+            self.spy_match = view.scene.match_id;
+            self.spy_pending.clear();
+        }
         let key = build_key(view);
         if self.built.as_ref() != Some(&key) {
             if let Err(error) = self.build(view) {
@@ -239,6 +295,7 @@ impl DiplomacyWindow {
             }
             self.built = Some(key);
         }
+        self.refresh_spy(view);
         self.show_ceasefire(view.scene);
     }
 
@@ -273,6 +330,8 @@ impl DiplomacyWindow {
         self.kick_handlers.clear();
         self.tribute_handlers.clear();
         self.tribute_buttons.clear();
+        self.request_handlers.clear();
+        self.spy_buttons.clear();
 
         let header = &self.header;
         self.cell(header, 0, 140, &lang::translate("Name"), "center")?;
@@ -383,6 +442,8 @@ impl DiplomacyWindow {
                 Some(viewed) => {
                     self.stance_columns(&row, scene, id, viewed)?;
                     self.tribute_buttons(&row, view, id, viewed)?;
+                    self.attack_button(&row, view, id, viewed)?;
+                    self.spy_button(&row, view, id, viewed)?;
                 }
                 None => {
                     for (column, _) in scene.players.iter().enumerate().skip(1) {
@@ -538,10 +599,11 @@ impl DiplomacyWindow {
         Ok(())
     }
 
-    /// `diplomacyPlayerTheirs[n]` and the three `StanceButton`s, shown but
-    /// never enabled, as for a viewer who does not control the player.
+    /// `diplomacyPlayerTheirs[n]` and the three `StanceButton`s: one press
+    /// per stance, enabled only for the seat that controls the viewed player
+    /// (`StanceButtonManager.update`).
     fn stance_columns(
-        &self,
+        &mut self,
         row: &HtmlElement,
         scene: &Scene,
         id: usize,
@@ -563,7 +625,7 @@ impl DiplomacyWindow {
         let inactive = id == viewed
             || viewed_state != Some(PlayerState::Active)
             || player.state != PlayerState::Active;
-        if inactive || ceasefire_active(scene) {
+        if inactive || ceasefire_active(scene) || scene.lock_teams {
             return Ok(());
         }
         let current = scene
@@ -572,19 +634,309 @@ impl DiplomacyWindow {
             .and_then(|viewed| viewed.stances.get(id))
             .copied()
             .unwrap_or(Stance::Enemy);
-        for (i, stance) in [Stance::Ally, Stance::Neutral, Stance::Enemy]
-            .into_iter()
-            .enumerate()
+        for (i, (stance, code)) in [
+            (Stance::Ally, DIPLOMACY_ALLY),
+            (Stance::Neutral, DIPLOMACY_NEUTRAL),
+            (Stance::Enemy, DIPLOMACY_ENEMY),
+        ]
+        .into_iter()
+        .enumerate()
         {
-            let caption = if stance == current {
-                lang::translate_context("diplomatic stance selection", "x")
-            } else {
-                String::new()
-            };
-            let button = self.cell(row, 360 + 20 * i as i32, 20, &caption, "center")?;
-            let _ = button.set_attribute("class", "text center sans-bold-stroke-14 stone disabled");
+            let button: HtmlButtonElement = create(&self.document, "button")?;
+            let _ = button.set_attribute("class", "text center sans-bold-stroke-14 stone stance");
+            let _ = button.set_attribute(
+                "style",
+                &place(STANCE_LEFT + STANCE_BUTTON * i as i32, STANCE_BUTTON),
+            );
+            if stance == current {
+                let caption = lang::translate_context("diplomatic stance selection", "x");
+                button.set_text_content(Some(&caption));
+            }
+            button.set_disabled(stance == current || !self.controls);
+            let request = Rc::clone(&self.stance_request);
+            let player = id as u8;
+            let handler = Closure::<dyn FnMut()>::new(move || request.set(Some((player, code))));
+            button.set_onclick(Some(handler.as_ref().unchecked_ref()));
+            self.request_handlers.push(handler);
+            row.append_child(&button)
+                .map_err(|_| "cannot add a stance button")?;
         }
         Ok(())
+    }
+
+    /// `AttackRequestButton`: shown on an enemy row only while the viewed
+    /// player has a mutual ally to ask.
+    fn attack_button(
+        &mut self,
+        row: &HtmlElement,
+        view: &View,
+        id: usize,
+        viewed: usize,
+    ) -> Result<(), String> {
+        let scene = view.scene;
+        let Some(player) = scene.players.get(id) else {
+            return Ok(());
+        };
+        let viewed_state = scene.players.get(viewed).map(|viewed| viewed.state);
+        if id == viewed
+            || viewed_state != Some(PlayerState::Active)
+            || player.state != PlayerState::Active
+            || ceasefire_active(scene)
+        {
+            return Ok(());
+        }
+        let enemy = scene
+            .players
+            .get(viewed)
+            .and_then(|viewed| viewed.stances.get(id))
+            == Some(&Stance::Enemy);
+        if !enemy || !has_mutual_ally(scene, viewed) {
+            return Ok(());
+        }
+        let button: HtmlButtonElement = create(&self.document, "button")?;
+        let _ = button.set_attribute("class", "request");
+        let _ = button.set_attribute("style", &place(ATTACK_LEFT, REQUEST_BUTTON));
+        let icon: HtmlElement = create(&self.document, "div")?;
+        let _ = icon.set_attribute("class", "icon");
+        let _ = icon.set_attribute("style", "background-image: var(--gui-attack-request)");
+        button
+            .append_child(&icon)
+            .map_err(|_| "cannot add an attack request icon")?;
+        button.set_disabled(!self.controls);
+        set_tooltip(
+            &button,
+            &lang::translate("Request your allies to attack this enemy"),
+            "sessionToolTipBold",
+        );
+        let request = Rc::clone(&self.attack_request);
+        let player = id as u8;
+        let handler = Closure::<dyn FnMut()>::new(move || request.set(Some(player)));
+        button.set_onclick(Some(handler.as_ref().unchecked_ref()));
+        self.request_handlers.push(handler);
+        row.append_child(&button)
+            .map_err(|_| "cannot add an attack request button")?;
+        Ok(())
+    }
+
+    /// `SpyRequestButton`: bribe a unit of the row's player; its tooltip and
+    /// state are refreshed every update.
+    fn spy_button(
+        &mut self,
+        row: &HtmlElement,
+        view: &View,
+        id: usize,
+        viewed: usize,
+    ) -> Result<(), String> {
+        let scene = view.scene;
+        let Some(player) = scene.players.get(id) else {
+            return Ok(());
+        };
+        let viewed_state = scene.players.get(viewed).map(|viewed| viewed.state);
+        if id == viewed
+            || viewed_state != Some(PlayerState::Active)
+            || player.state != PlayerState::Active
+        {
+            return Ok(());
+        }
+        let Some(name) = panel::string_index(scene, SPY_TEMPLATE) else {
+            return Ok(());
+        };
+        if panel::template_data_of(scene, view.data, name, viewed as i32).is_none() {
+            return Ok(());
+        }
+        // An old hook sends no spy data.
+        let Some(gui) = scene.details.players.get(viewed) else {
+            return Ok(());
+        };
+        if gui.spy_flags & PlayerGui::SPY_DISABLED != 0 {
+            return Ok(());
+        }
+        if mutual_ally(scene, viewed, id)
+            && !scene
+                .players
+                .get(viewed)
+                .is_some_and(|viewed| viewed.shared_los)
+        {
+            return Ok(());
+        }
+        let button: HtmlButtonElement = create(&self.document, "button")?;
+        let _ = button.set_attribute("class", "request spy");
+        let _ = button.set_attribute("style", &place(SPY_LEFT, REQUEST_BUTTON));
+        let icon: HtmlElement = create(&self.document, "div")?;
+        let _ = icon.set_attribute("class", "icon");
+        let _ = icon.set_attribute("style", "background-image: var(--gui-bribes)");
+        let tint: HtmlElement = create(&self.document, "div")?;
+        let _ = tint.set_attribute("class", "tint");
+        icon.append_child(&tint)
+            .map_err(|_| "cannot add a spy request tint")?;
+        button
+            .append_child(&icon)
+            .map_err(|_| "cannot add a spy request icon")?;
+        button.set_disabled(!self.controls);
+        let request = Rc::clone(&self.spy_request);
+        let player = id as u8;
+        let handler = Closure::<dyn FnMut()>::new(move || request.set(Some(player)));
+        button.set_onclick(Some(handler.as_ref().unchecked_ref()));
+        self.request_handlers.push(handler);
+        row.append_child(&button)
+            .map_err(|_| "cannot add a spy request button")?;
+        self.spy_buttons.push(SpyButton {
+            target: id as u8,
+            button,
+            icon,
+            tint,
+            tooltip: String::new(),
+        });
+        Ok(())
+    }
+
+    /// `SpyRequestButton.update`, every update: the tooltip's requirements,
+    /// modified cost and failed-bribe cost, and whether the bribe can be
+    /// pressed.
+    fn refresh_spy(&mut self, view: &View) {
+        let Perspective::Player(viewed) = view.perspective else {
+            return;
+        };
+        let scene = view.scene;
+        let Some(name) = panel::string_index(scene, SPY_TEMPLATE) else {
+            return;
+        };
+        let Some(template) = panel::template_data_of(scene, view.data, name, viewed as i32) else {
+            return;
+        };
+        let Some(gui) = scene.details.players.get(viewed) else {
+            return;
+        };
+        let controls = self.controls;
+        for spy in &mut self.spy_buttons {
+            let mut tooltip = lang::translate(
+                "Bribe a random unit from this player and share its vision during a limited period.",
+            );
+            let mut grey = false;
+            let mut tint: Option<String> = None;
+            let mut disabled = false;
+            let requirements = tips::field(&template, "requirements");
+            let missing_requirements =
+                requirements.is_truthy() && gui.spy_flags & PlayerGui::SPY_REQUIREMENTS_MET == 0;
+            if missing_requirements {
+                let technology = |technology: &str| {
+                    panel::string_index(scene, technology).and_then(|name| {
+                        panel::technology_data_of(scene, view.data, name, viewed as i32)
+                    })
+                };
+                tooltip.push('\n');
+                tooltip.push_str(&tips::requirements_tooltip(&template, &technology));
+                grey = true;
+                disabled = true;
+            }
+            let mut out_of_resources = false;
+            if !missing_requirements && tips::field(&template, "cost").is_truthy() {
+                let cost = tips::field(&template, "cost");
+                let multiplier = scene
+                    .details
+                    .players
+                    .get(usize::from(spy.target))
+                    .map_or(1.0, |target| f64::from(target.spy_multiplier));
+                let modified: Vec<(String, f64)> = tips::RESOURCES
+                    .iter()
+                    .map(|code| {
+                        (
+                            (*code).to_string(),
+                            (multiplier * tips::field(&cost, code).as_f64().unwrap_or(0.0)).floor(),
+                        )
+                    })
+                    .collect();
+                tooltip.push('\n');
+                tooltip.push_str(&tips::cost_tooltip(&template, 1.0, Some(&modified)));
+                let mut needed = Vec::new();
+                if let Some(economy) = scene.economy.get(viewed) {
+                    for (code, amount) in &modified {
+                        let Some(stock) = economy
+                            .resources
+                            .iter()
+                            .find(|stock| panel::string(scene, stock.code) == Some(code.as_str()))
+                        else {
+                            continue;
+                        };
+                        let stock = f64::from(stock.amount);
+                        if *amount > stock {
+                            needed.push((code.clone(), *amount - stock));
+                        }
+                    }
+                }
+                if !needed.is_empty() {
+                    tooltip.push('\n');
+                    tooltip.push_str(&tips::needed_resources_tooltip(&needed));
+                    if let Some(alpha) = panel::needed_alpha(&needed) {
+                        tint = Some(format!("background: rgba(255, 0, 0, {alpha:.3})"));
+                    }
+                    out_of_resources = true;
+                    disabled = true;
+                } else if gui.spy_failure_ratio > 0.0 {
+                    let ratio = f64::from(gui.spy_failure_ratio);
+                    let failed: Vec<(String, f64)> = modified
+                        .iter()
+                        .map(|(code, amount)| (code.clone(), (ratio * amount).floor()))
+                        .collect();
+                    tooltip.push('\n');
+                    tooltip.push_str(&lang::translate("A failed bribe will cost you:"));
+                    tooltip.push('\n');
+                    tooltip.push_str(&tips::cost_tooltip(&template, 1.0, Some(&failed)));
+                }
+            }
+            if !missing_requirements && !out_of_resources && self.spy_pending.contains(&spy.target)
+            {
+                grey = true;
+                disabled = true;
+            }
+            disabled = disabled || !controls;
+            let class = if grey { "icon grey" } else { "icon" };
+            if spy.icon.class_name() != class {
+                spy.icon.set_class_name(class);
+            }
+            let tint = tint.unwrap_or_default();
+            if spy.tint.get_attribute("style").unwrap_or_default() != tint {
+                let _ = spy.tint.set_attribute("style", &tint);
+            }
+            if spy.button.disabled() != disabled {
+                spy.button.set_disabled(disabled);
+            }
+            if spy.tooltip != tooltip {
+                set_tooltip(&spy.button, &tooltip, "sessionToolTipBold");
+                spy.tooltip = tooltip;
+            }
+        }
+    }
+
+    /// The presses of the stance, attack and spy buttons since the last
+    /// call: a spy's target waits for its answer.
+    pub fn take_requests(&mut self) -> Vec<Command> {
+        let mut commands = Vec::new();
+        if !self.controls {
+            self.stance_request.take();
+            self.attack_request.take();
+            self.spy_request.take();
+            return commands;
+        }
+        if let Some((player, stance)) = self.stance_request.take() {
+            commands.push(Command::Diplomacy { player, stance });
+        }
+        if let Some(player) = self.attack_request.take() {
+            commands.push(Command::AttackRequest { player });
+        }
+        if let Some(player) = self.spy_request.take() {
+            if !self.spy_pending.contains(&player) {
+                self.spy_pending.push(player);
+            }
+            commands.push(Command::SpyRequest { player });
+        }
+        commands
+    }
+
+    /// `onSpyResponse`: the answer arrived, so the row's button can be
+    /// pressed again.
+    pub fn spy_response(&mut self, target: u8) {
+        self.spy_pending.retain(|pending| *pending != target);
     }
 
     /// `DiplomacyDialogCeasefireCounter.update`.
@@ -733,10 +1085,37 @@ pub(crate) fn time_to_string(ms: f64) -> String {
     }
 }
 
+/// `Diplomacy.IsMutualAlly` between two players of the scene.
+fn mutual_ally(scene: &Scene, a: usize, b: usize) -> bool {
+    a != 0
+        && b != 0
+        && scene
+            .players
+            .get(a)
+            .and_then(|player| player.stances.get(b))
+            == Some(&Stance::Ally)
+        && scene
+            .players
+            .get(b)
+            .and_then(|player| player.stances.get(a))
+            == Some(&Stance::Ally)
+}
+
+/// Whether the viewed player has a mutual ally other than itself to ask for
+/// an attack.
+fn has_mutual_ally(scene: &Scene, viewed: usize) -> bool {
+    (1..scene.players.len()).any(|player| player != viewed && mutual_ally(scene, viewed, player))
+}
+
 /// Everything the rows show, so they are built again only when it changes;
 /// the ceasefire is in it as the stance buttons hide during one.
 fn build_key(view: &View) -> String {
-    let mut key = format!("{:?}|{}|", view.palette, ceasefire_active(view.scene));
+    let mut key = format!(
+        "{:?}|{}|{}|",
+        view.palette,
+        ceasefire_active(view.scene),
+        u8::from(view.scene.lock_teams)
+    );
     if let Perspective::Player(id) = view.perspective {
         key.push_str(&id.to_string());
     }
@@ -753,12 +1132,28 @@ fn build_key(view: &View) -> String {
             ));
         }
     }
-    for player in &view.scene.players {
+    for (index, player) in view.scene.players.iter().enumerate() {
         let stances: Vec<u8> = player.stances.iter().map(|&stance| stance as u8).collect();
         key.push_str(&format!(
-            "|{:?}|{}|{}|{:?}|{}",
-            player.name, player.team, player.state as u8, stances, player.civ
+            "|{:?}|{}|{}|{:?}|{}|{}|{}",
+            player.name,
+            player.team,
+            player.state as u8,
+            stances,
+            player.civ,
+            u8::from(player.shared_los),
+            view.scene
+                .details
+                .players
+                .get(index)
+                .map_or(0, |gui| gui.spy_flags)
         ));
+    }
+    if let Perspective::Player(id) = view.perspective {
+        let template = panel::string_index(view.scene, SPY_TEMPLATE)
+            .and_then(|name| panel::template_data_of(view.scene, view.data, name, id as i32))
+            .is_some();
+        key.push_str(&format!("|spy{}", u8::from(template)));
     }
     key
 }

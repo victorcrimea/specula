@@ -812,6 +812,13 @@ impl Seat {
         self.handles.get(id)
     }
 
+    /// The handle of the feed's `id`, a new one if it has none: a
+    /// spy-response may name a unit the seat has not seen yet, and its
+    /// camera follows the handle once it appears.
+    pub fn handle_of(&mut self, id: u32) -> u32 {
+        self.handles.of(id)
+    }
+
     fn sees_all(&self) -> bool {
         self.won
     }
@@ -1149,6 +1156,13 @@ impl Seat {
         }
         // The data the tooltips read for what the seat is shown.
         let all = self.sees_all();
+        // The window's spy tooltip reads the template and its technologies
+        // for the seat's own player (`SpyRequestButton.prototype`).
+        let me = self.player as usize;
+        templates.insert(("special/spy".to_string(), self.player as i32));
+        if let Some(gui) = source.player_gui.get(me) {
+            technologies.extend(gui.spy_techs.iter().copied());
+        }
         for (key, hash) in &source.data {
             let local = match *key {
                 DataKey::Template { name, player } => {
@@ -1180,7 +1194,6 @@ impl Seat {
             details.data.insert(local, *hash);
             self.named.insert(*hash);
         }
-        let me = self.player as usize;
         details.player_gui = source
             .player_gui
             .iter()
@@ -1203,6 +1216,10 @@ impl Seat {
                     })
                     .collect(),
                 can_barter: player.can_barter,
+                spy_multiplier: player.spy_multiplier,
+                spy_flags: player.spy_flags,
+                spy_failure_ratio: player.spy_failure_ratio,
+                spy_techs: Vec::new(),
                 // The engine shows a player only its own traders.
                 trading_goods: if all || index == me {
                     player
