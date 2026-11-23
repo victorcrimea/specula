@@ -1253,8 +1253,8 @@ fn match_summary(
     summary_response(summary, accepts.accepts())
 }
 
-/// The statistics summary of the visitor's own seat, undelayed: only what
-/// the seat itself may see in the summary.
+/// The statistics summary for the visitor's seat, undelayed: the seat's own
+/// view while the game goes on, every player once it is over.
 #[rocket::get("/g/<id>/play/summary?<turn>")]
 fn play_summary(
     id: MatchId,
@@ -1263,11 +1263,15 @@ fn play_summary(
     registry: &State<Arc<Registry>>,
     cookies: &CookieJar<'_>,
 ) -> Option<web::Encoded<SharedBytes>> {
-    let metadata = registry
-        .hosted(id)?
-        .play
-        .summary(usage::visitor(cookies).as_deref(), turn)?;
-    summary_response(metadata, accepts.accepts())
+    let summary = match registry.hosted(id) {
+        Some(found) => found
+            .play
+            .summary(usage::visitor(cookies).as_deref(), turn)?,
+        // A dropped match has no seats left; what `/` serves of it is no
+        // longer ahead of anyone.
+        None => registry.resolve(id)?.own_summary(turn)?,
+    };
+    summary_response(summary, accepts.accepts())
 }
 
 /// The client's heartbeat, a `sendBeacon` from `usage.rs` there.

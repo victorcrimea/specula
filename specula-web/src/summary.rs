@@ -4,7 +4,8 @@
 //!
 //! The numbers are the engine's statistics tracker's, captured by the hook
 //! every 30 s and served over HTTP: `/play/summary` to the player of
-//! `/play` (only the seat, Gaia and the allies it shares LOS with), and
+//! `/play` (the seat, Gaia and the allies it shares LOS with while the game
+//! goes on, every player once it is decided or the engine has stopped), and
 //! `/match/<id>/summary` to `/` (every player, `--delay` late). Opening the
 //! window never asks the engine for anything.
 

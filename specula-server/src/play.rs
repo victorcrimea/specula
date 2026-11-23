@@ -326,6 +326,11 @@ struct Game {
     summaries: HashMap<u8, Vec<Arc<SeatCapture>>>,
     /// The newest full capture and its turn, for the time limit's scoring.
     last_full: Option<(u32, Arc<[u8]>)>,
+    /// The newest full capture, every player, served to the seats once the
+    /// match is over (the decision or the engine's exit).
+    full: Option<Arc<SeatCapture>>,
+    /// The engine sent its final capture: the game is decided.
+    decided: bool,
 }
 
 /// One capture of a seat, and its envelope once compressed.
@@ -409,6 +414,8 @@ impl Play {
             launch,
             summaries: HashMap::new(),
             last_full: None,
+            full: None,
+            decided: false,
         });
         let host = self.seats.host().unwrap_or_default();
         println!("game {generation} for {host}: {}", args.join(" "));
@@ -640,8 +647,10 @@ impl Play {
         }
     }
 
-    /// Every capture is kept, but only the human seats' views: the full
-    /// copy is never served through the seats' routes.
+    /// Every capture is kept for the human seats' views. Only the newest
+    /// full copy is kept, as a seat has no timeline, and it is served
+    /// through the seats' route only once the match is over, as it holds the
+    /// opponents' statistics.
     pub fn set_summary(&self, summary: Summary) {
         let players = self.seats.players();
         let mut compress = Vec::with_capacity(players.len());
@@ -651,6 +660,21 @@ impl Play {
                 return;
             };
             game.last_full = Some((summary.turn, Arc::clone(&summary.full)));
+            if summary.is_final {
+                game.decided = true;
+            }
+            if let Some(raw) = summary_envelope(summary.turn, summary.is_final, &summary.full) {
+                let raw: Arc<[u8]> = raw.into();
+                let capture = Arc::new(SeatCapture {
+                    turn: summary.turn,
+                    inner: Mutex::new(SeatBody {
+                        raw: Some(Arc::clone(&raw)),
+                        brotli: None,
+                    }),
+                });
+                game.full = Some(Arc::clone(&capture));
+                compress.push((capture, raw));
+            }
             for player in players {
                 let Some(view) = summary
                     .seats
@@ -691,18 +715,28 @@ impl Play {
         }
     }
 
-    /// The visitor's seat view at or before `turn`, or the last one. Never
-    /// the full copy: it holds the opponents' statistics.
+    /// The visitor's seat view at or before `turn`, or the last one, while
+    /// the game goes on; every player once it is decided or the engine has
+    /// stopped, as vanilla's end summary (D47 keeps a defeated seat on its
+    /// own view until then).
     pub fn summary(&self, visitor: Option<&str>, turn: Option<u32>) -> Option<SummaryBody> {
         let player = self.seat(visitor)?;
         let inner = self.inner.lock().unwrap();
         let game = inner.game.as_ref()?;
-        let capture = game
-            .summaries
-            .get(&player)?
-            .iter()
-            .rev()
-            .find(|capture| turn.is_none_or(|turn| capture.turn <= turn))?;
+        let over = game.decided || !game.running;
+        let capture = match game
+            .full
+            .as_ref()
+            .filter(|full| over && turn.is_none_or(|turn| full.turn <= turn))
+        {
+            Some(full) => full,
+            None => game
+                .summaries
+                .get(&player)?
+                .iter()
+                .rev()
+                .find(|capture| turn.is_none_or(|turn| capture.turn <= turn))?,
+        };
         let body = capture.inner.lock().unwrap();
         if let Some(brotli) = &body.brotli {
             return Some(SummaryBody {

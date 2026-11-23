@@ -278,6 +278,12 @@ impl Source {
         }
     }
 
+    /// The summary of the match the UUID names, for a route that does not
+    /// carry its stream id. None for the broadcast's own UUID.
+    pub fn own_summary(&self, turn: Option<u32>) -> Option<SummaryBody> {
+        self.summary(self.match_id?, turn)
+    }
+
     /// Content-addressed, so any match's URL may serve it.
     pub fn terrain(&self, id: u64) -> Option<TerrainFile> {
         match &self.hub {
