@@ -185,6 +185,70 @@ fn enable(element: &Element, enabled: bool) {
     }
 }
 
+/// Gives `element` the text vanilla's `onscreenToolTip` shows in the
+/// bottom-left box while it is hovered, in place of a browser tooltip that
+/// would show it twice.
+fn tip(element: &Element, text: &str) {
+    let _ = element.set_attribute("data-tip", text);
+    if element.has_attribute("data-tip-shown")
+        && let Some(board) = element
+            .owner_document()
+            .and_then(|document| document.get_element_by_id("tip"))
+    {
+        board.set_text_content(Some(text));
+        show(&board, !text.is_empty());
+    }
+}
+
+/// Shows in `#tip` the text of what the pointer or, with no hover on a
+/// touch screen or keyboard, the focus last went to, as vanilla's
+/// `hide_object` tooltip does.
+fn install_tips(document: &Document) -> Result<(), String> {
+    let board: HtmlElement = by_id(document, "tip")?;
+    let root: Element = by_id(document, "window")?;
+    let shown: Rc<RefCell<Option<Element>>> = Rc::new(RefCell::new(None));
+    let point = Rc::new(move |target: Option<Element>| {
+        let owner = target.and_then(|target| target.closest("[data-tip]").ok().flatten());
+        let mut shown = shown.borrow_mut();
+        if let Some(old) = shown.as_ref() {
+            let _ = old.remove_attribute("data-tip-shown");
+        }
+        let text = owner
+            .as_ref()
+            .and_then(|owner| owner.get_attribute("data-tip"))
+            .unwrap_or_default();
+        if let Some(owner) = &owner {
+            let _ = owner.set_attribute("data-tip-shown", "");
+        }
+        *shown = owner;
+        board.set_text_content(Some(&text));
+        show(&board, !text.is_empty());
+    });
+    let target = |event: &Event| {
+        event
+            .target()
+            .and_then(|target| target.dyn_into::<Element>().ok())
+    };
+    let over = Rc::clone(&point);
+    listen(&root, "mouseover", move |event| over(target(&event)));
+    let leave = Rc::clone(&point);
+    listen(&root, "mouseleave", move |_| leave(None));
+    listen(&root, "focusin", move |event| {
+        let focused = target(&event);
+        if let Some(focused) = &focused {
+            // The box is also what a screen reader reads as its description.
+            let _ = focused.set_attribute("aria-describedby", "tip");
+        }
+        point(focused);
+    });
+    listen(&root, "focusout", move |event| {
+        if let Some(focused) = target(&event) {
+            let _ = focused.remove_attribute("aria-describedby");
+        }
+    });
+    Ok(())
+}
+
 fn clear(element: &Element) {
     while let Some(child) = element.first_child() {
         let _ = element.remove_child(&child);
@@ -419,6 +483,7 @@ pub async fn run() -> Result<(), String> {
         chat_send: by_id(&document, "chat-send")?,
         document: document.clone(),
     };
+    install_tips(&document)?;
     let storage = window.local_storage().ok().flatten();
     let saved = storage
         .as_ref()
@@ -1294,10 +1359,10 @@ fn build_control(page: &Shared, dom: &Dom, panel: &HtmlElement, spec: Spec) -> C
     let document = &dom.document;
     let wrap: HtmlElement = create(document, "div");
     wrap.set_class_name("setting");
+    tip(&wrap, &translate(spec.tooltip));
     let name: HtmlElement = create(document, "label");
     name.set_class_name("name");
     name.set_text_content(Some(&titled(&translate(spec.label))));
-    name.set_title(&translate(spec.tooltip));
     let value: HtmlElement = create(document, "div");
     value.set_class_name("value");
     let mut caption = None;
@@ -1305,7 +1370,6 @@ fn build_control(page: &Shared, dom: &Dom, panel: &HtmlElement, spec: Spec) -> C
     let input: HtmlElement = match spec.kind {
         Kind::Select(message) => {
             let select: HtmlSelectElement = create(document, "select");
-            select.set_title(&translate(spec.tooltip));
             let shared = Rc::clone(page);
             let target = select.clone();
             listen(&select, "change", move |_| {
@@ -1316,7 +1380,6 @@ fn build_control(page: &Shared, dom: &Dom, panel: &HtmlElement, spec: Spec) -> C
         Kind::Check(message) => {
             let check: HtmlInputElement = create(document, "input");
             check.set_type("checkbox");
-            check.set_title(&translate(spec.tooltip));
             let shared = Rc::clone(page);
             let target = check.clone();
             listen(&check, "change", move |_| {
@@ -1329,7 +1392,6 @@ fn build_control(page: &Shared, dom: &Dom, panel: &HtmlElement, spec: Spec) -> C
             let range: HtmlInputElement = create(document, "input");
             range.set_type("range");
             range.set_step("1");
-            range.set_title(&translate(spec.tooltip));
             let label: HtmlElement = create(document, "span");
             // The caption follows the thumb; only a release sends.
             let (shown, update) = (label.clone(), Rc::clone(&make));
@@ -1413,9 +1475,7 @@ fn build(page: &Shared, state: &mut Page) {
                     control
                         .name
                         .set_text_content(Some(&titled(&translate(&text(&condition, "title")))));
-                    control
-                        .name
-                        .set_title(&translate(&text(&condition, "description")));
+                    tip(&control.wrap, &translate(&text(&condition, "description")));
                     controls.insert(format!("victory:{name}"), control);
                 }
             }
@@ -1544,9 +1604,9 @@ fn build_row(page: &Shared, state: &Page, index: usize) -> Row {
 
     let color: HtmlSelectElement = create(document, "select");
     color.set_class_name("color");
-    color.set_title(&translate("Pick a color."));
+    tip(&color, &translate("Pick a color."));
     let who: HtmlSelectElement = create(document, "select");
-    who.set_title(&translate("Select player."));
+    tip(&who, &translate("Select player."));
     let who_text: HtmlElement = create(document, "div");
     who_text.set_class_name("who-text");
     let take: HtmlButtonElement = create(document, "button");
@@ -1557,9 +1617,9 @@ fn build_row(page: &Shared, state: &Page, index: usize) -> Row {
     gear.set_class_name("gear");
     let _ = gear.set_attribute("type", "button");
     let civ: HtmlSelectElement = create(document, "select");
-    civ.set_title(&translate("Choose the civilization for this player."));
+    tip(&civ, &translate("Choose the civilization for this player."));
     let team: HtmlSelectElement = create(document, "select");
-    team.set_title(&translate("Select player's team."));
+    tip(&team, &translate("Select player's team."));
     let _ = color_cell.append_child(&color);
     let _ = who_cell.append_child(&who);
     let _ = who_cell.append_child(&who_text);
@@ -1773,15 +1833,18 @@ fn render_chrome(page: &Page, view: &View) {
     ];
     dom.ready
         .set_text_content(Some(&translate(CAPTIONS[my_ready.min(2)])));
-    dom.ready.set_title(&translate(TOOLTIPS[my_ready.min(2)]));
+    tip(&dom.ready, &translate(TOOLTIPS[my_ready.min(2)]));
     show(&dom.start, view.host);
     let blocker = get(&view.state, "launch_blocker").as_string();
     enable(&dom.start, blocker.is_none());
-    dom.start.set_title(&translate(if blocker.is_none() {
-        "Start a new game with the current settings."
-    } else {
-        "Start a new game with the current settings (disabled until all players are ready)."
-    }));
+    tip(
+        &dom.start,
+        &translate(if blocker.is_none() {
+            "Start a new game with the current settings."
+        } else {
+            "Start a new game with the current settings (disabled until all players are ready)."
+        }),
+    );
     if let Some(reason) = blocker.as_deref().filter(|_| view.host) {
         // Also what the button's wait is for.
         let _ = dom
@@ -2433,9 +2496,7 @@ fn render_controls(page: &Page, view: &View) {
         control
             .name
             .set_text_content(Some(&titled(&translate(&text(entry, "cap_title")))));
-        let tooltip = translate(&text(entry, "cap_tooltip"));
-        control.name.set_title(&tooltip);
-        control.input.set_title(&tooltip);
+        tip(&control.wrap, &translate(&text(entry, "cap_tooltip")));
     }
     let resources_per_player = flag(offer, "resources_per_player");
     let options = if resources_per_player {
@@ -2762,10 +2823,13 @@ fn render_players(shared: &Shared, page: &mut Page, view: &View) {
                     ("AIname", &ai_name(&text(ai, "bot"))),
                 ],
             );
-            row.gear.set_title(&lang::format(
-                &translate("Configure AI: %(description)s."),
-                &[("description", &description)],
-            ));
+            tip(
+                &row.gear,
+                &lang::format(
+                    &translate("Configure AI: %(description)s."),
+                    &[("description", &description)],
+                ),
+            );
         }
 
         // Civ and team.

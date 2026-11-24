@@ -176,7 +176,15 @@ input[type=text] { height: 26px; box-sizing: border-box; padding: 0 6px; border:
 #description .label { color: var(--highlight); }
 
 #bottom { grid-area: bottom; display: flex; align-items: center; gap: 10px; min-width: 0; }
-#bottom .spacer { flex: 1; }
+/* Tooltip.xml: the hovered control's description, over the status while
+   it shows. */
+#bottom-left { flex: 1; position: relative; align-self: stretch; display: flex;
+  align-items: center; min-width: 0; }
+#tip { position: absolute; inset: 0; z-index: 1; display: flex; align-items: center;
+  padding: 0 6px; overflow: hidden; pointer-events: none; font-size: 14px; font-weight: 400;
+  background: rgba(0, 0, 0, 0.33); }
+#tip[hidden] { display: none; }
+#tip:not([hidden]) + #status { visibility: hidden; }
 #status { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; min-width: 0; font-weight: 400; }
 #error { color: rgb(255, 120, 120); margin: 0; }
 #connection { margin: 0; color: orange; }
@@ -242,8 +250,8 @@ input[type=text] { height: 26px; box-sizing: border-box; padding: 0 6px; border:
 <div class="color-head"><span data-i18n>Color</span></div>
 <div data-i18n>Player Placement</div>
 <div></div>
-<div><span data-i18n>Civilization</span> <button id="reset-civs" class="icon reset" type="button" hidden title="Reset any civilizations that have been selected to the default (random)." data-i18n-attrs="title"></button></div>
-<div><span data-i18n>Team</span> <button id="reset-teams" class="icon reset" type="button" hidden title="Reset all teams to the default." data-i18n-attrs="title"></button></div>
+<div><span data-i18n>Civilization</span> <button id="reset-civs" class="icon reset" type="button" hidden data-tip="Reset any civilizations that have been selected to the default (random)." data-i18n-attrs="data-tip"></button></div>
+<div><span data-i18n>Team</span> <button id="reset-teams" class="icon reset" type="button" hidden data-tip="Reset all teams to the default." data-i18n-attrs="data-tip"></button></div>
 </div>
 <div id="players"></div>
 </section>
@@ -273,15 +281,17 @@ input[type=text] { height: 26px; box-sizing: border-box; padding: 0 6px; border:
 </section>
 
 <footer id="bottom">
+<div id="bottom-left">
+<div id="tip" role="tooltip" hidden></div>
 <div id="status">
 <span id="countdown"></span>
 <button id="copy-link" class="red" type="button" data-i18n>Copy link</button>
 <p id="connection" hidden data-i18n>Connection lost. Reconnecting...</p>
 <p id="error" hidden></p>
 </div>
-<span class="spacer"></span>
+</div>
 <button id="step-down" class="stone" type="button" hidden data-i18n>Step down</button>
-<button id="back" class="stone" type="button" title="Return to the main menu." data-i18n data-i18n-attrs="title">Back</button>
+<button id="back" class="stone" type="button" data-tip="Return to the main menu." data-i18n data-i18n-attrs="data-tip">Back</button>
 <button id="ready" class="stone" type="button" hidden></button>
 <button id="start" class="stone" type="button" hidden data-i18n>Start Game!</button>
 </footer>
