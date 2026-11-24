@@ -269,6 +269,8 @@ body { cursor: var(--gui-cursor-default, default); }
 :is(#details, #top-panel, #diplomacy-window, #trade-window, #match-summary, #message-box, #research, #chat-window, #control-groups) .text { position: absolute; display: flex; align-items: center;
   white-space: pre; overflow: hidden; line-height: 1.1;
   -webkit-text-stroke: 2px black; paint-order: stroke fill; }
+/* `.text` sets display, which would otherwise beat the [hidden] rules. */
+:is(#details, #top-panel, #diplomacy-window, #trade-window, #match-summary, #message-box, #research, #chat-window, #control-groups) .text[hidden] { display: none; }
 :is(#details, #top-panel, #diplomacy-window, #trade-window, #match-summary, #message-box, #research, #chat-window, #control-groups) .center { justify-content: center; text-align: center; }
 :is(#details, #top-panel) .right { justify-content: flex-end; text-align: right; }
 :is(#details, #top-panel) .sans-stroke-12 { font-size: 12px; font-weight: 400; }
