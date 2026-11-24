@@ -204,6 +204,11 @@ const PITCH_SMOOTHNESS: f32 = 0.5;
 const DISTANCE_SMOOTHNESS: f32 = 0.4;
 /// `MouseEvent.buttons` bit of the middle button, the engine's camera.pan.
 const BUTTONS_MIDDLE: u16 = 4;
+/// `MouseEvent.buttons` bit of the right button.
+const BUTTONS_RIGHT: u16 = 2;
+/// As `g_FreehandSelection_ResolutionInputLineSquared`: squared metres
+/// between the kept points of a freehand line.
+const FREEHAND_RESOLUTION_SQUARED: f32 = 1.0;
 /// A longer frame is a hidden tab or a stall; the camera should not leap.
 const KEY_STEP_MAX_S: f32 = 0.1;
 /// Zooming at a point near the horizon would throw the camera far off;
@@ -422,9 +427,9 @@ struct Camera {
     hover: Option<[f32; 2]>,
     /// The left button's drag past `DRAG_DELTA` while it is held.
     band: Option<Band>,
-    /// The canvas's client offset at the right button's press; the release
-    /// gives an order, wherever it is, as the engine's does.
-    order_press: Option<[f32; 2]>,
+    /// The right button's press; the release gives an order, wherever it
+    /// is, as the engine's does.
+    order_press: Option<OrderPress>,
     /// A lone finger's press, which ends as a tap, a pan or a bandbox.
     touch: Option<TouchPress>,
     /// The last tap's end time, client point and click count, so taps in
@@ -492,6 +497,16 @@ struct PlaceAt {
     shift: bool,
 }
 
+/// The right button's press: the canvas's client offset and the client
+/// point then, and whether it has moved past `DRAG_DELTA` into a freehand
+/// line (`INPUT_UNIT_POSITION`).
+#[derive(Clone, Copy)]
+struct OrderPress {
+    offset: [f32; 2],
+    from: [f32; 2],
+    drawing: bool,
+}
+
 /// A click or drag on the canvas, points 0..1 across it from its top
 /// left, with the engine's selection.add (Shift) and selection.remove
 /// (Ctrl) held or not; or selection.cancel (Escape).
@@ -525,6 +540,14 @@ enum PickInput {
         queued: bool,
         hotkeys: u8,
         left: bool,
+        /// The release of a freehand line.
+        line: bool,
+    },
+    /// The right drag passed `DRAG_DELTA`: a new freehand line begins.
+    LineStart,
+    /// The mouse moved during a freehand line, 0..1 across the canvas.
+    LinePoint {
+        at: [f32; 2],
     },
 }
 
@@ -870,6 +893,8 @@ pub struct Field {
     entity_sounds: Vec<EntitySound>,
     /// Where the right clicks since the last call landed.
     order_targets: Vec<orders::Target>,
+    /// The freehand line's ground points, x and z in metres.
+    order_line: Vec<[f32; 2]>,
     /// What the mouse is over, as `View::hovered` gives it.
     hovered: Option<Option<u32>>,
     place_inputs: Vec<placement::Input>,
@@ -1604,6 +1629,7 @@ impl Field {
             sound_clocks: HashMap::new(),
             entity_sounds: Vec::new(),
             order_targets: Vec::new(),
+            order_line: Vec::new(),
             hovered: None,
             place_inputs: Vec::new(),
             place_pointer: None,
@@ -2072,11 +2098,35 @@ impl Field {
                 } => (self.in_band(view_proj, from, to), add, remove),
                 PickInput::Clear => (Vec::new(), false, false),
                 PickInput::Group { ids, add, remove } => (ids, add, remove),
+                PickInput::LineStart => {
+                    self.order_line.clear();
+                    continue;
+                }
+                PickInput::LinePoint { at } => {
+                    let point = self.ground.as_ref().and_then(|ground| {
+                        let image = &ground.image;
+                        pick::ground_hit(
+                            &ray(at),
+                            |x, z| image.ground(x, z).max(image.water_level),
+                            self.entities.map_size as f32,
+                        )
+                    });
+                    if let Some(point) = point
+                        && self.order_line.last().is_none_or(|last| {
+                            (point[0] - last[0]).powi(2) + (point[1] - last[1]).powi(2)
+                                >= FREEHAND_RESOLUTION_SQUARED
+                        })
+                    {
+                        self.order_line.push(point);
+                    }
+                    continue;
+                }
                 PickInput::Order {
                     at,
                     queued,
                     hotkeys,
                     left,
+                    line,
                 } => {
                     let ray = ray(at);
                     let point = self.ground.as_ref().and_then(|ground| {
@@ -2093,6 +2143,11 @@ impl Field {
                         queued,
                         hotkeys,
                         left,
+                        line: if line {
+                            std::mem::take(&mut self.order_line)
+                        } else {
+                            Vec::new()
+                        },
                     });
                     continue;
                 }
@@ -7505,6 +7560,7 @@ fn wire_camera(canvas: &HtmlCanvasElement, camera: &Rc<RefCell<Camera>>) -> Resu
                     queued: event.shift_key(),
                     hotkeys: camera.hotkeys(event.ctrl_key()),
                     left: true,
+                    line: false,
                 });
             } else if mouse && event.button() == 0 {
                 camera.press = Some((id, at, offset));
@@ -7562,6 +7618,7 @@ fn wire_camera(canvas: &HtmlCanvasElement, camera: &Rc<RefCell<Camera>>) -> Resu
                                 queued: false,
                                 hotkeys: 0,
                                 left: true,
+                                line: false,
                             }
                         } else {
                             PickInput::Click {
@@ -7670,7 +7727,11 @@ fn wire_camera(canvas: &HtmlCanvasElement, camera: &Rc<RefCell<Camera>>) -> Resu
                         at[0] - event.offset_x() as f32,
                         at[1] - event.offset_y() as f32,
                     ];
-                    camera.order_press = Some(offset);
+                    camera.order_press = Some(OrderPress {
+                        offset,
+                        from: at,
+                        drawing: false,
+                    });
                 }
                 return;
             }
@@ -7694,16 +7755,48 @@ fn wire_camera(canvas: &HtmlCanvasElement, camera: &Rc<RefCell<Camera>>) -> Resu
                 return;
             }
             let camera = &mut *target.borrow_mut();
-            let Some(offset) = camera.order_press.take() else {
+            // A freehand line ends on the window's listener below.
+            if camera.order_press.is_some_and(|order| order.drawing) {
+                return;
+            }
+            let Some(order) = camera.order_press.take() else {
                 return;
             };
             let at = [event.client_x() as f32, event.client_y() as f32];
             let hotkeys = camera.hotkeys(event.ctrl_key());
             camera.picks.push(PickInput::Order {
-                at: on_canvas(&order_canvas, at, offset),
+                at: on_canvas(&order_canvas, at, order.offset),
                 queued: event.shift_key(),
                 hotkeys,
                 left: false,
+                line: false,
+            });
+        }),
+    );
+    // On the window, as the engine's INPUT_UNIT_POSITION runs before the
+    // GUI, so a line released over a panel still orders.
+    let target = Rc::clone(camera);
+    let line_canvas = canvas.clone();
+    listen(
+        &window,
+        "mouseup",
+        Closure::new(move |event: MouseEvent| {
+            if event.button() != 2 {
+                return;
+            }
+            let camera = &mut *target.borrow_mut();
+            let Some(order) = camera.order_press.filter(|order| order.drawing) else {
+                return;
+            };
+            camera.order_press = None;
+            let at = [event.client_x() as f32, event.client_y() as f32];
+            let hotkeys = camera.hotkeys(event.ctrl_key());
+            camera.picks.push(PickInput::Order {
+                at: on_canvas(&line_canvas, at, order.offset),
+                queued: event.shift_key(),
+                hotkeys,
+                left: false,
+                line: true,
             });
         }),
     );
@@ -7756,6 +7849,25 @@ fn wire_camera(canvas: &HtmlCanvasElement, camera: &Rc<RefCell<Camera>>) -> Resu
             camera.ctrl = event.ctrl_key();
             camera.shift = event.shift_key();
             camera.pointer_moved(id, event.buttons(), at[0], at[1]);
+            if let Some(order) = camera.order_press
+                && event.buttons() & BUTTONS_RIGHT != 0
+                && !camera.preselecting
+                && !camera.placing
+                && camera.press.is_none()
+            {
+                if order.drawing {
+                    camera.picks.push(PickInput::LinePoint {
+                        at: on_canvas(&move_canvas, at, order.offset),
+                    });
+                } else if dragged(order.from, at) {
+                    // As INPUT_UNIT_POSITION_START: the move that passes
+                    // the slop adds no point.
+                    if let Some(order) = camera.order_press.as_mut() {
+                        order.drawing = true;
+                    }
+                    camera.picks.push(PickInput::LineStart);
+                }
+            }
             if let Some((pressed, from, offset)) = camera.press
                 && pressed == id
                 && (camera.band.is_some() || dragged(from, at))

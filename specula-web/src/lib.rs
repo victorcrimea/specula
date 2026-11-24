@@ -1823,14 +1823,20 @@ impl App {
                     None
                 }
                 (None, true) => None,
-                (None, false) => orders::action(
-                    &self.scene,
-                    selected,
-                    seat,
-                    &target,
-                    &formation,
-                    &self.data_files,
-                ),
+                (None, false) => match orders::freehand(&self.scene, selected, seat, &target) {
+                    Some((action, line_markers)) => {
+                        markers.extend(line_markers.into_iter().map(|[x, z]| (x, z)));
+                        Some(action)
+                    }
+                    None => orders::action(
+                        &self.scene,
+                        selected,
+                        seat,
+                        &target,
+                        &formation,
+                        &self.data_files,
+                    ),
+                },
             };
             if let Some(action) = action
                 && let Some(order) = action.command
@@ -1869,6 +1875,7 @@ impl App {
                     queued: false,
                     hotkeys,
                     left: false,
+                    line: Vec::new(),
                 };
                 match self.preselected {
                     Some(preselect) => orders::preselected(

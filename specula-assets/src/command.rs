@@ -6,7 +6,9 @@
 //! varint count and the ids sorted, each as a varint delta from the one
 //! before; positions are f32 metres; strings are a varint length and
 //! UTF-8; `flags` is a u8 of the `QUEUED`, `PUSH_FRONT` and
-//! `ALLOW_CAPTURE` bits.
+//! `ALLOW_CAPTURE` bits. A freehand line (`WalkCustom`) is a varint count
+//! and its points in sixteenths of a metre, each x and z a zigzag varint
+//! delta from the point before (the first from 0, 0).
 //!
 //! A message starting with `QUERY_TAG` is a `Query` instead: a GuiInterface
 //! call the session GUI makes while placing a structure, answered on the
@@ -31,7 +33,7 @@ use crate::bytes::ByteReader;
 
 /// The version of this format, which the server sends as the first byte of
 /// its seat message; a page on another version must reload.
-pub const COMMAND_VERSION: u8 = 11;
+pub const COMMAND_VERSION: u8 = 13;
 
 pub const QUEUED: u8 = 1;
 pub const PUSH_FRONT: u8 = 2;
@@ -82,6 +84,8 @@ const TRIBUTE: u8 = 42;
 const DIPLOMACY: u8 = 43;
 const ATTACK_REQUEST: u8 = 44;
 const SPY_REQUEST: u8 = 45;
+const WALK_CUSTOM: u8 = 46;
+const ATTACK_WALK_CUSTOM: u8 = 47;
 
 /// The stance codes the wire player table uses.
 pub const DIPLOMACY_ENEMY: u8 = 0;
@@ -123,6 +127,25 @@ pub enum Command {
         entities: Vec<u32>,
         x: f32,
         z: f32,
+    },
+    /// `walk-custom`: the entities spread along `line` (x and z in
+    /// metres, as `quantize_line` leaves them) by `freehand_points`, the
+    /// lowest id at the line's start, or at its end when `reversed`. The
+    /// points are sent rather than worked out by the page because they are
+    /// a function of the line and the count, and a line is far shorter
+    /// than a point per unit.
+    WalkCustom {
+        flags: u8,
+        entities: Vec<u32>,
+        line: Vec<[f32; 2]>,
+        reversed: bool,
+    },
+    /// `attack-walk-custom`, as `WalkCustom`.
+    AttackWalkCustom {
+        flags: u8,
+        entities: Vec<u32>,
+        line: Vec<[f32; 2]>,
+        reversed: bool,
     },
     Attack {
         flags: u8,
@@ -669,6 +692,8 @@ impl Command {
         match self {
             Command::Walk { entities, .. }
             | Command::AttackWalk { entities, .. }
+            | Command::WalkCustom { entities, .. }
+            | Command::AttackWalkCustom { entities, .. }
             | Command::Attack { entities, .. }
             | Command::Gather { entities, .. }
             | Command::Repair { entities, .. }
@@ -719,6 +744,8 @@ impl Command {
         match self {
             Command::Walk { entities, .. }
             | Command::AttackWalk { entities, .. }
+            | Command::WalkCustom { entities, .. }
+            | Command::AttackWalkCustom { entities, .. }
             | Command::Attack { entities, .. }
             | Command::Gather { entities, .. }
             | Command::Repair { entities, .. }
@@ -773,6 +800,8 @@ impl Command {
         match self {
             Command::Walk { entities, .. }
             | Command::AttackWalk { entities, .. }
+            | Command::WalkCustom { entities, .. }
+            | Command::AttackWalkCustom { entities, .. }
             | Command::Construct { entities, .. }
             | Command::Train { entities, .. }
             | Command::Stop { entities, .. }
@@ -886,6 +915,18 @@ impl Command {
                 out.head(ATTACK_WALK, *flags, entities);
                 out.point(*x, *z);
             }
+            Command::WalkCustom {
+                flags,
+                entities,
+                line,
+                reversed,
+            } => out.freehand(WALK_CUSTOM, *flags, entities, line, *reversed),
+            Command::AttackWalkCustom {
+                flags,
+                entities,
+                line,
+                reversed,
+            } => out.freehand(ATTACK_WALK_CUSTOM, *flags, entities, line, *reversed),
             Command::Attack {
                 flags,
                 entities,
@@ -1177,6 +1218,27 @@ impl Command {
                         entities,
                         x,
                         z,
+                    }
+                }
+            }
+            WALK_CUSTOM | ATTACK_WALK_CUSTOM => {
+                let flags = input.u8()?;
+                let entities = entities(&mut input)?;
+                let reversed = input.u8()? != 0;
+                let line = line(&mut input)?;
+                if kind == WALK_CUSTOM {
+                    Command::WalkCustom {
+                        flags,
+                        entities,
+                        line,
+                        reversed,
+                    }
+                } else {
+                    Command::AttackWalkCustom {
+                        flags,
+                        entities,
+                        line,
+                        reversed,
                     }
                 }
             }
@@ -1478,6 +1540,28 @@ impl Out {
         self.0.extend_from_slice(&z.to_le_bytes());
     }
 
+    fn freehand(
+        &mut self,
+        kind: u8,
+        flags: u8,
+        entities: &[u32],
+        line: &[[f32; 2]],
+        reversed: bool,
+    ) {
+        self.head(kind, flags, entities);
+        self.0.push(u8::from(reversed));
+        self.varint(line.len() as u64);
+        let mut previous = [0i64; 2];
+        for point in line {
+            for (axis, value) in point.iter().enumerate() {
+                let sixteenths = sixteenths(*value);
+                let delta = sixteenths - previous[axis];
+                self.varint(((delta << 1) ^ (delta >> 63)) as u64);
+                previous[axis] = sixteenths;
+            }
+        }
+    }
+
     fn head(&mut self, kind: u8, flags: u8, entities: &[u32]) {
         self.0.extend_from_slice(&[kind, flags]);
         self.entities(entities);
@@ -1506,6 +1590,90 @@ fn entities(input: &mut ByteReader) -> Result<Vec<u32>, &'static str> {
         ids.push(previous);
     }
     Ok(ids)
+}
+
+/// The most points a freehand line may have: at the page's 1 m spacing,
+/// several drags across the largest map.
+pub const MAX_LINE: usize = 16384;
+
+/// Past any map, so the deltas cannot overflow and the sums in
+/// `freehand_points` stay exact enough.
+const MAX_LINE_SIXTEENTHS: i64 = 1 << 24;
+
+fn sixteenths(value: f32) -> i64 {
+    (f64::from(value) * 16.0)
+        .round()
+        .clamp(-MAX_LINE_SIXTEENTHS as f64, MAX_LINE_SIXTEENTHS as f64) as i64
+}
+
+/// `line` as the wire carries it, which the page works from too, so its
+/// markers and reversal check see the server's points.
+pub fn quantize_line(line: &[[f32; 2]]) -> Vec<[f32; 2]> {
+    line.iter()
+        .map(|point| point.map(|value| sixteenths(value) as f32 / 16.0))
+        .collect()
+}
+
+fn line(input: &mut ByteReader) -> Result<Vec<[f32; 2]>, &'static str> {
+    let count = input.varint()? as usize;
+    if count > MAX_LINE {
+        return Err("line too long");
+    }
+    let mut points = Vec::with_capacity(count);
+    let mut previous = [0i64; 2];
+    for _ in 0..count {
+        let mut point = [0.0; 2];
+        for axis in 0..2 {
+            let zigzag = input.varint()?;
+            let delta = (zigzag >> 1) as i64 ^ -((zigzag & 1) as i64);
+            let value = previous[axis]
+                .checked_add(delta)
+                .filter(|value| value.abs() <= MAX_LINE_SIXTEENTHS)
+                .ok_or("line point out of range")?;
+            previous[axis] = value;
+            point[axis] = value as f32 / 16.0;
+        }
+        points.push(point);
+    }
+    Ok(points)
+}
+
+/// `count` points spread evenly along `line`, the even distribution of
+/// `positionUnitsFreehandSelectionMouseUp`, before its reversal check.
+/// Empty for an empty line.
+pub fn freehand_points(line: &[[f32; 2]], count: usize) -> Vec<[f32; 2]> {
+    let Some(&last) = line.last() else {
+        return Vec::new();
+    };
+    let dist = |a: [f32; 2], b: [f32; 2]| (a[0] - b[0]).hypot(a[1] - b[1]);
+    let length: f32 = line.windows(2).map(|pair| dist(pair[0], pair[1])).sum();
+    let step = length / count.saturating_sub(1).max(1) as f32;
+    let mut p0 = line[0];
+    let mut out = vec![p0];
+    let mut free = -step;
+    for pair in line.windows(2) {
+        let p1 = pair[1];
+        free += dist(pair[0], p1);
+        // Bounded by the count as well: a step of 0, or one lost against a
+        // long segment's float, would never bring `free` below 0, and the
+        // server runs this on what a page sent.
+        while free >= 0.0 && out.len() < count {
+            let away = [p0[0] - p1[0], p0[1] - p1[1]];
+            let len = away[0].hypot(away[1]);
+            // Vector2D.normalize leaves a zero vector alone.
+            let unit = if len > 0.0 {
+                [away[0] / len, away[1] / len]
+            } else {
+                away
+            };
+            p0 = [unit[0] * free + p1[0], unit[1] * free + p1[1]];
+            out.push(p0);
+            free -= step;
+        }
+    }
+    out.truncate(count);
+    out.resize(count, last);
+    out
 }
 
 // The JSON the server builds has no way to say NaN or infinity.

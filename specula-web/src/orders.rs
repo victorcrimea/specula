@@ -6,6 +6,7 @@
 //! checks every order again; what this gets wrong only sends an order the
 //! units cannot carry out.
 
+use specula_assets::command;
 use specula_assets::command::ALLOW_CAPTURE;
 use specula_assets::command::Command;
 use specula_assets::command::QUEUED;
@@ -57,7 +58,17 @@ pub struct Target {
     pub hotkeys: u8,
     /// A left click, which only a preselected action takes.
     pub left: bool,
+    /// The freehand line a right drag drew (`g_FreehandSelection_InputLine`),
+    /// ground points x and z in metres; empty for a click.
+    pub line: Vec<[f32; 2]>,
 }
+
+/// `g_FreehandSelection_MinLengthOfLine`, metres.
+const FREEHAND_MIN_LENGTH: f32 = 8.0;
+/// `g_FreehandSelection_MinNumberOfUnits`.
+const FREEHAND_MIN_UNITS: usize = 2;
+/// `DrawTargetMarker`'s spacing along a line, metres.
+const FREEHAND_MARKER_SPACING: f32 = 5.0;
 
 /// The engine's session.guard (G), session.patrol (P), session.repair (J),
 /// session.capture (C) and session.attack (F); and session.garrison,
@@ -370,6 +381,82 @@ pub fn preselected(
         command: None,
         sound: None,
     }))
+}
+
+fn dist(a: [f32; 2], b: [f32; 2]) -> f32 {
+    (a[0] - b[0]).hypot(a[1] - b[1])
+}
+
+/// The port of `positionUnitsFreehandSelectionMouseUp`: the order and the
+/// target markers. None where the engine falls back to `determineAction` at
+/// the release point (a click, a line under 8 m, fewer than 2 units).
+pub fn freehand(
+    scene: &Scene,
+    selected: &[u32],
+    player: i32,
+    target: &Target,
+) -> Option<(Action, Vec<[f32; 2]>)> {
+    // As the wire carries it, so the reversal and the markers see the
+    // points the server works out.
+    let line = command::quantize_line(&target.line);
+    let length: f32 = line.windows(2).map(|pair| dist(pair[0], pair[1])).sum();
+    let (_, able) = own_and_able(scene, selected, player)?;
+    // Only units the engine will not filter out, or it pairs the wrong
+    // points with them.
+    let mut units: Vec<u32> = able
+        .into_iter()
+        .filter(|id| {
+            scene
+                .dots
+                .get(id)
+                .and_then(|dot| template_details(scene, dot.template))
+                .is_some_and(|details| details.components & COMPONENT_UNIT_AI != 0)
+        })
+        .collect();
+    // The order the wire's entity list has, which the server pairs the
+    // points with.
+    units.sort_unstable();
+    let n = units.len();
+    if length < FREEHAND_MIN_LENGTH || n < FREEHAND_MIN_UNITS || line.len() > command::MAX_LINE {
+        return None;
+    }
+    let mut out = command::freehand_points(&line, n);
+    let first = position(scene.dots.get(&units[0])?);
+    let last = position(scene.dots.get(&units[n - 1])?);
+    let reversed =
+        dist(first, out[0]) + dist(last, out[n - 1]) > dist(first, out[n - 1]) + dist(last, out[0]);
+    if reversed {
+        out.reverse();
+    }
+    let step = length / (n - 1) as f32;
+    let flags = if target.queued { QUEUED } else { 0 };
+    let sound = Some(("order_walk", units[0]));
+    let command = if target.hotkeys & HOTKEY_GARRISON != 0 {
+        Command::AttackWalkCustom {
+            flags,
+            entities: units,
+            line,
+            reversed,
+        }
+    } else {
+        Command::WalkCustom {
+            flags,
+            entities: units,
+            line,
+            reversed,
+        }
+    };
+    let every = (FREEHAND_MARKER_SPACING / step).ceil().max(1.0) as usize;
+    let markers = out.iter().copied().step_by(every).collect();
+    Some((
+        Action {
+            cursor: String::new(),
+            tooltip: String::new(),
+            command: Some(command),
+            sound,
+        },
+        markers,
+    ))
 }
 
 /// The player's own among `selected`, and of those the ones getActionInfo

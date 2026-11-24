@@ -41,6 +41,7 @@ use specula_assets::command::PUSH_FRONT;
 use specula_assets::command::QUEUED;
 use specula_assets::command::Query;
 use specula_assets::command::QueryKind;
+use specula_assets::command::freehand_points;
 
 use rocket::tokio::sync::broadcast;
 
@@ -1643,6 +1644,17 @@ fn rematch_settings(launch: &Launch) -> Settings {
     settings
 }
 
+/// The engine reads `.x` and `.y` of each (y is the z coordinate). Numbers
+/// rounded to two decimals, not vanilla's `toFixed(2)` strings, which keeps
+/// the JSON of a 1500-unit line small.
+fn target_positions(points: &[[f32; 2]]) -> String {
+    let points: Vec<String> = points
+        .iter()
+        .map(|[x, z]| format!(r#"{{"x":{x:.2},"y":{z:.2}}}"#))
+        .collect();
+    format!("[{}]", points.join(","))
+}
+
 /// The engine's command JSON for `order`, field for field as the session
 /// GUI posts it (`gui/session/unit_actions.js`, `input.js`,
 /// `selection_panels_helpers.js`). `sender` fills the "attack-request"'s
@@ -1678,6 +1690,37 @@ fn order_json(order: &Order, sender: u8) -> String {
             out.entities("entities", entities);
             out.number("x", *x);
             out.number("z", *z);
+            out.raw("targetClasses", r#"{"attack":["Unit","Structure"]}"#);
+            out.order_flags(*flags);
+            out.text("formation", NULL_FORMATION);
+        }
+        Order::WalkCustom {
+            flags,
+            entities,
+            line,
+            reversed,
+        }
+        | Order::AttackWalkCustom {
+            flags,
+            entities,
+            line,
+            reversed,
+        } => {
+            let kind = if matches!(order, Order::WalkCustom { .. }) {
+                "walk-custom"
+            } else {
+                "attack-walk-custom"
+            };
+            // `entities` is in the order of the page's sorted handles (the
+            // decoder's, which the selection token keeps), the order the
+            // page checked the reversal in.
+            let mut points = freehand_points(line, entities.len());
+            if *reversed {
+                points.reverse();
+            }
+            out.text("type", kind);
+            out.entities("entities", entities);
+            out.raw("targetPositions", &target_positions(&points));
             out.raw("targetClasses", r#"{"attack":["Unit","Structure"]}"#);
             out.order_flags(*flags);
             out.text("formation", NULL_FORMATION);
