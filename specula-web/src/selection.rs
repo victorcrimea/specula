@@ -6,8 +6,11 @@
 use std::collections::HashMap;
 use std::collections::HashSet;
 
-/// `g_MaxSelectionSize`.
-const MAX_SELECTION: usize = 300;
+/// `g_MaxSelectionSize` raised from the engine's 300, which is a GUI limit
+/// only: the simulation takes any entity list. A player's selection stays
+/// bounded so one order cannot cost the engine unbounded path work in a
+/// turn; an observer gives no orders and is not limited.
+const MAX_SELECTION: usize = 1500;
 /// `g_HighlightedAlpha`.
 const HIGHLIGHTED_ALPHA: f32 = 0.75;
 /// `MIN_ALPHA_ALWAYS_VISIBLE`.
@@ -186,7 +189,7 @@ impl Selection {
         }
         let mut added = Vec::new();
         for &id in ids {
-            if self.selected.len() >= MAX_SELECTION {
+            if self.viewed.is_some() && self.selected.len() >= MAX_SELECTION {
                 break;
             }
             if self.selected.contains(&id) {
