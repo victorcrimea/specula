@@ -353,6 +353,7 @@ use std::sync::Arc;
 use std::sync::Condvar;
 use std::sync::Mutex;
 use std::sync::OnceLock;
+use std::sync::atomic::AtomicU32;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
@@ -381,6 +382,7 @@ use crate::feed::Territory;
 use crate::feed::TimeNote;
 use crate::flare;
 use crate::history::History;
+use crate::history::Meta;
 use crate::limit;
 use crate::pause;
 use crate::registry::MatchId;
@@ -823,7 +825,44 @@ pub struct Hub {
     /// None when storage is off. Locked after `state` when both are, never
     /// before it; requests read its files with neither held.
     history: Option<Arc<Mutex<History>>>,
+    /// Open observer visual sockets, for the lobby (M40); kept outside
+    /// `state` so counting never waits on the encoder.
+    observers: AtomicU32,
 }
+
+/// Counts one observer socket while it lives.
+pub struct ObserverGuard(Arc<Hub>);
+
+impl Drop for ObserverGuard {
+    fn drop(&mut self) {
+        self.0.observers.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+/// One minimap-visible entity of a thumbnail, as the minimap draws it.
+pub struct ThumbDot {
+    /// In 1/16 m.
+    pub x: i32,
+    pub z: i32,
+    /// 0xRRGGBB.
+    pub color: u32,
+    pub structure: bool,
+}
+
+/// What the lobby's thumbnail draws, captured when a turn is encoded and
+/// shown once its delay is over, so a thumbnail never shows more than a
+/// viewer sees (D61).
+pub struct Thumb {
+    /// In metres.
+    pub map_size: u32,
+    /// 0xRRGGBB by player index, gaia first.
+    pub colors: Vec<u32>,
+    pub territory: Option<Territory>,
+    pub dots: Vec<ThumbDot>,
+}
+
+/// 10 s of game time; the lobby refreshes no faster.
+const THUMB_TURNS: u32 = 50;
 
 /// A terrain resource as served, and its brotli copy once made.
 #[derive(Clone)]
@@ -1126,6 +1165,8 @@ enum Release {
     },
     /// Queued like the turns around it, so `/` sees it `delay` late.
     Summary(Arc<SummaryEntry>),
+    /// The lobby's thumbnail snapshot, delayed like a turn (M41).
+    Thumb(Arc<Thumb>),
     /// A pause or resume, a message in the visual frame.
     Pause(TrackOp),
     /// A player's flare or notification, a message in the visual frame.
@@ -1155,6 +1196,8 @@ struct Shown {
     previous: Option<Archive>,
     /// Every capture released for the shown match, in turn order.
     summaries: Vec<Arc<SummaryEntry>>,
+    /// The latest thumbnail snapshot released (M41).
+    thumb: Option<Arc<Thumb>>,
 }
 
 impl Shown {
@@ -1216,6 +1259,7 @@ impl Shown {
                 let message = self.detail.apply(op, store(self.match_id, true));
                 let _ = self.detail.sender.send(message);
             }
+            Release::Thumb(thumb) => self.thumb = Some(thumb),
             Release::Summary(entry) => {
                 if entry.match_id != self.match_id {
                     return;
@@ -1831,6 +1875,9 @@ struct State {
     /// A hosted hub's first match takes its registry UUID; any other match
     /// a new one.
     next_uuid: Option<MatchId>,
+    /// The host's nickname and the map's name, which the registry knows and
+    /// the feed does not, for the history's lobby record (M40).
+    meta_source: Option<(String, Option<String>)>,
     /// Every match this hub encoded, so `/g/<uuid>` finds it while the hub
     /// holds it.
     uuids: Vec<(MatchId, u64)>,
@@ -1843,6 +1890,38 @@ struct State {
 }
 
 impl State {
+    /// The observers' latest dots, territory and colours; gaia's units and
+    /// anything off the minimap (colour 0) are left out, as on the minimap.
+    fn thumb(&self) -> Thumb {
+        let templates = &self.observer.templates.items;
+        let dots = self
+            .observer
+            .dots
+            .values()
+            .filter(|dot| dot.color != 0 && dot.mirage == 0)
+            .map(|dot| ThumbDot {
+                x: dot.x,
+                z: dot.z,
+                color: dot.color & 0x00FF_FFFF,
+                structure: templates
+                    .get(dot.template as usize)
+                    .is_some_and(|template| template.name.contains("structures/")),
+            })
+            .collect();
+        Thumb {
+            map_size: self.map_size,
+            colors: self
+                .observer
+                .players
+                .players
+                .iter()
+                .map(|player| player.color)
+                .collect(),
+            territory: self.observer.territory.clone(),
+            dots,
+        }
+    }
+
     fn common(&self) -> Common {
         Common {
             match_id: self.match_id,
@@ -1990,6 +2069,7 @@ impl Shown {
             ended: None,
             previous: None,
             summaries: Vec::new(),
+            thumb: None,
         }
     }
 }
@@ -2059,6 +2139,7 @@ impl Hub {
         Hub {
             queued: Condvar::new(),
             history,
+            observers: AtomicU32::new(0),
             state: Mutex::new(State {
                 turn: 0,
                 map_size: 0,
@@ -2084,6 +2165,7 @@ impl Hub {
                 ended: false,
                 feed_activity: None,
                 next_uuid: uuid,
+                meta_source: None,
                 uuids: Vec::new(),
                 retired: false,
                 flares: limit::Limiter::new(flare::SCOPE),
@@ -2271,6 +2353,28 @@ impl Hub {
             players.lock_teams = locked;
             state.observer.set_players(players);
         }
+    }
+
+    pub fn observer_guard(self: &Arc<Self>) -> ObserverGuard {
+        self.observers.fetch_add(1, Ordering::Relaxed);
+        ObserverGuard(Arc::clone(self))
+    }
+
+    pub fn observer_count(&self) -> u32 {
+        self.observers.load(Ordering::Relaxed)
+    }
+
+    /// Each player's name, civ and colour, gaia left out, for the lobby.
+    pub fn lobby_players(&self) -> Vec<(String, String, u32)> {
+        let state = self.state.lock().unwrap();
+        state
+            .observer
+            .players
+            .players
+            .iter()
+            .skip(1)
+            .map(|player| (player.name.clone(), player.civ.clone(), player.color))
+            .collect()
     }
 
     /// The latest turn the feed gave, which viewers may not see yet.
@@ -2856,6 +2960,7 @@ impl Hub {
             seat.end(&common, state.turn);
         }
         state.ended = true;
+        self.store_meta(state, true);
         println!("match {:016x} ended at turn {}", state.match_id, state.turn);
         self.queue(state, release);
     }
@@ -2900,6 +3005,69 @@ impl Hub {
         }
     }
 
+    /// The shown thumbnail snapshot and the terrain under it; None until
+    /// both exist.
+    pub fn thumb(&self) -> Option<(Arc<Thumb>, Arc<Terrain>)> {
+        let state = self.state.lock().unwrap();
+        Some((
+            Arc::clone(state.shown.thumb.as_ref()?),
+            Arc::clone(state.terrain_source.as_ref()?),
+        ))
+    }
+
+    pub fn set_meta_source(&self, host: String, map_name: Option<String>) {
+        self.state.lock().unwrap().meta_source = Some((host, map_name));
+    }
+
+    /// Writes the history's lobby record of the encoded match.
+    fn store_meta(&self, state: &State, with_players: bool) {
+        let Some(history) = &self.history else {
+            return;
+        };
+        let (host, map_name) = state.meta_source.clone().unwrap_or_default();
+        let players = if with_players {
+            state
+                .observer
+                .players
+                .players
+                .iter()
+                .skip(1)
+                .map(|player| (player.name.clone(), player.civ.clone(), player.color))
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let meta = Meta {
+            map_name,
+            host,
+            players,
+            // At the start no turn has run, and `first_turn` is not set yet.
+            duration_secs: if with_players {
+                (f64::from(state.turn.saturating_sub(state.first_turn)) * 0.2) as u32
+            } else {
+                0
+            },
+        };
+        let protect = [
+            state.shown.match_id,
+            state
+                .shown
+                .previous
+                .as_ref()
+                .map_or(0, |archive| archive.match_id),
+        ];
+        if let Err(error) = history
+            .lock()
+            .unwrap()
+            .write_meta(state.match_id, &meta, &protect)
+        {
+            eprintln!(
+                "cannot store match {:016x}'s record: {error}",
+                state.match_id
+            );
+        }
+    }
+
     pub fn set_map(&self, size: u32, game_speed: f32) {
         let mut state = self.state.lock().unwrap();
         state.map_size = size;
@@ -2934,6 +3102,7 @@ impl Hub {
                     eprintln!("cannot store match {:016x}: {error}", state.match_id);
                 }
             }
+            self.store_meta(state, false);
             state.ended = false;
             state.first_turn = turn;
             let players = state.seat_players.clone();
@@ -2987,6 +3156,10 @@ impl Hub {
         state.new_feed = false;
         state.feed_activity = Some(Instant::now());
         self.queue(state, release);
+        if start || turn.is_multiple_of(THUMB_TURNS) {
+            let thumb = Arc::new(state.thumb());
+            self.queue(state, Release::Thumb(thumb));
+        }
         Ok(())
     }
 
@@ -3220,6 +3393,7 @@ fn ending(
         } => Some((terrain.as_ref(), data_files)),
         Release::Turn { .. }
         | Release::Summary(_)
+        | Release::Thumb(_)
         | Release::Pause(_)
         | Release::Flare(_)
         | Release::Detail(_) => None,

@@ -341,6 +341,21 @@ pub struct Assignment<'a> {
     pub name: &'a str,
 }
 
+/// What the lobby shows of a map (M40).
+pub struct MapInfo {
+    pub name: Option<String>,
+    pub preview: Option<String>,
+}
+
+impl Settings {
+    pub fn map_info(&self) -> MapInfo {
+        MapInfo {
+            name: self.map_name.clone(),
+            preview: self.map_preview.clone(),
+        }
+    }
+}
+
 /// What a launch hands the engine and keeps for later.
 pub struct Launch {
     /// Every random choice resolved. A rematch (D62) starts from these with

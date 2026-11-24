@@ -20,6 +20,7 @@ mod settings;
 mod setup;
 mod stop;
 mod terrain;
+mod thumb;
 mod usage;
 mod view;
 mod web;
@@ -244,6 +245,8 @@ async fn main() {
                 match_map_page,
                 play_status,
                 new_status,
+                lobby,
+                match_thumb,
                 play_new,
                 setup_socket,
                 chat_socket,
@@ -344,7 +347,10 @@ fn viewer(
 ) -> Option<Channel<'static>> {
     let hub = registry.resolve(id)?.hub?;
     let watch = usage.watch(cookies);
-    Some(relay(socket, watch, move || hub.subscribe(View::Observer)))
+    let counted = hub.observer_guard();
+    Some(relay(socket, (watch, counted), move || {
+        hub.subscribe(View::Observer)
+    }))
 }
 
 /// The detail stream, which viewers hold open only while they have
@@ -472,6 +478,35 @@ fn play_status(
 #[derive(rocket::Responder)]
 #[response(content_type = "json")]
 struct Json(String, Header<'static>);
+
+/// A running match's thumbnail (M41), what an observer would see now.
+#[rocket::get("/g/<id>/thumb")]
+async fn match_thumb(id: MatchId, registry: &State<Arc<Registry>>) -> Option<Thumbnail> {
+    let found = registry.hosted(id)?;
+    let bytes = rocket::tokio::task::spawn_blocking(move || found.thumb_webp())
+        .await
+        .ok()??;
+    Some(Thumbnail(
+        bytes.to_vec(),
+        Header::new("Cache-Control", "public, max-age=10"),
+    ))
+}
+
+#[derive(rocket::Responder)]
+#[response(content_type = "image/webp")]
+struct Thumbnail(Vec<u8>, Header<'static>);
+
+/// The lobby's lists (M40); a visitor's own game is in `/new`.
+#[rocket::get("/lobby.json?<replays>")]
+fn lobby(registry: &State<Arc<Registry>>, replays: Option<usize>) -> Option<Json> {
+    if registry.broadcast().is_some() {
+        return None;
+    }
+    Some(Json(
+        registry.lobby_json(replays.unwrap_or(20).min(200)),
+        Header::new("Cache-Control", "no-store"),
+    ))
+}
 
 /// The setup form's state: whether the server is full and which game, if
 /// any, is the visitor's.

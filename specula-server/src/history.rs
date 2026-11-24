@@ -35,6 +35,10 @@ const DETAIL_DIR: &str = "detail";
 const DATA_DIR: &str = "data";
 const SUMMARY_DIR: &str = "summary";
 const ID_FILE: &str = "id";
+const META_FILE: &str = "meta.json";
+/// A stored match without a `meta.json` is dated and sized from its files:
+/// 150 turns of 200 ms per segment.
+const SEGMENT_SECS: u32 = 30;
 
 struct Stored {
     /// Names the directory.
@@ -59,6 +63,62 @@ impl Stored {
             summaries: Vec::new(),
         }
     }
+}
+
+/// What the lobby shows of a stored match (M40); written at the start and
+/// again at the end, so a match cut short keeps the first.
+pub struct Meta {
+    pub map_name: Option<String>,
+    pub host: String,
+    /// Name, civ code and 0xRRGGBB colour, gaia left out.
+    pub players: Vec<(String, String, u32)>,
+    pub duration_secs: u32,
+}
+
+impl Meta {
+    fn to_bytes(&self) -> Vec<u8> {
+        serde_json::json!({
+            "map": self.map_name,
+            "host": self.host,
+            "players": self.players.iter()
+                .map(|(name, civ, color)| serde_json::json!([name, civ, color]))
+                .collect::<Vec<_>>(),
+            "duration": self.duration_secs,
+        })
+        .to_string()
+        .into_bytes()
+    }
+
+    fn from_bytes(bytes: &[u8]) -> Option<Meta> {
+        let value: serde_json::Value = serde_json::from_slice(bytes).ok()?;
+        let players = value
+            .get("players")?
+            .as_array()?
+            .iter()
+            .filter_map(|entry| {
+                Some((
+                    entry.get(0)?.as_str()?.to_string(),
+                    entry.get(1)?.as_str()?.to_string(),
+                    u32::try_from(entry.get(2)?.as_u64()?).ok()?,
+                ))
+            })
+            .collect();
+        Some(Meta {
+            map_name: value.get("map")?.as_str().map(str::to_string),
+            host: value.get("host")?.as_str()?.to_string(),
+            players,
+            duration_secs: u32::try_from(value.get("duration")?.as_u64()?).ok()?,
+        })
+    }
+}
+
+/// A finished stored match as the lobby lists it.
+pub struct StoredInfo {
+    pub uuid: MatchId,
+    pub started_ms: u64,
+    pub duration_secs: u32,
+    /// None for a match stored before M40.
+    pub meta: Option<Meta>,
 }
 
 pub struct History {
@@ -185,6 +245,46 @@ impl History {
             format!("{match_id:016x}").as_bytes(),
             protect,
         )
+    }
+
+    /// Replaces the match's lobby record; a failure only costs the lobby
+    /// its details.
+    pub fn write_meta(&mut self, match_id: u64, meta: &Meta, protect: &[u64]) -> io::Result<()> {
+        let Some(stored) = self.matches.get(&match_id) else {
+            return Ok(());
+        };
+        let path = self.dir.join(stored.uuid.to_string()).join(META_FILE);
+        self.write(match_id, &path, &meta.to_bytes(), protect)
+    }
+
+    /// The `limit` newest finished matches, and whether older ones remain.
+    pub fn list(&self, limit: usize) -> (Vec<StoredInfo>, bool) {
+        let mut finished = self
+            .matches
+            .iter()
+            .rev()
+            .filter(|(id, _)| !self.live.contains(id));
+        let listed = finished
+            .by_ref()
+            .take(limit)
+            .map(|(match_id, stored)| {
+                let path = self.dir.join(stored.uuid.to_string()).join(META_FILE);
+                let meta = fs::read(path)
+                    .ok()
+                    .and_then(|bytes| Meta::from_bytes(&bytes));
+                StoredInfo {
+                    uuid: stored.uuid,
+                    // Match ids are nanoseconds since the epoch.
+                    started_ms: match_id / 1_000_000,
+                    duration_secs: meta.as_ref().map_or_else(
+                        || stored.segments as u32 * SEGMENT_SECS,
+                        |meta| meta.duration_secs,
+                    ),
+                    meta,
+                }
+            })
+            .collect();
+        (listed, finished.next().is_some())
     }
 
     pub fn match_of(&self, uuid: MatchId) -> Option<u64> {

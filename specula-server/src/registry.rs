@@ -52,6 +52,7 @@ use std::time::Instant;
 use std::time::SystemTime;
 
 use serde_json::Value;
+use serde_json::json;
 
 use crate::catalog::Catalog;
 use crate::chat::Chat;
@@ -95,6 +96,10 @@ const LIMIT_WARNINGS: [Duration; 3] = [
     Duration::from_secs(5 * 60),
     Duration::from_secs(60),
 ];
+/// The lobby refreshes thumbnails every 15 s, so a drawing this old is
+/// current enough for every visitor.
+const THUMB_TTL: Duration = Duration::from_secs(10);
+
 /// `DEFAULT_TURN_LENGTH` (`TurnManager.h`), which a hosted game runs at.
 pub(crate) const TURN_LENGTH: Duration = Duration::from_millis(200);
 
@@ -192,6 +197,9 @@ pub struct Match {
     /// Taken as the engine's start for L1: the runner may first wait a
     /// moment for the slot's previous engine, which only makes it stricter.
     launched: Mutex<Option<Instant>>,
+    /// The lobby's thumbnail as last drawn (M41), so a lobby full of
+    /// visitors draws it once per `THUMB_TTL`.
+    thumb: Mutex<Option<(Instant, Arc<Vec<u8>>)>>,
     /// How many of `LIMIT_WARNINGS` were logged.
     warned: Mutex<usize>,
     /// When the watcher first saw the game decided.
@@ -204,6 +212,27 @@ pub struct Match {
 impl Match {
     pub fn state(&self) -> MatchState {
         *self.state.lock().unwrap()
+    }
+
+    /// The thumbnail as WebP, at most `THUMB_TTL` old; None while the
+    /// match is not running or has shown nothing yet. Blocks while it
+    /// draws, so call it off the async threads.
+    pub fn thumb_webp(&self) -> Option<Arc<Vec<u8>>> {
+        // M36's "none" observer mode returns None here, which the lobby
+        // shows as the map's stock preview (D61).
+        if self.state() != MatchState::Running {
+            return None;
+        }
+        let mut cached = self.thumb.lock().unwrap();
+        if let Some((drawn, bytes)) = &*cached
+            && drawn.elapsed() < THUMB_TTL
+        {
+            return Some(Arc::clone(bytes));
+        }
+        let (thumb, terrain) = self.hub.thumb()?;
+        let bytes = Arc::new(crate::thumb::render(&thumb, &terrain)?);
+        *cached = Some((Instant::now(), Arc::clone(&bytes)));
+        Some(bytes)
     }
 
     /// L2 counts this. Without save and restore it is the game clock; a
@@ -494,6 +523,112 @@ impl Registry {
         })
     }
 
+    /// `/lobby.json` (M40, D59): the setups, the running matches and the
+    /// newest `replays` stored ones.
+    pub fn lobby_json(&self, replays: usize) -> String {
+        let hosted: Vec<(MatchId, Arc<Match>)> = {
+            let inner = self.inner.lock().unwrap();
+            inner
+                .order
+                .iter()
+                .rev()
+                .filter_map(|id| Some((*id, Arc::clone(inner.matches.get(id)?))))
+                .collect()
+        };
+        let color = |color: u32| format!("#{color:06x}");
+        let host_of = |found: &Match| {
+            found
+                .seats
+                .host()
+                .and_then(|host| found.seats.nickname_of(&host))
+                .map(|nickname| nickname.as_str().to_string())
+                .unwrap_or_default()
+        };
+        let mut setups = Vec::new();
+        let mut running = Vec::new();
+        // Off the registry lock, as `watch_matches`: each read takes the
+        // match's own locks.
+        for (id, found) in &hosted {
+            match found.state() {
+                MatchState::Setup => {
+                    let Some((map, max)) = found.room.lobby_info() else {
+                        continue;
+                    };
+                    setups.push(json!({
+                        "id": id.to_string(),
+                        "host": host_of(found),
+                        "map": map.name,
+                        "preview": map.preview,
+                        "seated": found.seats.seated_names().len(),
+                        "max": max,
+                    }));
+                }
+                MatchState::Running => {
+                    let map = found.play.lobby_info();
+                    let mut players: Vec<Value> = found
+                        .hub
+                        .lobby_players()
+                        .into_iter()
+                        .map(|(name, civ, rgb)| {
+                            json!({ "name": name, "civ": civ, "color": color(rgb) })
+                        })
+                        .collect();
+                    // Before the first turn the feed has no players yet.
+                    if players.is_empty() {
+                        players = found
+                            .seats
+                            .seated_names()
+                            .into_iter()
+                            .map(|(_, name)| json!({ "name": name.as_str(), "civ": "", "color": null }))
+                            .collect();
+                    }
+                    running.push(json!({
+                        "id": id.to_string(),
+                        "host": host_of(found),
+                        "map": map.as_ref().and_then(|map| map.name.clone()),
+                        "preview": map.and_then(|map| map.preview),
+                        "players": players,
+                        "elapsed": found.game_time().as_secs(),
+                        "observers": found.hub.observer_count(),
+                    }));
+                }
+                MatchState::Ended => {}
+            }
+        }
+        let (stored, more) = match &self.history {
+            Some(history) => history.lock().unwrap().list(replays),
+            None => (Vec::new(), false),
+        };
+        let stored: Vec<Value> = stored
+            .into_iter()
+            .map(|info| {
+                let meta = info.meta.as_ref();
+                json!({
+                    "id": info.uuid.to_string(),
+                    "map": meta.and_then(|meta| meta.map_name.clone()),
+                    "host": meta.map(|meta| meta.host.clone()),
+                    "players": meta.map_or_else(Vec::new, |meta| {
+                        meta.players
+                            .iter()
+                            .map(|(name, civ, rgb)| {
+                                json!({ "name": name, "civ": civ, "color": color(*rgb) })
+                            })
+                            .collect()
+                    }),
+                    "duration": info.duration_secs,
+                    "started": info.started_ms,
+                })
+            })
+            .collect();
+        json!({
+            "setups": setups,
+            "running": running,
+            "replays": stored,
+            "more": more,
+        })
+        .to_string()
+    }
+
     pub fn slot_free(&self) -> bool {
         self.inner.lock().unwrap().slots.iter().any(Option::is_none)
     }
@@ -619,6 +754,7 @@ impl Registry {
                 runner: Mutex::new(None),
                 previous: Mutex::new(previous),
                 launched: Mutex::new(None),
+                thumb: Mutex::new(None),
                 warned: Mutex::new(0),
                 decided: Mutex::new(None),
                 rematch: Mutex::new(None),
@@ -674,6 +810,15 @@ impl Registry {
                 eprintln!("cannot open the feed socket {socket}: {error}");
                 FEED_SOCKET_ERROR
             })?;
+        found.hub.set_meta_source(
+            found
+                .seats
+                .host()
+                .and_then(|host| found.seats.nickname_of(&host))
+                .map(|nickname| nickname.as_str().to_string())
+                .unwrap_or_default(),
+            launch.settings.map_name.clone(),
+        );
         let engine_done = Arc::new(AtomicBool::new(false));
         {
             let (hub, play) = (Arc::clone(&found.hub), Arc::clone(&found.play));

@@ -2417,12 +2417,18 @@ pub fn observer_main(
     });
 }
 
-/// Entry point of play.html, the setup of a game the server hosts: only
-/// the language, for the page's own script to translate with.
+/// Entry point of lobby.html, the server's front page: only the language,
+/// for the page's own script to translate with.
 #[wasm_bindgen]
-pub fn play_setup_main() {
+pub fn lobby_main() {
     set_panic_hook();
     lang::start_page();
+}
+
+/// A civ's name in the language, for the lobby's player lists.
+#[wasm_bindgen]
+pub fn lobby_civ_name(code: &str) -> String {
+    setup::civ_name(code)
 }
 
 /// Entry point of setup.html, a match's setup (D13): the host edits the

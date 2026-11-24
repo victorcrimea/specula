@@ -41,7 +41,7 @@ pub const NOTIFY_FLARE_KEY: &str = "specula.chat.notifyflare";
 pub const NOTIFY_PHASE_KEY: &str = "specula.chat.notifyphase";
 /// `chat.session.extended`, on unless turned off.
 pub const EXTENDED_KEY: &str = "specula.chat.extended";
-/// The key `play.html` and the setup page keep the nickname under.
+/// The key `lobby.html` and the setup page keep the nickname under.
 const NICKNAME_KEY: &str = "specula.nickname";
 
 /// The pause before reconnecting, doubled after each failure, as the server

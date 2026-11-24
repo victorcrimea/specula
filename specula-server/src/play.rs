@@ -58,6 +58,7 @@ use crate::seats::Phase;
 use crate::seats::Seats;
 use crate::settings::Choice;
 use crate::settings::Launch;
+use crate::settings::MapInfo;
 use crate::settings::Settings;
 use crate::summary_envelope;
 use crate::view::Hub;
@@ -1392,6 +1393,12 @@ impl Play {
         let inner = self.inner.lock().unwrap();
         let game = inner.game.as_ref()?;
         Some((host, rematch_settings(&game.launch)))
+    }
+
+    /// The map of the launched game, for the lobby.
+    pub fn lobby_info(&self) -> Option<MapInfo> {
+        let inner = self.inner.lock().unwrap();
+        Some(inner.game.as_ref()?.launch.settings.map_info())
     }
 
     /// The settings of the game `owner` hosts, which a rematch repeats.

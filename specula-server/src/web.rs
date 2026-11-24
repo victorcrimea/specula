@@ -120,7 +120,7 @@ impl<'r> FromParam<'r> for Page {
             "index.html",
             "unit.html",
             "map.html",
-            "play.html",
+            "lobby.html",
             "setup.html",
         ]
         .into_iter()
@@ -372,7 +372,7 @@ fn format_size(bytes: u64) -> String {
     }
 }
 
-/// `/`: the setup form when this server hosts, else the broadcast.
+/// `/`: the lobby when this server hosts, else the broadcast.
 #[derive(rocket::Responder)]
 pub enum IndexPage {
     Page(RawHtml<String>),
@@ -394,7 +394,7 @@ pub async fn index(
             "/g/{id}"
         )))));
     }
-    render("play.html", pkg, assets, atlases, usage, cookies, referrer)
+    render("lobby.html", pkg, assets, atlases, usage, cookies, referrer)
         .await
         .map(IndexPage::Page)
 }

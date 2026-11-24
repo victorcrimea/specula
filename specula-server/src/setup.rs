@@ -26,6 +26,7 @@ use crate::seats::Seats;
 use crate::settings::Choice;
 use crate::settings::LandscapeChoice;
 use crate::settings::Launch;
+use crate::settings::MapInfo;
 use crate::settings::Settings;
 use crate::settings::gamesetup::CEASEFIRE_MAX;
 use crate::settings::gamesetup::Change;
@@ -135,6 +136,14 @@ impl SetupRoom {
             }),
             revision: watch::channel(0).0,
         }
+    }
+
+    /// The map and the seat count of an open setup, for the lobby; None
+    /// once it launched or closed.
+    pub fn lobby_info(&self) -> Option<(MapInfo, usize)> {
+        let inner = self.inner.lock().unwrap();
+        matches!(inner.phase, Phase::Open | Phase::Launching)
+            .then(|| (inner.settings.map_info(), inner.settings.player_count.max))
     }
 
     pub fn subscribe(&self) -> watch::Receiver<u64> {

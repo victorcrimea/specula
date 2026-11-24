@@ -35,9 +35,9 @@ use crate::lang;
 use crate::lang::translate;
 use crate::lang::translate_context as tc;
 
-/// `localStorage` key of the nickname, which `play.html` keeps too.
+/// `localStorage` key of the nickname, which `lobby.html` keeps too.
 const NICKNAME_KEY: &str = "specula.nickname";
-/// The host's last settings, which `play.html` sends with `POST /new`; it is
+/// The host's last settings, which `lobby.html` sends with `POST /new`; it is
 /// vanilla's `config/matchsettings.mp.json` (D34).
 const SETTINGS_KEY: &str = "specula.matchsettings";
 /// Reconnecting: first retry after this, doubling up to `RETRY_MAX_MS`.
@@ -310,7 +310,7 @@ fn title_case(name: &str) -> String {
         .join(" ")
 }
 
-fn civ_name(code: &str) -> String {
+pub(crate) fn civ_name(code: &str) -> String {
     CIVS.lines()
         .filter(|line| !line.starts_with('#'))
         .filter_map(|line| line.split_once('\t'))

@@ -22,11 +22,11 @@ use crate::lang;
 /// Long enough for an engine whose game the defeat finished to have quit,
 /// so that the page stays on that match's end instead.
 const DEFEAT_SETTLE_MS: i32 = 3000;
-/// `localStorage` key of the nickname, which `play.html` keeps too.
+/// `localStorage` key of the nickname, which `lobby.html` keeps too.
 const NICKNAME_KEY: &str = "specula.nickname";
 /// The host's last settings, which `/new` takes (D34).
 const SETTINGS_KEY: &str = "specula.matchsettings";
-/// `/new` refuses a settings body longer than this, as `play.html` knows.
+/// `/new` refuses a settings body longer than this, as `lobby.html` knows.
 const SETTINGS_MAX: usize = 30000;
 
 pub struct GameMenu {
@@ -293,7 +293,7 @@ pub fn new_match(error: Rc<RefCell<Option<String>>>) {
             .filter(|value| !value.is_empty())
     };
     let Some(nickname) = stored(NICKNAME_KEY) else {
-        // `play.html` asks for a name; this page has no form for one.
+        // `lobby.html` asks for a name; this page has no form for one.
         let _ = window.location().set_href("/");
         return;
     };
