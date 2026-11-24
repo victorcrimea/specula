@@ -22,6 +22,11 @@ pub const CONTROL_HOST: u8 = 1;
 pub const CONTROL_KICKED: u8 = 2;
 pub const CONTROL_ABSENT: u8 = 4;
 pub const CONTROL_BANNED: u8 = 8;
+/// A human whose player has no live /play socket.
+pub const CONTROL_OFFLINE: u8 = 16;
+/// Archived matches keep it; it has no status effects, turret counts,
+/// entity limits or shared dropsite flag, which version 15 has.
+const DETAIL_VERSION_NO_STATUS: u8 = 14;
 /// Archived matches keep it; it has no spy cost fields, which a player
 /// carries from version 14.
 const DETAIL_VERSION_NO_SPY: u8 = 13;
@@ -78,7 +83,8 @@ pub const UPGRADES: usize = 22;
 pub const TRADE_ROUTE: usize = 23;
 pub const MARKET: usize = 24;
 pub const TRADE_GARRISON: usize = 25;
-const SLOTS: usize = 26;
+pub const STATUS_EFFECTS: usize = 26;
+const SLOTS: usize = 27;
 /// Rally positions come in 1/16 m.
 pub const RALLY_UNITS_PER_METRE: f32 = 16.0;
 /// `Group::Progress`'s pack or upgrade when not running.
@@ -169,6 +175,37 @@ pub enum Group {
         list: Vec<u32>,
     },
     Commands(Commands),
+    /// The entity's active status effects, empty once they end.
+    StatusEffects(Vec<StatusEffect>),
+}
+
+/// One of an entity's active status effects.
+#[derive(Clone, Debug, PartialEq)]
+pub struct StatusEffect {
+    /// The base code (e.g. `Burning`), a 1-based string.
+    pub code: u32,
+    /// The effect's data as JSON, a 1-based string.
+    pub json: u32,
+    /// Time elapsed in 100 ms.
+    pub elapsed: u32,
+}
+
+/// How a version lays out the groups that grew fields.
+#[derive(Clone, Copy)]
+struct Format {
+    /// A garrison's members carry owners.
+    owners: bool,
+    /// The commands group ends with the turret counts.
+    turret_counts: bool,
+}
+
+impl Format {
+    fn of(version: u8) -> Self {
+        Format {
+            owners: version != DETAIL_VERSION_NO_OWNERS,
+            turret_counts: version > DETAIL_VERSION_NO_STATUS,
+        }
+    }
 }
 
 /// What the command row and the pack, gate and alert panels read.
@@ -179,6 +216,10 @@ pub struct Commands {
     pub alert_classes: u32,
     /// The ejectable occupants of a TurretHolder's points.
     pub turrets: u32,
+    /// The TurretHolder's points with an entity on them, and all of its
+    /// points.
+    pub turrets_occupied: u32,
+    pub turret_points: u32,
 }
 
 impl Commands {
@@ -214,6 +255,30 @@ pub struct PlayerGui {
     pub spy_flags: u8,
     /// `VisionSharing.FailureCostRatio` of the spy template.
     pub spy_failure_ratio: f32,
+    /// `hasSharedDropsites`; false for another player than a seat's own.
+    pub shared_dropsites: bool,
+    /// The entity limits and counts, empty for another player than a
+    /// seat's own.
+    pub limits: EntityLimits,
+}
+
+/// A player's entity limits, as the simulation state has them.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct EntityLimits {
+    pub categories: Vec<LimitCategory>,
+    /// 1-based template string and count, `matchEntityCounts`.
+    pub matches: Vec<(u32, u32)>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct LimitCategory {
+    /// 1-based category string.
+    pub name: u32,
+    /// `u32::MAX` for none.
+    pub limit: u32,
+    pub count: u32,
+    /// 1-based changer string and its change.
+    pub changers: Vec<(u32, i32)>,
 }
 
 impl PlayerGui {
@@ -232,6 +297,8 @@ impl Default for PlayerGui {
             spy_multiplier: 1.0,
             spy_flags: 0,
             spy_failure_ratio: 0.0,
+            shared_dropsites: false,
+            limits: EntityLimits::default(),
         }
     }
 }
@@ -374,6 +441,7 @@ fn read_control(cursor: &mut ByteReader) -> Result<Control, &'static str> {
                 kicked: flags & CONTROL_KICKED != 0,
                 absent: flags & CONTROL_ABSENT != 0,
                 banned: flags & CONTROL_BANNED != 0,
+                offline: flags & CONTROL_OFFLINE != 0,
             })
         })
         .collect::<Result<_, &'static str>>()?;
@@ -407,6 +475,9 @@ fn write_control(out: &mut Writer, control: &Control) {
         }
         if seat.banned {
             flags |= CONTROL_BANNED;
+        }
+        if seat.offline {
+            flags |= CONTROL_OFFLINE;
         }
         out.u8(seat.player);
         out.u8(flags);
@@ -462,6 +533,8 @@ pub struct ControlSeat {
     pub kicked: bool,
     pub absent: bool,
     pub banned: bool,
+    /// No live /play socket; shown as `[OFFLINE]` on its units.
+    pub offline: bool,
 }
 
 impl Details {
@@ -491,6 +564,7 @@ impl Details {
         if !matches!(
             version,
             DETAIL_VERSION
+                | DETAIL_VERSION_NO_STATUS
                 | DETAIL_VERSION_NO_SPY
                 | DETAIL_VERSION_NO_CONTROL
                 | DETAIL_VERSION_NO_TRADE_GAIN
@@ -507,7 +581,7 @@ impl Details {
         ) {
             return Err("unknown detail version, reload the page");
         }
-        let owners = version != DETAIL_VERSION_NO_OWNERS;
+        let owners = Format::of(version);
         *self = Details {
             known: true,
             turn,
@@ -533,7 +607,7 @@ impl Details {
                 self.cleared.insert(id, cleared);
             }
         }
-        if version >= DETAIL_VERSION {
+        if version > DETAIL_VERSION_NO_CONTROL {
             self.control = read_control(cursor)?;
         }
         Ok(())
@@ -596,8 +670,8 @@ impl Details {
     }
 
     /// Whether its garrisons carry owners, which a delta does not say.
-    fn owners(&self) -> bool {
-        self.version != DETAIL_VERSION_NO_OWNERS
+    fn owners(&self) -> Format {
+        Format::of(self.version)
     }
 
     fn read_data(&mut self, cursor: &mut ByteReader) -> Result<(), &'static str> {
@@ -655,6 +729,24 @@ impl Details {
                     player.spy_multiplier = cursor.f32()?;
                     player.spy_flags = cursor.u8()?;
                     player.spy_failure_ratio = cursor.f32()?;
+                }
+                if self.version > DETAIL_VERSION_NO_STATUS {
+                    player.shared_dropsites = cursor.u8()? & 1 != 0;
+                    player.limits.categories = (0..cursor.varint()?)
+                        .map(|_| {
+                            Ok(LimitCategory {
+                                name: cursor.varint_u32()?,
+                                limit: cursor.varint_u32()?,
+                                count: cursor.varint_u32()?,
+                                changers: (0..cursor.u8()?)
+                                    .map(|_| Ok((cursor.varint_u32()?, cursor.zigzag()?)))
+                                    .collect::<Result<_, &'static str>>()?,
+                            })
+                        })
+                        .collect::<Result<_, &'static str>>()?;
+                    player.limits.matches = (0..cursor.varint()?)
+                        .map(|_| Ok((cursor.varint_u32()?, cursor.varint_u32()?)))
+                        .collect::<Result<_, &'static str>>()?;
                 }
                 Ok(player)
             })
@@ -775,6 +867,25 @@ impl Details {
                     out.u8(player.spy_flags);
                     out.f32(player.spy_failure_ratio);
                 }
+                if self.version > DETAIL_VERSION_NO_STATUS {
+                    out.u8(u8::from(player.shared_dropsites));
+                    out.varint(player.limits.categories.len() as u64);
+                    for category in &player.limits.categories {
+                        out.varint(u64::from(category.name));
+                        out.varint(u64::from(category.limit));
+                        out.varint(u64::from(category.count));
+                        out.u8(category.changers.len() as u8);
+                        for (name, change) in &category.changers {
+                            out.varint(u64::from(*name));
+                            out.zigzag(*change);
+                        }
+                    }
+                    out.varint(player.limits.matches.len() as u64);
+                    for (template, count) in &player.limits.matches {
+                        out.varint(u64::from(*template));
+                        out.varint(u64::from(*count));
+                    }
+                }
             }
         }
         let owners = self.owners();
@@ -793,7 +904,7 @@ impl Details {
             }
             write_groups(&mut out, groups, Some(self.turn), owners);
         }
-        if self.version >= DETAIL_VERSION {
+        if self.version > DETAIL_VERSION_NO_CONTROL {
             write_control(&mut out, &self.control);
         }
         out.0
@@ -850,7 +961,7 @@ fn read_groups(
     cursor: &mut ByteReader,
     turn: u32,
     keyframe_entity: bool,
-    owners: bool,
+    owners: Format,
 ) -> Result<Groups, &'static str> {
     let mask = cursor.varint()?;
     if mask >> SLOTS != 0 {
@@ -882,7 +993,7 @@ fn read_group(
     cursor: &mut ByteReader,
     slot: usize,
     turn: u32,
-    owners: bool,
+    owners: Format,
 ) -> Result<Group, &'static str> {
     Ok(match slot {
         HEALTH => Group::Health {
@@ -952,7 +1063,7 @@ fn read_group(
                     previous += cursor.zigzag_i64()?;
                     let id = u32::try_from(previous).map_err(|_| "id out of range")?;
                     let template = cursor.varint_u32()?;
-                    let owner = if owners {
+                    let owner = if owners.owners {
                         Some(cursor.zigzag()?).filter(|owner| *owner >= 0)
                     } else {
                         None
@@ -997,7 +1108,28 @@ fn read_group(
             flags: cursor.varint_u32()?,
             alert_classes: cursor.varint_u32()?,
             turrets: cursor.varint_u32()?,
+            turrets_occupied: if owners.turret_counts {
+                cursor.varint_u32()?
+            } else {
+                0
+            },
+            turret_points: if owners.turret_counts {
+                cursor.varint_u32()?
+            } else {
+                0
+            },
         }),
+        STATUS_EFFECTS => Group::StatusEffects(
+            (0..cursor.u8()?)
+                .map(|_| {
+                    Ok(StatusEffect {
+                        code: cursor.varint_u32()?,
+                        json: cursor.varint_u32()?,
+                        elapsed: cursor.varint_u32()?,
+                    })
+                })
+                .collect::<Result<_, &'static str>>()?,
+        ),
         PROGRESS => Group::Progress {
             pack: cursor.u8()?,
             upgrade: cursor.u8()?,
@@ -1043,7 +1175,7 @@ fn read_group(
 
 /// As `read_groups` reads them; `keyframe_turn` is set for a keyframe's
 /// entities.
-fn write_groups(out: &mut Writer, groups: &Groups, keyframe_turn: Option<u32>, owners: bool) {
+fn write_groups(out: &mut Writer, groups: &Groups, keyframe_turn: Option<u32>, owners: Format) {
     let mask = groups
         .iter()
         .enumerate()
@@ -1062,7 +1194,7 @@ fn write_groups(out: &mut Writer, groups: &Groups, keyframe_turn: Option<u32>, o
     }
 }
 
-fn write_group(out: &mut Writer, group: &Group, owners: bool) {
+fn write_group(out: &mut Writer, group: &Group, owners: Format) {
     match group {
         Group::Health { hitpoints, max } => {
             out.varint(u64::from(*hitpoints));
@@ -1125,7 +1257,7 @@ fn write_group(out: &mut Writer, group: &Group, owners: bool) {
                 out.zigzag_i64(i64::from(entity.id) - previous);
                 previous = i64::from(entity.id);
                 out.varint(u64::from(entity.template));
-                if owners {
+                if owners.owners {
                     out.zigzag(entity.owner.unwrap_or(-1));
                 }
             }
@@ -1185,6 +1317,18 @@ fn write_group(out: &mut Writer, group: &Group, owners: bool) {
             out.varint(u64::from(commands.flags));
             out.varint(u64::from(commands.alert_classes));
             out.varint(u64::from(commands.turrets));
+            if owners.turret_counts {
+                out.varint(u64::from(commands.turrets_occupied));
+                out.varint(u64::from(commands.turret_points));
+            }
+        }
+        Group::StatusEffects(effects) => {
+            out.u8(effects.len() as u8);
+            for effect in effects {
+                out.varint(u64::from(effect.code));
+                out.varint(u64::from(effect.json));
+                out.varint(u64::from(effect.elapsed));
+            }
         }
         Group::Rally { marker, points } => {
             out.varint(u64::from(*marker));

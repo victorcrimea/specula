@@ -77,6 +77,8 @@ const TIME_NOTES_WIRE: u8 = 27;
 const LOCK_WIRE: u8 = 28;
 /// From v29: each economy ends with its `trainingBlocked` flag.
 const BLOCKED_WIRE: u8 = 29;
+/// The heal action's classes and a garrison size in the template details.
+const HEAL_WIRE: u8 = 30;
 const LEDGER_WIRE: u8 = 24;
 /// A ledger line's seat holds a voluntary pause.
 pub const LEDGER_HOLDS: u8 = 1;
@@ -92,6 +94,8 @@ const MOTION_HITPOINTS: u8 = 2;
 const MOTION_CAPTURE: u8 = 4;
 /// `TemplateDetails::components` bit for Health.
 pub const COMPONENT_HEALTH: u32 = 1;
+/// And for Heal.
+pub const COMPONENT_HEAL: u32 = 1 << 19;
 pub const COMPONENT_CAPTURABLE: u32 = 2;
 /// And for ResourceSupply.
 pub const COMPONENT_RESOURCE_SUPPLY: u32 = 4;
@@ -120,6 +124,9 @@ pub const COMPONENT_GUARD: u32 = 1 << 27;
 /// `Market.HasType`, sent after the component bits.
 pub const COMPONENT_MARKET_LAND: u32 = 1 << 28;
 pub const COMPONENT_MARKET_NAVAL: u32 = 1 << 29;
+/// The treasure and what collects it, sent after the market's.
+pub const COMPONENT_TREASURE: u32 = 1 << 30;
+pub const COMPONENT_TREASURE_COLLECTOR: u32 = 1 << 31;
 /// `TemplateDetails::flags`: Identity's Undeletable.
 pub const TEMPLATE_UNDELETABLE: u32 = 2048;
 /// And Identity's Controllable false.
@@ -129,6 +136,8 @@ pub const TEMPLATE_UNCONTROLLABLE: u32 = 4096;
 pub const TEMPLATE_SILHOUETTE_DISPLAY: u32 = 8192;
 /// And its SilhouetteOccluder: hides those.
 pub const TEMPLATE_SILHOUETTE_OCCLUDER: u32 = 16384;
+/// And Health's Unhealable.
+pub const TEMPLATE_UNHEALABLE: u32 = 32768;
 const SOUND_ENTITY: u8 = 0;
 const SOUND_POSITION: u8 = 1;
 const SOUND_PLAYER: u8 = 2;
@@ -522,6 +531,12 @@ pub struct TemplateDetails {
     /// strings, 0 when older.
     pub garrison_classes: u32,
     pub turret_classes: u32,
+    /// Heal's HealableClasses and UnhealableClasses, 1-based strings, 0
+    /// when older or without.
+    pub heal_classes: u32,
+    pub unhealable_classes: u32,
+    /// Garrisonable's Size, 0 for none or older.
+    pub garrison_size: u32,
 }
 
 /// A player's top panel numbers.
@@ -1376,6 +1391,9 @@ impl Scene {
             out.varint(u64::from(details.order_sounds));
             out.varint(u64::from(details.garrison_classes));
             out.varint(u64::from(details.turret_classes));
+            out.varint(u64::from(details.heal_classes));
+            out.varint(u64::from(details.unhealable_classes));
+            out.varint(u64::from(details.garrison_size));
         }
         out.varint(self.strings.len() as u64);
         for text in &self.strings {
@@ -2145,6 +2163,9 @@ impl Records for ByteReader<'_> {
             order_sounds: 0,
             garrison_classes: 0,
             turret_classes: 0,
+            heal_classes: 0,
+            unhealable_classes: 0,
+            garrison_size: 0,
         };
         if version >= OLDEST_WIRE {
             details.supply_type = self.varint_u32()?;
@@ -2158,6 +2179,11 @@ impl Records for ByteReader<'_> {
         if version >= 21 {
             details.garrison_classes = self.varint_u32()?;
             details.turret_classes = self.varint_u32()?;
+        }
+        if version >= HEAL_WIRE {
+            details.heal_classes = self.varint_u32()?;
+            details.unhealable_classes = self.varint_u32()?;
+            details.garrison_size = self.varint_u32()?;
         }
         Ok(details)
     }

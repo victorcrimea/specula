@@ -4279,6 +4279,9 @@ fn write_templates(out: &mut Writer, templates: &[Template]) {
         out.varint(one_based(details.order_sounds));
         out.varint(one_based(details.garrison_classes));
         out.varint(one_based(details.turret_classes));
+        out.varint(one_based(details.heal_classes));
+        out.varint(one_based(details.unhealable_classes));
+        out.varint(u64::from(details.garrison_size));
     }
 }
 

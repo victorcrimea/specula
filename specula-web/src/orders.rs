@@ -10,6 +10,7 @@ use specula_assets::command;
 use specula_assets::command::ALLOW_CAPTURE;
 use specula_assets::command::Command;
 use specula_assets::command::QUEUED;
+use specula_assets::command::UNITS_ONLY;
 
 use crate::detail;
 use crate::detail::Commands;
@@ -28,12 +29,16 @@ use crate::stream::COMPONENT_FOUNDATION;
 use crate::stream::COMPONENT_GARRISON_HOLDER;
 use crate::stream::COMPONENT_GARRISONABLE;
 use crate::stream::COMPONENT_GUARD;
+use crate::stream::COMPONENT_HEAL;
+use crate::stream::COMPONENT_HEALTH;
 use crate::stream::COMPONENT_MARKET;
 use crate::stream::COMPONENT_RALLY_POINT;
 use crate::stream::COMPONENT_REPAIRABLE;
 use crate::stream::COMPONENT_RESOURCE_DROPSITE;
 use crate::stream::COMPONENT_RESOURCE_GATHERER;
 use crate::stream::COMPONENT_RESOURCE_SUPPLY;
+use crate::stream::COMPONENT_TREASURE;
+use crate::stream::COMPONENT_TREASURE_COLLECTOR;
 use crate::stream::COMPONENT_TURRET_HOLDER;
 use crate::stream::COMPONENT_TURRETABLE;
 use crate::stream::COMPONENT_UNIT_AI;
@@ -41,6 +46,7 @@ use crate::stream::Dot;
 use crate::stream::Scene;
 use crate::stream::Stance;
 use crate::stream::TEMPLATE_UNCONTROLLABLE;
+use crate::stream::TEMPLATE_UNHEALABLE;
 use crate::stream::TemplateDetails;
 use crate::tips;
 use crate::tips::DataFiles;
@@ -73,13 +79,16 @@ const FREEHAND_MARKER_SPACING: f32 = 5.0;
 /// The engine's session.guard (G), session.patrol (P), session.repair (J),
 /// session.capture (C) and session.attack (F); and session.garrison,
 /// session.occupyturret, session.attackmove and session.autorallypoint,
-/// which the engine's default config all bind to Ctrl.
+/// which the engine's default config all bind to Ctrl. With Q held as well,
+/// Ctrl is session.attackmoveUnit only (`HOTKEY_ATTACK_MOVE_UNIT`), as the
+/// engine releases the hotkeys a more specific one overrides.
 pub const HOTKEY_GARRISON: u8 = 1;
 pub const HOTKEY_GUARD: u8 = 2;
 pub const HOTKEY_PATROL: u8 = 4;
 pub const HOTKEY_REPAIR: u8 = 8;
 pub const HOTKEY_CAPTURE: u8 = 16;
 pub const HOTKEY_ATTACK: u8 = 32;
+pub const HOTKEY_ATTACK_MOVE_UNIT: u8 = 64;
 
 /// A command button's `preSelectedAction`: the action the next left
 /// click on the view takes.
@@ -154,9 +163,17 @@ pub fn action(
         formation,
     };
 
-    // "set-rallypoint": structures only, as commands to units take
-    // precedence, and vanilla checks it before every hotkey, so a
-    // fortress with F held still sets its rally point.
+    // "focus-fire" and "set-rallypoint" are structures only, as commands to
+    // units take precedence, and vanilla checks both (in that order, as
+    // they are declared) before every other hotkey.
+    if !unit_ai
+        && target.hotkeys & HOTKEY_ATTACK != 0
+        && let Some(action) = actions.focus_fire()
+    {
+        return Some(action);
+    }
+    // Vanilla checks it before every hotkey, so a fortress with F held
+    // and nothing to focus on still sets its rally point.
     if !unit_ai
         && able.iter().any(|&id| has(id, COMPONENT_RALLY_POINT))
         && let Some(action) = rally(scene, &own, player, target, target_dot, flags, data)
@@ -178,7 +195,7 @@ pub fn action(
                 .flatten()
         })
         .or_else(|| {
-            held(HOTKEY_GARRISON)
+            (held(HOTKEY_GARRISON) || held(HOTKEY_ATTACK_MOVE_UNIT))
                 .then(|| actions.attack_move())
                 .flatten()
         })
@@ -269,9 +286,36 @@ pub fn action(
                 sound: Some(("order_gather", gatherer)),
             });
         }
-        // "returnresource"; shared dropsites are not considered.
-        if relation == Relation::Own
-            && bits & COMPONENT_RESOURCE_DROPSITE != 0
+        // "collect-treasure"
+        if bits & COMPONENT_TREASURE != 0
+            && let Some(&collector) = able
+                .iter()
+                .find(|&&unit| has(unit, COMPONENT_TREASURE_COLLECTOR))
+        {
+            return Some(Action {
+                cursor: "action-collect-treasure".to_string(),
+                tooltip: String::new(),
+                command: Some(Command::CollectTreasure {
+                    flags,
+                    entities: entities(),
+                    target: id,
+                }),
+                sound: Some(("order_collect_treasure", collector)),
+            });
+        }
+        // "returnresource": a shared dropsite takes the mutual allies' too,
+        // when the player shares dropsites.
+        let shared = scene
+            .details
+            .players
+            .get(usize::try_from(player).unwrap_or(usize::MAX))
+            .is_some_and(|gui| gui.shared_dropsites)
+            && actions.command_flags(id) & Commands::SHARED != 0;
+        if (if shared {
+            actions.own_or_mutual_ally(dot.owner)
+        } else {
+            relation == Relation::Own
+        }) && bits & COMPONENT_RESOURCE_DROPSITE != 0
             && let Some((carrier, carried)) = able.iter().find_map(|&unit| {
                 let carried = carried(scene, unit)?;
                 let types = target_details?.dropsite_types;
@@ -315,10 +359,13 @@ pub fn action(
     }
 
     if target_dot.is_some() {
+        if let Some(action) = actions.heal() {
+            return Some(action);
+        }
         if let Some(action) = actions.attack().or_else(|| actions.capture()) {
             return Some(action);
         }
-        if let Some(action) = actions.repair() {
+        if let Some(action) = actions.repair().or_else(|| actions.unset_rally()) {
             return Some(action);
         }
     }
@@ -431,9 +478,14 @@ pub fn freehand(
     let step = length / (n - 1) as f32;
     let flags = if target.queued { QUEUED } else { 0 };
     let sound = Some(("order_walk", units[0]));
-    let command = if target.hotkeys & HOTKEY_GARRISON != 0 {
+    let units_only = if target.hotkeys & HOTKEY_ATTACK_MOVE_UNIT != 0 {
+        UNITS_ONLY
+    } else {
+        0
+    };
+    let command = if target.hotkeys & (HOTKEY_GARRISON | HOTKEY_ATTACK_MOVE_UNIT) != 0 {
         Command::AttackWalkCustom {
-            flags,
+            flags: flags | units_only,
             entities: units,
             line,
             reversed,
@@ -688,6 +740,98 @@ impl Actions<'_> {
         })
     }
 
+    /// "focus-fire": a structure with a rally point and an attack aims at
+    /// an enemy, or at the ground. Only the target's `Enemy` relation and a
+    /// missing ResourceSupply (a tree is not worth the arrows) make it a
+    /// target, and play the sound.
+    fn focus_fire(&self) -> Option<Action> {
+        let &shooter = self.able.iter().find(|&&unit| {
+            self.has(unit, COMPONENT_RALLY_POINT) && self.has(unit, COMPONENT_ATTACK)
+        })?;
+        let target = self.target().and_then(|(id, _, bits, relation)| {
+            (relation == Relation::Enemy && bits & COMPONENT_RESOURCE_SUPPLY == 0).then_some(id)
+        });
+        Some(Action {
+            cursor: "action-target".to_string(),
+            tooltip: String::new(),
+            command: self.point().map(|[x, z]| Command::FocusFire {
+                flags: self.flags,
+                entities: self.own.to_vec(),
+                x,
+                z,
+                target: target.unwrap_or(0),
+            }),
+            sound: target.map(|_| ("focus_fire", shooter)),
+        })
+    }
+
+    /// "heal": a healer on an own or allied unit that is hurt and that its
+    /// Heal classes name.
+    fn heal(&self) -> Option<Action> {
+        let (id, dot, _, relation) = self.target()?;
+        if !matches!(relation, Relation::Own | Relation::Ally) {
+            return None;
+        }
+        let target_details = self.details(id)?;
+        let classes = target_classes(self.scene, Some(target_details));
+        if !classes.contains(&"Unit")
+            || target_details.components & COMPONENT_HEALTH == 0
+            || target_details.flags & TEMPLATE_UNHEALABLE != 0
+        {
+            return None;
+        }
+        let injured = match &entity_groups(self.scene, id, dot.template)[detail::HEALTH] {
+            Some(Group::Health { hitpoints, max }) => *hitpoints > 0 && hitpoints < max,
+            _ => dot.hitpoints > 0 && dot.hitpoints < u8::MAX,
+        };
+        if !injured {
+            return None;
+        }
+        let &healer = self.able.iter().find(|&&unit| {
+            unit != id
+                && self.has(unit, COMPONENT_HEAL)
+                && self.details(unit).is_some_and(|healer| {
+                    let list = |index: u32| string(self.scene, index).unwrap_or_default();
+                    // A hook that does not send the lists lets any through.
+                    healer.heal_classes == 0
+                        || (!matches_class_list(&classes, list(healer.unhealable_classes))
+                            && matches_class_list(&classes, list(healer.heal_classes)))
+                })
+        })?;
+        Some(Action {
+            cursor: "action-heal".to_string(),
+            tooltip: String::new(),
+            command: Some(Command::Heal {
+                flags: self.flags,
+                entities: self.own.to_vec(),
+                target: id,
+            }),
+            sound: Some(("order_heal", healer)),
+        })
+    }
+
+    /// "unset-rallypoint": on a selected structure that has one.
+    fn unset_rally(&self) -> Option<Action> {
+        let (id, dot, _, _) = self.target()?;
+        if !self.able.contains(&id)
+            || self.has(id, COMPONENT_UNIT_AI)
+            || !matches!(
+                &entity_groups(self.scene, id, dot.template)[detail::RALLY],
+                Some(Group::Rally { points, .. }) if !points.is_empty()
+            )
+        {
+            return None;
+        }
+        Some(Action {
+            cursor: "action-unset-rally".to_string(),
+            tooltip: String::new(),
+            command: Some(Command::UnsetRally {
+                entities: self.own.to_vec(),
+            }),
+            sound: None,
+        })
+    }
+
     /// "garrison": into an own or mutually allied holder whose List the
     /// unit matches; any, from a hook that does not send the List.
     fn garrison(&self) -> Option<Action> {
@@ -705,9 +849,34 @@ impl Actions<'_> {
                         matches_class_list(&target_classes(self.scene, self.details(unit)), list)
                     }))
         })?;
+        // The tooltip is the first able unit's, which also counts what it
+        // carries if it is a holder itself.
+        let mut extra = self
+            .details(unit)
+            .map_or(0, |details| details.garrison_size)
+            .max(1);
+        if self.has(unit, COMPONENT_GARRISON_HOLDER)
+            && let Some(dot) = self.scene.dots.get(&unit)
+            && let Some((_, occupied, _)) = garrison_line(self.scene, unit, dot.template)
+        {
+            extra += occupied;
+        }
+        let tooltip = self
+            .scene
+            .dots
+            .get(&id)
+            .and_then(|dot| garrison_line(self.scene, id, dot.template))
+            .map(|(text, occupied, capacity)| {
+                if occupied + extra > capacity {
+                    tooltip::colored(&text, "orange")
+                } else {
+                    text
+                }
+            })
+            .unwrap_or_default();
         Some(Action {
             cursor: "action-garrison".to_string(),
-            tooltip: String::new(),
+            tooltip,
             command: Some(Command::Garrison {
                 flags: self.flags,
                 entities: self.own.to_vec(),
@@ -735,9 +904,22 @@ impl Actions<'_> {
                         })
                     }))
         })?;
+        let tooltip = self
+            .scene
+            .dots
+            .get(&id)
+            .and_then(|dot| turret_line(self.scene, id, dot.template))
+            .map(|(text, occupied, capacity)| {
+                if occupied == capacity {
+                    tooltip::colored(&text, "orange")
+                } else {
+                    text
+                }
+            })
+            .unwrap_or_default();
         Some(Action {
             cursor: "action-occupy-turret".to_string(),
-            tooltip: String::new(),
+            tooltip,
             command: Some(Command::OccupyTurret {
                 flags: self.flags,
                 entities: self.own.to_vec(),
@@ -795,7 +977,12 @@ impl Actions<'_> {
             cursor: "action-attack-move".to_string(),
             tooltip: String::new(),
             command: self.point().map(|[x, z]| Command::AttackWalk {
-                flags: self.flags,
+                flags: self.flags
+                    | if self.target.hotkeys & HOTKEY_ATTACK_MOVE_UNIT != 0 {
+                        UNITS_ONLY
+                    } else {
+                        0
+                    },
                 entities: self.own.to_vec(),
                 x,
                 z,
@@ -1033,12 +1220,50 @@ fn trains_units(scene: &Scene, id: u32) -> bool {
     }
 }
 
-/// "set-rallypoint": on a resource gather, from a market on another the
-/// default trade route, on a friendly foundation or damaged building
-/// repair, on an enemy attack, else walk, which Ctrl (session.attackmove)
-/// makes an attack-walk. Garrisoning, turrets and treasures are not
-/// ordered, so those show the walk's arrow. None on a selected entity
-/// itself, which the engine unsets the rally point on, unless Ctrl
+/// The "Current garrison" line of a holder, with its occupied slots and
+/// capacity; none without the garrison group.
+fn garrison_line(scene: &Scene, id: u32, template: u32) -> Option<(String, u32, u32)> {
+    let Some(Group::Garrison {
+        capacity, occupied, ..
+    }) = &entity_groups(scene, id, template)[detail::GARRISON]
+    else {
+        return None;
+    };
+    let text = lang::format(
+        &lang::translate("Current garrison: %(garrisoned)s/%(capacity)s"),
+        &[
+            ("garrisoned", &occupied.to_string()),
+            ("capacity", &capacity.to_string()),
+        ],
+    );
+    Some((text, *occupied, *capacity))
+}
+
+/// The "Current turrets" line, with the points taken and all of them; none
+/// without the commands group.
+fn turret_line(scene: &Scene, id: u32, template: u32) -> Option<(String, u32, u32)> {
+    let Some(Group::Commands(commands)) = &entity_groups(scene, id, template)[detail::COMMANDS]
+    else {
+        return None;
+    };
+    let text = lang::format(
+        &lang::translate("Current turrets: %(occupied)s/%(capacity)s"),
+        &[
+            ("occupied", &commands.turrets_occupied.to_string()),
+            ("capacity", &commands.turret_points.to_string()),
+        ],
+    );
+    Some((text, commands.turrets_occupied, commands.turret_points))
+}
+
+/// "set-rallypoint", as v0.28's `getActionInfo` picks it: on a friendly
+/// foundation or damaged building with repair held, a holder to garrison
+/// or occupy, a resource to gather or a treasure to collect (near the
+/// position when it moves), from a market on another the default trade
+/// route, on a friendly foundation or damaged building repair, on an enemy
+/// attack or capture, else walk, which Ctrl (session.attackmove, or Ctrl+Q,
+/// units only) makes an attack-walk. None on a selected entity itself,
+/// which the engine unsets the rally point on, unless Ctrl
 /// (session.autorallypoint) is held and it trains units.
 fn rally(
     scene: &Scene,
@@ -1050,9 +1275,19 @@ fn rally(
     data: &DataFiles,
 ) -> Option<Action> {
     let ctrl = target.hotkeys & HOTKEY_GARRISON != 0;
+    let attack_move = ctrl || target.hotkeys & HOTKEY_ATTACK_MOVE_UNIT != 0;
+    let mut flags = flags;
     let mut resource = (String::new(), String::new());
     let mut source = 0;
     let mut tooltip = String::new();
+    // The default, which an attack-move changes.
+    let walk = || {
+        if attack_move {
+            ("action-attack-move".to_string(), "attack-walk")
+        } else {
+            (String::new(), "walk")
+        }
+    };
     let (cursor, order, rally_target, point) = match target_dot {
         Some((id, _)) if own.contains(&id) && !(ctrl && trains_units(scene, id)) => return None,
         Some((id, dot)) => {
@@ -1060,7 +1295,40 @@ fn rally(
             let bits = details.map_or(0, |details| details.components);
             let relation = relation(scene, player, dot.owner);
             let friendly = matches!(relation, Relation::Own | Relation::Ally);
-            let (cursor, order, rally_target) = if bits & COMPONENT_RESOURCE_SUPPLY != 0 {
+            let own_or_mutual = relation == Relation::Own
+                || matches!(
+                    (usize::try_from(player), usize::try_from(dot.owner)),
+                    (Ok(player), Ok(owner)) if owner > 0 && mutual_allies(scene, player, owner)
+                );
+            let needs_repair = bits & COMPONENT_FOUNDATION != 0
+                || (bits & COMPONENT_REPAIRABLE != 0 && dot.hitpoints < u8::MAX);
+            // `targetState.speed`: a unit that walks away.
+            let mobile = bits & COMPONENT_UNIT_AI != 0;
+            let (cursor, order, rally_target) = if target.hotkeys & HOTKEY_REPAIR != 0
+                && needs_repair
+                && friendly
+            {
+                ("action-repair".to_string(), "repair", id)
+            } else if bits & COMPONENT_GARRISON_HOLDER != 0 && own_or_mutual {
+                if let Some((text, occupied, capacity)) = garrison_line(scene, id, dot.template) {
+                    tooltip = if occupied >= capacity {
+                        tooltip::colored(&text, "orange")
+                    } else {
+                        text
+                    };
+                }
+                ("action-garrison".to_string(), "garrison", id)
+            } else if bits & COMPONENT_TURRET_HOLDER != 0 && own_or_mutual {
+                if let Some((text, occupied, capacity)) = turret_line(scene, id, dot.template) {
+                    tooltip = if occupied >= capacity {
+                        tooltip::colored(&text, "orange")
+                    } else {
+                        text
+                    };
+                }
+                // Vanilla shows the garrison cursor here too.
+                ("action-garrison".to_string(), "occupy-turret", id)
+            } else if bits & COMPONENT_RESOURCE_SUPPLY != 0 {
                 let kind = details
                     .and_then(|details| string(scene, details.supply_type))
                     .unwrap_or_default();
@@ -1072,7 +1340,18 @@ fn rally(
                 } else {
                     format!("action-gather-{specific}")
                 };
-                (cursor, "gather", id)
+                if mobile {
+                    (cursor, "gather-near-position", 0)
+                } else {
+                    (cursor, "gather", id)
+                }
+            } else if bits & COMPONENT_TREASURE != 0 {
+                let cursor = "action-collect-treasure".to_string();
+                if mobile {
+                    (cursor, "collect-treasure-near-position", 0)
+                } else {
+                    (cursor, "collect-treasure", id)
+                }
             } else if let Some((market, gain)) = rally_trade_gain(scene, own, player, id, data) {
                 if gain.trader_gain == 0.0 {
                     return Some(Action {
@@ -1089,39 +1368,31 @@ fn rally(
                 );
                 source = market;
                 ("action-setup-trade-route".to_string(), "trade", id)
-            } else if friendly
-                && (bits & COMPONENT_FOUNDATION != 0
-                    || (bits & COMPONENT_REPAIRABLE != 0 && dot.hitpoints < 255))
-            {
+            } else if needs_repair && matches!(relation, Relation::Own | Relation::Ally) {
                 ("action-repair".to_string(), "repair", id)
             } else if relation.enemy() {
                 if dot.hitpoints > 0 {
                     ("action-attack".to_string(), "attack", id)
                 } else if bits & COMPONENT_CAPTURABLE != 0 {
+                    flags |= ALLOW_CAPTURE;
                     ("action-capture".to_string(), "attack", id)
                 } else {
                     return None;
                 }
-            } else if ctrl {
-                ("action-attack-move".to_string(), "attack-walk", 0)
             } else {
-                (String::new(), "walk", 0)
+                let (cursor, order) = walk();
+                (cursor, order, 0)
             };
             (cursor, order, rally_target, Some(position(dot)))
         }
         None => {
-            if ctrl {
-                (
-                    "action-attack-move".to_string(),
-                    "attack-walk",
-                    0,
-                    target.point,
-                )
-            } else {
-                (String::new(), "walk", 0, target.point)
-            }
+            let (cursor, order) = walk();
+            (cursor, order, 0, target.point)
         }
     };
+    if order == "attack-walk" && target.hotkeys & HOTKEY_ATTACK_MOVE_UNIT != 0 {
+        flags |= UNITS_ONLY;
+    }
     Some(Action {
         cursor,
         tooltip,

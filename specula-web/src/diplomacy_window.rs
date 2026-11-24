@@ -1123,12 +1123,13 @@ fn build_key(view: &View) -> String {
     if let Some(control) = view.control {
         for seat in &control.seats {
             key.push_str(&format!(
-                "|{}:{}{}{}{}",
+                "|{}:{}{}{}{}{}",
                 seat.player,
                 u8::from(seat.host),
                 u8::from(seat.kicked),
                 u8::from(seat.absent),
-                u8::from(seat.banned)
+                u8::from(seat.banned),
+                u8::from(seat.offline)
             ));
         }
     }

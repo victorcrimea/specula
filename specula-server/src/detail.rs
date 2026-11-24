@@ -2,8 +2,9 @@
 //! show beyond the status bars, for every entity, sent only to viewers that
 //! have something selected. Varints and zigzag as in `wire.rs`.
 //!
-//! - kind 1 keyframe: varint turn, u8 detail version (14; a viewer also
-//!   reads 13, which had no spy cost fields, 12, which had no control, 8,
+//! - kind 1 keyframe: varint turn, u8 detail version (15; a viewer also
+//!   reads 14, which had no status effects, turret counts, entity limits or
+//!   shared dropsite flag, 13, which had no spy cost fields, 12, which had no control, 8,
 //!   which had no cleared masks, 7, which also had no stances,
 //!   formations, commands or upgrades and no player table, 6, which had no buildable lists, 5, which also had no stats, 4,
 //!   which also had no data table, 3, which also had no rally points,
@@ -29,7 +30,8 @@
 //!   streams line up turn by turn.
 //! - kind 3 control: varint turn, then the control: u8 own flags (1 this
 //!   seat may end the game, 2 it may claim victory), varint n, n x {u8
-//!   player, u8 flags (1 host, 2 kicked, 4 absent, 8 banned)} for every
+//!   player, u8 flags (1 host, 2 kicked, 4 absent, 8 banned, 16 offline:
+//!   a human whose player has no live /play socket)} for every
 //!   human seat at launch, by player number. Sent into the open frame
 //!   whenever it changes, paused or not. The observers' stream always
 //!   carries the empty control, `[0, 0]`, which a keyframe also has until a
@@ -86,7 +88,8 @@
 //! - 2097152 commands (33554432): varint flags (1 has work orders, 2 can
 //!   guard, 4 guards, 8 can patrol, 16 gate locked, 32 packed, 64 sharable
 //!   dropsite, 128 shared, 256 ejectable), varint AlertRaiser's target
-//!   classes, varint ejectable turret occupants;
+//!   classes, varint ejectable turret occupants, varint turret points with an
+//!   occupant, varint turret points;
 //! - 4194304 upgrades (67108864): varint index into the list table, the
 //!   upgrades of an Upgrade, each with the costs, requirements and limits
 //!   of the upgrade as the Upgrade panel reads them (time left out);
@@ -94,7 +97,10 @@
 //!   0 for none, f32 `GetTraderGainMultiplier`;
 //! - 16777216 market (268435456): f32 `GetInternationalBonus`;
 //! - 33554432 trade garrison (536870912): f32 a trader's
-//!   `GetGarrisonGainMultiplier`, for those that have one.
+//!   `GetGarrisonGainMultiplier`, for those that have one;
+//! - 67108864 status effects (the hook's 1073741824): varint n, n x {varint
+//!   code string, varint JSON string of the effect's data, varint time
+//!   elapsed in 100 ms}; an entity whose effects end gets n 0.
 //!
 //! Strings (resource types, templates and technologies, stances, the
 //! upgrade target, goods, the marker actor) are 1-based indices into the visual stream's
@@ -123,6 +129,10 @@
 //! version 14 each player ends with f32 spy cost multiplier, u8 spy flags
 //! (1 requirements met, 2 the template is disabled), f32 failed bribe cost
 //! ratio.
+//! From version 15 each player then ends with u8 flags (1 shares dropsites),
+//! varint n, n x {varint category, varint limit (`u32::MAX` for none),
+//! varint count, u8 m, m x {varint changer, zigzag change}}, varint k, k x
+//! {varint template, varint count} (the match counts).
 //!
 //! Reckoning: while the first item of a queue is not paused, its time
 //! remaining goes down by 200 ms a turn from the turn it was sent; while a
@@ -160,6 +170,7 @@ pub const CONTROL_HOST: u8 = 1;
 pub const CONTROL_KICKED: u8 = 2;
 pub const CONTROL_ABSENT: u8 = 4;
 pub const CONTROL_BANNED: u8 = 8;
+pub const CONTROL_OFFLINE: u8 = 16;
 const HEALTH: usize = 0;
 const CAPTURE: usize = 1;
 const SUPPLY: usize = 2;
@@ -186,7 +197,8 @@ const UPGRADES: usize = 22;
 const TRADE_ROUTE: usize = 23;
 const MARKET: usize = 24;
 const TRADE_GARRISON: usize = 25;
-const SLOTS: usize = 26;
+const STATUS_EFFECTS: usize = 26;
+const SLOTS: usize = 27;
 /// Rally positions are sent in 1/16 m, finer than a line is wide.
 const RALLY_UNITS_PER_METRE: f32 = 16.0;
 const TURN_MS: f64 = 200.0;
@@ -354,6 +366,17 @@ fn encode_group(slot: usize, details: &EntityDetails) -> Option<Vec<u8>> {
             out.varint(u64::from(commands.flags));
             out.varint(one_based(commands.alert_classes));
             out.varint(u64::from(commands.turrets));
+            out.varint(u64::from(commands.turrets_occupied));
+            out.varint(u64::from(commands.turret_points));
+        }
+        STATUS_EFFECTS => {
+            let effects = details.status_effects.as_ref()?;
+            out.varint(effects.len() as u64);
+            for effect in effects {
+                out.varint(one_based(effect.code));
+                out.varint(one_based(effect.json));
+                out.varint(round(effect.elapsed / 100.0));
+            }
         }
         PROGRESS => {
             let progress = details.progress.as_ref()?;
@@ -893,6 +916,27 @@ fn write_players(out: &mut Writer, players: &[PlayerGui]) {
         out.f32(player.spy_multiplier);
         out.u8(player.spy_flags);
         out.f32(player.spy_failure_ratio);
+        out.u8(u8::from(player.shared_dropsites));
+        out.varint(player.limits.categories.len() as u64);
+        for category in &player.limits.categories {
+            out.varint(one_based(category.name));
+            out.varint(if category.limit.is_finite() {
+                round(category.limit)
+            } else {
+                u64::from(u32::MAX)
+            });
+            out.varint(round(category.count));
+            out.u8(category.changers.len().min(0xFF) as u8);
+            for (name, change) in category.changers.iter().take(0xFF) {
+                out.varint(one_based(*name));
+                out.zigzag(change.round() as i64);
+            }
+        }
+        out.varint(player.limits.matches.len() as u64);
+        for (template, count) in &player.limits.matches {
+            out.varint(one_based(*template));
+            out.varint(round(*count));
+        }
     }
 }
 

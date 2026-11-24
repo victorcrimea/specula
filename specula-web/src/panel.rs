@@ -68,6 +68,9 @@ const TRAINING_ROW: usize = 10;
 const MAX_RESEARCHABLE: usize = 10;
 /// A research column's bottom button, a row below its top.
 const RESEARCH_BOTTOM: usize = 39;
+/// The repeat count of `statusEffectsIcons`.
+const STATUS_ICONS: usize = 5;
+
 /// `resourcesToAlphaMask`: the red's alpha, of 255.
 const NEEDED_ALPHA_BASE: f64 = 50.0;
 const NEEDED_ALPHA_MAX: f64 = 125.0;
@@ -299,6 +302,8 @@ pub struct DetailsPanel {
     player: Out,
     primary: Out,
     secondary: Out,
+    /// `statusEffectsIcons`, one per effect it can show.
+    status_icons: Vec<Out>,
     capture_section: Out,
     capture_stats: Out,
     capture: CaptureBar,
@@ -306,6 +311,7 @@ pub struct DetailsPanel {
     health_stats: Out,
     health_bar: Out,
     resource_section: Out,
+    resource_label: Out,
     resource_stats: Out,
     resource_bar: Out,
     carrying_text: Out,
@@ -405,6 +411,10 @@ struct CommandsPanel {
     research_orders: Vec<[Option<Command>; 2]>,
     /// What a Shift-press of each training cell batches.
     training_batches: Vec<Option<Trainable>>,
+    /// Where the trainable items' cells start in `training`, and how many
+    /// there are, for the `session.queueunit` hotkeys.
+    training_first: usize,
+    training_count: usize,
     /// The current selection, refreshed each redraw.
     selection: Vec<u32>,
 }
@@ -720,6 +730,8 @@ impl DetailsPanel {
                 training_orders: vec![None; MAX_TRAINABLE],
                 research_orders: vec![[None, None]; MAX_RESEARCHABLE],
                 training_batches: vec![None; MAX_TRAINABLE],
+                training_first: 0,
+                training_count: 0,
                 selection: Vec::new(),
             }),
             _ => None,
@@ -748,6 +760,9 @@ impl DetailsPanel {
             player: find("details-player")?,
             primary: find("details-primary")?,
             secondary: find("details-secondary")?,
+            status_icons: (0..STATUS_ICONS)
+                .map(|index| find(&format!("details-status-{index}")))
+                .collect::<Result<_, _>>()?,
             capture_section: find("details-capture-section")?,
             capture_stats: find("details-capture-stats")?,
             capture: CaptureBar::find(document, "details-capture")?,
@@ -755,6 +770,7 @@ impl DetailsPanel {
             health_stats: find("details-health-stats")?,
             health_bar: find("details-health-bar")?,
             resource_section: find("details-resource-section")?,
+            resource_label: find("details-resource-label")?,
             resource_stats: find("details-resource-stats")?,
             resource_bar: find("details-resource-bar")?,
             carrying_text: find("details-carrying-text")?,
@@ -1050,6 +1066,19 @@ impl DetailsPanel {
         }
     }
 
+    /// `session.queueunit.N`: the press of the `index`th trainable item's
+    /// button, `shift` as `command_clicked` has it.
+    pub fn training_hotkey(&mut self, index: usize, shift: bool) {
+        let Some(commands) = &self.commands else {
+            return;
+        };
+        if index >= commands.training_count {
+            return;
+        }
+        let button = commands.training_first + index;
+        self.command_clicked(CommandButton::Training(button), shift, false);
+    }
+
     /// The portrait was clicked: `setCameraFollow`, when it shows an icon.
     pub fn portrait_clicked(&self) {
         if let Some(id) = self.portrait_id {
@@ -1228,7 +1257,28 @@ impl DetailsPanel {
             .map(lang::translate)
             .or_else(|| generic.clone());
         let primary = specific.as_deref().unwrap_or_default();
+        let data = scene
+            .templates
+            .get(dot.template as usize)
+            .and_then(|name| string_index(scene, name))
+            .and_then(|name| view.template_data(name, dot.owner));
+        // If packed, that goes to the secondary name (reduces template
+        // clutter).
+        let packed = data
+            .as_ref()
+            .is_some_and(|data| tips::text_field(&tips::field(data, "pack"), "state") == "packed");
         let secondary = generic.as_deref().unwrap_or_default();
+        let secondary = if !packed {
+            secondary.to_string()
+        } else if secondary.is_empty() {
+            lang::translate("Packed")
+        } else {
+            lang::format(
+                &lang::translate("%(secondaryName)s \u{2014} Packed"),
+                &[("secondaryName", secondary)],
+            )
+        };
+        let secondary = secondary.as_str();
         let hide_secondary = secondary.is_empty() || primary == secondary;
         self.primary.text(primary);
         self.primary.class(format!(
@@ -1243,8 +1293,26 @@ impl DetailsPanel {
         self.secondary.hidden(hide_secondary);
         self.strip_name.text(primary);
 
-        self.player
-            .text(player.map_or("", |player| player.name.as_str()));
+        // Players without a live /play socket are marked as the engine
+        // marks the disconnected ones; its markup unescapes the bracket.
+        let offline = owner.is_some_and(|owner| {
+            scene
+                .details
+                .control
+                .seats
+                .iter()
+                .any(|seat| usize::from(seat.player) == owner && seat.offline)
+        });
+        let player_name = player.map_or("", |player| player.name.as_str());
+        self.player.text(&if offline {
+            lang::format(
+                &lang::translate("\\[OFFLINE] %(player)s"),
+                &[("player", player_name)],
+            )
+            .replacen("\\[", "[", 1)
+        } else {
+            player_name.to_string()
+        });
         let color = owner
             .and_then(|owner| view.palette.get(owner))
             .copied()
@@ -1295,6 +1363,29 @@ impl DetailsPanel {
                 self.rank.hidden(false);
             }
             None => self.rank.hidden(true),
+        }
+
+        // `statusEffectsIcons`, at an 18 px pitch (the page places them by `--i`).
+        let effects: &[detail::StatusEffect] = match &groups[detail::STATUS_EFFECTS] {
+            Some(Group::StatusEffects(effects)) => effects,
+            _ => &[],
+        };
+        for (index, icon) in self.status_icons.iter_mut().enumerate() {
+            let Some(effect) = effects.get(index) else {
+                icon.hidden(true);
+                continue;
+            };
+            let code = string(scene, effect.code).unwrap_or_default();
+            icon.style(format!(
+                "background-image: var(--gui-status-{}); --i: {index}",
+                tips::status_effect_icon(code)
+            ));
+            icon.tooltip(&tips::status_effect_receiver_tooltip(
+                code,
+                string(scene, effect.json).unwrap_or("{}"),
+                f64::from(effect.elapsed) * 100.0,
+            ));
+            icon.hidden(false);
         }
 
         let icon = template
@@ -1420,6 +1511,18 @@ impl DetailsPanel {
         if let Some((fill, text)) = &supply {
             self.resource_bar.style(format!("width: {}%", 100.0 * fill));
             self.resource_stats.text(text);
+            // `resourceNameFirstWord` of the generic type.
+            let generic = template
+                .and_then(|template| string(scene, template.supply_type))
+                .map_or("", |kind| kind.split('.').next().unwrap_or_default());
+            let mut name = generic.to_string();
+            if let Some(first) = name.get_mut(..1) {
+                first.make_ascii_uppercase();
+            }
+            self.resource_label.text(&lang::format(
+                &lang::translate("%(resource)s:"),
+                &[("resource", &lang::translate_context("firstWord", &name))],
+            ));
         }
 
         // `attackAndResistanceStats`, from the stats the detail stream
@@ -2180,6 +2283,8 @@ impl CommandsPanel {
             |producer| producer.buildable,
             MAX_TRAINABLE - before - trainable.len(),
         );
+        self.training_first = before;
+        self.training_count = trainable.len();
         let (right_cells, other_cells) = self.training.split_at_mut(before);
         let (gate_cells, other) = right_cells.split_at_mut(gate.len());
         let (pack_cells, upgrade_cells) = other.split_at_mut(pack.len());
@@ -2263,6 +2368,7 @@ impl CommandsPanel {
                 view,
                 item,
                 player,
+                index,
                 (full, size, rem),
                 &short,
             ));
@@ -2999,26 +3105,115 @@ fn training_status(
     (full, next, rem)
 }
 
+/// `getEntityLimitAndCount`: the category's limit, count and changers, and
+/// the template's own match limit and count, each `None` without one; and
+/// whether the limits are of "training" or "build".
+type EntityLimits = (
+    Option<(f64, f64, Vec<(String, f64)>)>,
+    Option<(f64, f64)>,
+    &'static str,
+);
+
+fn entity_limit_and_count(
+    view: &View,
+    player: i32,
+    item: &ListItem,
+    data: &JsValue,
+) -> EntityLimits {
+    let scene = view.scene;
+    let none = (None, None, "");
+    let Some(limits) = usize::try_from(player)
+        .ok()
+        .and_then(|player| scene.details.players.get(player))
+        .map(|gui| &gui.limits)
+        .filter(|limits| !limits.categories.is_empty())
+    else {
+        return none;
+    };
+    let (key, kind) = if tips::field(data, "trainingRestrictions").is_truthy() {
+        ("trainingRestrictions", "training")
+    } else if tips::field(data, "buildRestrictions").is_truthy() {
+        ("buildRestrictions", "build")
+    } else {
+        return none;
+    };
+    let category = tips::restriction_category(data, key)
+        .and_then(|category| {
+            limits
+                .categories
+                .iter()
+                .find(|other| string(scene, other.name) == Some(category.as_str()))
+        })
+        .map(|category| {
+            let limit = if category.limit == u32::MAX {
+                f64::INFINITY
+            } else {
+                f64::from(category.limit)
+            };
+            let changers = category
+                .changers
+                .iter()
+                .map(|(name, change)| {
+                    (
+                        string(scene, *name).unwrap_or_default().to_string(),
+                        f64::from(*change),
+                    )
+                })
+                .collect();
+            (limit, f64::from(category.count), changers)
+        });
+    let match_limit = tips::restriction_match_limit(data, key);
+    let matched = (match_limit != 0.0).then(|| {
+        let count = limits
+            .matches
+            .iter()
+            .find(|(template, _)| *template == item.name)
+            .map_or(0, |(_, count)| *count);
+        (match_limit, f64::from(count))
+    });
+    (category, matched, kind)
+}
+
+/// `formatLimitString` and `formatMatchLimitString` of an item.
+fn limit_lines(view: &View, player: i32, item: &ListItem, data: &JsValue) -> [String; 2] {
+    let (category, matched, kind) = entity_limit_and_count(view, player, item, data);
+    [
+        tips::format_limit_string(
+            category
+                .as_ref()
+                .map(|(limit, count, changers)| (*limit, *count, changers.as_slice())),
+        ),
+        tips::format_match_limit_string(matched, kind),
+    ]
+}
+
 /// `g_SelectionPanels.Training.setupButton`'s tooltip for an observer:
-/// without the hotkey, the limits (only what can be added is sent) and
-/// the template viewer line (V9).
+/// without the template viewer line (V9). `button` is the item's place in
+/// the panel, which names its hotkey.
 fn training_tooltip(
     view: &View,
     item: &ListItem,
     player: i32,
+    button: usize,
     status: (u32, u32, u32),
     short: &[(String, f64)],
 ) -> String {
     let Some(data) = view.template_data(item.name, player) else {
         return String::new();
     };
+    let hotkey = crate::command_row::hotkey_text(&format!("session.queueunit.{}", button + 1));
     let mut lines = vec![
-        tips::entity_names_formatted(&data),
+        format!(
+            "{} {}",
+            tooltip::tags(&hotkey, &[("font", "sans-bold-16")]),
+            tips::entity_names_formatted(&data)
+        ),
         tips::visible_classes(&data),
         tips::auras_tooltip(&data),
         tips::entity_tooltip(&data),
         tips::cost_tooltip(&data, f64::from(status.0 * status.1 + status.2), None),
     ];
+    lines.extend(limit_lines(view, player, item, &data));
     if view.detailed {
         lines.extend(tips::detailed_lines(&data));
     }
@@ -3035,8 +3230,7 @@ fn training_tooltip(
 }
 
 /// `g_SelectionPanels.Construction.setupButton`'s tooltip for an observer:
-/// without the limits (only what can be added is sent) and the template
-/// viewer line (V9).
+/// without the template viewer line (V9).
 fn construction_tooltip(
     view: &View,
     item: &ListItem,
@@ -3057,6 +3251,7 @@ fn construction_tooltip(
         tips::turrets_tooltip(&data),
         tips::population_bonus_tooltip(&data),
     ];
+    lines.extend(limit_lines(view, player, item, &data));
     if item.flags & ListItem::REQUIREMENTS_MET == 0 {
         let technology = |name: &str| {
             let name = string_index(view.scene, name)?;

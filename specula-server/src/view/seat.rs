@@ -330,6 +330,8 @@ impl Local {
             &mut local.order_sounds,
             &mut local.garrison_classes,
             &mut local.turret_classes,
+            &mut local.heal_classes,
+            &mut local.unhealable_classes,
         ] {
             *field = self.optional(feed, stream, *field);
         }
@@ -1240,6 +1242,45 @@ impl Seat {
                 } else {
                     [0; 5]
                 },
+                // Like the traders, the engine shows a player only its own.
+                shared_dropsites: (all || index == me) && player.shared_dropsites,
+                limits: if all || index == me {
+                    crate::feed::EntityLimits {
+                        categories: player
+                            .limits
+                            .categories
+                            .iter()
+                            .map(|category| crate::feed::LimitCategory {
+                                name: self.local.optional(feed, &mut self.stream, category.name),
+                                limit: category.limit,
+                                count: category.count,
+                                changers: category
+                                    .changers
+                                    .iter()
+                                    .map(|(name, change)| {
+                                        (
+                                            self.local.optional(feed, &mut self.stream, *name),
+                                            *change,
+                                        )
+                                    })
+                                    .collect(),
+                            })
+                            .collect(),
+                        matches: player
+                            .limits
+                            .matches
+                            .iter()
+                            .map(|(template, count)| {
+                                (
+                                    self.local.optional(feed, &mut self.stream, *template),
+                                    *count,
+                                )
+                            })
+                            .collect(),
+                    }
+                } else {
+                    crate::feed::EntityLimits::default()
+                },
             })
             .collect();
         // Every group is compared with what the seat holds, so all count as
@@ -1295,6 +1336,17 @@ impl Seat {
         if mirage {
             return out;
         }
+        // The engine shows the status effects of every entity.
+        out.status_effects = groups.status_effects.clone().map(|effects| {
+            effects
+                .into_iter()
+                .map(|mut effect| {
+                    effect.code = local.optional(feed, stream, effect.code);
+                    effect.json = local.optional(feed, stream, effect.json);
+                    effect
+                })
+                .collect()
+        });
         out.carrying = groups.carrying.clone().map(|carrying| {
             carrying
                 .into_iter()

@@ -5,8 +5,8 @@
 //! A message is one command: u8 kind, then its fields. Entity lists are a
 //! varint count and the ids sorted, each as a varint delta from the one
 //! before; positions are f32 metres; strings are a varint length and
-//! UTF-8; `flags` is a u8 of the `QUEUED`, `PUSH_FRONT` and
-//! `ALLOW_CAPTURE` bits. A freehand line (`WalkCustom`) is a varint count
+//! UTF-8; `flags` is a u8 of the `QUEUED`, `PUSH_FRONT`,
+//! `ALLOW_CAPTURE` and `UNITS_ONLY` bits. A freehand line (`WalkCustom`) is a varint count
 //! and its points in sixteenths of a metre, each x and z a zigzag varint
 //! delta from the point before (the first from 0, 0).
 //!
@@ -33,11 +33,14 @@ use crate::bytes::ByteReader;
 
 /// The version of this format, which the server sends as the first byte of
 /// its seat message; a page on another version must reload.
-pub const COMMAND_VERSION: u8 = 13;
+pub const COMMAND_VERSION: u8 = 14;
 
 pub const QUEUED: u8 = 1;
 pub const PUSH_FRONT: u8 = 2;
 pub const ALLOW_CAPTURE: u8 = 4;
+/// An attack-move that fights units only (Ctrl+Q); on `Rally` it is the
+/// rally's attack-walk.
+pub const UNITS_ONLY: u8 = 8;
 
 const WALK: u8 = 1;
 const ATTACK_WALK: u8 = 2;
@@ -86,6 +89,10 @@ const ATTACK_REQUEST: u8 = 44;
 const SPY_REQUEST: u8 = 45;
 const WALK_CUSTOM: u8 = 46;
 const ATTACK_WALK_CUSTOM: u8 = 47;
+const HEAL: u8 = 48;
+const COLLECT_TREASURE: u8 = 49;
+const FOCUS_FIRE: u8 = 50;
+const UNSET_RALLY: u8 = 51;
 
 /// The stance codes the wire player table uses.
 pub const DIPLOMACY_ENEMY: u8 = 0;
@@ -280,6 +287,27 @@ pub enum Command {
         flags: u8,
         entities: Vec<u32>,
         target: u32,
+    },
+    Heal {
+        flags: u8,
+        entities: Vec<u32>,
+        target: u32,
+    },
+    CollectTreasure {
+        flags: u8,
+        entities: Vec<u32>,
+        target: u32,
+    },
+    /// A structure's attack at a point; `target` is 0 for none.
+    FocusFire {
+        flags: u8,
+        entities: Vec<u32>,
+        x: f32,
+        z: f32,
+        target: u32,
+    },
+    UnsetRally {
+        entities: Vec<u32>,
     },
     /// `formation` as in `Walk`; `target` is the entity clicked, 0 for
     /// none.
@@ -715,6 +743,10 @@ impl Command {
             | Command::DropsiteSharing { entities, .. }
             | Command::Guard { entities, .. }
             | Command::OccupyTurret { entities, .. }
+            | Command::Heal { entities, .. }
+            | Command::CollectTreasure { entities, .. }
+            | Command::FocusFire { entities, .. }
+            | Command::UnsetRally { entities, .. }
             | Command::Patrol { entities, .. }
             | Command::CallToArms { entities, .. }
             | Command::AlertRaise { entities, .. }
@@ -767,6 +799,10 @@ impl Command {
             | Command::DropsiteSharing { entities, .. }
             | Command::Guard { entities, .. }
             | Command::OccupyTurret { entities, .. }
+            | Command::Heal { entities, .. }
+            | Command::CollectTreasure { entities, .. }
+            | Command::FocusFire { entities, .. }
+            | Command::UnsetRally { entities, .. }
             | Command::Patrol { entities, .. }
             | Command::CallToArms { entities, .. }
             | Command::AlertRaise { entities, .. }
@@ -813,6 +849,7 @@ impl Command {
             | Command::LeaveTurret { entities }
             | Command::BackToWork { entities }
             | Command::RemoveGuard { entities }
+            | Command::UnsetRally { entities }
             | Command::DropsiteSharing { entities, .. }
             | Command::CallToArms { entities, .. }
             | Command::AlertRaise { entities }
@@ -841,6 +878,15 @@ impl Command {
                 entities, target, ..
             }
             | Command::OccupyTurret {
+                entities, target, ..
+            }
+            | Command::Heal {
+                entities, target, ..
+            }
+            | Command::CollectTreasure {
+                entities, target, ..
+            }
+            | Command::FocusFire {
                 entities, target, ..
             }
             | Command::SetupTradeRoute {
@@ -1137,6 +1183,31 @@ impl Command {
                 entities,
                 target,
             } => out.targeted(OCCUPY_TURRET, *flags, entities, *target),
+            Command::Heal {
+                flags,
+                entities,
+                target,
+            } => out.targeted(HEAL, *flags, entities, *target),
+            Command::CollectTreasure {
+                flags,
+                entities,
+                target,
+            } => out.targeted(COLLECT_TREASURE, *flags, entities, *target),
+            Command::FocusFire {
+                flags,
+                entities,
+                x,
+                z,
+                target,
+            } => {
+                out.head(FOCUS_FIRE, *flags, entities);
+                out.point(*x, *z);
+                out.varint(u64::from(*target));
+            }
+            Command::UnsetRally { entities } => {
+                out.0.push(UNSET_RALLY);
+                out.entities(entities);
+            }
             Command::SetupTradeRoute {
                 flags,
                 entities,
@@ -1243,7 +1314,7 @@ impl Command {
                 }
             }
             ATTACK | GATHER | REPAIR | GARRISON | RETURN_RESOURCE | GUARD | OCCUPY_TURRET
-            | SETUP_TRADE_ROUTE | CANCEL_TRADE_ROUTE => {
+            | HEAL | COLLECT_TREASURE | SETUP_TRADE_ROUTE | CANCEL_TRADE_ROUTE => {
                 let flags = input.u8()?;
                 let entities = entities(&mut input)?;
                 let target = input.varint_u32()?;
@@ -1274,6 +1345,16 @@ impl Command {
                         target,
                     },
                     OCCUPY_TURRET => Command::OccupyTurret {
+                        flags,
+                        entities,
+                        target,
+                    },
+                    HEAL => Command::Heal {
+                        flags,
+                        entities,
+                        target,
+                    },
+                    COLLECT_TREASURE => Command::CollectTreasure {
                         flags,
                         entities,
                         target,
@@ -1469,6 +1550,21 @@ impl Command {
                     formation: input.text()?,
                 }
             }
+            FOCUS_FIRE => {
+                let flags = input.u8()?;
+                let entities = entities(&mut input)?;
+                let (x, z) = point(&mut input)?;
+                Command::FocusFire {
+                    flags,
+                    entities,
+                    x,
+                    z,
+                    target: input.varint_u32()?,
+                }
+            }
+            UNSET_RALLY => Command::UnsetRally {
+                entities: entities(&mut input)?,
+            },
             CALL_TO_ARMS => {
                 let flags = input.u8()?;
                 let entities = entities(&mut input)?;

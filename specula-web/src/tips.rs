@@ -45,10 +45,23 @@ const DAMAGE_TYPES: [(&str, &str, u32); 5] = [
     ("Fire", "Fire", 4),
     ("Poison", "Poison", 5),
 ];
-/// simulation/data/status_effects/: code, statusName, applierTooltip.
-const STATUS_EFFECTS: [(&str, &str, &str); 2] = [
-    ("Burning", "Burning", "This unit causes fire damage."),
-    ("Poisoned", "Poisoned", "This unit causes poison damage."),
+/// simulation/data/status_effects/: code, statusName, applierTooltip,
+/// receiverTooltip, icon.
+const STATUS_EFFECTS: [(&str, &str, &str, &str, &str); 2] = [
+    (
+        "Burning",
+        "Burning",
+        "This unit causes fire damage.",
+        "This unit is burning.",
+        "burning",
+    ),
+    (
+        "Poisoned",
+        "Poisoned",
+        "This unit causes poison damage.",
+        "This unit is poisoned.",
+        "poisoned",
+    ),
 ];
 
 enum File {
@@ -226,8 +239,8 @@ fn sort_damage_types(mut codes: Vec<String>) -> Vec<String> {
 fn status_name(code: &str) -> String {
     let name = STATUS_EFFECTS
         .iter()
-        .find(|(known, _, _)| *known == code)
-        .map_or(code, |(_, name, _)| name);
+        .find(|(known, ..)| *known == code)
+        .map_or(code, |(_, name, ..)| name);
     translate_context("status effect", name)
 }
 
@@ -247,6 +260,144 @@ pub fn restriction_category(template: &JsValue, key: &str) -> Option<String> {
     restrictions
         .is_object()
         .then(|| text(&field(&restrictions, "category")))
+}
+
+/// The `matchLimit` of a template's `trainingRestrictions` or
+/// `buildRestrictions`, 0 for none.
+pub fn restriction_match_limit(template: &JsValue, key: &str) -> f64 {
+    number_field(&field(template, key), "matchLimit")
+}
+
+/// A category's limit and count, and what changes the limit.
+pub type Limit<'a> = (f64, f64, &'a [(String, f64)]);
+
+/// `formatLimitString`: the count against the category's limit, then each
+/// changer's effect on the limit; empty without a limit.
+pub fn format_limit_string(limit: Option<Limit>) -> String {
+    let Some((limit, count, changers)) = limit else {
+        return String::new();
+    };
+    let number = |value: f64| {
+        if value.is_infinite() {
+            "Infinity".to_string()
+        } else {
+            value.to_string()
+        }
+    };
+    let mut text = crate::lang::format(
+        &translate("Current Count: %(count)s, Limit: %(limit)s."),
+        &[("count", &number(count)), ("limit", &number(limit))],
+    );
+    if count >= limit {
+        text = objection_font(&text);
+    }
+    for (name, change) in changers {
+        if *change == 0.0 {
+            continue;
+        }
+        let template = if *change > 0.0 {
+            translate("%(changer)s enlarges the limit with %(change)s.")
+        } else {
+            translate("%(changer)s lessens the limit with %(change)s.")
+        };
+        text.push('\n');
+        text.push_str(&crate::lang::format(
+            &template,
+            &[("changer", &translate(name)), ("change", &number(*change))],
+        ));
+    }
+    text
+}
+
+/// `formatMatchLimitString` for the template's own limit; `kind` is
+/// "build" or "training".
+pub fn format_match_limit_string(limit: Option<(f64, f64)>, kind: &str) -> String {
+    let Some((limit, count)) = limit else {
+        return String::new();
+    };
+    let passed = count >= limit;
+    let left = limit - count;
+    let format = |template: String, name: &str, value: f64| {
+        crate::lang::format(&template, &[(name, &value.to_string())])
+    };
+    let text = match kind {
+        "build" => {
+            if limit == 1.0 {
+                translate("Can be constructed only once.")
+            } else if passed {
+                format(
+                    translate_plural(
+                        "Could only be constructed %(limit)s time.",
+                        "Could only be constructed %(limit)s times.",
+                        limit,
+                    ),
+                    "limit",
+                    limit,
+                )
+            } else {
+                format(
+                    translate_plural(
+                        "Can be constructed %(count)s more time.",
+                        "Can be constructed %(count)s more times.",
+                        left,
+                    ),
+                    "count",
+                    left,
+                )
+            }
+        }
+        "training" => {
+            if passed {
+                format(
+                    translate_plural(
+                        "Could only be trained once.",
+                        "Could only be trained %(limit)s times.",
+                        limit,
+                    ),
+                    "limit",
+                    limit,
+                )
+            } else if limit == 1.0 {
+                translate("Can be trained only once.")
+            } else {
+                format(
+                    translate_plural(
+                        "Can be trained %(count)s more time.",
+                        "Can be trained %(count)s more times.",
+                        left,
+                    ),
+                    "count",
+                    left,
+                )
+            }
+        }
+        _ => {
+            if passed {
+                format(
+                    translate_plural(
+                        "Could only be created once.",
+                        "Could only be created %(limit)s times.",
+                        limit,
+                    ),
+                    "limit",
+                    limit,
+                )
+            } else if limit == 1.0 {
+                translate("Can be created only once.")
+            } else {
+                format(
+                    translate_plural(
+                        "Can be created %(count)s more time.",
+                        "Can be created %(count)s more times.",
+                        left,
+                    ),
+                    "count",
+                    left,
+                )
+            }
+        }
+    };
+    if passed { objection_font(&text) } else { text }
 }
 
 /// A template with an empty `cost`, for a tooltip that gives its own costs.
@@ -587,8 +738,28 @@ fn splash_details(splash: &JsValue) -> String {
     tooltip
 }
 
-/// `getStatusEffectsTooltip` for an applier.
-fn status_effects_tooltip(code: &str, effect: &JsValue) -> String {
+/// `g_StatusEffectsMetadata.getIcon`: the file name of a code's icon, the
+/// default's for one without metadata.
+pub fn status_effect_icon(code: &str) -> &'static str {
+    STATUS_EFFECTS
+        .iter()
+        .find(|(known, ..)| *known == code)
+        .map_or("default", |(.., icon)| icon)
+}
+
+/// `getStatusEffectsTooltip` for a receiver, from the effect's JSON as the
+/// detail stream carries it and the time elapsed in ms.
+pub fn status_effect_receiver_tooltip(code: &str, json: &str, elapsed: f64) -> String {
+    let effect = js_sys::JSON::parse(json).unwrap_or(JsValue::UNDEFINED);
+    if effect.is_object() {
+        let _ = js_sys::Reflect::set(&effect, &"_timeElapsed".into(), &elapsed.into());
+    }
+    status_effects_tooltip(code, &effect, false)
+}
+
+/// `getStatusEffectsTooltip`; `applier` for the attacker's tooltip, else
+/// the receiver's.
+fn status_effects_tooltip(code: &str, effect: &JsValue, applier: bool) -> String {
     let mut attributes = Vec::new();
     if field(effect, "Damage").is_truthy() || field(effect, "Capture").is_truthy() {
         attributes.push(attack_effects_details(effect));
@@ -611,8 +782,21 @@ fn status_effects_tooltip(code: &str, effect: &JsValue) -> String {
             seconds_string(left / 1000.0)
         ));
     }
-    if let Some((_, _, applier)) = STATUS_EFFECTS.iter().find(|(known, _, _)| *known == code) {
-        attributes.push((*applier).to_string());
+    if let Some((_, _, on_applier, on_receiver, _)) =
+        STATUS_EFFECTS.iter().find(|(known, ..)| *known == code)
+    {
+        if applier {
+            attributes.push((*on_applier).to_string());
+        } else {
+            attributes.push(translate_context("status effect", on_receiver));
+        }
+    }
+    if !applier {
+        return format!(
+            "{}: {}",
+            header_font(&status_name(code)),
+            attributes.join(&comma_font(", "))
+        );
     }
     let stackability = match text(&field(effect, "Stackability")).as_str() {
         "Extend" => "(extends)",
@@ -656,7 +840,7 @@ pub fn attack_tooltip(template: &JsValue) -> String {
             .map(|code| {
                 format!(
                     "\n{INDENT}{INDENT}{}",
-                    status_effects_tooltip(code, &field(&status, code))
+                    status_effects_tooltip(code, &field(&status, code), true)
                 )
             })
             .collect();

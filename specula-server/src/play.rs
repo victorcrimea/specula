@@ -41,6 +41,7 @@ use specula_assets::command::PUSH_FRONT;
 use specula_assets::command::QUEUED;
 use specula_assets::command::Query;
 use specula_assets::command::QueryKind;
+use specula_assets::command::UNITS_ONLY;
 use specula_assets::command::freehand_points;
 
 use rocket::tokio::sync::broadcast;
@@ -51,6 +52,7 @@ use crate::detail::CONTROL_CLAIM;
 use crate::detail::CONTROL_END_ALLOWED;
 use crate::detail::CONTROL_HOST;
 use crate::detail::CONTROL_KICKED;
+use crate::detail::CONTROL_OFFLINE;
 use crate::feed;
 use crate::feed::Summary;
 use crate::groups;
@@ -279,6 +281,8 @@ struct Facts {
     active: BTreeSet<u8>,
     /// Not disconnected for `DISCONNECT_GRACE` or longer.
     connected: BTreeSet<u8>,
+    /// No `play/command` socket open right now, however briefly.
+    offline: BTreeSet<u8>,
     kicked: BTreeSet<u8>,
     banned: BTreeSet<u8>,
     /// No pause time left and no `play/command` socket for `ABSENT_AFTER`.
@@ -915,6 +919,11 @@ impl Play {
             .filter(|(_, away)| away.is_none_or(|away| away < crate::seats::DISCONNECT_GRACE))
             .map(|(player, _)| *player)
             .collect();
+        let offline: BTreeSet<u8> = away
+            .iter()
+            .filter(|(_, away)| away.is_some())
+            .map(|(player, _)| *player)
+            .collect();
         let absent: BTreeSet<u8> = {
             let ledger = self.ledger.lock().unwrap();
             away.iter()
@@ -933,6 +942,7 @@ impl Play {
             host,
             active,
             connected,
+            offline,
             kicked,
             banned,
             absent,
@@ -973,6 +983,9 @@ impl Play {
             }
             if facts.absent.contains(&human) {
                 flags |= CONTROL_ABSENT;
+            }
+            if facts.offline.contains(&human) {
+                flags |= CONTROL_OFFLINE;
             }
             body.u8(human);
             body.u8(flags);
@@ -1655,6 +1668,15 @@ fn target_positions(points: &[[f32; 2]]) -> String {
     format!("[{}]", points.join(","))
 }
 
+/// An attack-move's `targetClasses`: Ctrl+Q fights units only.
+fn attack_classes(flags: u8) -> &'static str {
+    if flags & UNITS_ONLY != 0 {
+        r#"{"attack":["Unit"]}"#
+    } else {
+        r#"{"attack":["Unit","Structure"]}"#
+    }
+}
+
 /// The engine's command JSON for `order`, field for field as the session
 /// GUI posts it (`gui/session/unit_actions.js`, `input.js`,
 /// `selection_panels_helpers.js`). `sender` fills the "attack-request"'s
@@ -1690,7 +1712,7 @@ fn order_json(order: &Order, sender: u8) -> String {
             out.entities("entities", entities);
             out.number("x", *x);
             out.number("z", *z);
-            out.raw("targetClasses", r#"{"attack":["Unit","Structure"]}"#);
+            out.raw("targetClasses", attack_classes(*flags));
             out.order_flags(*flags);
             out.text("formation", NULL_FORMATION);
         }
@@ -1721,7 +1743,7 @@ fn order_json(order: &Order, sender: u8) -> String {
             out.text("type", kind);
             out.entities("entities", entities);
             out.raw("targetPositions", &target_positions(&points));
-            out.raw("targetClasses", r#"{"attack":["Unit","Structure"]}"#);
+            out.raw("targetClasses", attack_classes(*flags));
             out.order_flags(*flags);
             out.text("formation", NULL_FORMATION);
         }
@@ -1835,7 +1857,11 @@ fn order_json(order: &Order, sender: u8) -> String {
             // `RallyPointCommands.js` sends an attack-walk's targetClasses
             // from the data, as the GUI's set-rallypoint puts them there.
             if order == "attack-walk" {
-                data.raw("targetClasses", r#"{"attack":["Unit","Structure"]}"#);
+                data.raw("targetClasses", attack_classes(*flags));
+            }
+            // `RallyPointCommands.js` reads it to capture at the point.
+            if flags & ALLOW_CAPTURE != 0 {
+                data.boolean("allowCapture", true);
             }
             if *target != 0 {
                 data.raw("target", &target.to_string());
@@ -2040,6 +2066,43 @@ fn order_json(order: &Order, sender: u8) -> String {
             entities,
             target,
         } => out.targeted("occupy-turret", *flags, entities, *target),
+        Order::Heal {
+            flags,
+            entities,
+            target,
+        } => out.targeted("heal", *flags, entities, *target),
+        Order::CollectTreasure {
+            flags,
+            entities,
+            target,
+        } => out.targeted("collect-treasure", *flags, entities, *target),
+        Order::FocusFire {
+            flags,
+            entities,
+            x,
+            z,
+            target,
+        } => {
+            out.text("type", "focus-fire");
+            out.entities("entities", entities);
+            out.number("x", *x);
+            out.number("z", *z);
+            // `action.target`, undefined unless it is an enemy.
+            if *target != 0 {
+                out.raw("target", &target.to_string());
+            }
+            let mut data = Json::new();
+            data.text("command", "attack-only");
+            if *target != 0 {
+                data.raw("target", &target.to_string());
+            }
+            out.raw("data", &data.finish());
+            out.order_flags(*flags);
+        }
+        Order::UnsetRally { entities } => {
+            out.text("type", "unset-rallypoint");
+            out.entities("entities", entities);
+        }
         Order::SetupTradeRoute {
             flags,
             entities,

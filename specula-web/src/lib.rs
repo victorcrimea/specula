@@ -4255,17 +4255,32 @@ fn wire_command_hotkeys(app: &Rc<RefCell<App>>, window: &web_sys::Window) {
         {
             return;
         }
-        let names: &[&str] = match text(&event, "code").as_str() {
+        let code = text(&event, "code");
+        // session.queueunit.1 to 8: the Nth trainable item's button.
+        let queue = [
+            "KeyZ", "KeyX", "KeyC", "KeyV", "KeyB", "KeyN", "KeyM", "Comma",
+        ]
+        .iter()
+        .position(|key| *key == code);
+        let names: &[&str] = match code.as_str() {
             "KeyU" => &["unload-all", "unload-all-turrets", "leave-turret"],
             "KeyY" => &["back-to-work"],
             "KeyH" => &["stop"],
             "Delete" | "Backspace" => &["delete"],
+            _ if queue.is_some() => &[],
             _ => return,
         };
-        let Ok(app) = target.try_borrow() else {
+        let Ok(mut app) = target.try_borrow_mut() else {
             return;
         };
         if app.message_box.as_ref().is_some_and(MessageBox::is_open) {
+            return;
+        }
+        if let Some(index) = queue {
+            if let Some(details) = &mut app.details {
+                details.training_hotkey(index, flag("shiftKey"));
+            }
+            app.details_dirty = true;
             return;
         }
         if let Some(details) = &app.details {

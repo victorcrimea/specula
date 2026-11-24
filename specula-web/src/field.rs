@@ -456,7 +456,7 @@ struct Camera {
     /// gives it rather than selects, as `input.js`' INPUT_PRESELECTEDACTION.
     preselecting: bool,
     /// The right click's hotkey letters held, `orders::HOTKEY_*` bits but
-    /// Ctrl's, which the events carry.
+    /// Ctrl's, which the events carry; Q is `HOTKEY_ATTACK_MOVE_UNIT`.
     hotkey_keys: u8,
     /// selection.idleonly (I) is held: a bandbox takes only idle units.
     idle_only: bool,
@@ -465,7 +465,14 @@ struct Camera {
 impl Camera {
     /// The `orders::HOTKEY_*` held, with Ctrl as of `ctrl`.
     fn hotkeys(&self, ctrl: bool) -> u8 {
-        self.hotkey_keys | if ctrl { orders::HOTKEY_GARRISON } else { 0 }
+        // Ctrl+Q is the more specific hotkey, so the engine releases the
+        // ones Ctrl or a letter alone make (`Hotkey.cpp` keeps only those
+        // of the greatest specificity).
+        if ctrl && self.hotkey_keys & orders::HOTKEY_ATTACK_MOVE_UNIT != 0 {
+            return orders::HOTKEY_ATTACK_MOVE_UNIT;
+        }
+        (self.hotkey_keys & !orders::HOTKEY_ATTACK_MOVE_UNIT)
+            | if ctrl { orders::HOTKEY_GARRISON } else { 0 }
     }
 }
 
@@ -477,6 +484,7 @@ fn hotkey_bit(code: &str) -> u8 {
         "KeyG" => orders::HOTKEY_GUARD,
         "KeyP" => orders::HOTKEY_PATROL,
         "KeyJ" => orders::HOTKEY_REPAIR,
+        "KeyQ" => orders::HOTKEY_ATTACK_MOVE_UNIT,
         _ => 0,
     }
 }

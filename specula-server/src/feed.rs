@@ -89,6 +89,7 @@ const DETAIL_UPGRADES: u32 = 67108864;
 const DETAIL_TRADE_ROUTE: u32 = 134217728;
 const DETAIL_MARKET: u32 = 268435456;
 const DETAIL_TRADE_GARRISON: u32 = 536870912;
+const DETAIL_STATUS_EFFECTS: u32 = 1073741824;
 const NO_LIMIT: u16 = 0xFFFF;
 const QUEUE_UNIT: u8 = 0;
 const QUEUE_TECHNOLOGY: u8 = 1;
@@ -337,6 +338,12 @@ pub struct TemplateDetails {
     /// actions match.
     pub garrison_classes: Option<u32>,
     pub turret_classes: Option<u32>,
+    /// Heal's HealableClasses and UnhealableClasses, which the heal
+    /// action matches a target's classes against.
+    pub heal_classes: Option<u32>,
+    pub unhealable_classes: Option<u32>,
+    /// Garrisonable's Size, 0 for none.
+    pub garrison_size: u32,
 }
 
 /// One item of a trainable or researchable list, read for the producer's
@@ -405,6 +412,8 @@ pub struct EntityDetails {
     /// Older hooks do not send it.
     pub garrison_owners: Option<Vec<i8>>,
     pub rally: Option<Rally>,
+    /// The active status effects; an empty list once they end.
+    pub status_effects: Option<Vec<StatusEffect>>,
     /// The kind 20 stats index as decoded, then, once applied, the hash
     /// `Details::set_stats` gave that index.
     pub stats: Option<u64>,
@@ -445,6 +454,7 @@ impl EntityDetails {
         take(&mut self.ranges, changed.ranges);
         take(&mut self.garrison_owners, changed.garrison_owners);
         take(&mut self.rally, changed.rally);
+        take(&mut self.status_effects, changed.status_effects);
         take(&mut self.stats, changed.stats);
     }
 }
@@ -531,6 +541,22 @@ pub struct Commands {
     pub alert_classes: Option<u32>,
     /// The ejectable occupants of a TurretHolder's points.
     pub turrets: u16,
+    /// The TurretHolder's points with an entity on them, and all its
+    /// points.
+    pub turrets_occupied: u16,
+    pub turret_points: u16,
+}
+
+/// One of a StatusEffectsReceiver's active effects.
+#[derive(Clone, PartialEq)]
+pub struct StatusEffect {
+    /// String record index of the base code, e.g. `Burning`.
+    pub code: Option<u32>,
+    /// String record index of the effect's data as JSON, without the
+    /// engine's per-instance keys.
+    pub json: Option<u32>,
+    /// `_timeElapsed`, milliseconds.
+    pub elapsed: f32,
 }
 
 #[derive(Clone)]
@@ -613,6 +639,29 @@ pub struct PlayerGui {
     /// The spy template's technologies, string record indices; the same
     /// list on every player.
     pub spy_techs: Vec<u32>,
+    /// `hasSharedDropsites`: whether the player shares dropsites with
+    /// allies.
+    pub shared_dropsites: bool,
+    pub limits: EntityLimits,
+}
+
+/// A player's entity limits and counts, as the simulation state has them.
+#[derive(Clone, Default, PartialEq)]
+pub struct EntityLimits {
+    pub categories: Vec<LimitCategory>,
+    /// Template string record index and count, `matchEntityCounts`.
+    pub matches: Vec<(Option<u32>, f32)>,
+}
+
+#[derive(Clone, PartialEq)]
+pub struct LimitCategory {
+    /// String record index of the category.
+    pub name: Option<u32>,
+    /// Infinity for a category without a limit.
+    pub limit: f32,
+    pub count: f32,
+    /// String record index of what changes the limit, and by how much.
+    pub changers: Vec<(Option<u32>, f32)>,
 }
 
 impl Default for PlayerGui {
@@ -627,6 +676,8 @@ impl Default for PlayerGui {
             spy_flags: 0,
             spy_failure_ratio: 0.0,
             spy_techs: Vec::new(),
+            shared_dropsites: false,
+            limits: EntityLimits::default(),
         }
     }
 }
@@ -1573,6 +1624,9 @@ fn decode_template_details(payload: &[u8]) -> io::Result<Record> {
         order_sounds: None,
         garrison_classes: None,
         turret_classes: None,
+        heal_classes: None,
+        unhealable_classes: None,
+        garrison_size: 0,
     };
     // A hook from before lang and phenotypes ends here; the feed version
     // stayed, so both lengths are read.
@@ -1603,6 +1657,12 @@ fn decode_template_details(payload: &[u8]) -> io::Result<Record> {
     if !cursor.0.is_empty() {
         details.garrison_classes = optional(cursor.u32()?);
         details.turret_classes = optional(cursor.u32()?);
+    }
+    // And for one from before the heal action's classes.
+    if !cursor.0.is_empty() {
+        details.heal_classes = optional(cursor.u32()?);
+        details.unhealable_classes = optional(cursor.u32()?);
+        details.garrison_size = cursor.u32()?;
     }
     if !cursor.0.is_empty() {
         return Err(invalid("template details record longer than its contents"));
@@ -1820,6 +1880,8 @@ fn decode_groups(cursor: &mut Cursor, mask: u32) -> io::Result<EntityDetails> {
             flags: cursor.u16()?,
             alert_classes: optional(cursor.u32()?),
             turrets: cursor.u16()?,
+            turrets_occupied: cursor.u16()?,
+            turret_points: cursor.u16()?,
         });
     }
     if mask & DETAIL_UPGRADES != 0 {
@@ -1837,6 +1899,20 @@ fn decode_groups(cursor: &mut Cursor, mask: u32) -> io::Result<EntityDetails> {
     }
     if mask & DETAIL_TRADE_GARRISON != 0 {
         details.trade_garrison = Some(cursor.f32()?);
+    }
+    if mask & DETAIL_STATUS_EFFECTS != 0 {
+        let count = cursor.u8()?;
+        details.status_effects = Some(
+            (0..count)
+                .map(|_| {
+                    Ok(StatusEffect {
+                        code: optional(cursor.u32()?),
+                        json: optional(cursor.u32()?),
+                        elapsed: cursor.f32()?,
+                    })
+                })
+                .collect::<io::Result<_>>()?,
+        );
     }
     Ok(details)
 }
@@ -1920,13 +1996,19 @@ fn decode_production_list(payload: &[u8]) -> io::Result<Record> {
 fn decode_player_gui(payload: &[u8]) -> io::Result<Record> {
     // An engine built before the trade dialog's fields sends none, and the
     // feed version did not change with them; nor did it for the spy block.
-    decode_player_gui_fields(payload, true, true)
-        .or_else(|_| decode_player_gui_fields(payload, true, false))
-        .or_else(|_| decode_player_gui_fields(payload, false, false))
+    decode_player_gui_fields(payload, true, true, true)
+        .or_else(|_| decode_player_gui_fields(payload, true, true, false))
+        .or_else(|_| decode_player_gui_fields(payload, true, false, false))
+        .or_else(|_| decode_player_gui_fields(payload, false, false, false))
         .map(Record::PlayerGui)
 }
 
-fn decode_player_gui_fields(payload: &[u8], trade: bool, spy: bool) -> io::Result<Vec<PlayerGui>> {
+fn decode_player_gui_fields(
+    payload: &[u8],
+    trade: bool,
+    spy: bool,
+    limits: bool,
+) -> io::Result<Vec<PlayerGui>> {
     let mut cursor = Cursor(payload);
     let count = cursor.u32()?;
     let mut players = Vec::new();
@@ -1973,6 +2055,26 @@ fn decode_player_gui_fields(payload: &[u8], trade: bool, spy: bool) -> io::Resul
             player.spy_flags = flags;
             player.spy_failure_ratio = failure_ratio;
             player.spy_techs = techs.clone();
+        }
+    }
+    if limits {
+        for player in &mut players {
+            player.shared_dropsites = cursor.u8()? & 1 != 0;
+            player.limits.categories = (0..cursor.u16()?)
+                .map(|_| {
+                    Ok(LimitCategory {
+                        name: optional(cursor.u32()?),
+                        limit: cursor.f32()?,
+                        count: cursor.f32()?,
+                        changers: (0..cursor.u8()?)
+                            .map(|_| Ok((optional(cursor.u32()?), cursor.f32()?)))
+                            .collect::<io::Result<_>>()?,
+                    })
+                })
+                .collect::<io::Result<_>>()?;
+            player.limits.matches = (0..cursor.u16()?)
+                .map(|_| Ok((optional(cursor.u32()?), cursor.f32()?)))
+                .collect::<io::Result<_>>()?;
         }
     }
     if !cursor.0.is_empty() {

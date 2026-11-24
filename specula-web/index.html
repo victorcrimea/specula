@@ -302,6 +302,10 @@ body { cursor: var(--gui-cursor-default, default); }
 #details-primary { left: 0; top: 3px; width: 220px; height: 17px; }
 #details-primary.alone { height: 34px; }
 #details-secondary { left: 0; top: 19px; width: 220px; height: 18px; }
+/* statusEffectsIcons at 100%-20 4, an 18 px pitch of 16 px icons. */
+#details-status-effects { inset: 0; pointer-events: none; }
+.status-icon { pointer-events: auto; left: 200px; top: calc(4px + var(--i, 0) * 18px); width: 16px; height: 16px; z-index: 200;
+  background: none 0 0 / 100% 100% no-repeat; }
 #details-bars { left: 0; top: 0; width: 220px; height: 65px; }
 #details .section { left: 96px; width: 124px; }
 #details .section-top { top: 2px; height: 22px; }
@@ -626,6 +630,9 @@ body { cursor: var(--gui-cursor-default, default); }
     justify-content: flex-start; }
   /* The generic name (the type: Civic Centre, Spearman) on its own row
      under the specific one, which a player may not know. */
+  /* Over the portrait's bottom edge, as many as fit its width. */
+  #details .status-icon { left: calc(2px + var(--i, 0) * 18px); top: 38px; }
+  #details #details-status-3, #details #details-status-4 { display: none; }
   #details #details-secondary { left: 60px; top: 14px; width: auto;
     right: calc(var(--commands, 0) * 27px); height: 14px; justify-content: flex-start; }
   #details #details-emblem, #details #details-phase { display: none; }
@@ -1218,6 +1225,13 @@ body:not([data-debug="storage"]) #stats-storage { display: none; }
 <div id="details-primary" class="text center sans-bold-stroke-13 gold"></div>
 <div id="details-secondary" class="text center sans-stroke-12"></div>
 </div>
+<div id="details-status-effects" class="box">
+<div id="details-status-0" class="box status-icon" data-tooltip-style="sessionToolTip" hidden></div>
+<div id="details-status-1" class="box status-icon" data-tooltip-style="sessionToolTip" hidden></div>
+<div id="details-status-2" class="box status-icon" data-tooltip-style="sessionToolTip" hidden></div>
+<div id="details-status-3" class="box status-icon" data-tooltip-style="sessionToolTip" hidden></div>
+<div id="details-status-4" class="box status-icon" data-tooltip-style="sessionToolTip" hidden></div>
+</div>
 <div id="details-bars" class="box top-edged">
 <div id="details-capture-section" class="box section">
 <div id="details-capture-stats" class="text right sans-stroke-12"></div>
@@ -1228,6 +1242,7 @@ body:not([data-debug="storage"]) #stats-storage { display: none; }
 <div class="box bar"><div class="border"></div><div class="health-bg"></div><div id="details-health-bar" class="health-fg"></div><div class="shine horizontal"></div></div>
 </div>
 <div id="details-resource-section" class="box section">
+<div id="details-resource-label" class="text left sans-stroke-12"></div>
 <div id="details-resource-stats" class="text right sans-stroke-12"></div>
 <div class="box bar"><div class="border"></div><div class="resource-bg"></div><div id="details-resource-bar" class="resource-fg"></div><div class="shine horizontal"></div></div>
 </div>
