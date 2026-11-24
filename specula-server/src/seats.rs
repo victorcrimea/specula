@@ -181,13 +181,19 @@ impl Seats {
         };
         table.members[index].present = false;
         if table.host == Some(index) {
-            table.host = table.members.iter().position(|member| {
-                member.present
-                    && match phase {
-                        Phase::Setup => true,
-                        Phase::Running => member.player.is_some_and(&active),
-                    }
-            });
+            // `present` is a setup page flag that a return to a running match
+            // never sets again, so only the setup phase may read it.
+            table.host = table
+                .members
+                .iter()
+                .enumerate()
+                .position(|(other, member)| {
+                    other != index
+                        && match phase {
+                            Phase::Setup => member.present,
+                            Phase::Running => member.player.is_some_and(&active),
+                        }
+                });
         }
     }
 
