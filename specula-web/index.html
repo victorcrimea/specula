@@ -768,9 +768,11 @@ body:not([data-debug="storage"]) #stats-storage { display: none; }
 #notification-text[hidden] { display: none; }
 /* diplomacyDialogPanel (gui/session/diplomacy/DiplomacyDialog.xml) in the
    ModernDialog sprite (gui/common/modern/sprites.xml); the wasm sets its
-   size. Narrow screens scroll the table rather than the page. */
+   size. Narrow screens scroll the table rather than the page. The height is
+   auto, sized by the table's ::after, so the horizontal scrollbar adds to the
+   window instead of covering the last row. */
 #diplomacy-window { position: fixed; left: 50%; top: 50%; translate: -50% -50%;
-  width: var(--dialog-width, 560px); height: var(--dialog-height, 170px);
+  width: var(--dialog-width, 560px); height: auto;
   max-width: calc(100vw - 32px);
   font-family: "0ad sans", "0ad sans fallback", sans-serif; color: white;
   user-select: none; -webkit-user-select: none; }
@@ -803,8 +805,10 @@ body:not([data-debug="storage"]) #stats-storage { display: none; }
 :is(#diplomacy-window, #trade-window, #message-box-dialog, #match-summary, #chat-window) > .titlebar.right { left: calc(50% + 102px); width: 32px;
   background-image: var(--gui-dialog-titlebar-left); scale: -1 -1; }
 #diplomacy-title { left: calc(50% - 96px); top: -16px; width: 192px; height: 32px; }
-#diplomacy-table { position: absolute; left: 32px; right: 32px; top: 32px;
-  bottom: 90px; overflow-x: auto; overflow-y: hidden; }
+#diplomacy-table { position: relative; margin: 32px 32px 90px;
+  overflow-x: auto; overflow-y: hidden; }
+#diplomacy-table::after { content: ""; display: block;
+  height: calc(var(--dialog-height, 170px) - 122px); }
 #diplomacy-header, #diplomacy-rows { position: absolute; left: 0;
   width: calc(var(--dialog-width, 560px) - 64px); }
 #diplomacy-header { top: 0; height: 32px; }
