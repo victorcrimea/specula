@@ -204,5 +204,6 @@
   "Time: %(time)s": "Čas: %(time)s",
   "Length: %(time)s": "Délka: %(time)s",
   "Observers: %(count)s": "Pozorovatelé: %(count)s",
-  "Watch": "Sledovat"
+  "Watch": "Sledovat",
+  "Control group %(number)s": "Skupina %(number)s"
 }

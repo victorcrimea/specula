@@ -11,12 +11,19 @@
 //! A message starting with `QUERY_TAG` is a `Query` instead: a GuiInterface
 //! call the session GUI makes while placing a structure, answered on the
 //! same socket by a text message `{"id": id, "result": JSON}`.
+//!
+//! A message starting with `GROUP_TAG` is a control group, in both
+//! directions (the direction tells them apart). From the page it is a
+//! `GroupSave`: the group, a flags byte (bit 0 is "disjoint") and the
+//! selection to keep. From the server it is a `GroupContents`: the group
+//! and its members' handles. Neither is an engine order, so they are not
+//! in `Command`.
 
 use crate::bytes::ByteReader;
 
 /// The version of this format, which the server sends as the first byte of
 /// its seat message; a page on another version must reload.
-pub const COMMAND_VERSION: u8 = 9;
+pub const COMMAND_VERSION: u8 = 10;
 
 pub const QUEUED: u8 = 1;
 pub const PUSH_FRONT: u8 = 2;
@@ -78,6 +85,16 @@ pub const QUERY_TAG: u8 = 0x80;
 const QUERY_PREVIEW: u8 = 1;
 const QUERY_SNAP: u8 = 2;
 const QUERY_WALL: u8 = 3;
+
+/// Above every command kind, and not `QUERY_TAG`.
+pub const GROUP_TAG: u8 = 0x81;
+/// Vanilla's control groups, the keys 1-9 and 0.
+pub const GROUP_COUNT: usize = 10;
+/// The same as the page's selection limit (`MAX_SELECTION` in
+/// specula-web), so a whole selection fits in a group; not imported, as
+/// the crates do not share it.
+pub const MAX_GROUP: usize = 1500;
+const GROUP_DISJOINT: u8 = 1;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Command {
@@ -492,6 +509,84 @@ impl Query {
             return Err("trailing bytes after the query");
         }
         Ok(Query { id, kind })
+    }
+}
+
+/// A page's request to keep a selection as a control group; an empty
+/// selection clears the group.
+#[derive(Clone, Debug, PartialEq)]
+pub struct GroupSave {
+    pub group: u8,
+    /// Take the entities out of the other groups first.
+    pub disjoint: bool,
+    pub entities: Vec<u32>,
+}
+
+impl GroupSave {
+    /// As `Command::entity_ids_mut`.
+    pub fn entity_ids_mut(&mut self) -> Vec<&mut u32> {
+        self.entities.iter_mut().collect()
+    }
+
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = Out(vec![GROUP_TAG]);
+        out.0.push(self.group);
+        out.0.push(if self.disjoint { GROUP_DISJOINT } else { 0 });
+        out.entities(&self.entities);
+        out.0
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<GroupSave, &'static str> {
+        let mut input = ByteReader(bytes);
+        if input.u8()? != GROUP_TAG {
+            return Err("not a control group");
+        }
+        let group = input.u8()?;
+        if usize::from(group) >= GROUP_COUNT {
+            return Err("control group out of range");
+        }
+        let flags = input.u8()?;
+        let entities = entities(&mut input)?;
+        if !input.0.is_empty() {
+            return Err("trailing bytes after the control group");
+        }
+        Ok(GroupSave {
+            group,
+            disjoint: flags & GROUP_DISJOINT != 0,
+            entities,
+        })
+    }
+}
+
+/// A control group's members, as the server pushes it to the page.
+#[derive(Clone, Debug, PartialEq)]
+pub struct GroupContents {
+    pub group: u8,
+    pub entities: Vec<u32>,
+}
+
+impl GroupContents {
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = Out(vec![GROUP_TAG]);
+        out.0.push(self.group);
+        out.entities(&self.entities);
+        out.0
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<GroupContents, &'static str> {
+        let mut input = ByteReader(bytes);
+        if input.u8()? != GROUP_TAG {
+            return Err("not a control group");
+        }
+        let group = input.u8()?;
+        if usize::from(group) >= GROUP_COUNT {
+            return Err("control group out of range");
+        }
+        let entities = entities(&mut input)?;
+        if !input.0.is_empty() {
+            return Err("trailing bytes after the control group");
+        }
+        Ok(GroupContents { group, entities })
     }
 }
 

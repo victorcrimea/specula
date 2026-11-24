@@ -188,6 +188,21 @@ body { cursor: var(--gui-cursor-default, default); }
 #diplomacy:hover { background-image: var(--gui-minimap-diplomacy-off-highlight); }
 #diplomacy[aria-pressed="true"] { background-image: var(--gui-minimap-diplomacy-on); }
 #diplomacy[aria-pressed="true"]:hover { background-image: var(--gui-minimap-diplomacy-on-highlight); }
+/* unitGroupPanel (0 50%-228 38 50%+152): up to ten iconButtons of 38 px in
+   one column, 1 px apart (setPanelObjectPosition); /play only. */
+#control-groups { position: fixed; left: 0; top: calc(50% - 228px); width: 38px; height: 380px;
+  font-family: "0ad sans", "0ad sans fallback", sans-serif; color: white;
+  user-select: none; -webkit-user-select: none; pointer-events: none; }
+#control-groups[hidden], #control-groups .control-group[hidden] { display: none; }
+#control-groups .control-group { position: absolute; left: 0; width: 38px; height: 38px;
+  padding: 0; margin: 0; border: 0; color: inherit; font-family: inherit; pointer-events: auto;
+  background: var(--gui-portrait-black) 0 0 / 100% 100%; }
+#control-groups .control-group:hover::after { content: ""; position: absolute; inset: 0;
+  background: rgb(42, 42, 42); mix-blend-mode: plus-lighter; pointer-events: none; }
+/* The icon is 3 3 35 35 in the engine. */
+#control-groups .icon { position: absolute; left: 3px; top: 3px; width: 32px; height: 32px;
+  background: var(--gui-groups) 0 0 / 100% 100% no-repeat; }
+#control-groups .text { inset: 0; }
 /* idleWorkerButton (100%-119 100%-121 100%-4 100%-6), clipped as #diplomacy
    is, about the texture's top left corner; /play only. */
 #idle-worker { position: absolute; left: 81px; top: 83px; width: 115px; height: 115px;
@@ -251,15 +266,15 @@ body { cursor: var(--gui-cursor-default, default); }
   var(--gui-panel-shader-top-edge) 0 0 / 100% 1px no-repeat; }
 /* The engine's `-stroke` fonts: a 1 px black outline. The top panel
    shares the text and bar styles. */
-:is(#details, #top-panel, #diplomacy-window, #trade-window, #match-summary, #message-box, #research, #chat-window) .text { position: absolute; display: flex; align-items: center;
+:is(#details, #top-panel, #diplomacy-window, #trade-window, #match-summary, #message-box, #research, #chat-window, #control-groups) .text { position: absolute; display: flex; align-items: center;
   white-space: pre; overflow: hidden; line-height: 1.1;
   -webkit-text-stroke: 2px black; paint-order: stroke fill; }
-:is(#details, #top-panel, #diplomacy-window, #trade-window, #match-summary, #message-box, #research, #chat-window) .center { justify-content: center; text-align: center; }
+:is(#details, #top-panel, #diplomacy-window, #trade-window, #match-summary, #message-box, #research, #chat-window, #control-groups) .center { justify-content: center; text-align: center; }
 :is(#details, #top-panel) .right { justify-content: flex-end; text-align: right; }
 :is(#details, #top-panel) .sans-stroke-12 { font-size: 12px; font-weight: 400; }
 :is(#details, #top-panel, #research) .sans-stroke-14 { font-size: 14px; font-weight: 400; }
 :is(#details, #top-panel) .sans-bold-stroke-13 { font-size: 13px; font-weight: 700; }
-:is(#details, #top-panel, #diplomacy-window, #trade-window, #match-summary, #message-box, #chat-window) .sans-bold-stroke-14 { font-size: 14px; font-weight: 700; }
+:is(#details, #top-panel, #diplomacy-window, #trade-window, #match-summary, #message-box, #chat-window, #control-groups) .sans-bold-stroke-14 { font-size: 14px; font-weight: 700; }
 :is(#details, #top-panel) .gold { color: var(--gui-gold); }
 /* A bar: barBorder around it, the background, the foreground and
    statsBarShaderHorizontal or ...Vertical over them. */
@@ -1162,6 +1177,18 @@ body:not([data-debug="storage"]) #stats-storage { display: none; }
 <label data-i18n>Music <input id="volume-music" type="range" min="0" max="1" step="0.05" value="0.5"></label>
 </div>
 </div>
+<div id="control-groups" hidden>
+<button type="button" class="control-group" style="top: 0px" hidden><div class="icon"></div><div class="text center sans-bold-stroke-14"></div></button>
+<button type="button" class="control-group" style="top: 39px" hidden><div class="icon"></div><div class="text center sans-bold-stroke-14"></div></button>
+<button type="button" class="control-group" style="top: 78px" hidden><div class="icon"></div><div class="text center sans-bold-stroke-14"></div></button>
+<button type="button" class="control-group" style="top: 117px" hidden><div class="icon"></div><div class="text center sans-bold-stroke-14"></div></button>
+<button type="button" class="control-group" style="top: 156px" hidden><div class="icon"></div><div class="text center sans-bold-stroke-14"></div></button>
+<button type="button" class="control-group" style="top: 195px" hidden><div class="icon"></div><div class="text center sans-bold-stroke-14"></div></button>
+<button type="button" class="control-group" style="top: 234px" hidden><div class="icon"></div><div class="text center sans-bold-stroke-14"></div></button>
+<button type="button" class="control-group" style="top: 273px" hidden><div class="icon"></div><div class="text center sans-bold-stroke-14"></div></button>
+<button type="button" class="control-group" style="top: 312px" hidden><div class="icon"></div><div class="text center sans-bold-stroke-14"></div></button>
+<button type="button" class="control-group" style="top: 351px" hidden><div class="icon"></div><div class="text center sans-bold-stroke-14"></div></button>
+</div>
 <div id="clock" aria-label="Match time" data-i18n-attrs="aria-label">0:00</div>
 <div id="minimap-panel" class="gui-frame">
 <div id="minimap-background"></div>
@@ -1388,6 +1415,7 @@ body:not([data-debug="storage"]) #stats-storage { display: none; }
 <button type="button" role="tab" id="tab-quality" aria-controls="pane-quality" aria-selected="true" data-i18n>Quality</button>
 <button type="button" role="tab" id="tab-language" aria-controls="pane-language" aria-selected="false" data-i18n>Language</button>
 <button type="button" role="tab" id="tab-chat" aria-controls="pane-chat" aria-selected="false" data-i18n>Chat</button>
+<button type="button" role="tab" id="tab-gameplay" aria-controls="pane-gameplay" aria-selected="false" data-i18n>Gameplay</button>
 </div>
 <div class="pane" role="tabpanel" id="pane-quality" aria-labelledby="tab-quality">
 <div class="presets">
@@ -1558,6 +1586,12 @@ body:not([data-debug="storage"]) #stats-storage { display: none; }
 <option value="none" data-i18n>Disable</option>
 <option value="completed" data-i18n>Completed</option>
 <option value="all" data-i18n>All displayed</option>
+</select></label>
+</div>
+<div class="pane" role="tabpanel" id="pane-gameplay" aria-labelledby="tab-gameplay" hidden>
+<label title="Decide whether units can be part of multiple control groups." data-i18n-attrs="title"><span data-i18n>Control group membership</span> <select id="control-group-membership">
+<option value="single" title="When adding a Unit or Structure to a control group, they are removed from other control groups. Use this choice if you want control groups to refer to distinct armies." data-i18n data-i18n-attrs="title">Single</option>
+<option value="multiple" title="Units and Structures can be part of multiple control groups. This is useful to keep control groups for distinct armies and a control group for the entire army simultaneously." data-i18n data-i18n-attrs="title">Multiple</option>
 </select></label>
 </div>
 <div class="pane" role="tabpanel" id="pane-language" aria-labelledby="tab-language" hidden>

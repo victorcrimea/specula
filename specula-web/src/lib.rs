@@ -6,6 +6,7 @@ mod blend;
 mod chat;
 mod chat_window;
 mod command_row;
+mod control_groups;
 mod detail;
 mod diplomacy;
 mod diplomacy_window;
@@ -378,6 +379,9 @@ trait View {
     /// Selects only `ids`, or with `remove` leaves them out of the
     /// selection: a selection panel group button.
     fn select_group(&mut self, _ids: &[u32], _remove: bool) {}
+    /// Adds `ids` to the selection in one pick, so one select sound plays:
+    /// a control group's recall with Shift.
+    fn add_group(&mut self, _ids: &[u32]) {}
     /// Selects only `id`, or with `add` adds it: a hero button.
     fn select_entity(&mut self, _id: u32, _add: bool) {}
     /// The asset bake it draws from, which also holds the sounds.
@@ -739,6 +743,9 @@ struct App {
     /// On `/play`: the minimap's idle worker button.
     idle_worker: Option<IdleWorker>,
     idle_finder: idle::Finder,
+    /// On `/play`: the server's control groups, and their panel.
+    control_groups: Option<control_groups::ControlGroups>,
+    control_group_panel: Option<control_groups::Panel>,
     /// The minimap's flare button and animation, on a match's pages.
     flares: Option<flare::Flares>,
 }
@@ -1244,6 +1251,7 @@ impl App {
             }
             self.dirty = true;
         }
+        self.update_control_groups(self.scene_changed);
         if self.scene_changed {
             self.scene_changed = false;
             self.renderer.set_renames(&self.renames);
@@ -1427,6 +1435,83 @@ impl App {
             tooltips.frame(now);
         }
         timing::frame(page_now() - start, drew);
+    }
+
+    /// Takes the server's pushes and redraws the panel when they or a new
+    /// turn changed what it shows.
+    fn update_control_groups(&mut self, turn: bool) {
+        let (Some(groups), Some(uplink)) = (&mut self.control_groups, &self.uplink) else {
+            return;
+        };
+        for contents in uplink.take_groups() {
+            groups.set(contents);
+        }
+        let changed = groups.take_dirty();
+        let Some(panel) = &mut self.control_group_panel else {
+            return;
+        };
+        if !changed && !turn {
+            return;
+        }
+        let store = self.renderer.asset_store();
+        let portrait = |icon: &str| store.as_ref()?.borrow().portrait_url(icon);
+        panel.refresh(groups, &self.scene, &self.data_files, &portrait);
+    }
+
+    /// `performGroup`.
+    fn perform_group(&mut self, action: control_groups::Action, group: usize) {
+        use control_groups::Action;
+        let Some(groups) = &mut self.control_groups else {
+            return;
+        };
+        match action {
+            Action::Select | Action::Snap => {
+                let ids = groups.members(group).to_vec();
+                // An empty group clears the selection, as vanilla's reset.
+                self.renderer.select_group(&ids, false);
+                if action == Action::Snap {
+                    self.snap_to(&ids);
+                }
+            }
+            Action::Add => {
+                let ids = groups.members(group).to_vec();
+                self.renderer.add_group(&ids);
+            }
+            Action::Save | Action::BreakUp => {
+                let ids = if action == Action::Save {
+                    self.renderer.selected().to_vec()
+                } else {
+                    Vec::new()
+                };
+                let disjoint = action == Action::Save && control_groups::disjoint();
+                groups.save_local(group, &ids, disjoint);
+                if let Some(uplink) = &self.uplink {
+                    uplink.save_group(&specula_assets::command::GroupSave {
+                        group: group as u8,
+                        disjoint,
+                        entities: ids,
+                    });
+                }
+            }
+        }
+    }
+
+    /// The camera to the group's lowest member, or its holder when it is
+    /// garrisoned; one that is nowhere is left alone.
+    fn snap_to(&mut self, ids: &[u32]) {
+        let Some(&lowest) = ids.iter().min() else {
+            return;
+        };
+        let holder = match self.scene.details.group(lowest, None, detail::HOLDER) {
+            Some(detail::Group::Holder(holder)) if *holder != 0 => *holder,
+            _ => lowest,
+        };
+        if let Some(dot) = self.scene.dots.get(&holder) {
+            self.renderer.move_to(
+                dot.x as f32 / POSITION_UNITS_PER_METRE,
+                dot.z as f32 / POSITION_UNITS_PER_METRE,
+            );
+        }
     }
 
     /// `findIdleUnit(classes)` on `/play`, with selection.add and
@@ -2641,6 +2726,17 @@ async fn run(
     } else {
         None
     };
+    // An older page has no panel; the keys still work.
+    let control_groups = commanding.then(control_groups::ControlGroups::new);
+    let control_group_panel = if commanding {
+        control_groups::Panel::new(&document)
+            .inspect_err(|error| {
+                web_sys::console::error_1(&format!("control groups: {error}").into())
+            })
+            .ok()
+    } else {
+        None
+    };
     // An older page has no flare button; flares are then not sent.
     let flares = if page == Page::Observer && !match_base().is_empty() {
         flare::Flares::new(&document, !seated)
@@ -2803,6 +2899,8 @@ async fn run(
         uplink: seated.then(Uplink::open),
         idle_worker,
         idle_finder: idle::Finder::default(),
+        control_groups,
+        control_group_panel,
         flares,
         seat_shown: None,
         cursor: String::new(),
@@ -2824,6 +2922,7 @@ async fn run(
     wire_summary(&app, &window);
     wire_command_hotkeys(&app, &window);
     wire_idle(&app, &window);
+    wire_control_groups(&app, &window, &document);
     wire_last_attack(&app, &window);
     if page == Page::Observer {
         let shadows: HtmlSelectElement = element(&document, "shadows")?;
@@ -4377,6 +4476,129 @@ fn wire_idle(app: &Rc<RefCell<App>>, window: &web_sys::Window) {
     });
     button.set_onclick(Some(on_click.as_ref().unchecked_ref()));
     on_click.forget();
+}
+
+/// The control group hotkeys (input.js `hotkeypress` of
+/// `selection.group.*`: Ctrl saves, no modifier selects, Shift adds, the
+/// digits 1-9 and 0 and their numpad keys), the panel's buttons, and the
+/// Gameplay tab's membership setting.
+fn wire_control_groups(app: &Rc<RefCell<App>>, window: &web_sys::Window, document: &Document) {
+    use control_groups::Action;
+    use control_groups::Key;
+    if app.borrow().uplink.is_none() {
+        // Only /play has groups, so only it has the tab.
+        for id in ["tab-gameplay", "pane-gameplay"] {
+            if let Some(element) = document.get_element_by_id(id) {
+                let _ = element.set_attribute("hidden", "");
+            }
+        }
+        return;
+    }
+    if let Ok(select) = element::<HtmlSelectElement>(document, "control-group-membership") {
+        select.set_value(chat::choice(
+            control_groups::MEMBERSHIP_KEY,
+            "single",
+            &["single", "multiple"],
+        ));
+        let list = select.clone();
+        on_change(&select, move || {
+            chat::store_choice(control_groups::MEMBERSHIP_KEY, &list.value());
+        });
+    }
+    let target = Rc::clone(app);
+    let on_key = Closure::<dyn FnMut(web_sys::Event)>::new(move |event: web_sys::Event| {
+        let text = |name: &str| event_text(&event, name);
+        let flag = |name: &str| {
+            js_sys::Reflect::get(&event, &name.into()).is_ok_and(|value| value.is_truthy())
+        };
+        if event_focused(&event)
+            || flag("repeat")
+            || flag("metaKey")
+            || flag("altKey")
+            || (flag("ctrlKey") && flag("shiftKey"))
+        {
+            return;
+        }
+        let code = text("code");
+        let group = match code
+            .strip_prefix("Digit")
+            .or_else(|| code.strip_prefix("Numpad"))
+        {
+            Some("0") => 9,
+            Some(digit @ ("1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9")) => {
+                digit.parse::<usize>().unwrap_or(1) - 1
+            }
+            _ => return,
+        };
+        let key = if flag("ctrlKey") {
+            Key::Save
+        } else if flag("shiftKey") {
+            Key::Add
+        } else {
+            Key::Select
+        };
+        // Ctrl+digit is the browser's tab switch.
+        event.prevent_default();
+        let Ok(mut app) = target.try_borrow_mut() else {
+            return;
+        };
+        // Vanilla handles them in INPUT_NORMAL only.
+        if app.message_box.as_ref().is_some_and(MessageBox::is_open)
+            || app.placement.active()
+            || app.preselected.is_some()
+        {
+            return;
+        }
+        let Some(action) = app
+            .control_groups
+            .as_mut()
+            .and_then(|groups| groups.press(key, group, page_now()))
+        else {
+            return;
+        };
+        app.perform_group(action, group);
+    });
+    let _ = window.add_event_listener_with_callback("keydown", on_key.as_ref().unchecked_ref());
+    // The window lives as long as the page, so its handler does too.
+    on_key.forget();
+    let buttons: Vec<HtmlButtonElement> = app
+        .borrow()
+        .control_group_panel
+        .as_ref()
+        .map(|panel| panel.buttons().cloned().collect())
+        .unwrap_or_default();
+    for (index, button) in buttons.into_iter().enumerate() {
+        let click = Rc::clone(app);
+        let on_click = Closure::<dyn FnMut(MouseEvent)>::new(move |event: MouseEvent| {
+            let action = if event.shift_key() {
+                Action::Add
+            } else {
+                Action::Select
+            };
+            if let Ok(mut app) = click.try_borrow_mut() {
+                app.perform_group(action, index);
+            }
+        });
+        button.set_onclick(Some(on_click.as_ref().unchecked_ref()));
+        on_click.forget();
+        let double = Rc::clone(app);
+        let on_double = Closure::<dyn FnMut(MouseEvent)>::new(move |_: MouseEvent| {
+            if let Ok(mut app) = double.try_borrow_mut() {
+                app.perform_group(Action::Snap, index);
+            }
+        });
+        button.set_ondblclick(Some(on_double.as_ref().unchecked_ref()));
+        on_double.forget();
+        let menu = Rc::clone(app);
+        let on_menu = Closure::<dyn FnMut(MouseEvent)>::new(move |event: MouseEvent| {
+            event.prevent_default();
+            if let Ok(mut app) = menu.try_borrow_mut() {
+                app.perform_group(Action::BreakUp, index);
+            }
+        });
+        button.set_oncontextmenu(Some(on_menu.as_ref().unchecked_ref()));
+        on_menu.forget();
+    }
 }
 
 fn wire_research(app: &Rc<RefCell<App>>) {

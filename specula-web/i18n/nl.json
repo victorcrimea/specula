@@ -204,5 +204,6 @@
   "Time: %(time)s": "Tijd: %(time)s",
   "Length: %(time)s": "Duur: %(time)s",
   "Observers: %(count)s": "Toeschouwers: %(count)s",
-  "Watch": "Kijken"
+  "Watch": "Kijken",
+  "Control group %(number)s": "Controlegroep %(number)s"
 }

@@ -204,5 +204,6 @@
   "Time: %(time)s": "時間：%(time)s",
   "Length: %(time)s": "時長：%(time)s",
   "Observers: %(count)s": "觀眾：%(count)s",
-  "Watch": "觀看"
+  "Watch": "觀看",
+  "Control group %(number)s": "控制組 %(number)s"
 }

@@ -204,5 +204,6 @@
   "Time: %(time)s": "Час: %(time)s",
   "Length: %(time)s": "Тривалість: %(time)s",
   "Observers: %(count)s": "Спостерігачі: %(count)s",
-  "Watch": "Дивитися"
+  "Watch": "Дивитися",
+  "Control group %(number)s": "Група керування %(number)s"
 }

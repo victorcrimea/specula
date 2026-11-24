@@ -204,5 +204,6 @@
   "Time: %(time)s": "Tid: %(time)s",
   "Length: %(time)s": "Längd: %(time)s",
   "Observers: %(count)s": "Åskådare: %(count)s",
-  "Watch": "Titta"
+  "Watch": "Titta",
+  "Control group %(number)s": "Kontrollgrupp %(number)s"
 }

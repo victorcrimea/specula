@@ -15,6 +15,7 @@
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::collections::VecDeque;
 use std::io::Write;
 use std::os::unix::net::UnixStream;
@@ -34,6 +35,8 @@ use specula_assets::command::ALLOW_CAPTURE;
 use specula_assets::command::Command as Order;
 use specula_assets::command::DIPLOMACY_ALLY;
 use specula_assets::command::DIPLOMACY_NEUTRAL;
+use specula_assets::command::GroupContents;
+use specula_assets::command::GroupSave;
 use specula_assets::command::PUSH_FRONT;
 use specula_assets::command::QUEUED;
 use specula_assets::command::Query;
@@ -47,7 +50,9 @@ use crate::detail::CONTROL_CLAIM;
 use crate::detail::CONTROL_END_ALLOWED;
 use crate::detail::CONTROL_HOST;
 use crate::detail::CONTROL_KICKED;
+use crate::feed;
 use crate::feed::Summary;
+use crate::groups;
 use crate::observer;
 use crate::observer::EngineDirs;
 use crate::pause;
@@ -80,6 +85,8 @@ const QUERY_WALL_PREVIEW: u8 = 3;
 /// Replies not yet sent to the pages; a placement asks at most a couple at
 /// a time.
 const REPLY_BACKLOG: usize = 64;
+/// Every changed group of every connected page in a turn.
+const GROUP_BACKLOG: usize = 256;
 /// How many unanswered queries are remembered: the engine never answers one
 /// whose uplink dropped mid-query, and they must not pile up.
 const ASKERS_KEPT: usize = 256;
@@ -223,6 +230,14 @@ pub struct Play {
     /// The in-game control (D17, D44 to D46, D54): a leaf lock, never take
     /// `seats`, `hub`, `ledger` or `inner` while holding it.
     control: Mutex<ControlState>,
+    /// The control groups (V115): a leaf lock, never take `seats`, `hub`,
+    /// `ledger`, `control` or `inner` while holding it, and never call into
+    /// `hub` with it held. Snapshot, release, map the handles, then lock
+    /// again for `mark_pushed`, whose version check lets a save that landed
+    /// in between win.
+    groups: Mutex<groups::Store>,
+    /// Changed groups, for the command socket of the seat's page.
+    group_pushes: broadcast::Sender<groups::Push>,
 }
 
 /// What the host and the rules of leaving have decided so far in this game.
@@ -371,6 +386,8 @@ impl Play {
             ledger: Mutex::new(pause::Ledger::new(&[])),
             humans: Mutex::new(Vec::new()),
             control: Mutex::new(ControlState::default()),
+            groups: Mutex::new(groups::Store::default()),
+            group_pushes: broadcast::channel(GROUP_BACKLOG).0,
         }
     }
 
@@ -1478,6 +1495,120 @@ impl Play {
 
     pub fn replies(&self) -> broadcast::Receiver<Reply> {
         self.replies.subscribe()
+    }
+
+    pub fn group_pushes(&self) -> broadcast::Receiver<groups::Push> {
+        self.group_pushes.subscribe()
+    }
+
+    /// `save.entities` are the feed's ids.
+    pub fn save_group(&self, cookie: &str, seat: u8, save: GroupSave) {
+        let changed = self.groups.lock().unwrap().save(
+            cookie,
+            seat,
+            save.group,
+            save.disjoint,
+            save.entities,
+        );
+        self.push_groups(cookie, seat, &changed);
+    }
+
+    /// All the groups of the seat's page, which has just connected.
+    pub fn group_snapshot(&self, cookie: &str, seat: u8) -> Vec<GroupContents> {
+        let entries = self.groups.lock().unwrap().snapshot(cookie, seat);
+        let mut contents = Vec::with_capacity(entries.len());
+        for entry in entries {
+            let handles = self.hub.seat_handles(u32::from(seat), &entry.ids);
+            // Recorded so that the next turn does not send them again.
+            self.groups.lock().unwrap().mark_pushed(
+                cookie,
+                seat,
+                entry.group,
+                entry.version,
+                handles.clone(),
+            );
+            contents.push(GroupContents {
+                group: entry.group,
+                entities: handles,
+            });
+        }
+        contents
+    }
+
+    /// Once a turn, before the feed's renames are cleared: follows the
+    /// groups' members through them and sends what changed, which also
+    /// covers a member whose handle appeared or changed.
+    pub fn update_groups(&self, entities: &[feed::Entity], details: &feed::Details) {
+        if self.groups.lock().unwrap().is_empty() {
+            return;
+        }
+        let renames: HashMap<u32, u32> = details.renames.iter().copied().collect();
+        let world: HashMap<u32, i32> = entities.iter().map(|e| (e.id, e.owner)).collect();
+        // A garrisoned unit is not in the world, so the feed lists it only
+        // here, in its holder's garrison or by its own holder.
+        let mut garrisoned: HashSet<u32> = HashSet::new();
+        for (id, detail) in &details.entities {
+            if let Some(garrison) = &detail.garrison {
+                garrisoned.extend(garrison.entities.iter().map(|(id, _)| *id));
+            }
+            if detail.holder.is_some_and(|holder| holder != 0) {
+                garrisoned.insert(*id);
+            }
+        }
+        self.groups.lock().unwrap().turn(&renames, |id| {
+            if let Some(owner) = world.get(&id) {
+                groups::Alive::Owned(*owner)
+            } else if garrisoned.contains(&id) {
+                groups::Alive::Garrisoned
+            } else {
+                groups::Alive::Gone
+            }
+        });
+        let entries = self.groups.lock().unwrap().all();
+        for entry in entries {
+            let handles = self.hub.seat_handles(u32::from(entry.seat), &entry.ids);
+            let changed = self.groups.lock().unwrap().mark_pushed(
+                &entry.cookie,
+                entry.seat,
+                entry.group,
+                entry.version,
+                handles.clone(),
+            );
+            if changed {
+                // No receiver is no page to tell.
+                let _ = self.group_pushes.send(groups::Push {
+                    cookie: entry.cookie,
+                    seat: entry.seat,
+                    group: entry.group,
+                    handles,
+                });
+            }
+        }
+    }
+
+    fn push_groups(&self, cookie: &str, seat: u8, changed: &[u8]) {
+        let entries = self.groups.lock().unwrap().snapshot(cookie, seat);
+        for entry in entries
+            .into_iter()
+            .filter(|entry| changed.contains(&entry.group))
+        {
+            let handles = self.hub.seat_handles(u32::from(seat), &entry.ids);
+            let marked = self.groups.lock().unwrap().mark_pushed(
+                cookie,
+                seat,
+                entry.group,
+                entry.version,
+                handles.clone(),
+            );
+            if marked {
+                let _ = self.group_pushes.send(groups::Push {
+                    cookie: cookie.to_string(),
+                    seat,
+                    group: entry.group,
+                    handles,
+                });
+            }
+        }
     }
 
     fn write_uplink(&self, record: &[u8]) {

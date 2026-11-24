@@ -204,5 +204,6 @@
   "Time: %(time)s": "Время: %(time)s",
   "Length: %(time)s": "Длительность: %(time)s",
   "Observers: %(count)s": "Наблюдатели: %(count)s",
-  "Watch": "Смотреть"
+  "Watch": "Смотреть",
+  "Control group %(number)s": "Группа управления %(number)s"
 }

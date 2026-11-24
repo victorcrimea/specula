@@ -4878,6 +4878,14 @@ impl View for Field {
         });
     }
 
+    fn add_group(&mut self, ids: &[u32]) {
+        self.camera.borrow_mut().picks.push(PickInput::Group {
+            ids: ids.to_vec(),
+            add: true,
+            remove: false,
+        });
+    }
+
     fn select_entity(&mut self, id: u32, add: bool) {
         self.camera.borrow_mut().picks.push(PickInput::Group {
             ids: vec![id],

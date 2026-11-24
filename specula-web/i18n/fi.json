@@ -204,5 +204,6 @@
   "Time: %(time)s": "Aika: %(time)s",
   "Length: %(time)s": "Kesto: %(time)s",
   "Observers: %(count)s": "Katsojat: %(count)s",
-  "Watch": "Katso"
+  "Watch": "Katso",
+  "Control group %(number)s": "Ohjausryhmä %(number)s"
 }

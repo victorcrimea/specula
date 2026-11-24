@@ -11,6 +11,9 @@ use std::rc::Weak;
 
 use specula_assets::command::COMMAND_VERSION;
 use specula_assets::command::Command;
+use specula_assets::command::GROUP_TAG;
+use specula_assets::command::GroupContents;
+use specula_assets::command::GroupSave;
 use specula_assets::command::Query;
 use specula_assets::command::QueryKind;
 use wasm_bindgen::JsCast;
@@ -38,6 +41,8 @@ struct Inner {
     next_query: u32,
     /// Query id and result, as they came.
     replies: Rc<RefCell<Vec<(u32, JsValue)>>>,
+    /// The control groups the server pushed, as they came.
+    groups: Rc<RefCell<Vec<GroupContents>>>,
     reconnect_ms: i32,
     /// Kept as long as their socket.
     _handlers: Option<Handlers>,
@@ -56,6 +61,7 @@ impl Uplink {
             starting_camera: Rc::new(Cell::new(None)),
             next_query: 1,
             replies: Rc::new(RefCell::new(Vec::new())),
+            groups: Rc::new(RefCell::new(Vec::new())),
             reconnect_ms: RECONNECT_MS,
             _handlers: None,
         }));
@@ -85,6 +91,22 @@ impl Uplink {
         if socket.ready_state() == WebSocket::OPEN && inner.seat.get() != 0 {
             let _ = socket.send_with_u8_array(&command.encode());
         }
+    }
+
+    /// Dropped while the socket is not open, as `send`.
+    pub fn save_group(&self, save: &GroupSave) {
+        let inner = self.inner.borrow();
+        let Some(socket) = &inner.socket else {
+            return;
+        };
+        if socket.ready_state() == WebSocket::OPEN && inner.seat.get() != 0 {
+            let _ = socket.send_with_u8_array(&save.encode());
+        }
+    }
+
+    /// The control group contents that came since the last call.
+    pub fn take_groups(&self) -> Vec<GroupContents> {
+        std::mem::take(&mut *self.inner.borrow().groups.borrow_mut())
     }
 
     /// Asks the engine; the id the reply will carry, or none while the
@@ -133,6 +155,7 @@ fn connect(inner: &Weak<RefCell<Inner>>) {
     let seat = Rc::clone(&strong.borrow().seat);
     let starting_camera = Rc::clone(&strong.borrow().starting_camera);
     let replies = Rc::clone(&strong.borrow().replies);
+    let groups = Rc::clone(&strong.borrow().groups);
     let on_message = Closure::<dyn FnMut(MessageEvent)>::new(move |event: MessageEvent| {
         if let Some(text) = event.data().as_string() {
             let Ok(reply) = js_sys::JSON::parse(&text) else {
@@ -151,6 +174,12 @@ fn connect(inner: &Weak<RefCell<Inner>>) {
         };
         let bytes = js_sys::Uint8Array::new(&buffer).to_vec();
         match bytes.as_slice() {
+            [GROUP_TAG, ..] => match GroupContents::decode(&bytes) {
+                Ok(contents) => groups.borrow_mut().push(contents),
+                Err(error) => {
+                    web_sys::console::error_1(&format!("bad control group: {error}").into());
+                }
+            },
             [COMMAND_VERSION, player, rest @ ..] if rest.is_empty() || rest.len() == 8 => {
                 let float = |at: usize| {
                     f32::from_le_bytes([rest[at], rest[at + 1], rest[at + 2], rest[at + 3]])

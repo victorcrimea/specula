@@ -204,5 +204,6 @@
   "Time: %(time)s": "Denbora: %(time)s",
   "Length: %(time)s": "Iraupena: %(time)s",
   "Observers: %(count)s": "Behatzaileak: %(count)s",
-  "Watch": "Ikusi"
+  "Watch": "Ikusi",
+  "Control group %(number)s": "Kontrol-taldea %(number)s"
 }

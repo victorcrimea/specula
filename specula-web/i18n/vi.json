@@ -204,5 +204,6 @@
   "Time: %(time)s": "Thời gian: %(time)s",
   "Length: %(time)s": "Độ dài: %(time)s",
   "Observers: %(count)s": "Người xem: %(count)s",
-  "Watch": "Xem"
+  "Watch": "Xem",
+  "Control group %(number)s": "Nhóm điều khiển %(number)s"
 }

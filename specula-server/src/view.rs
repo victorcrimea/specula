@@ -2759,6 +2759,18 @@ impl Hub {
             .handle(id)
     }
 
+    /// The seat's handles of the feed's ids, sorted; an id the seat does
+    /// not hold this turn is left out.
+    pub fn seat_handles(&self, player: u32, ids: &[u32]) -> Vec<u32> {
+        let state = self.state.lock().unwrap();
+        let Some(seat) = state.seats.iter().find(|seat| seat.player == player) else {
+            return Vec::new();
+        };
+        let mut handles: Vec<u32> = ids.iter().filter_map(|id| seat.handle(*id)).collect();
+        handles.sort_unstable();
+        handles
+    }
+
     /// As `data`, for terrain.
     pub fn terrain(&self, id: u64) -> Option<TerrainFile> {
         {

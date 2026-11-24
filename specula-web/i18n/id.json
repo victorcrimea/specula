@@ -204,5 +204,6 @@
   "Time: %(time)s": "Waktu: %(time)s",
   "Length: %(time)s": "Durasi: %(time)s",
   "Observers: %(count)s": "Pengamat: %(count)s",
-  "Watch": "Tonton"
+  "Watch": "Tonton",
+  "Control group %(number)s": "Grup kontrol %(number)s"
 }

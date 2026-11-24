@@ -7,6 +7,7 @@ mod delta;
 mod detail;
 mod feed;
 mod flare;
+mod groups;
 mod history;
 mod limit;
 mod nickname;
@@ -56,6 +57,9 @@ use rocket_ws::Channel;
 use rocket_ws::WebSocket;
 use specula_assets::command::COMMAND_VERSION;
 use specula_assets::command::Command as Order;
+use specula_assets::command::GROUP_TAG;
+use specula_assets::command::GroupContents;
+use specula_assets::command::GroupSave;
 use specula_assets::command::QUERY_TAG;
 use specula_assets::command::Query;
 
@@ -1050,14 +1054,50 @@ fn play_command(
                 .and(visitor.as_deref())
                 .map(|cookie| play.present(cookie));
             let mut replies = play.replies();
+            // Before the snapshot, so a push in between is not missed.
+            let mut pushes = play.group_pushes();
             let mut hello = vec![COMMAND_VERSION, bound.unwrap_or(0)];
             if let Some([x, z]) = bound.and_then(|seat| play.starting_camera(seat)) {
                 hello.extend_from_slice(&x.to_le_bytes());
                 hello.extend_from_slice(&z.to_le_bytes());
             }
             stream.send(rocket_ws::Message::binary(hello)).await?;
+            if let (Some(seat), Some(cookie)) = (bound, visitor.as_deref()) {
+                for contents in play.group_snapshot(cookie, seat) {
+                    stream
+                        .send(rocket_ws::Message::binary(contents.encode()))
+                        .await?;
+                }
+            }
             loop {
                 let message = rocket::tokio::select! {
+                    push = pushes.recv() => match push {
+                        Ok(push) => {
+                            if Some(push.seat) == bound
+                                && Some(push.cookie.as_str()) == visitor.as_deref()
+                            {
+                                let contents = GroupContents {
+                                    group: push.group,
+                                    entities: push.handles,
+                                };
+                                stream
+                                    .send(rocket_ws::Message::binary(contents.encode()))
+                                    .await?;
+                            }
+                            continue;
+                        }
+                        Err(RecvError::Lagged(_)) => {
+                            if let (Some(seat), Some(cookie)) = (bound, visitor.as_deref()) {
+                                for contents in play.group_snapshot(cookie, seat) {
+                                    stream
+                                        .send(rocket_ws::Message::binary(contents.encode()))
+                                        .await?;
+                                }
+                            }
+                            continue;
+                        }
+                        Err(RecvError::Closed) => return Ok(()),
+                    },
                     reply = replies.recv() => match reply {
                         Ok(reply) => {
                             if reply.connection != connection {
@@ -1099,6 +1139,29 @@ fn play_command(
                             None => false,
                         })
                 };
+                if bytes.first() == Some(&GROUP_TAG) {
+                    match GroupSave::decode(&bytes) {
+                        Ok(mut save) => {
+                            // Unlike an order, a group with a few stale
+                            // handles still means something, so those are
+                            // left out instead of dropping the save.
+                            save.entities.retain_mut(|id| {
+                                match hub.seat_entity(u32::from(seat), *id) {
+                                    Some(feed) => {
+                                        *id = feed;
+                                        true
+                                    }
+                                    None => false,
+                                }
+                            });
+                            if let Some(cookie) = visitor.as_deref() {
+                                play.save_group(cookie, seat, save);
+                            }
+                        }
+                        Err(error) => eprintln!("bad control group from the player: {error}"),
+                    }
+                    continue;
+                }
                 if bytes.first() == Some(&QUERY_TAG) {
                     match Query::decode(&bytes) {
                         Ok(mut query) => {
@@ -1595,6 +1658,10 @@ pub(crate) fn serve(
             }
             Record::Turn { turn, entities } => {
                 hub.publish(turn, &entities, &details)?;
+                // Before `end_turn` clears the renames.
+                if let Some(play) = play {
+                    play.update_groups(&entities, &details);
+                }
                 details.end_turn();
                 if let Some(summary) = classifier.observe(turn, &entities) {
                     println!("{summary}, {} templates", templates.len());

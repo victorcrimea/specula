@@ -204,5 +204,6 @@
   "Time: %(time)s": "Idő: %(time)s",
   "Length: %(time)s": "Hossz: %(time)s",
   "Observers: %(count)s": "Megfigyelők: %(count)s",
-  "Watch": "Megtekintés"
+  "Watch": "Megtekintés",
+  "Control group %(number)s": "%(number)s. vezérlőcsoport"
 }

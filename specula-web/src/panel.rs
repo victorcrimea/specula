@@ -3349,7 +3349,7 @@ pub(crate) fn string(scene: &Scene, index: u32) -> Option<&str> {
 }
 
 /// `EntityGroups`' name: the selection group name, else the template.
-fn group_name(scene: &Scene, template: u32) -> Option<&str> {
+pub(crate) fn group_name(scene: &Scene, template: u32) -> Option<&str> {
     template_details(scene, template)
         .and_then(|details| string(scene, details.group_name))
         .filter(|name| !name.is_empty())

@@ -204,5 +204,6 @@
   "Time: %(time)s": "lobby card line of a running match; %(time)s is the game time played, as 12:34",
   "Length: %(time)s": "lobby card line of a replay; %(time)s is the match's length, as 12:34",
   "Observers: %(count)s": "lobby card line of a running match; %(count)s is how many viewers are watching it",
-  "Watch": "button on a lobby card that opens a running match or a replay"
+  "Watch": "button on a lobby card that opens a running match or a replay",
+  "Control group %(number)s": "accessible name of a control group button on the left screen edge; %(number)s is the group's number, 1 to 10"
 }

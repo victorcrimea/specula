@@ -204,5 +204,6 @@
   "Time: %(time)s": "Χρόνος: %(time)s",
   "Length: %(time)s": "Διάρκεια: %(time)s",
   "Observers: %(count)s": "Παρατηρητές: %(count)s",
-  "Watch": "Παρακολούθηση"
+  "Watch": "Παρακολούθηση",
+  "Control group %(number)s": "Ομάδα ελέγχου %(number)s"
 }

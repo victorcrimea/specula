@@ -204,5 +204,6 @@
   "Time: %(time)s": "Süre: %(time)s",
   "Length: %(time)s": "Uzunluk: %(time)s",
   "Observers: %(count)s": "Gözlemciler: %(count)s",
-  "Watch": "İzle"
+  "Watch": "İzle",
+  "Control group %(number)s": "Kontrol grubu %(number)s"
 }
