@@ -449,7 +449,7 @@ pub type VariableSet = Vec<(u32, f32)>;
 /// for none, relative to art/textures/selection/.
 #[derive(Clone, Copy)]
 pub struct RangeCircle {
-    /// 0 attack, 1 aura, 2 heal.
+    /// 0 attack, 1 aura, 2 heal, 3 a foundation's future attack.
     pub kind: u8,
     pub radius: f32,
     pub texture: u32,

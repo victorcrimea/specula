@@ -5100,12 +5100,20 @@ impl View for Field {
             .tick(((time - self.last_fade) / 1000.0) as f32);
         self.last_fade = time;
         let ranges = self.camera.borrow().ranges;
+        // CCmpTerritoryManager::Interpolate's blink, as borders.wgsl draws it.
+        let pulse = 0.2
+            + 0.8
+                * (territory::blink_seconds(now()) * std::f32::consts::PI)
+                    .cos()
+                    .abs();
         let marks = overlay_marks(
             &self.pickables,
             &self.entities,
+            &self.ghosts,
             &self.selection,
             &self.palette,
             ranges,
+            pulse,
         );
         let rally_lines = rally_lines(
             &self.entities,
@@ -6798,36 +6806,73 @@ impl Camera {
 fn overlay_marks<'a>(
     pickables: &[Pickable],
     entities: &'a Entities,
+    ghosts: &'a [Ghost],
     selection: &Selection,
     palette: &[u32],
     ranges: [bool; 3],
+    pulse: f32,
 ) -> Vec<Mark<'a>> {
     let mut marks = Vec::new();
     let owner_rgb = |owner: i32| owner_rgb(palette, owner);
+    // The preview's own circles and, with them, those of the player's
+    // structures (a Specula addition, CONTROL-IMPL V112).
+    let placing_owner = ghosts
+        .iter()
+        .find(|ghost| !ghost.ranges.is_empty())
+        .map(|ghost| ghost.owner)
+        .filter(|_| ranges[0]);
+    let future_owners: &[i32] = ghosts
+        .iter()
+        .find(|ghost| !ghost.ranges.is_empty())
+        .filter(|_| ranges[0])
+        .map_or(&[], |ghost| &ghost.range_allies);
     for pickable in pickables {
         let Some(dot) = entity_dot(entities, pickable.id) else {
             continue;
         };
         // The circles of `RangeOverlayRenderer`, in the owner's colour and
         // not faded.
+        let selected = selection.shows_ranges(pickable.id);
+        let placing = !selected
+            && placing_owner == Some(dot.owner)
+            && pickable.seen
+            && entities
+                .template_details
+                .get(dot.template as usize)
+                .and_then(Option::as_ref)
+                .is_some_and(|details| pick::has_class(details, &entities.strings, "Structure"));
+        let future = !selected && pickable.seen && future_owners.contains(&dot.owner);
         if dot.ranges != 0
             && ranges.contains(&true)
-            && selection.shows_ranges(pickable.id)
+            && (selected || placing || future)
             && let Some(set) = (dot.ranges as usize)
                 .checked_sub(1)
                 .and_then(|index| entities.range_sets.get(index))
         {
             for circle in set {
-                let Some(shown) = ranges.get(usize::from(circle.kind)) else {
+                // Not built yet: pulsing like a blinking territory border
+                // (V113). The toggle was checked through `future_owners`.
+                let future_circle = circle.kind == 3;
+                if future_circle && !future {
                     continue;
-                };
+                }
+                let shown = future_circle
+                    || ranges
+                        .get(usize::from(circle.kind))
+                        .copied()
+                        .unwrap_or(false);
                 let Some(texture) = (circle.texture as usize)
                     .checked_sub(1)
                     .and_then(|index| entities.strings.get(index))
                 else {
                     continue;
                 };
-                if !shown {
+                // Only the attack circles, for a structure shown for the
+                // placement.
+                if !shown
+                    || (!future_circle && placing && circle.kind != 0)
+                    || (!future_circle && !selected && !placing)
+                {
                     continue;
                 }
                 marks.push(Mark {
@@ -6838,7 +6883,10 @@ fn overlay_marks<'a>(
                     },
                     centre: [pickable.position[0], pickable.position[2]],
                     facing: [1.0, 0.0],
-                    color: packed(owner_rgb(dot.owner), 1.0),
+                    color: packed(
+                        owner_rgb(dot.owner),
+                        if future_circle { pulse } else { 1.0 },
+                    ),
                 });
             }
         }
@@ -6876,6 +6924,24 @@ fn overlay_marks<'a>(
             facing: pickable.facing,
             color: packed(rgb, overlay.alpha),
         });
+    }
+    if ranges[0] {
+        for ghost in ghosts {
+            for range in &ghost.ranges {
+                // The owner's colour even where the spot is refused: vanilla
+                // reddens only the model.
+                marks.push(Mark {
+                    texture: &range.texture,
+                    outline: Some(range.thickness),
+                    shape: OverlayShape::Circle {
+                        radius: range.radius,
+                    },
+                    centre: [ghost.x, ghost.z],
+                    facing: [1.0, 0.0],
+                    color: packed(owner_rgb(ghost.owner), 1.0),
+                });
+            }
+        }
     }
     marks
 }

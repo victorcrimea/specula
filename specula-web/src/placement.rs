@@ -23,6 +23,7 @@ use crate::View;
 use crate::field::DRAG_DELTA;
 use crate::lang;
 use crate::panel::Place;
+use crate::panel::mutual_allies;
 use crate::stream::Scene;
 use crate::tips;
 use crate::tooltip;
@@ -66,6 +67,22 @@ pub struct Ghost {
     pub seed: u32,
     pub owner: i32,
     pub invalid: bool,
+    /// The preview's attack range circles, as its last judged spot's reply
+    /// gave them.
+    pub ranges: Vec<GhostRange>,
+    /// The players whose foundations show their future attack range with
+    /// this ghost: its owner and the owner's mutual allies. Empty when the
+    /// ghost has no ranges.
+    pub range_allies: Vec<i32>,
+}
+
+/// One circle of the preview's `Attack.GetRangeOverlays()`.
+#[derive(Clone)]
+pub struct GhostRange {
+    pub radius: f32,
+    /// Relative to art/textures/selection/.
+    pub texture: String,
+    pub thickness: f32,
 }
 
 #[derive(Default)]
@@ -96,6 +113,9 @@ struct Building {
     judged: Option<(Spot, bool, String)>,
     /// A release waiting for the verdict of the spot, with Shift held.
     placing: Option<bool>,
+    /// Kept across spots: the radius does not depend on the position, so the
+    /// circles do not flicker while a new preview query is in flight.
+    ranges: Vec<GhostRange>,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -181,6 +201,7 @@ impl Placement {
                 snapped: None,
                 judged: None,
                 placing: None,
+                ranges: Vec::new(),
             }),
         });
         self.set_tooltip(Some(""));
@@ -255,7 +276,7 @@ impl Placement {
             self.set_tooltip(Some(&message));
         }
         view.set_placing(self.active.is_some());
-        view.set_ghosts(self.ghosts(seat));
+        view.set_ghosts(self.ghosts(scene, seat));
     }
 
     fn input(&mut self, input: Input, uplink: &Uplink) {
@@ -509,6 +530,7 @@ impl Placement {
             (Some(Active::Building(building)), Asked::Preview(spot)) => {
                 let valid = tips::field(result, "success").as_bool() == Some(true);
                 building.judged = Some((spot, valid, refusal(result)));
+                building.ranges = ghost_ranges(result);
             }
             (Some(Active::Wall(wall)), Asked::Wall(start, end)) => {
                 let layout = result.is_object().then(|| Layout {
@@ -535,7 +557,7 @@ impl Placement {
         }
     }
 
-    fn ghosts(&self, seat: i32) -> Vec<Ghost> {
+    fn ghosts(&self, scene: &Scene, seat: i32) -> Vec<Ghost> {
         match &self.active {
             Some(Active::Building(building)) => {
                 let Some(spot) = building.snapped.map(|(_, spot)| spot).or(building.wanted) else {
@@ -549,6 +571,19 @@ impl Placement {
                     seed: building.seed,
                     owner: seat,
                     invalid: building.judged.as_ref().is_some_and(|(_, valid, _)| !valid),
+                    ranges: building.ranges.clone(),
+                    range_allies: if building.ranges.is_empty() {
+                        Vec::new()
+                    } else {
+                        (1..scene.players.len())
+                            .filter(|&p| {
+                                p as i32 == seat
+                                    || usize::try_from(seat)
+                                        .is_ok_and(|s| mutual_allies(scene, s, p))
+                            })
+                            .map(|p| p as i32)
+                            .collect()
+                    },
                 }]
             }
             Some(Active::Wall(wall)) => match &wall.laid {
@@ -563,6 +598,8 @@ impl Placement {
                         seed: 0,
                         owner: seat,
                         invalid: false,
+                        ranges: Vec::new(),
+                        range_allies: Vec::new(),
                     })
                     .collect(),
                 _ => Vec::new(),
@@ -726,4 +763,21 @@ fn refusal(result: &JsValue) -> String {
 /// `RandomizeActorSeed`: below 2^16.
 fn random_seed() -> u32 {
     (js_sys::Math::random() * 65536.0) as u32 % 65536
+}
+
+/// The preview reply's `ranges`, none when the template has no attack.
+fn ghost_ranges(result: &JsValue) -> Vec<GhostRange> {
+    let ranges = tips::field(result, "ranges");
+    if !js_sys::Array::is_array(&ranges) {
+        return Vec::new();
+    }
+    js_sys::Array::from(&ranges)
+        .iter()
+        .map(|range| GhostRange {
+            radius: tips::number_field(&range, "radius") as f32,
+            texture: tips::text_field(&range, "texture"),
+            thickness: tips::number_field(&range, "thickness") as f32,
+        })
+        .filter(|range| range.radius > 0.0 && !range.texture.is_empty())
+        .collect()
 }

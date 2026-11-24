@@ -562,7 +562,7 @@ pub struct TradeRoute {
 /// the renderer.
 #[derive(Clone)]
 pub struct RangeOverlay {
-    /// 0 attack, 1 aura, 2 heal.
+    /// 0 attack, 1 aura, 2 heal, 3 a foundation's future attack.
     pub kind: u8,
     pub radius: f32,
     /// String record indices, relative to art/textures/selection/.
