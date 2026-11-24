@@ -41,6 +41,7 @@ use std::hash::BuildHasher;
 use std::io::ErrorKind;
 use std::io::Read;
 use std::os::unix::net::UnixListener;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::Weak;
@@ -326,6 +327,20 @@ impl Source {
             Some(hub) => hub.data(hash, View::Observer),
             None => stored_data(self.history.as_deref()?, hash),
         }
+    }
+
+    /// The stored vanilla replay's files by name, and when the match
+    /// started in Unix ms; None for one without, or with the history off.
+    pub fn replay_files(&self) -> Option<(Vec<(&'static str, PathBuf)>, u64)> {
+        let match_id = self.match_id?;
+        let files = self
+            .history
+            .as_ref()?
+            .lock()
+            .unwrap()
+            .replay_files(match_id)?;
+        // Match ids are nanoseconds since the epoch.
+        Some((files, match_id / 1_000_000))
     }
 
     /// Whether observers have already reached the match's end.
@@ -617,6 +632,7 @@ impl Registry {
                     }),
                     "duration": info.duration_secs,
                     "started": info.started_ms,
+                    "replay": info.replay,
                 })
             })
             .collect();
@@ -732,7 +748,8 @@ impl Registry {
         }
         let hub = spawn_hub(self.delay, self.history.clone(), Some(id));
         let dirs = observer::EngineDirs::new(&self.config.engine_dir, id, &format!("slot-{slot}"))
-            .with_settings();
+            .with_settings()
+            .with_replay();
         let play = Arc::new(Play::new(
             socket.clone(),
             self.config.port(slot),

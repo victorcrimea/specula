@@ -205,5 +205,7 @@
   "Length: %(time)s": "lobby card line of a replay; %(time)s is the match's length, as 12:34",
   "Observers: %(count)s": "lobby card line of a running match; %(count)s is how many viewers are watching it",
   "Watch": "button on a lobby card that opens a running match or a replay",
-  "Control group %(number)s": "accessible name of a control group button on the left screen edge; %(number)s is the group's number, 1 to 10"
+  "Control group %(number)s": "accessible name of a control group button on the left screen edge; %(number)s is the group's number, 1 to 10",
+  "Download replay": "button on the end screen and on a lobby replay card that downloads the match as a replay the 0 A.D. game itself can play",
+  "Unzip it into the replays folder of 0 A.D. 0.28.0.": "tooltip of that button: the downloaded zip holds one folder, to be put in the game's own replays folder, for game version 0.28.0"
 }

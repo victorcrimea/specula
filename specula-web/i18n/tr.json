@@ -205,5 +205,7 @@
   "Length: %(time)s": "Uzunluk: %(time)s",
   "Observers: %(count)s": "Gözlemciler: %(count)s",
   "Watch": "İzle",
-  "Control group %(number)s": "Kontrol grubu %(number)s"
+  "Control group %(number)s": "Kontrol grubu %(number)s",
+  "Download replay": "Tekrarı indir",
+  "Unzip it into the replays folder of 0 A.D. 0.28.0.": "0 A.D. 0.28.0 tekrarlar klasörüne çıkarın."
 }

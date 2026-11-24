@@ -18,6 +18,8 @@ port=$2
 shift 2
 pyrogenesis=${PYROGENESIS:-$(dirname "$0")/../../0ad-specula/binaries/system/pyrogenesis}
 
+# The replay goes to XDG_DATA_HOME, which specula-server points at the run's
+# own dir and keeps in its history for download.
 # -unique-logs: a crash or oos_dump must not overwrite the log of another
 # engine running on the same machine.
 # specula.commanddelay: the host is its game's only client, with the
@@ -28,7 +30,6 @@ exec "$pyrogenesis" \
 	-autostart-specula-play \
 	-autostart-port="$port" \
 	-autostart-nonvisual \
-	-autostart-disable-replay \
 	-autostart-playername=specula \
 	-unique-logs \
 	-conf=specula.feed:"$socket" \

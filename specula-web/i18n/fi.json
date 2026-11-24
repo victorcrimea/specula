@@ -205,5 +205,7 @@
   "Length: %(time)s": "Kesto: %(time)s",
   "Observers: %(count)s": "Katsojat: %(count)s",
   "Watch": "Katso",
-  "Control group %(number)s": "Ohjausryhmä %(number)s"
+  "Control group %(number)s": "Ohjausryhmä %(number)s",
+  "Download replay": "Lataa tallenne",
+  "Unzip it into the replays folder of 0 A.D. 0.28.0.": "Pura se 0 A.D. 0.28.0:n tallennekansioon."
 }

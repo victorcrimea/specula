@@ -205,5 +205,7 @@
   "Length: %(time)s": "Διάρκεια: %(time)s",
   "Observers: %(count)s": "Παρατηρητές: %(count)s",
   "Watch": "Παρακολούθηση",
-  "Control group %(number)s": "Ομάδα ελέγχου %(number)s"
+  "Control group %(number)s": "Ομάδα ελέγχου %(number)s",
+  "Download replay": "Λήψη επανάληψης",
+  "Unzip it into the replays folder of 0 A.D. 0.28.0.": "Αποσυμπιέστε το στον φάκελο επαναλήψεων του 0 A.D. 0.28.0."
 }

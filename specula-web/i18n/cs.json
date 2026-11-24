@@ -205,5 +205,7 @@
   "Length: %(time)s": "Délka: %(time)s",
   "Observers: %(count)s": "Pozorovatelé: %(count)s",
   "Watch": "Sledovat",
-  "Control group %(number)s": "Skupina %(number)s"
+  "Control group %(number)s": "Skupina %(number)s",
+  "Download replay": "Stáhnout záznam",
+  "Unzip it into the replays folder of 0 A.D. 0.28.0.": "Rozbalte jej do složky se záznamy 0 A.D. 0.28.0."
 }

@@ -1953,6 +1953,8 @@ name = "specula-server"
 version = "0.1.0"
 dependencies = [
  "brotli",
+ "crc32fast",
+ "flate2",
  "rand",
  "rocket",
  "rocket_ws",

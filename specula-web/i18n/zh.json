@@ -205,5 +205,7 @@
   "Length: %(time)s": "时长：%(time)s",
   "Observers: %(count)s": "观众：%(count)s",
   "Watch": "观看",
-  "Control group %(number)s": "控制组 %(number)s"
+  "Control group %(number)s": "控制组 %(number)s",
+  "Download replay": "下载回放",
+  "Unzip it into the replays folder of 0 A.D. 0.28.0.": "解压到 0 A.D. 0.28.0 的回放文件夹。"
 }

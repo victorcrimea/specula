@@ -205,5 +205,7 @@
   "Length: %(time)s": "Duración: %(time)s",
   "Observers: %(count)s": "Observadores: %(count)s",
   "Watch": "Ver",
-  "Control group %(number)s": "Grupo de control %(number)s"
+  "Control group %(number)s": "Grupo de control %(number)s",
+  "Download replay": "Descargar reprodución",
+  "Unzip it into the replays folder of 0 A.D. 0.28.0.": "Descomprímea no cartafol de reproducións de 0 A.D. 0.28.0."
 }

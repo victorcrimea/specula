@@ -701,9 +701,14 @@ fn format_time(unix: u64) -> String {
     )
 }
 
-/// Days since 1970-01-01 as a date, after Howard Hinnant's
-/// `civil_from_days`.
 fn format_date(days: u64) -> String {
+    let (year, month, day) = civil_from_days(days);
+    format!("{year:04}-{month:02}-{day:02}")
+}
+
+/// Days since 1970-01-01 as (year, month, day), after Howard Hinnant's
+/// `civil_from_days`.
+pub fn civil_from_days(days: u64) -> (i64, i64, i64) {
     let z = days as i64 + 719_468;
     let era = z.div_euclid(146_097);
     let doe = z - era * 146_097;
@@ -713,5 +718,5 @@ fn format_date(days: u64) -> String {
     let day = doy - (153 * mp + 2) / 5 + 1;
     let month = if mp < 10 { mp + 3 } else { mp - 9 };
     let year = yoe + era * 400 + i64::from(month <= 2);
-    format!("{year:04}-{month:02}-{day:02}")
+    (year, month, day)
 }

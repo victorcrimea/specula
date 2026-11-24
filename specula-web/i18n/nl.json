@@ -205,5 +205,7 @@
   "Length: %(time)s": "Duur: %(time)s",
   "Observers: %(count)s": "Toeschouwers: %(count)s",
   "Watch": "Kijken",
-  "Control group %(number)s": "Controlegroep %(number)s"
+  "Control group %(number)s": "Controlegroep %(number)s",
+  "Download replay": "Herhaling downloaden",
+  "Unzip it into the replays folder of 0 A.D. 0.28.0.": "Pak het uit in de herhalingenmap van 0 A.D. 0.28.0."
 }

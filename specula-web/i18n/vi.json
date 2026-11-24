@@ -205,5 +205,7 @@
   "Length: %(time)s": "Độ dài: %(time)s",
   "Observers: %(count)s": "Người xem: %(count)s",
   "Watch": "Xem",
-  "Control group %(number)s": "Nhóm điều khiển %(number)s"
+  "Control group %(number)s": "Nhóm điều khiển %(number)s",
+  "Download replay": "Tải bản phát lại",
+  "Unzip it into the replays folder of 0 A.D. 0.28.0.": "Giải nén vào thư mục phát lại của 0 A.D. 0.28.0."
 }

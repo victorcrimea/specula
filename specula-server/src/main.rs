@@ -15,6 +15,7 @@ mod observer;
 mod pause;
 mod play;
 mod registry;
+mod replay_zip;
 mod score;
 mod seats;
 mod settings;
@@ -252,6 +253,7 @@ async fn main() {
                 new_status,
                 lobby,
                 match_thumb,
+                match_replay,
                 play_new,
                 setup_socket,
                 chat_socket,
@@ -500,6 +502,41 @@ async fn match_thumb(id: MatchId, registry: &State<Arc<Registry>>) -> Option<Thu
 #[derive(rocket::Responder)]
 #[response(content_type = "image/webp")]
 struct Thumbnail(Vec<u8>, Header<'static>);
+
+/// A hosted match's replay for vanilla 0 A.D., once observers have reached
+/// its end, so the download gives nothing of the delay away.
+#[rocket::get("/g/<id>/replay.zip")]
+async fn match_replay(id: MatchId, registry: &State<Arc<Registry>>) -> Option<ReplayZip> {
+    let source = registry.resolve(id)?;
+    if !source.replay_only() {
+        return None;
+    }
+    let (files, started_ms) = source.replay_files()?;
+    let folder = replay_zip::folder_name(started_ms, &id.to_string());
+    let disposition = format!("attachment; filename=\"{folder}.zip\"");
+    let bytes = rocket::tokio::task::spawn_blocking(move || {
+        let mut read = Vec::with_capacity(files.len());
+        for (name, path) in files {
+            read.push((name, std::fs::read(path).ok()?));
+        }
+        let zipped = replay_zip::build(&folder, &read, started_ms / 1000);
+        if let Err(error) = &zipped {
+            eprintln!("cannot zip the replay of {folder}: {error}");
+        }
+        zipped.ok()
+    })
+    .await
+    .ok()??;
+    Some(ReplayZip(
+        bytes,
+        Header::new("Content-Disposition", disposition),
+        Header::new("Cache-Control", "no-store"),
+    ))
+}
+
+#[derive(rocket::Responder)]
+#[response(content_type = "application/zip")]
+struct ReplayZip(Vec<u8>, Header<'static>, Header<'static>);
 
 /// The lobby's lists (M40); a visitor's own game is in `/new`.
 #[rocket::get("/lobby.json?<replays>")]
@@ -1649,6 +1686,11 @@ pub(crate) fn serve(
             Record::TimeNotifications(notes) => hub.set_time_notifications(notes),
             Record::ControlGroups(groups) => hub.set_control_groups(&groups),
             Record::KeepAlive => hub.feed_alive(),
+            Record::MetadataSaved => {
+                if let Some(play) = play {
+                    play.metadata_saved();
+                }
+            }
             Record::InitAttributes(json) => {
                 hub.set_lock_teams(&json);
                 // The broadcast has no game to compare with.

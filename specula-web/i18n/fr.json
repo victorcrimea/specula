@@ -205,5 +205,7 @@
   "Length: %(time)s": "Durée : %(time)s",
   "Observers: %(count)s": "Observateurs : %(count)s",
   "Watch": "Regarder",
-  "Control group %(number)s": "Groupe de contrôle %(number)s"
+  "Control group %(number)s": "Groupe de contrôle %(number)s",
+  "Download replay": "Télécharger la rediffusion",
+  "Unzip it into the replays folder of 0 A.D. 0.28.0.": "Décompressez-la dans le dossier des rediffusions de 0 A.D. 0.28.0."
 }

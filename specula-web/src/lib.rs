@@ -891,6 +891,19 @@ struct MatchOver {
     /// match, and Rematch if the server keeps the last setup. The bar's
     /// button is then New match too.
     owner: Option<OwnerButtons>,
+    /// Download replay; None on a page with no match of its own.
+    replay: Option<ReplayLink>,
+}
+
+/// The vanilla replay's download, shown once the server serves it: only
+/// after the delayed view has reached the end and the engine has exited,
+/// which on a seat's live page is later than the end it saw.
+struct ReplayLink {
+    button: HtmlButtonElement,
+    ready: Rc<Cell<bool>>,
+    asking: Rc<Cell<bool>>,
+    /// When the server is asked next, on the frame clock.
+    ask_at: f64,
 }
 
 struct OwnerButtons {
@@ -978,6 +991,21 @@ impl MatchOver {
             self.closed = false;
             self.popup.set_hidden(false);
         }
+        if let Some(replay) = &mut self.replay {
+            if self.ended && !replay.ready.get() && !replay.asking.get() && now >= replay.ask_at {
+                replay.ask_at = now + 10_000.0;
+                replay.asking.set(true);
+                let (ready, asking) = (Rc::clone(&replay.ready), Rc::clone(&replay.asking));
+                wasm_bindgen_futures::spawn_local(async move {
+                    ready.set(replay_served().await);
+                    asking.set(false);
+                });
+            }
+            let hidden = !(self.ended && replay.ready.get());
+            if replay.button.hidden() != hidden {
+                replay.button.set_hidden(hidden);
+            }
+        }
         if !self.ended || self.closed {
             return;
         }
@@ -1000,6 +1028,39 @@ impl MatchOver {
             self.shown = text;
         }
     }
+}
+
+/// Where the match's vanilla replay is served.
+fn replay_url() -> String {
+    format!("{}/replay.zip", match_base())
+}
+
+/// Whether the server serves the replay yet, asked without its body.
+async fn replay_served() -> bool {
+    let Some(window) = web_sys::window() else {
+        return false;
+    };
+    // Through Reflect: RequestInit is not among web-sys's enabled features.
+    let Some(fetch) = js_sys::Reflect::get(&window, &"fetch".into())
+        .ok()
+        .and_then(|fetch| fetch.dyn_into::<js_sys::Function>().ok())
+    else {
+        return false;
+    };
+    let init = js_sys::Object::new();
+    let _ = js_sys::Reflect::set(&init, &"method".into(), &"HEAD".into());
+    let Some(promise) = fetch
+        .call2(&window, &replay_url().into(), &init)
+        .ok()
+        .and_then(|promise| promise.dyn_into::<js_sys::Promise>().ok())
+    else {
+        return false;
+    };
+    JsFuture::from(promise)
+        .await
+        .ok()
+        .and_then(|response| response.dyn_into::<Response>().ok())
+        .is_some_and(|response| response.ok())
 }
 
 /// The match over popup's New match and Rematch, and the bar's button
@@ -2851,6 +2912,15 @@ async fn run(
             } else {
                 None
             },
+            replay: element(&document, "match-over-replay")
+                .ok()
+                .filter(|_| !match_base().is_empty())
+                .map(|button| ReplayLink {
+                    button,
+                    ready: Rc::new(Cell::new(false)),
+                    asking: Rc::new(Cell::new(false)),
+                    ask_at: 0.0,
+                }),
         },
         stream_start: StreamStart {
             element: stream_start,
@@ -5699,6 +5769,20 @@ fn wire_playback(app: &Rc<RefCell<App>>) {
             app.match_over.close_button.clone(),
         )
     };
+    let replay = app
+        .borrow()
+        .match_over
+        .replay
+        .as_ref()
+        .map(|replay| replay.button.clone());
+    if let Some(replay) = replay {
+        // An attachment: the browser saves it and the page stays.
+        on_click(&replay, || {
+            if let Some(window) = web_sys::window() {
+                let _ = window.location().assign(&replay_url());
+            }
+        });
+    }
     let owner = {
         let app = app.borrow();
         app.match_over.owner.as_ref().map(|owner| {

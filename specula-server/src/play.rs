@@ -20,6 +20,7 @@ use std::io::Write;
 use std::os::unix::net::UnixStream;
 use std::process::Command;
 use std::sync::Arc;
+use std::sync::Condvar;
 use std::sync::Mutex;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
@@ -52,6 +53,7 @@ use crate::detail::CONTROL_OFFLINE;
 use crate::feed;
 use crate::feed::Summary;
 use crate::groups;
+use crate::history;
 use crate::observer;
 use crate::observer::EngineDirs;
 use crate::pause;
@@ -76,6 +78,10 @@ const SETTINGS_VFS_PATH: &str = "config/matchsettings.mp.json";
 const UPLINK_COMMAND: u8 = 1;
 const UPLINK_PAUSE: u8 = 3;
 const UPLINK_SUMMARY: u8 = 4;
+const UPLINK_METADATA: u8 = 5;
+/// How long a stop waits for the engine to write its replay's
+/// metadata.json, which it does on its next frame.
+const METADATA_WAIT: Duration = Duration::from_secs(3);
 /// Every changed group of every connected page in a turn.
 const GROUP_BACKLOG: usize = 256;
 /// What every order the GUI gives but walk names, as
@@ -199,6 +205,9 @@ pub struct Play {
     groups: Mutex<groups::Store>,
     /// Changed groups, for the command socket of the seat's page.
     group_pushes: broadcast::Sender<groups::Push>,
+    /// Set when the engine reports its replay's metadata written: a leaf
+    /// lock, which the thread stopping the engine waits on.
+    metadata_saved: Arc<(Mutex<bool>, Condvar)>,
 }
 
 /// What the host and the rules of leaving have decided so far in this game.
@@ -347,6 +356,7 @@ impl Play {
             control: Mutex::new(ControlState::default()),
             groups: Mutex::new(groups::Store::default()),
             group_pushes: broadcast::channel(GROUP_BACKLOG).0,
+            metadata_saved: Arc::new((Mutex::new(false), Condvar::new())),
         }
     }
 
@@ -433,6 +443,7 @@ impl Play {
                 Ok(outcome) => println!("play host {outcome}"),
                 Err(error) => eprintln!("cannot run the play host: {error}"),
             }
+            play.store_replay();
             {
                 let mut inner = play.inner.lock().unwrap();
                 if let Some(game) = inner.game.as_mut() {
@@ -827,13 +838,11 @@ impl Play {
             );
         }
         let mut inner = self.inner.lock().unwrap();
-        match &mut inner.game {
-            Some(game) if game.running => {
-                self.stop_engine(game);
-                Ok(())
-            }
-            _ => Err("no game of yours is running"),
+        if !inner.game.as_ref().is_some_and(|game| game.running) {
+            return Err("no game of yours is running");
         }
+        self.stop_engine(&mut inner);
+        Ok(())
     }
 
     /// Whether `owner` may end the running game (D45): the host, and either
@@ -1303,11 +1312,75 @@ impl Play {
             .collect()
     }
 
-    fn stop_engine(&self, game: &mut Game) {
-        observer::kill_recorded(&self.socket);
+    /// Kills the engine once it has written its replay's metadata.json,
+    /// which vanilla's replay menu needs for the summary and which the
+    /// engine otherwise writes only on a clean exit.
+    fn stop_engine(&self, inner: &mut Inner) {
         // At once rather than once the runner has seen the engine exit, so
         // the page reloaded after this shows the end.
-        game.running = false;
+        if let Some(game) = inner.game.as_mut() {
+            game.running = false;
+        }
+        // Noted now: a later read could name the engine of the next game in
+        // the slot.
+        let Some(pid) = observer::recorded(&self.socket) else {
+            return;
+        };
+        *self.metadata_saved.0.lock().unwrap() = false;
+        let asked = inner
+            .uplink
+            .as_mut()
+            .is_some_and(|uplink| uplink.write_all(&[UPLINK_METADATA, 0, 0, 0, 0]).is_ok());
+        let saved = Arc::clone(&self.metadata_saved);
+        // Off the caller's locks: the ack comes through the feed thread,
+        // which takes them.
+        std::thread::spawn(move || {
+            if asked {
+                let (flag, wake) = &*saved;
+                let (flag, _) = wake
+                    .wait_timeout_while(flag.lock().unwrap(), METADATA_WAIT, |saved| !*saved)
+                    .unwrap();
+                if !*flag {
+                    eprintln!("the engine did not save its replay metadata");
+                }
+            }
+            observer::kill_engine(pid);
+        });
+    }
+
+    /// The engine's answer to `UPLINK_METADATA`.
+    pub fn metadata_saved(&self) {
+        let (flag, wake) = &*self.metadata_saved;
+        *flag.lock().unwrap() = true;
+        wake.notify_all();
+    }
+
+    /// Hands the replay the engine wrote to the history. The engine starts
+    /// one game per run, so the run's replay dir holds one folder.
+    fn store_replay(&self) {
+        let Some(root) = self.dirs.replays() else {
+            return;
+        };
+        let folders = std::fs::read_dir(&root)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .flat_map(|version| std::fs::read_dir(version.path()).into_iter().flatten())
+            .flatten()
+            .map(|folder| folder.path());
+        let Some(folder) = folders.max() else {
+            println!("no replay in {}", root.display());
+            return;
+        };
+        let Ok(commands) = std::fs::read(folder.join(history::REPLAY_COMMANDS)) else {
+            eprintln!("no {} in {}", history::REPLAY_COMMANDS, folder.display());
+            return;
+        };
+        let mut files = vec![(history::REPLAY_COMMANDS, commands)];
+        if let Ok(metadata) = std::fs::read(folder.join(history::REPLAY_METADATA)) {
+            files.push((history::REPLAY_METADATA, metadata));
+        }
+        self.hub.store_replay(&files);
     }
 
     /// Stops the engine of the host's game that a new setup replaces (D14),
@@ -1316,8 +1389,8 @@ impl Play {
     /// slot.
     pub fn end_replaced(&self) {
         let mut inner = self.inner.lock().unwrap();
-        if let Some(game) = inner.game.as_mut().filter(|game| game.running) {
-            self.stop_engine(game);
+        if inner.game.as_ref().is_some_and(|game| game.running) {
+            self.stop_engine(&mut inner);
         }
     }
 
@@ -1325,13 +1398,11 @@ impl Play {
     /// still running.
     pub fn end_at_limit(&self) -> bool {
         let mut inner = self.inner.lock().unwrap();
-        match &mut inner.game {
-            Some(game) if game.running => {
-                self.stop_engine(game);
-                true
-            }
-            _ => false,
+        if !inner.game.as_ref().is_some_and(|game| game.running) {
+            return false;
         }
+        self.stop_engine(&mut inner);
+        true
     }
 
     /// Stops the engine of a game nobody plays any more, as `end` does but
@@ -1340,17 +1411,15 @@ impl Play {
     pub fn end_decided(&self) -> bool {
         let out = self.humans_out();
         let mut inner = self.inner.lock().unwrap();
-        match &mut inner.game {
-            Some(game) if game.running && out => {
-                println!(
-                    "game {} is decided, stopping its engine",
-                    self.generation.load(Ordering::SeqCst)
-                );
-                self.stop_engine(game);
-                true
-            }
-            _ => false,
+        if !(out && inner.game.as_ref().is_some_and(|game| game.running)) {
+            return false;
         }
+        println!(
+            "game {} is decided, stopping its engine",
+            self.generation.load(Ordering::SeqCst)
+        );
+        self.stop_engine(&mut inner);
+        true
     }
 
     /// Whether the game runs on with no seat left to play it (D17).

@@ -205,5 +205,7 @@
   "Length: %(time)s": "Durada: %(time)s",
   "Observers: %(count)s": "Observadors: %(count)s",
   "Watch": "Mira",
-  "Control group %(number)s": "Grup de control %(number)s"
+  "Control group %(number)s": "Grup de control %(number)s",
+  "Download replay": "Baixa la repetició",
+  "Unzip it into the replays folder of 0 A.D. 0.28.0.": "Descomprimeix-la a la carpeta de repeticions de 0 A.D. 0.28.0."
 }

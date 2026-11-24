@@ -205,5 +205,7 @@
   "Length: %(time)s": "Iraupena: %(time)s",
   "Observers: %(count)s": "Behatzaileak: %(count)s",
   "Watch": "Ikusi",
-  "Control group %(number)s": "Kontrol-taldea %(number)s"
+  "Control group %(number)s": "Kontrol-taldea %(number)s",
+  "Download replay": "Deskargatu errepikapena",
+  "Unzip it into the replays folder of 0 A.D. 0.28.0.": "Deskonprimatu 0 A.D. 0.28.0 bertsioaren errepikapenen karpetan."
 }

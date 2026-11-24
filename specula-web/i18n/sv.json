@@ -205,5 +205,7 @@
   "Length: %(time)s": "Längd: %(time)s",
   "Observers: %(count)s": "Åskådare: %(count)s",
   "Watch": "Titta",
-  "Control group %(number)s": "Kontrollgrupp %(number)s"
+  "Control group %(number)s": "Kontrollgrupp %(number)s",
+  "Download replay": "Ladda ner repris",
+  "Unzip it into the replays folder of 0 A.D. 0.28.0.": "Packa upp den i reprismappen för 0 A.D. 0.28.0."
 }

@@ -205,5 +205,7 @@
   "Length: %(time)s": "Dauer: %(time)s",
   "Observers: %(count)s": "Zuschauer: %(count)s",
   "Watch": "Zuschauen",
-  "Control group %(number)s": "Kontrollgruppe %(number)s"
+  "Control group %(number)s": "Kontrollgruppe %(number)s",
+  "Download replay": "Aufzeichnung herunterladen",
+  "Unzip it into the replays folder of 0 A.D. 0.28.0.": "In den Aufzeichnungsordner von 0 A.D. 0.28.0 entpacken."
 }

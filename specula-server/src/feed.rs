@@ -46,6 +46,7 @@ const RECORD_NOTIFICATIONS: u8 = 29;
 const RECORD_EVENTS: u8 = 30;
 const RECORD_TIME_NOTIFICATIONS: u8 = 31;
 const RECORD_CONTROL_GROUPS: u8 = 32;
+const RECORD_METADATA_SAVED: u8 = 33;
 const ENTITY_SIZE: usize = 84;
 const ENTITY_SIZE_V14: usize = 74;
 const SOUND_SIZE: usize = 29;
@@ -903,6 +904,9 @@ pub enum Record {
     Pause(Vec<i8>),
     /// Kind 27: the engine is running though paused, so no turns come.
     KeepAlive,
+    /// Kind 33: the replay's metadata.json is written, as uplink kind 5
+    /// asked.
+    MetadataSaved,
     /// Kind 28: the simulation's init attributes as JSON, once at the start.
     InitAttributes(Vec<u8>),
     /// Kind 29: what the session GUI would tell a player, before the turn
@@ -1117,6 +1121,7 @@ pub fn read_record(reader: &mut impl Read, version: u32) -> io::Result<Option<Re
                 return Ok(Some(Record::Pause(players)));
             }
             RECORD_KEEPALIVE => return Ok(Some(Record::KeepAlive)),
+            RECORD_METADATA_SAVED => return Ok(Some(Record::MetadataSaved)),
             RECORD_INIT_ATTRIBUTES => return Ok(Some(Record::InitAttributes(payload))),
             RECORD_NOTIFICATIONS => return decode_notifications(&payload).map(Some),
             RECORD_EVENTS => return Ok(Some(Record::Events(payload))),

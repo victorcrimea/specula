@@ -205,5 +205,7 @@
   "Length: %(time)s": "Durasi: %(time)s",
   "Observers: %(count)s": "Pengamat: %(count)s",
   "Watch": "Tonton",
-  "Control group %(number)s": "Grup kontrol %(number)s"
+  "Control group %(number)s": "Grup kontrol %(number)s",
+  "Download replay": "Unduh tayangan ulang",
+  "Unzip it into the replays folder of 0 A.D. 0.28.0.": "Ekstrak ke folder tayangan ulang 0 A.D. 0.28.0."
 }

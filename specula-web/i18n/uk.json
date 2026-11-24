@@ -205,5 +205,7 @@
   "Length: %(time)s": "Тривалість: %(time)s",
   "Observers: %(count)s": "Спостерігачі: %(count)s",
   "Watch": "Дивитися",
-  "Control group %(number)s": "Група керування %(number)s"
+  "Control group %(number)s": "Група керування %(number)s",
+  "Download replay": "Завантажити запис",
+  "Unzip it into the replays folder of 0 A.D. 0.28.0.": "Розпакуйте в теку записів 0 A.D. 0.28.0."
 }

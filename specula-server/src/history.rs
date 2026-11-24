@@ -10,6 +10,8 @@
 //! - `summary/<turn>.br`: every statistics capture shown to `/`, the brotli
 //!   of its envelope, by turn as 8 hex digits. A later capture does not
 //!   hold an earlier one's "now" sample, so each is kept.
+//! - `replay/commands.txt`, `replay/metadata.json`: a hosted match's replay
+//!   as the engine wrote it, which vanilla 0 A.D. plays.
 //!
 //! Each file is written under a `.tmp` name and renamed, so a crash leaves
 //! no half file. Match ids are nanosecond timestamps, so the smallest is the
@@ -34,6 +36,10 @@ const SEGMENTS_DIR: &str = "seg";
 const DETAIL_DIR: &str = "detail";
 const DATA_DIR: &str = "data";
 const SUMMARY_DIR: &str = "summary";
+const REPLAY_DIR: &str = "replay";
+/// Vanilla lists a replay folder only with this file in it.
+pub const REPLAY_COMMANDS: &str = "commands.txt";
+pub const REPLAY_METADATA: &str = "metadata.json";
 const ID_FILE: &str = "id";
 const META_FILE: &str = "meta.json";
 /// A stored match without a `meta.json` is dated and sized from its files:
@@ -50,6 +56,7 @@ struct Stored {
     data: Vec<u64>,
     /// The turns of the stored captures, sorted.
     summaries: Vec<u32>,
+    replay: bool,
 }
 
 impl Stored {
@@ -61,6 +68,7 @@ impl Stored {
             terrains: Vec::new(),
             data: Vec::new(),
             summaries: Vec::new(),
+            replay: false,
         }
     }
 }
@@ -119,6 +127,7 @@ pub struct StoredInfo {
     pub duration_secs: u32,
     /// None for a match stored before M40.
     pub meta: Option<Meta>,
+    pub replay: bool,
 }
 
 pub struct History {
@@ -281,6 +290,7 @@ impl History {
                         |meta| meta.duration_secs,
                     ),
                     meta,
+                    replay: stored.replay,
                 }
             })
             .collect();
@@ -400,6 +410,45 @@ impl History {
             stored.summaries.insert(index, turn);
         }
         Ok(())
+    }
+
+    /// One file of the engine's replay, `REPLAY_COMMANDS` or
+    /// `REPLAY_METADATA`.
+    pub fn write_replay(
+        &mut self,
+        match_id: u64,
+        name: &str,
+        bytes: &[u8],
+        protect: &[u64],
+    ) -> io::Result<()> {
+        let path = self
+            .match_dir(match_id)
+            .ok_or_else(not_stored)?
+            .join(REPLAY_DIR)
+            .join(name);
+        self.write(match_id, &path, bytes, protect)?;
+        if name == REPLAY_COMMANDS
+            && let Some(stored) = self.matches.get_mut(&match_id)
+        {
+            stored.replay = true;
+        }
+        Ok(())
+    }
+
+    /// The replay's files by name, `REPLAY_COMMANDS` first; None without
+    /// one.
+    pub fn replay_files(&self, match_id: u64) -> Option<Vec<(&'static str, PathBuf)>> {
+        if !self.matches.get(&match_id)?.replay {
+            return None;
+        }
+        let dir = self.match_dir(match_id)?.join(REPLAY_DIR);
+        let mut files = vec![(REPLAY_COMMANDS, dir.join(REPLAY_COMMANDS))];
+        let metadata = dir.join(REPLAY_METADATA);
+        // The engine writes it only when asked before its stop.
+        if metadata.is_file() {
+            files.push((REPLAY_METADATA, metadata));
+        }
+        Some(files)
     }
 
     /// The file of the capture at or before `turn`; the last one for `None`.
@@ -602,6 +651,7 @@ fn scan_match(dir: &Path, uuid: MatchId) -> io::Result<Stored> {
                             stored.summaries.push(turn);
                         }
                     }
+                    REPLAY_DIR if file_name == REPLAY_COMMANDS => stored.replay = true,
                     _ => {}
                 }
             }

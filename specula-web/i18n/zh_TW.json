@@ -205,5 +205,7 @@
   "Length: %(time)s": "時長：%(time)s",
   "Observers: %(count)s": "觀眾：%(count)s",
   "Watch": "觀看",
-  "Control group %(number)s": "控制組 %(number)s"
+  "Control group %(number)s": "控制組 %(number)s",
+  "Download replay": "下載重播",
+  "Unzip it into the replays folder of 0 A.D. 0.28.0.": "解壓縮到 0 A.D. 0.28.0 的重播資料夾。"
 }

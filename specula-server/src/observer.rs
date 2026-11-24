@@ -61,6 +61,9 @@ pub struct EngineDirs {
     cache: PathBuf,
     /// Set for a hosted match, whose settings file lives here.
     config: Option<PathBuf>,
+    /// Set for a hosted match, whose replay the engine writes here rather
+    /// than into the user's own 0 A.D. data.
+    data: Option<PathBuf>,
 }
 
 impl EngineDirs {
@@ -71,6 +74,7 @@ impl EngineDirs {
             state: root.join("logs").join(run.to_string()),
             cache: root.join("cache").join(cache),
             config: None,
+            data: None,
         }
     }
 
@@ -80,6 +84,19 @@ impl EngineDirs {
     pub fn with_settings(mut self) -> Self {
         self.config = Some(self.state.join("config"));
         self
+    }
+
+    /// Gives the run a data dir of its own, for its replay; under the
+    /// run's log dir, as the config dir is.
+    pub fn with_replay(mut self) -> Self {
+        self.data = Some(self.state.join("data"));
+        self
+    }
+
+    /// The replay folders the engine writes, one per game it started
+    /// (`VisualReplay::GetDirectoryPath`, `CReplayLogger::StartGame`).
+    pub fn replays(&self) -> Option<PathBuf> {
+        Some(self.data.as_ref()?.join("0ad").join("replays"))
     }
 
     /// Where the engine finds the settings as `config/matchsettings.mp.json`
@@ -177,6 +194,10 @@ pub fn run_engine(
         std::fs::create_dir_all(config)?;
         command.env("XDG_CONFIG_HOME", config);
     }
+    if let Some(data) = &dirs.data {
+        std::fs::create_dir_all(data)?;
+        command.env("XDG_DATA_HOME", data);
+    }
     let started = Instant::now();
     let mut child = command
         .stdin(Stdio::piped())
@@ -227,20 +248,30 @@ fn pid_path(socket: &str) -> String {
 
 /// Kills the observer noted for this socket, if it is still running.
 pub fn kill_recorded(socket: &str) {
-    let path = pid_path(socket);
-    let Ok(text) = std::fs::read_to_string(&path) else {
-        return;
-    };
-    if let Ok(pid) = text.trim().parse::<u32>() {
-        // The pid may belong to something else by now.
-        let is_engine = std::fs::read(format!("/proc/{pid}/cmdline"))
-            .is_ok_and(|cmdline| cmdline.windows(11).any(|word| word == b"pyrogenesis"));
-        if is_engine {
-            println!("killing observer {pid}");
-            kill_group(pid);
-        }
+    if let Some(pid) = recorded(socket) {
+        kill_engine(pid);
     }
-    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(pid_path(socket));
+}
+
+/// The process group noted for this socket.
+pub fn recorded(socket: &str) -> Option<u32> {
+    std::fs::read_to_string(pid_path(socket))
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
+}
+
+/// Kills the group `pid` leads if it is still an engine.
+pub fn kill_engine(pid: u32) {
+    // The pid may belong to something else by now.
+    let is_engine = std::fs::read(format!("/proc/{pid}/cmdline"))
+        .is_ok_and(|cmdline| cmdline.windows(11).any(|word| word == b"pyrogenesis"));
+    if is_engine {
+        println!("killing observer {pid}");
+        kill_group(pid);
+    }
 }
 
 /// Kills the engines and removes the sockets of matches `<socket_base>.<uuid>`

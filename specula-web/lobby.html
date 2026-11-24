@@ -247,6 +247,10 @@ const render = () => {
     line(el, fill("Length: %(time)s", { time: clock(entry.duration) }));
     line(el, new Date(entry.started).toLocaleString());
     link(el, entry.id, T("Watch"));
+    if (entry.replay) {
+      link(el, entry.id, T("Download replay"), "/replay.zip");
+      el.lastChild.title = T("Unzip it into the replays folder of 0 A.D. 0.28.0.");
+    }
     return el;
   }));
   if (!lobby.replays.length) replays.append(empty("No stored matches."));

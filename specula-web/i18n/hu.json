@@ -205,5 +205,7 @@
   "Length: %(time)s": "Hossz: %(time)s",
   "Observers: %(count)s": "Megfigyelők: %(count)s",
   "Watch": "Megtekintés",
-  "Control group %(number)s": "%(number)s. vezérlőcsoport"
+  "Control group %(number)s": "%(number)s. vezérlőcsoport",
+  "Download replay": "Visszajátszás letöltése",
+  "Unzip it into the replays folder of 0 A.D. 0.28.0.": "Csomagold ki a 0 A.D. 0.28.0 visszajátszásmappájába."
 }

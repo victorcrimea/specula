@@ -2941,6 +2941,21 @@ impl Hub {
         }
     }
 
+    /// The engine's replay of a hosted hub's match, kept in the history
+    /// once its run dir is pruned. A match with no turn has no history yet,
+    /// and nothing to replay.
+    pub fn store_replay(&self, files: &[(&str, Vec<u8>)]) {
+        let state = self.state.lock().unwrap();
+        let Some(&(_, match_id)) = state.uuids.last() else {
+            return;
+        };
+        for (name, bytes) in files {
+            self.store(&state, |history, protect| {
+                history.write_replay(match_id, name, bytes, protect)
+            });
+        }
+    }
+
     /// A keepalive: the engine is up while the game is paused.
     pub fn feed_alive(&self) {
         self.state.lock().unwrap().feed_activity = Some(Instant::now());
