@@ -259,6 +259,25 @@ impl Placement {
             self.input(input, uplink);
         }
         let pointer = view.place_pointer();
+        // The mouse motion of INPUT_BUILDING_PLACEMENT ends a building's
+        // placement once its cost cannot be paid, which is how a queued
+        // run of buildings stops when the stockpile runs out.
+        if pointer.is_some()
+            && let Some(Active::Building(building)) = &self.active
+            && !building.place.costs.is_empty()
+            && let Some(economy) = usize::try_from(seat)
+                .ok()
+                .and_then(|seat| scene.economy.get(seat))
+            && building.place.costs.iter().any(|&(resource, cost)| {
+                economy
+                    .resources
+                    .iter()
+                    .find(|stock| stock.code == resource)
+                    .is_some_and(|stock| f64::from(cost / 100) > f64::from(stock.amount))
+            })
+        {
+            self.stop(uplink);
+        }
         match &mut self.active {
             Some(Active::Building(building)) => building.follow(pointer),
             Some(Active::Wall(wall)) => wall.follow(pointer),

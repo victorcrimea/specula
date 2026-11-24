@@ -599,6 +599,8 @@ pub struct Place {
     pub tower: Option<String>,
     /// BuildRestrictions' PlacementType: "shore" snaps to the shoreline.
     pub shore: bool,
+    /// The template's costs as `ListItem::costs` has them, in 1/100.
+    pub costs: Vec<(u32, u32)>,
 }
 
 /// What one update reads.
@@ -2346,6 +2348,7 @@ impl CommandsPanel {
                     builders,
                     tower,
                     shore,
+                    costs: item.costs.clone(),
                 }));
             }
         }
