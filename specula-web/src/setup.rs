@@ -325,7 +325,8 @@ struct Control {
     wrap: HtmlElement,
     input: HtmlElement,
     name: HtmlElement,
-    /// A slider's value caption.
+    /// A slider's value caption, or a checkbox's "Yes" or "No", which
+    /// vanilla shows in place of a control the viewer cannot change.
     caption: Option<HtmlElement>,
     make_caption: Option<Caption>,
 }
@@ -1321,6 +1322,7 @@ fn build_control(page: &Shared, dom: &Dom, panel: &HtmlElement, spec: Spec) -> C
             listen(&check, "change", move |_| {
                 send(&shared, &message(Input::Bool(target.checked())));
             });
+            caption = Some(create(document, "span"));
             check.unchecked_into()
         }
         Kind::Range(message, make) => {
@@ -2146,16 +2148,23 @@ fn render_controls(page: &Page, view: &View) {
         if let Some(control) = page.controls.get(key) {
             show(&control.wrap, visible);
             enable(&control.input, enabled);
+            show(&control.input, enabled);
             control
                 .input
                 .unchecked_ref::<HtmlInputElement>()
                 .set_checked(checked);
+            if let Some(caption) = &control.caption {
+                show(caption, !enabled);
+                let shown = if checked { "Yes" } else { "No" };
+                caption.set_text_content(Some(&translate(shown)));
+            }
         }
     };
     let range = |key: &str, visible: bool, enabled: bool, min: f64, max: f64, value: f64| {
         if let Some(control) = page.controls.get(key) {
             show(&control.wrap, visible);
             enable(&control.input, enabled);
+            show(&control.input, enabled);
             let input: &HtmlInputElement = control.input.unchecked_ref();
             input.set_min(&min.to_string());
             input.set_max(&max.to_string());
