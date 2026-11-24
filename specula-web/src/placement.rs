@@ -39,6 +39,7 @@ use crate::field::DRAG_DELTA;
 use crate::panel::Place;
 use crate::panel::mutual_allies;
 use crate::stream::Scene;
+use crate::tips;
 use crate::tooltip;
 use crate::uplink::Uplink;
 
@@ -256,7 +257,8 @@ impl Placement {
         }
         let message = match &self.active {
             Some(Active::Building(building)) => building.message(),
-            _ => String::new(),
+            Some(Active::Wall(wall)) => wall.message(scene, seat),
+            None => String::new(),
         };
         if self.active.is_some() {
             self.set_tooltip(Some(&message));
@@ -597,6 +599,43 @@ impl Wall {
             &snap,
             &mut self.last_angle,
         );
+    }
+
+    /// The tooltip of the wall's end moving: what the pieces cost and what
+    /// the stockpile lacks of it.
+    fn message(&self, scene: &Scene, seat: i32) -> String {
+        let (Some(layout), Some(_)) = (&self.layout, self.end) else {
+            return String::new();
+        };
+        let Some(total) = layout.pieces.last().map(|laid| &laid.cost) else {
+            return String::new();
+        };
+        let cost = js_sys::Object::new();
+        for (resource, amount) in total {
+            let _ = js_sys::Reflect::set(&cost, &resource.into(), &(*amount).into());
+        }
+        let template = js_sys::Object::new();
+        let _ = js_sys::Reflect::set(&template, &"cost".into(), &cost);
+        let economy = usize::try_from(seat)
+            .ok()
+            .and_then(|seat| scene.economy.get(seat));
+        let lacking: Vec<(String, f64)> = total
+            .iter()
+            .filter_map(|(resource, amount)| {
+                let code = scene.strings.iter().position(|string| string == resource)? as u32 + 1;
+                let stock = economy?.resources.iter().find(|stock| stock.code == code)?;
+                (*amount > f64::from(stock.amount))
+                    .then(|| (resource.clone(), *amount - f64::from(stock.amount)))
+            })
+            .collect();
+        [
+            tips::cost_tooltip(&template, 1.0, None),
+            tips::needed_resources_tooltip(&lacking),
+        ]
+        .into_iter()
+        .filter(|tip| !tip.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
     }
 
     /// `tryPlaceWall`, on the layout of the last update.
