@@ -16,13 +16,11 @@ use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::collections::HashSet;
-use std::collections::VecDeque;
 use std::io::Write;
 use std::os::unix::net::UnixStream;
 use std::process::Command;
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::sync::atomic::AtomicU32;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use std::thread::JoinHandle;
@@ -39,8 +37,6 @@ use specula_assets::command::GroupContents;
 use specula_assets::command::GroupSave;
 use specula_assets::command::PUSH_FRONT;
 use specula_assets::command::QUEUED;
-use specula_assets::command::Query;
-use specula_assets::command::QueryKind;
 use specula_assets::command::UNITS_ONLY;
 use specula_assets::command::freehand_points;
 
@@ -78,21 +74,10 @@ const PLAY_SCRIPT: &str = "scripts/play.sh";
 /// Where the engine finds the settings file (`EngineDirs::settings_file`).
 const SETTINGS_VFS_PATH: &str = "config/matchsettings.mp.json";
 const UPLINK_COMMAND: u8 = 1;
-const UPLINK_QUERY: u8 = 2;
 const UPLINK_PAUSE: u8 = 3;
 const UPLINK_SUMMARY: u8 = 4;
-/// `SpeculaFeed.h`'s query methods.
-const QUERY_BUILDING_PREVIEW: u8 = 1;
-const QUERY_FOUNDATION_SNAP: u8 = 2;
-const QUERY_WALL_PREVIEW: u8 = 3;
-/// Replies not yet sent to the pages; a placement asks at most a couple at
-/// a time.
-const REPLY_BACKLOG: usize = 64;
 /// Every changed group of every connected page in a turn.
 const GROUP_BACKLOG: usize = 256;
-/// How many unanswered queries are remembered: the engine never answers one
-/// whose uplink dropped mid-query, and they must not pile up.
-const ASKERS_KEPT: usize = 256;
 /// What every order the GUI gives but walk names, as
 /// `g_AutoFormation.getNull()` with `formationwalkonly`
 /// (`globalscripts/Formation.js`).
@@ -117,23 +102,6 @@ const LIMIT_RESIGN_WAIT: Duration = Duration::from_secs(10);
 const LIMIT_RESIGN_SEEN: Duration = Duration::from_secs(1);
 /// The resign the engine takes as the seat's own (`Commands.js` `resign`).
 const RESIGN_JSON: &str = r#"{"type":"resign"}"#;
-
-/// A query's answer, for the one command connection that asked.
-#[derive(Clone)]
-pub struct Reply {
-    pub connection: u64,
-    pub seat: u8,
-    /// `{"id":<the page's id>,"result":<JSON>}`, as the page reads it.
-    pub text: String,
-}
-
-/// Who asked a query the uplink sent under `uplink_id`.
-struct Asker {
-    uplink_id: u32,
-    connection: u64,
-    seat: u8,
-    id: u32,
-}
 
 /// What the player's page reads: whether a game is running and is the
 /// visitor's, whether its seat is defeated and whether the visitor's last
@@ -210,16 +178,6 @@ pub struct Play {
     hub: Arc<Hub>,
     seats: Arc<Seats>,
     inner: Mutex<Inner>,
-    /// One id per command socket.
-    next_connection: AtomicU64,
-    /// The id the next query goes to the engine under.
-    next_query: AtomicU32,
-    /// Who asked each query the engine has not answered yet: a leaf lock,
-    /// never take `inner` while holding it.
-    askers: Mutex<VecDeque<Asker>>,
-    /// The engine's answers to the queries, each for the connection that
-    /// asked, as the text message `{"id":..,"result":..}` the page reads.
-    replies: broadcast::Sender<Reply>,
     /// Held for a whole pause update, so the engine and the pages get the
     /// ledger's decisions in the order the ledger made them. After the
     /// registry lock (`start` runs under it), before every lock of this,
@@ -383,10 +341,6 @@ impl Play {
             hub,
             seats,
             inner: Mutex::new(Inner::default()),
-            next_connection: AtomicU64::new(0),
-            next_query: AtomicU32::new(1),
-            askers: Mutex::new(VecDeque::new()),
-            replies: broadcast::channel(REPLY_BACKLOG).0,
             pause_order: Mutex::new(()),
             ledger: Mutex::new(pause::Ledger::new(&[])),
             humans: Mutex::new(Vec::new()),
@@ -536,11 +490,6 @@ impl Play {
             position["x"].as_f64()? as f32,
             position["z"].as_f64()? as f32,
         ])
-    }
-
-    /// An id for one command socket.
-    pub fn connection(&self) -> u64 {
-        self.next_connection.fetch_add(1, Ordering::Relaxed)
     }
 
     /// Counts a seated page's `play/command` socket while the guard lives;
@@ -1459,58 +1408,6 @@ impl Play {
         self.write_uplink(&record);
     }
 
-    /// Asks the engine `query` as `player` would; the answer comes back as
-    /// a feed record, to `reply`.
-    pub fn query(&self, connection: u64, player: u8, query: &Query) {
-        let uplink_id = self.next_query.fetch_add(1, Ordering::Relaxed);
-        {
-            let mut askers = self.askers.lock().unwrap();
-            askers.push_back(Asker {
-                uplink_id,
-                connection,
-                seat: player,
-                id: query.id,
-            });
-            while askers.len() > ASKERS_KEPT {
-                askers.pop_front();
-            }
-        }
-        let (method, json) = query_json(&query.kind);
-        let mut record = Vec::with_capacity(json.len() + 11);
-        record.push(UPLINK_QUERY);
-        record.extend_from_slice(&(json.len() as u32 + 6).to_le_bytes());
-        record.extend_from_slice(&uplink_id.to_le_bytes());
-        record.push(player);
-        record.push(method);
-        record.extend_from_slice(json.as_bytes());
-        self.write_uplink(&record);
-    }
-
-    /// `id` is the uplink id the query was sent under.
-    pub fn reply(&self, id: u32, json: &[u8]) {
-        let Ok(json) = std::str::from_utf8(json) else {
-            return;
-        };
-        let asker = {
-            let mut askers = self.askers.lock().unwrap();
-            let index = askers.iter().position(|asker| asker.uplink_id == id);
-            index.and_then(|index| askers.remove(index))
-        };
-        let Some(asker) = asker else {
-            return;
-        };
-        // No receiver is no page to tell.
-        let _ = self.replies.send(Reply {
-            connection: asker.connection,
-            seat: asker.seat,
-            text: format!(r#"{{"id":{},"result":{json}}}"#, asker.id),
-        });
-    }
-
-    pub fn replies(&self) -> broadcast::Receiver<Reply> {
-        self.replies.subscribe()
-    }
-
     pub fn group_pushes(&self) -> broadcast::Receiver<groups::Push> {
         self.group_pushes.subscribe()
     }
@@ -2170,65 +2067,6 @@ fn order_json(order: &Order, sender: u8) -> String {
     out.finish()
 }
 
-/// The query method and its argument JSON, as `input.js` passes it to
-/// `Engine.GuiInterfaceCall`.
-fn query_json(kind: &QueryKind) -> (u8, String) {
-    let mut out = Json::new();
-    let method = match kind {
-        QueryKind::Preview {
-            template,
-            x,
-            z,
-            angle,
-            seed,
-        } => {
-            out.text("template", template);
-            out.number("x", *x);
-            out.number("z", *z);
-            out.number("angle", *angle);
-            out.raw("actorSeed", &seed.to_string());
-            QUERY_BUILDING_PREVIEW
-        }
-        QueryKind::Snap {
-            template,
-            x,
-            z,
-            angle,
-            edges,
-        } => {
-            out.text("template", template);
-            out.number("x", *x);
-            out.number("z", *z);
-            out.number("angle", *angle);
-            out.boolean("snapToEdges", *edges);
-            QUERY_FOUNDATION_SNAP
-        }
-        QueryKind::Wall {
-            wallset,
-            start,
-            end,
-            snap,
-        } => {
-            out.text("wallSet", wallset);
-            let point = |(x, z): (f32, f32)| {
-                let mut point = Json::new();
-                point.number("x", x);
-                point.number("z", z);
-                point.finish()
-            };
-            if let Some(start) = start {
-                out.raw("start", &point(*start));
-            }
-            if let Some(end) = end {
-                out.raw("end", &point(*end));
-            }
-            out.entities("snapEntities", snap);
-            QUERY_WALL_PREVIEW
-        }
-    };
-    (method, out.finish())
-}
-
 /// A JSON object written field by field.
 struct Json(String);
 
@@ -2299,31 +2137,4 @@ pub fn push_string(out: &mut String, text: &str) {
         }
     }
     out.push('"');
-}
-
-/// The entity ids a query reply names (`SetWallPlacementPreview`'s
-/// `startSnappedEnt` and `endSnappedEnt`, `GetFoundationSnapData`'s
-/// `ent`), as the seat's handles; one the seat does not hold reads as
-/// none, `INVALID_ENTITY`.
-pub fn map_reply_ids(reply: &str, handle: impl Fn(u32) -> Option<u32>) -> String {
-    const KEYS: [&str; 3] = ["\"startSnappedEnt\":", "\"endSnappedEnt\":", "\"ent\":"];
-    let mut out = String::with_capacity(reply.len());
-    let mut rest = reply;
-    while let Some((at, key)) = KEYS
-        .iter()
-        .filter_map(|key| Some((rest.find(key)?, *key)))
-        .min_by_key(|(at, _)| *at)
-    {
-        let value_start = at + key.len();
-        out.push_str(&rest[..value_start]);
-        rest = &rest[value_start..];
-        let digits = rest.len() - rest.trim_start_matches(|c: char| c.is_ascii_digit()).len();
-        if let Ok(id) = rest[..digits].parse::<u32>() {
-            let mapped = if id == 0 { 0 } else { handle(id).unwrap_or(0) };
-            out.push_str(&mapped.to_string());
-            rest = &rest[digits..];
-        }
-    }
-    out.push_str(rest);
-    out
 }

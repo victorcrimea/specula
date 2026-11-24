@@ -60,8 +60,6 @@ use specula_assets::command::Command as Order;
 use specula_assets::command::GROUP_TAG;
 use specula_assets::command::GroupContents;
 use specula_assets::command::GroupSave;
-use specula_assets::command::QUERY_TAG;
-use specula_assets::command::Query;
 use specula_assets::command::SELECTION_DEFINE_TAG;
 use specula_assets::command::SELECTION_USE_TAG;
 use specula_assets::command::Tokened;
@@ -1034,8 +1032,7 @@ fn play_data(
 /// the format version and the player number the visitor commands, 0 for
 /// none, then the seat's starting camera (x and z, f32 LE) when the map
 /// gives one. The seat is the one held when the socket opened: orders are
-/// dropped once the visitor no longer holds it. A query's reply goes only
-/// to the connection that asked. Orders may name the socket's last selection
+/// dropped once the visitor no longer holds it. Orders may name the socket's last selection
 /// by token (`Tokened`), kept only for this connection.
 #[rocket::get("/g/<id>/play/command")]
 fn play_command(
@@ -1048,7 +1045,6 @@ fn play_command(
     let play = Arc::clone(&found.play);
     let hub = Arc::clone(&found.hub);
     let visitor = usage::visitor(cookies);
-    let connection = play.connection();
     Some(socket.channel(move |mut stream| {
         Box::pin(async move {
             let bound = play.seat(visitor.as_deref());
@@ -1060,7 +1056,6 @@ fn play_command(
             // The token's list as the feed's ids, for this socket only, since
             // the page numbers its tokens per connection.
             let mut kept: Option<(u32, Vec<u32>)> = None;
-            let mut replies = play.replies();
             // Before the snapshot, so a push in between is not missed.
             let mut pushes = play.group_pushes();
             let mut hello = vec![COMMAND_VERSION, bound.unwrap_or(0)];
@@ -1103,21 +1098,6 @@ fn play_command(
                             }
                             continue;
                         }
-                        Err(RecvError::Closed) => return Ok(()),
-                    },
-                    reply = replies.recv() => match reply {
-                        Ok(reply) => {
-                            if reply.connection != connection {
-                                continue;
-                            }
-                            let reply = play::map_reply_ids(&reply.text, |id| {
-                                hub.seat_handle(u32::from(reply.seat), id)
-                            });
-                            stream.send(rocket_ws::Message::text(reply)).await?;
-                            continue;
-                        }
-                        // A dropped reply only leaves one preview untinted.
-                        Err(RecvError::Lagged(_)) => continue,
                         Err(RecvError::Closed) => return Ok(()),
                     },
                     incoming = stream.next() => match incoming {
@@ -1210,17 +1190,6 @@ fn play_command(
                             _ => eprintln!("order with an unknown selection token {token}"),
                         },
                         Err(error) => eprintln!("bad tokened order from the player: {error}"),
-                    }
-                    continue;
-                }
-                if bytes.first() == Some(&QUERY_TAG) {
-                    match Query::decode(&bytes) {
-                        Ok(mut query) => {
-                            if to_feed(query.entity_ids_mut()) {
-                                play.query(connection, seat, &query);
-                            }
-                        }
-                        Err(error) => eprintln!("bad query from the player: {error}"),
                     }
                     continue;
                 }
@@ -1678,17 +1647,13 @@ pub(crate) fn serve(
             Record::Notifications(notes) => hub.notify(&notes),
             Record::Events(json) => hub.notify_events(&json),
             Record::TimeNotifications(notes) => hub.set_time_notifications(notes),
+            Record::ControlGroups(groups) => hub.set_control_groups(&groups),
             Record::KeepAlive => hub.feed_alive(),
             Record::InitAttributes(json) => {
                 hub.set_lock_teams(&json);
                 // The broadcast has no game to compare with.
                 if let Some(play) = play {
                     play.check_attributes(&json);
-                }
-            }
-            Record::QueryReply { id, json } => {
-                if let Some(play) = play {
-                    play.reply(id, &json);
                 }
             }
             Record::Economy(economy) => {

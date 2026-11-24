@@ -50,6 +50,8 @@ const CHANGED_CAPTURE: u64 = 131072;
 const CHANGED_RANGES: u64 = 262144;
 const CHANGED_MIRAGE: u64 = 524288;
 const CHANGED_CHOSEN: u64 = 1048576;
+const CHANGED_EXACT: u64 = 2097152;
+const CHANGED_GROUPS: u64 = 4194304;
 /// One entry of the engine's time notification list.
 #[derive(Clone, PartialEq)]
 pub struct TimeNote {
@@ -79,6 +81,9 @@ const LOCK_WIRE: u8 = 28;
 const BLOCKED_WIRE: u8 = 29;
 /// The heal action's classes and a garrison size in the template details.
 const HEAL_WIRE: u8 = 30;
+/// From v31: the template details end with the obstruction and a dot may
+/// carry an exact pose and control groups.
+const PLACEMENT_WIRE: u8 = 31;
 const LEDGER_WIRE: u8 = 24;
 /// A ledger line's seat holds a voluntary pause.
 pub const LEDGER_HOLDS: u8 = 1;
@@ -92,6 +97,8 @@ pub const VISIBLE: u32 = 2;
 const MOTION_GROUNDED: u8 = 1;
 const MOTION_HITPOINTS: u8 = 2;
 const MOTION_CAPTURE: u8 = 4;
+const MOTION_EXACT: u8 = 8;
+const MOTION_GROUPS: u8 = 16;
 /// `TemplateDetails::components` bit for Health.
 pub const COMPONENT_HEALTH: u32 = 1;
 /// And for Heal.
@@ -151,6 +158,14 @@ const TURN_SECS: f32 = 0.2;
 /// As specula-server keeps a projectile: `PROJECTILE_DECAY_TIME` and a
 /// margin for the launch point drawn.
 const PROJECTILE_KEEP_SECS: f32 = 35.0;
+
+/// An exact pose in raw 16.16: metres and radians, as the engine holds it.
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+pub struct Pose {
+    pub x: i32,
+    pub z: i32,
+    pub angle: i32,
+}
 
 #[derive(Clone, Copy, Default)]
 pub struct Dot {
@@ -235,6 +250,13 @@ pub struct Dot {
     pub step: [i32; 2],
     /// Its height is the ground's.
     pub grounded: bool,
+    /// For an entity with a static or cluster obstruction, from a v31
+    /// stream: where the engine holds it, which the quantised x, z and
+    /// angle only approximate.
+    pub exact: Option<Pose>,
+    /// A wall piece's two obstruction control groups, 0 for none. Only
+    /// compared with one another: a seat's are its own tokens.
+    pub groups: [u32; 2],
 }
 
 /// Player p's `LosVisibility` in a visibility mask.
@@ -270,6 +292,11 @@ pub struct Ground {
     vertices: i64,
     /// In 1/92 m, row-major, x fastest.
     heights: Vec<u16>,
+    /// The water's height in raw 16.16 metres; the engine sends it as
+    /// `fixed::ToFloat`, so this is exact.
+    pub water_level: i32,
+    /// A circular map, whose edge the pathfinder closes round.
+    pub circular: bool,
 }
 
 impl Ground {
@@ -283,7 +310,42 @@ impl Ground {
             revision: 0,
             vertices,
             heights,
+            water_level: 0,
+            circular: false,
         })
+    }
+
+    /// From a built terrain resource, with its water level and shape.
+    pub fn from_image(id: u64, image: &crate::terrain::TerrainImage) -> Result<Self, &'static str> {
+        let mut ground = Ground::new(id, image.size, image.heights.clone())?;
+        ground.revision = image.seat.as_ref().map_or(0, |seat| seat.revision);
+        ground.water_level = (f64::from(image.water_level) * 65536.0).round() as i32;
+        ground.circular = image.circular;
+        Ok(ground)
+    }
+
+    /// Tiles per side.
+    pub fn tiles(&self) -> i64 {
+        self.vertices - 1
+    }
+
+    /// `CTerrain::GetSlopeFixed`, raw 16.16: the spread of the heights at
+    /// a tile's corners over a tile's size, per metre of height.
+    pub fn slope(&self, i: i64, j: i64) -> i64 {
+        // Clamped to the last tile, as the engine does.
+        let i = i.clamp(0, self.vertices - 2);
+        let j = j.clamp(0, self.vertices - 2);
+        let height = |i: i64, j: i64| i64::from(self.heights[(j * self.vertices + i) as usize]);
+        let corners = [
+            height(i, j),
+            height(i, j + 1),
+            height(i + 1, j),
+            height(i + 1, j + 1),
+        ];
+        let spread = corners.iter().max().unwrap_or(&0) - corners.iter().min().unwrap_or(&0);
+        // `TERRAIN_TILE_SIZE` and `HEIGHT_UNITS_PER_METRE`, truncating as
+        // C++ does.
+        (spread / 4 * 65536) / 92
     }
 
     /// Adds a reveal's heights; a seat's entities only stand where it has
@@ -301,18 +363,26 @@ impl Ground {
     pub fn from_resource(id: u64, resource: &[u8]) -> Result<Self, &'static str> {
         if resource.first() == Some(&TERRAIN_VERSION) {
             let image = crate::terrain::build(resource)?;
-            let mut ground = Ground::new(id, image.size, image.heights)?;
-            ground.revision = image.seat.map_or(0, |seat| seat.revision);
-            return Ok(ground);
+            return Ground::from_image(id, &image);
         }
         let mut cursor = ByteReader(resource);
         if cursor.u8()? != 4 {
             return Err("unknown terrain version");
         }
         let tiles = cursor.u32()?;
-        // Water level, shallow depth, circular, the light's seventeen f32,
-        // the post effect and the water's nine f32.
-        cursor.take(9 + 17 * 4 + 1 + 9 * 4)?;
+        let water_level = cursor.take(4)?;
+        let water_level = f32::from_le_bytes([
+            water_level[0],
+            water_level[1],
+            water_level[2],
+            water_level[3],
+        ]);
+        // Shallow depth.
+        cursor.take(4)?;
+        let circular = cursor.u8()? != 0;
+        // The light's seventeen f32, the post effect and the water's nine
+        // f32.
+        cursor.take(17 * 4 + 1 + 9 * 4)?;
         // The water type and the sky set.
         for _ in 0..2 {
             let length = cursor.take(2)?;
@@ -329,16 +399,26 @@ impl Ground {
             .chunks_exact(2)
             .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
             .collect();
-        Ground::new(id, tiles, heights)
+        let mut ground = Ground::new(id, tiles, heights)?;
+        ground.water_level = (f64::from(water_level) * 65536.0).round() as i32;
+        ground.circular = circular;
+        Ok(ground)
     }
 
     /// `CTerrain::GetExactGroundLevelFixed` at a position in 1/16 m, in
     /// 1/16 m, exactly as specula-server reckons it.
     pub fn at(&self, x: i32, z: i32) -> i32 {
+        let raw = self.at_fixed(i64::from(x) * 4096, i64::from(z) * 4096);
+        (raw + 2048).div_euclid(4096) as i32
+    }
+
+    /// The same before the rounding to 1/16 m, in raw 16.16 metres both
+    /// ways, so that a check may compare it with a water level.
+    pub fn at_fixed(&self, x: i64, z: i64) -> i64 {
         const ONE: i64 = 1 << 16;
         // 16.16 metres over `TERRAIN_TILE_SIZE`, which truncates as C++ does.
-        let x = i64::from(x) * 4096 / 4;
-        let z = i64::from(z) * 4096 / 4;
+        let x = x / 4;
+        let z = z / 4;
         let round_to_zero = |value: i64| {
             if value > 0 {
                 value >> 16
@@ -360,8 +440,7 @@ impl Ground {
         let far = xf1 * height(xi, zi + 1) + xf0 * height(xi + 1, zi + 1);
         // `HEIGHT_UNITS_PER_METRE / 2`.
         let raw = (((ONE - zf) * near) >> 16) + ((zf * far) >> 16);
-        let raw = raw / 46;
-        (raw + 2048).div_euclid(4096) as i32
+        raw / 46
     }
 }
 
@@ -537,7 +616,43 @@ pub struct TemplateDetails {
     pub unhealable_classes: u32,
     /// Garrisonable's Size, 0 for none or older.
     pub garrison_size: u32,
+    /// What a placement check reads, from a v31 stream; `None` for a
+    /// template without an Obstruction or from an older one.
+    pub obstruction: Option<Obstruction>,
+    /// 1 for a BuildRestrictions component, 2 for a WallPiece.
+    pub placement_flags: u8,
 }
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ObstructionKind {
+    Static,
+    Unit,
+    Cluster,
+}
+
+/// The most sub-shapes of a cluster kept, so that the details stay `Copy`;
+/// the public gates have three.
+pub const CLUSTER_SHAPES: usize = 3;
+
+/// A template's obstruction, as `CCmpObstruction::Init` reads it, in metres.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct Obstruction {
+    pub kind: ObstructionKind,
+    /// A unit's radius is the width; a cluster's is its bounding box.
+    pub width: f64,
+    pub depth: f64,
+    /// 1 BlockMovement, 2 BlockFoundation, 4 BlockConstruction, 8
+    /// BlockPathfinding, 128 Active.
+    pub flags: u8,
+    /// A cluster's sub-shapes as `[x, z, width, depth]`, the first
+    /// `shapes` of them.
+    pub clusters: [[f64; 4]; CLUSTER_SHAPES],
+    pub shapes: u8,
+}
+
+pub const OBSTRUCTION_BLOCK_FOUNDATION: u8 = 2;
+pub const OBSTRUCTION_ACTIVE: u8 = 128;
+pub const PLACEMENT_BUILD_RESTRICTIONS: u8 = 1;
 
 /// A player's top panel numbers.
 #[derive(Clone, Default)]
@@ -1394,6 +1509,26 @@ impl Scene {
             out.varint(u64::from(details.heal_classes));
             out.varint(u64::from(details.unhealable_classes));
             out.varint(u64::from(details.garrison_size));
+            out.u8(details.placement_flags);
+            match &details.obstruction {
+                None => out.u8(0),
+                Some(obstruction) => {
+                    out.u8(match obstruction.kind {
+                        ObstructionKind::Static => 1,
+                        ObstructionKind::Unit => 2,
+                        ObstructionKind::Cluster => 3,
+                    });
+                    out.zigzag_i64(metres_to_raw(obstruction.width));
+                    out.zigzag_i64(metres_to_raw(obstruction.depth));
+                    out.u8(obstruction.flags);
+                    out.varint(u64::from(obstruction.shapes));
+                    for shape in &obstruction.clusters[..usize::from(obstruction.shapes)] {
+                        for value in shape {
+                            out.zigzag_i64(metres_to_raw(*value));
+                        }
+                    }
+                }
+            }
         }
         out.varint(self.strings.len() as u64);
         for text in &self.strings {
@@ -1499,6 +1634,12 @@ impl Scene {
             if !capture.is_empty() {
                 motion |= MOTION_CAPTURE;
             }
+            if dot.exact.is_some() {
+                motion |= MOTION_EXACT;
+            }
+            if dot.groups != [0, 0] {
+                motion |= MOTION_GROUPS;
+            }
             out.u8(motion);
             if motion & MOTION_HITPOINTS != 0 {
                 out.u8(dot.hitpoints);
@@ -1506,6 +1647,16 @@ impl Scene {
             if motion & MOTION_CAPTURE != 0 {
                 out.u8(capture.len() as u8);
                 out.0.extend_from_slice(capture);
+            }
+            if let Some(pose) = dot.exact {
+                out.u8(1);
+                out.zigzag(pose.x - (dot.x << 12));
+                out.zigzag(pose.z - (dot.z << 12));
+                out.zigzag(pose.angle);
+            }
+            if motion & MOTION_GROUPS != 0 {
+                out.varint(u64::from(dot.groups[0]));
+                out.varint(u64::from(dot.groups[1]));
             }
         }
         out.varint(self.shots.len() as u64);
@@ -1540,6 +1691,24 @@ impl Scene {
     }
 }
 
+/// A pose from a residual of the position (x and z in 1/16 m) it is
+/// relative to.
+fn based_on(x: i32, z: i32, fine: Pose) -> Pose {
+    Pose {
+        x: (x << 12) + fine.x,
+        z: (z << 12) + fine.z,
+        angle: fine.angle,
+    }
+}
+
+fn metres_to_raw(metres: f64) -> i64 {
+    (metres * 65536.0).round() as i64
+}
+
+fn raw_to_metres(raw: i64) -> f64 {
+    raw as f64 / 65536.0
+}
+
 /// A delta's update of one entity, as specula-server reckons it.
 fn advance(dot: &mut Dot, change: Option<&Change>, ground: Option<&Ground>, turn: u32) {
     let mask = change.map_or(0, |change| change.mask);
@@ -1551,6 +1720,11 @@ fn advance(dot: &mut Dot, change: Option<&Change>, ground: Option<&Ground>, turn
     let step = dot.step;
     dot.x += step[0];
     dot.z += step[1];
+    // The engine's residual stays, so the pose follows the position.
+    if let Some(pose) = &mut dot.exact {
+        pose.x += step[0] << 12;
+        pose.z += step[1] << 12;
+    }
     if mask & CHANGED_GROUNDED != 0 {
         dot.grounded = true;
     }
@@ -1635,6 +1809,12 @@ fn advance(dot: &mut Dot, change: Option<&Change>, ground: Option<&Ground>, turn
         }
         if mask & CHANGED_CHOSEN != 0 {
             dot.choices = values.choices;
+        }
+        if mask & CHANGED_EXACT != 0 {
+            dot.exact = values.exact.map(|fine| based_on(dot.x, dot.z, fine));
+        }
+        if mask & CHANGED_GROUPS != 0 {
+            dot.groups = values.groups;
         }
     }
     if mask & CHANGED_ANIMATION != 0 {
@@ -2100,6 +2280,9 @@ impl Writer {
 /// What only the visual stream records are read with.
 trait Records {
     fn template_details(&mut self, version: u8) -> Result<TemplateDetails, &'static str>;
+    fn obstruction(&mut self) -> Result<Option<Obstruction>, &'static str>;
+    fn exact(&mut self) -> Result<Option<Pose>, &'static str>;
+    fn groups(&mut self) -> Result<[u32; 2], &'static str>;
     fn seed(&mut self, id: u32) -> Result<u32, &'static str>;
     fn dot(
         &mut self,
@@ -2166,6 +2349,8 @@ impl Records for ByteReader<'_> {
             heal_classes: 0,
             unhealable_classes: 0,
             garrison_size: 0,
+            obstruction: None,
+            placement_flags: 0,
         };
         if version >= OLDEST_WIRE {
             details.supply_type = self.varint_u32()?;
@@ -2185,7 +2370,58 @@ impl Records for ByteReader<'_> {
             details.unhealable_classes = self.varint_u32()?;
             details.garrison_size = self.varint_u32()?;
         }
+        if version >= PLACEMENT_WIRE {
+            details.placement_flags = self.u8()?;
+            details.obstruction = self.obstruction()?;
+        }
         Ok(details)
+    }
+
+    fn obstruction(&mut self) -> Result<Option<Obstruction>, &'static str> {
+        let kind = match self.u8()? {
+            0 => return Ok(None),
+            1 => ObstructionKind::Static,
+            2 => ObstructionKind::Unit,
+            3 => ObstructionKind::Cluster,
+            _ => return Err("unknown obstruction type"),
+        };
+        let mut obstruction = Obstruction {
+            kind,
+            width: raw_to_metres(self.zigzag_i64()?),
+            depth: raw_to_metres(self.zigzag_i64()?),
+            flags: self.u8()?,
+            clusters: [[0.0; 4]; CLUSTER_SHAPES],
+            shapes: 0,
+        };
+        for index in 0..self.varint_u32()? as usize {
+            let mut shape = [0.0; 4];
+            for value in &mut shape {
+                *value = raw_to_metres(self.zigzag_i64()?);
+            }
+            // The rest are read and dropped.
+            if let Some(slot) = obstruction.clusters.get_mut(index) {
+                *slot = shape;
+                obstruction.shapes += 1;
+            }
+        }
+        Ok(Some(obstruction))
+    }
+
+    /// The residuals of x and z from the sent position, and the angle, as
+    /// a pose relative to it; `place` makes it absolute.
+    fn exact(&mut self) -> Result<Option<Pose>, &'static str> {
+        if self.u8()? == 0 {
+            return Ok(None);
+        }
+        Ok(Some(Pose {
+            x: self.zigzag()?,
+            z: self.zigzag()?,
+            angle: self.zigzag()?,
+        }))
+    }
+
+    fn groups(&mut self) -> Result<[u32; 2], &'static str> {
+        Ok([self.varint_u32()?, self.varint_u32()?])
     }
 
     /// Sent as the difference from the entity id, which is the default.
@@ -2252,6 +2488,8 @@ impl Records for ByteReader<'_> {
             from_z: z as f32,
             speed_turn: 0,
             phase: 0.0,
+            exact: None,
+            groups: [0, 0],
         };
         let (mirage, parent) = self.mirage(version)?;
         let step = [self.zigzag()?, self.zigzag()?];
@@ -2272,10 +2510,22 @@ impl Records for ByteReader<'_> {
         } else {
             Vec::new()
         };
+        let exact = if motion & MOTION_EXACT != 0 {
+            self.exact()?.map(|fine| based_on(dot.x, dot.z, fine))
+        } else {
+            None
+        };
+        let groups = if motion & MOTION_GROUPS != 0 {
+            self.groups()?
+        } else {
+            [0, 0]
+        };
         let dot = Dot {
             speed_turn: dot.animation_turn,
             grounded: motion & MOTION_GROUNDED != 0,
             hitpoints,
+            exact,
+            groups,
             ..dot
         };
         Ok((dot, capture))
@@ -2395,6 +2645,14 @@ impl Records for ByteReader<'_> {
         }
         if mask & CHANGED_CHOSEN != 0 {
             values.choices = self.varint_u32()?;
+        }
+        if mask & CHANGED_EXACT != 0 {
+            // Still the residual: the position it is from is not known
+            // until the step is applied.
+            change.values.exact = self.exact()?;
+        }
+        if mask & CHANGED_GROUPS != 0 {
+            change.values.groups = self.groups()?;
         }
         Ok(change)
     }

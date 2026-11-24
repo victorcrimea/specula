@@ -1,8 +1,7 @@
 //! `/play`'s orders to the server (`specula_assets::command`), over the
 //! `/play/command` WebSocket, which the page holds itself: orders are page
 //! events and few, so they need not pass through the stream worker. The
-//! server's first message names the player the visitor commands; its text
-//! messages answer the placement queries. An order naming a selection the
+//! server's first message names the player the visitor commands. An order naming a selection the
 //! socket sent before names it by a per-socket token instead.
 
 use std::cell::Cell;
@@ -15,11 +14,8 @@ use specula_assets::command::Command;
 use specula_assets::command::GROUP_TAG;
 use specula_assets::command::GroupContents;
 use specula_assets::command::GroupSave;
-use specula_assets::command::Query;
-use specula_assets::command::QueryKind;
 use specula_assets::command::Tokened;
 use wasm_bindgen::JsCast;
-use wasm_bindgen::JsValue;
 use wasm_bindgen::closure::Closure;
 use web_sys::BinaryType;
 use web_sys::MessageEvent;
@@ -50,12 +46,9 @@ struct Inner {
     seat: Rc<Cell<u8>>,
     /// The map's starting camera of the seat, x and z, when it has one.
     starting_camera: Rc<Cell<Option<[f32; 2]>>>,
-    next_query: u32,
     /// What the server keeps under this socket's token.
     sent: Option<Sent>,
     next_token: u32,
-    /// Query id and result, as they came.
-    replies: Rc<RefCell<Vec<(u32, JsValue)>>>,
     /// The control groups the server pushed, as they came.
     groups: Rc<RefCell<Vec<GroupContents>>>,
     reconnect_ms: i32,
@@ -74,10 +67,8 @@ impl Uplink {
             socket: None,
             seat: Rc::new(Cell::new(0)),
             starting_camera: Rc::new(Cell::new(None)),
-            next_query: 1,
             sent: None,
             next_token: 1,
-            replies: Rc::new(RefCell::new(Vec::new())),
             groups: Rc::new(RefCell::new(Vec::new())),
             reconnect_ms: RECONNECT_MS,
             _handlers: None,
@@ -129,26 +120,6 @@ impl Uplink {
     /// The control group contents that came since the last call.
     pub fn take_groups(&self) -> Vec<GroupContents> {
         std::mem::take(&mut *self.inner.borrow().groups.borrow_mut())
-    }
-
-    /// Asks the engine; the id the reply will carry, or none while the
-    /// socket is not open.
-    pub fn query(&self, kind: QueryKind) -> Option<u32> {
-        let mut inner = self.inner.borrow_mut();
-        let socket = inner.socket.as_ref()?;
-        if socket.ready_state() != WebSocket::OPEN || inner.seat.get() == 0 {
-            return None;
-        }
-        let id = inner.next_query;
-        let bytes = Query { id, kind }.encode();
-        socket.send_with_u8_array(&bytes).ok()?;
-        inner.next_query = id.wrapping_add(1).max(1);
-        Some(id)
-    }
-
-    /// The replies that came since the last call: id and result.
-    pub fn take_replies(&self) -> Vec<(u32, JsValue)> {
-        std::mem::take(&mut *self.inner.borrow().replies.borrow_mut())
     }
 }
 
@@ -225,21 +196,8 @@ fn connect(inner: &Weak<RefCell<Inner>>) {
     socket.set_binary_type(BinaryType::Arraybuffer);
     let seat = Rc::clone(&strong.borrow().seat);
     let starting_camera = Rc::clone(&strong.borrow().starting_camera);
-    let replies = Rc::clone(&strong.borrow().replies);
     let groups = Rc::clone(&strong.borrow().groups);
     let on_message = Closure::<dyn FnMut(MessageEvent)>::new(move |event: MessageEvent| {
-        if let Some(text) = event.data().as_string() {
-            let Ok(reply) = js_sys::JSON::parse(&text) else {
-                return;
-            };
-            let field = |key: &str| js_sys::Reflect::get(&reply, &key.into()).ok();
-            if let (Some(id), Some(result)) =
-                (field("id").and_then(|id| id.as_f64()), field("result"))
-            {
-                replies.borrow_mut().push((id as u32, result));
-            }
-            return;
-        }
         let Ok(buffer) = event.data().dyn_into::<js_sys::ArrayBuffer>() else {
             return;
         };

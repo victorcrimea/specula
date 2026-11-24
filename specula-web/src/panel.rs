@@ -12,6 +12,7 @@
 //! changes nothing touches no DOM.
 
 use std::cell::RefCell;
+use std::rc::Rc;
 
 use specula_assets::command::Command;
 use wasm_bindgen::JsCast;
@@ -33,6 +34,7 @@ use crate::lang;
 use crate::left::LeftPanel;
 use crate::orders::Preselect;
 use crate::pick;
+use crate::placement::PlaceData;
 use crate::predict::Predictions;
 use crate::stream::COMPONENT_GATE;
 use crate::stream::COMPONENT_PACK;
@@ -607,10 +609,10 @@ pub struct Place {
     /// For a wall set, its tower template: the wall is placed between two
     /// points, as `placementSupport.mode` "wall".
     pub tower: Option<String>,
-    /// BuildRestrictions' PlacementType: "shore" snaps to the shoreline.
-    pub shore: bool,
     /// The template's costs as `ListItem::costs` has them, in 1/100.
     pub costs: Vec<(u32, u32)>,
+    /// What the placement checks read of the template.
+    pub data: Rc<PlaceData>,
 }
 
 /// What one update reads.
@@ -2445,16 +2447,13 @@ impl CommandsPanel {
                     "tower",
                 )
                 .as_string();
-                let shore =
-                    tips::text_field(&tips::field(&data, "buildRestrictions"), "placementType")
-                        == "shore";
                 self.training_orders[before + trainable.len() + i] = Some(Request::Place(Place {
                     template: name.to_string(),
                     actor: tips::text_field(&data, "actor"),
                     builders,
                     tower,
-                    shore,
                     costs: item.costs.clone(),
+                    data: Rc::new(PlaceData::parse(&data)),
                 }));
             }
         }

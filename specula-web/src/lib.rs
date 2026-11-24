@@ -1984,8 +1984,8 @@ impl App {
                     }
                 }
                 Request::Place(place) => {
-                    if let Some(uplink) = &self.uplink {
-                        self.placement.start(place, uplink);
+                    if self.uplink.is_some() {
+                        self.placement.start(place);
                     }
                 }
                 Request::ConfirmDelete(entities) => {
@@ -6291,8 +6291,7 @@ fn receive_notification(app: &Rc<RefCell<App>>, message: &[u8]) {
 fn receive_terrain(app_rc: &Rc<RefCell<App>>, id: u64, resource: &[u8]) {
     let app = &mut *app_rc.borrow_mut();
     let built = terrain::build(resource).and_then(|image| {
-        let mut ground = Ground::new(id, image.size, image.heights.clone())?;
-        ground.revision = image.seat.as_ref().map_or(0, |seat| seat.revision);
+        let ground = Ground::from_image(id, &image)?;
         Ok((image, ground))
     });
     match built {

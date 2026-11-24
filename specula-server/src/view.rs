@@ -1,4 +1,4 @@
-//! The viewer stream, wire format v27: messages for each keyframe, turn or
+//! The viewer stream, wire format v31: messages for each keyframe, turn or
 //! match end, varints and zigzag as in `wire.rs`, positions and heights in
 //! 1/16 m, carried brotli-compressed as below.
 //!
@@ -39,7 +39,8 @@
 //!   varint actor, zigzag seed - id; 1024 varint variant set; 2048 u8
 //!   construction; 4096 varint visibility; 8192 nothing; 32768 varint
 //!   variable set; 65536 u8 hitpoints; 131072 capture; 262144 varint range
-//!   set; 524288 mirage; 1048576 varint choices}, then the sounds
+//!   set; 524288 mirage; 1048576 varint choices; 2097152 exact pose;
+//!   4194304 groups}, then the sounds
 //!   of the turn: varint count, count x sound, in the order the simulation
 //!   played them, then the projectiles launched in the turn (for a seat,
 //!   those that came into its sight): varint count, count x {varint id
@@ -117,7 +118,8 @@
 //! animation started, varint sync repeat, zigzag sync offset, varint turns
 //! since the sync was set, u8 construction, varint visibility, mirage, zigzag step
 //! x, zigzag step z, u8 motion flags, then u8 hitpoints if motion flag 2,
-//! then capture if motion flag 4}:
+//! then capture if motion flag 4, then the exact pose if motion flag 8,
+//! then the groups if motion flag 16}:
 //! - y is the absolute height, not the height above the ground;
 //! - angle is the heading in 1/256 turn, clockwise from +z;
 //! - colour is 0xFFRRGGBB, or 0 for an entity that is not on the minimap;
@@ -157,7 +159,20 @@
 //! - step is how far it moves each turn until a delta changes it, in 1/16
 //!   m;
 //! - motion flags: 1 follows the ground, 2 hitpoints follow, 4 capture
-//!   follows;
+//!   follows, 8 exact pose follows, 16 groups follow;
+//! - the exact pose (motion flag 8, change bit 2097152) is u8 present, and
+//!   when 1 zigzag x residual, zigzag z residual, zigzag angle, all raw
+//!   16.16: the residuals are the engine's x and z less the sent ones
+//!   (within half a 1/16 m step), the angle in radians. It is sent for an
+//!   entity whose template has a static or cluster obstruction, which
+//!   does not move, and absent without it;
+//! - the groups (motion flag 16, change bit 4194304) are two varints, the
+//!   entity's obstruction control groups, 0 for none, for a wall piece
+//!   (a template with the WallPiece flag) that is not a mirage. In the
+//!   observers' stream they are the feed's ids, a piece without any being
+//!   its own group; in a seat's they are tokens that the seat numbers
+//!   from 1 as it first meets a group, as a group may name an entity that
+//!   is gone, so they compare with one another and with nothing else;
 //! - hitpoints are 0 without the Health component, else the hitpoints in
 //!   1/255 of the max, rounded up and at least 1. Without motion flag 2
 //!   they are 255 when the template's details have the Health component
@@ -260,7 +275,14 @@
 //! texture, varint rally line mask, f32 rally line thickness, u8 rally line
 //! start cap, u8 rally line end cap, varint resource supply type, varint
 //! gather rate names, varint dropsite types, varint attack types, varint
-//! order sound groups, varint garrison classes, varint turret classes}. The
+//! order sound groups, varint garrison classes, varint turret classes,
+//! varint heal classes, varint unhealable classes, varint garrison size,
+//! then u8 placement flags (1 BuildRestrictions, 2 WallPiece), u8 obstruction
+//! type (0 none, 1 static, 2 unit, 3 cluster) and, when not 0, zigzag
+//! width, zigzag depth (raw 16.16), u8 obstruction flags (1 BlockMovement,
+//! 2 BlockFoundation, 4 BlockConstruction, 8 BlockPathfinding, 128
+//! Active), varint cluster shape count, each shape 4 x zigzag x, z, width,
+//! depth (raw 16.16)}. The
 //! flags and
 //! component bits are those of the hook's template details (`SpeculaFeed.h`, kind 11), and so are the
 //! meanings of the strings, which are 1-based indices into the string
@@ -373,6 +395,7 @@ use crate::feed::Icon;
 use crate::feed::Launch;
 use crate::feed::LosRun;
 use crate::feed::Note;
+use crate::feed::ObstructionKind;
 use crate::feed::Players;
 use crate::feed::Sound;
 use crate::feed::SoundTarget;
@@ -427,9 +450,13 @@ const CHANGED_CAPTURE: u64 = 131072;
 const CHANGED_RANGES: u64 = 262144;
 const CHANGED_MIRAGE: u64 = 524288;
 const CHANGED_CHOSEN: u64 = 1048576;
+const CHANGED_EXACT: u64 = 2097152;
+const CHANGED_GROUPS: u64 = 4194304;
 const MOTION_GROUNDED: u8 = 1;
 const MOTION_HITPOINTS: u8 = 2;
 const MOTION_CAPTURE: u8 = 4;
+const MOTION_EXACT: u8 = 8;
+const MOTION_GROUPS: u8 = 16;
 /// The hook's template component bit for Health.
 const COMPONENT_HEALTH: u32 = 1;
 /// How far a reckoned animation speed may be off, in 1/256 of the
@@ -534,6 +561,16 @@ struct Dot {
     step: [i32; 2],
     /// Its height is the ground's, likewise.
     grounded: bool,
+    /// For a static or cluster obstruction, the exact pose past the
+    /// quantised one: the x and z residuals in raw 16.16 (within half a
+    /// 1/16 m step) and the raw 16.16 angle; zero otherwise.
+    fine: [i32; 2],
+    exact_angle: i32,
+    exact: bool,
+    /// For a wall piece, its two control groups, each 0 for none: the
+    /// feed's ids in the observers' streams, a seat's own tokens in a
+    /// seat's (see `Stream::control_groups`).
+    groups: [u32; 2],
 }
 
 impl Dot {
@@ -585,6 +622,10 @@ impl Dot {
             hitpoints,
             step: [0, 0],
             grounded: false,
+            fine: [0, 0],
+            exact_angle: 0,
+            exact: false,
+            groups: [0, 0],
         }
     }
 }
@@ -1380,6 +1421,13 @@ struct Stream {
     /// entity that comes back into sight gets a new id but the engine
     /// played its animation and decay on all the while.
     dot_starts: HashMap<u32, (u32, u32)>,
+    /// The control groups of the wall pieces that have any, by this
+    /// stream's id: the feed's ids in the observers' stream, a seat's
+    /// tokens (not handles, as a group may name an entity that is gone) in
+    /// a seat's. A piece without an entry is its own group in the observers'
+    /// stream (`raw_groups`), and none in a seat's.
+    control_groups: HashMap<u32, [u32; 2]>,
+    raw_groups: bool,
     /// A seat's additions to this turn's launches, by projectile id.
     launch_extras: HashMap<u32, LaunchExtra>,
     /// The players who have the game paused, ascending.
@@ -1431,6 +1479,8 @@ impl Stream {
             choice_ids: HashMap::new(),
             dot_choices: HashMap::new(),
             dot_starts: HashMap::new(),
+            control_groups: HashMap::new(),
+            raw_groups: false,
             launch_extras: HashMap::new(),
             paused: Vec::new(),
             ledger: Vec::new(),
@@ -1486,6 +1536,44 @@ impl Stream {
             }
         };
         index as u32 + 1
+    }
+
+    /// What a placement check reads of a dot: the exact pose of a static
+    /// obstruction, which never moves so that it costs once, and a wall
+    /// piece's control groups.
+    fn place(&self, dot: &mut Dot, entity: &Entity) {
+        let Some(details) = self
+            .templates
+            .items
+            .get(entity.template as usize)
+            .and_then(|template| template.details.as_ref())
+        else {
+            return;
+        };
+        if details
+            .obstruction
+            .as_ref()
+            .is_some_and(|obstruction| obstruction.kind != ObstructionKind::Unit)
+        {
+            dot.exact = true;
+            dot.fine = [
+                entity.x - (quantize_position(entity.x) << 12),
+                entity.z - (quantize_position(entity.z) << 12),
+            ];
+            dot.exact_angle = entity.angle;
+        }
+        // Walls snap to the player's own towers, never to a mirage.
+        if details.placement_flags & 2 != 0 && entity.mirage.is_none() {
+            dot.groups =
+                self.control_groups
+                    .get(&entity.id)
+                    .copied()
+                    .unwrap_or(if self.raw_groups {
+                        [entity.id, 0]
+                    } else {
+                        [0, 0]
+                    });
+        }
     }
 
     /// The turns `dot`'s animation and sync started on, from last turn's
@@ -1566,6 +1654,7 @@ impl Stream {
                     quantize_hitpoints(health),
                     ranges,
                 );
+                self.place(&mut dot, entity);
                 if let Some(chosen) = self.dot_choices.get(&entity.id) {
                     dot.chosen = *chosen;
                     dot.seed = 0;
@@ -2147,7 +2236,11 @@ impl Hub {
                 match_id: 0,
                 first_turn: 0,
                 delay,
-                observer: Stream::new(),
+                observer: {
+                    let mut observer = Stream::new();
+                    observer.raw_groups = true;
+                    observer
+                },
                 seats: Vec::new(),
                 seat_players: Vec::new(),
                 seat_water: None,
@@ -2245,6 +2338,7 @@ impl Hub {
         observer.range_set_ids.clear();
         observer.template_icons.clear();
         observer.player_color_templates.clear();
+        observer.control_groups.clear();
         observer.players = Players::default();
         observer.territory = None;
         observer.economy.clear();
@@ -2330,6 +2424,15 @@ impl Hub {
     }
 
     /// The engine's time notes, which the players record does not carry.
+    /// The whole list of the engine's non-default control groups.
+    pub fn set_control_groups(&self, groups: &[(u32, u32, u32)]) {
+        let observer = &mut self.state.lock().unwrap().observer;
+        observer.control_groups = groups
+            .iter()
+            .map(|(id, group, group2)| (*id, [*group, *group2]))
+            .collect();
+    }
+
     pub fn set_time_notifications(&self, notes: Vec<TimeNote>) {
         let observer = &mut self.state.lock().unwrap().observer;
         let mut players = observer.players.clone();
@@ -2747,16 +2850,6 @@ impl Hub {
             .iter()
             .find(|seat| seat.player == player)?
             .entity(handle)
-    }
-
-    /// The seat's handle of the feed's id, while the seat holds it.
-    pub fn seat_handle(&self, player: u32, id: u32) -> Option<u32> {
-        let state = self.state.lock().unwrap();
-        state
-            .seats
-            .iter()
-            .find(|seat| seat.player == player)?
-            .handle(id)
     }
 
     /// The seat's handles of the feed's ids, sorted; an id the seat does
@@ -3933,6 +4026,13 @@ fn exact_changes(before: &Dot, now: &Dot) -> u64 {
         (CHANGED_VARIABLES, before.variables != now.variables),
         (CHANGED_RANGES, before.ranges != now.ranges),
         (CHANGED_HITPOINTS, before.hitpoints != now.hitpoints),
+        (
+            CHANGED_EXACT,
+            before.exact != now.exact
+                || before.fine != now.fine
+                || before.exact_angle != now.exact_angle,
+        ),
+        (CHANGED_GROUPS, before.groups != now.groups),
     ];
     changes
         .iter()
@@ -4090,6 +4190,27 @@ fn write_change(out: &mut Writer, id: u32, change: &Change, now: &Dot, capture: 
     if mask & CHANGED_CHOSEN != 0 {
         out.varint(u64::from(now.chosen));
     }
+    if mask & CHANGED_EXACT != 0 {
+        write_exact(out, now);
+    }
+    if mask & CHANGED_GROUPS != 0 {
+        write_groups(out, now);
+    }
+}
+
+/// Without `exact` set, a zero pose, which a viewer reads as none.
+fn write_exact(out: &mut Writer, dot: &Dot) {
+    out.u8(u8::from(dot.exact));
+    if dot.exact {
+        out.zigzag(i64::from(dot.fine[0]));
+        out.zigzag(i64::from(dot.fine[1]));
+        out.zigzag(i64::from(dot.exact_angle));
+    }
+}
+
+fn write_groups(out: &mut Writer, dot: &Dot) {
+    out.varint(u64::from(dot.groups[0]));
+    out.varint(u64::from(dot.groups[1]));
 }
 
 fn write_mirage(out: &mut Writer, dot: &Dot) {
@@ -4282,6 +4403,29 @@ fn write_templates(out: &mut Writer, templates: &[Template]) {
         out.varint(one_based(details.heal_classes));
         out.varint(one_based(details.unhealable_classes));
         out.varint(u64::from(details.garrison_size));
+        write_obstruction(out, details);
+    }
+}
+
+fn write_obstruction(out: &mut Writer, details: &TemplateDetails) {
+    out.u8(details.placement_flags);
+    let Some(obstruction) = &details.obstruction else {
+        out.u8(0);
+        return;
+    };
+    out.u8(match obstruction.kind {
+        ObstructionKind::Static => 1,
+        ObstructionKind::Unit => 2,
+        ObstructionKind::Cluster => 3,
+    });
+    out.zigzag(i64::from(obstruction.width));
+    out.zigzag(i64::from(obstruction.depth));
+    out.u8(obstruction.flags);
+    out.varint(obstruction.clusters.len() as u64);
+    for shape in &obstruction.clusters {
+        for value in shape {
+            out.zigzag(i64::from(*value));
+        }
     }
 }
 
@@ -4380,11 +4524,23 @@ fn write_dot(out: &mut Writer, id: u32, turn: u32, dot: &Dot, hitpoints: u8, cap
     if !capture.is_empty() {
         motion |= MOTION_CAPTURE;
     }
+    if dot.exact {
+        motion |= MOTION_EXACT;
+    }
+    if dot.groups != [0, 0] {
+        motion |= MOTION_GROUPS;
+    }
     out.u8(motion);
     if motion & MOTION_HITPOINTS != 0 {
         out.u8(dot.hitpoints);
     }
     if motion & MOTION_CAPTURE != 0 {
         write_capture(out, capture);
+    }
+    if motion & MOTION_EXACT != 0 {
+        write_exact(out, dot);
+    }
+    if motion & MOTION_GROUPS != 0 {
+        write_groups(out, dot);
     }
 }

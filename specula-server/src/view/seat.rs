@@ -142,6 +142,10 @@ pub(super) struct Seat {
     pub shown: Shown,
     stream: Stream,
     handles: Handles,
+    /// Tokens for control groups, which are the feed's ids but may name an
+    /// entity that is gone (a tower keeps its foundation's), so a seat
+    /// cannot take them through `handles`. 1, 2, ... on first sight.
+    group_tokens: HashMap<u32, u32>,
     local: Local,
     revealed: Revealed,
     /// The `/data` hashes the stream has named.
@@ -769,6 +773,7 @@ impl Seat {
             shown: Shown::new(),
             stream,
             handles: Handles::default(),
+            group_tokens: HashMap::new(),
             local: Local::default(),
             revealed: Revealed::new(),
             named: HashSet::new(),
@@ -819,6 +824,15 @@ impl Seat {
     /// camera follows the handle once it appears.
     pub fn handle_of(&mut self, id: u32) -> u32 {
         self.handles.of(id)
+    }
+
+    /// 0 stays 0, for no group.
+    fn group_token(&mut self, group: u32) -> u32 {
+        if group == 0 {
+            return 0;
+        }
+        let next = self.group_tokens.len() as u32 + 1;
+        *self.group_tokens.entry(group).or_insert(next)
     }
 
     fn sees_all(&self) -> bool {
@@ -918,9 +932,26 @@ impl Seat {
         let mut entities = Vec::with_capacity(view.len());
         self.stream.dot_choices.clear();
         self.stream.dot_starts.clear();
+        self.stream.control_groups.clear();
         for entity in &view {
             let handle = self.handles.of(entity.id);
             let template = self.local.template(feed, &mut self.stream, entity.template);
+            let wall_piece = entity.mirage.is_none()
+                && feed
+                    .templates
+                    .items
+                    .get(entity.template as usize)
+                    .and_then(|template| template.details.as_ref())
+                    .is_some_and(|details| details.placement_flags & 2 != 0);
+            if wall_piece {
+                let [group, group2] = feed
+                    .control_groups
+                    .get(&entity.id)
+                    .copied()
+                    .unwrap_or([entity.id, 0]);
+                let groups = [self.group_token(group), self.group_token(group2)];
+                self.stream.control_groups.insert(handle, groups);
+            }
             let visual = entity
                 .visual
                 .map(|visual| self.local.visual(feed, &mut self.stream, &visual));

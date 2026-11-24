@@ -1,6 +1,7 @@
-//! Decoder for the observer hook's feed, format v15 (and v14, which had
-//! one visibility bit per player, no mirages, no LOS and no shared LOS
-//! flag). The writer is `source/network/SpeculaFeed.cpp` in the `specula`
+//! Decoder for the observer hook's feed, format v16 (and v15, whose
+//! template details end before the obstruction and which has no control
+//! groups, and v14, which had one visibility bit per player, no mirages,
+//! no LOS and no shared LOS flag). The writer is `source/network/SpeculaFeed.cpp` in the `specula`
 //! branch of 0ad-specula.
 
 use std::collections::BTreeMap;
@@ -12,7 +13,7 @@ use std::io::Read;
 use std::sync::Arc;
 
 const MAGIC: [u8; 4] = *b"SPCF";
-const VERSION: u32 = 15;
+const VERSION: u32 = 16;
 const OLDEST_VERSION: u32 = 14;
 const RECORD_TEMPLATE: u8 = 1;
 const RECORD_TURN: u8 = 2;
@@ -36,7 +37,6 @@ const RECORD_TECHNOLOGY_DATA: u8 = 19;
 const RECORD_STATS: u8 = 20;
 const RECORD_PLAYER_GUI: u8 = 21;
 const RECORD_FORMATION_DATA: u8 = 22;
-const RECORD_QUERY_REPLY: u8 = 23;
 const RECORD_LOS: u8 = 24;
 const RECORD_SUMMARY: u8 = 25;
 const RECORD_PAUSE: u8 = 26;
@@ -45,6 +45,7 @@ const RECORD_INIT_ATTRIBUTES: u8 = 28;
 const RECORD_NOTIFICATIONS: u8 = 29;
 const RECORD_EVENTS: u8 = 30;
 const RECORD_TIME_NOTIFICATIONS: u8 = 31;
+const RECORD_CONTROL_GROUPS: u8 = 32;
 const ENTITY_SIZE: usize = 84;
 const ENTITY_SIZE_V14: usize = 74;
 const SOUND_SIZE: usize = 29;
@@ -344,6 +345,33 @@ pub struct TemplateDetails {
     pub unhealable_classes: Option<u32>,
     /// Garrisonable's Size, 0 for none.
     pub garrison_size: u32,
+    /// None from a hook before v16, and for a template without an
+    /// Obstruction.
+    pub obstruction: Option<Obstruction>,
+    /// 1 for a BuildRestrictions component, 2 for a WallPiece.
+    pub placement_flags: u8,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ObstructionKind {
+    Static,
+    Unit,
+    Cluster,
+}
+
+/// The obstruction CCmpObstruction::Init reads from a template, in raw
+/// 16.16.
+#[derive(Clone, PartialEq)]
+pub struct Obstruction {
+    pub kind: ObstructionKind,
+    /// A unit's radius is the width; a cluster's is its bounding box.
+    pub width: i32,
+    pub depth: i32,
+    /// 1 BlockMovement, 2 BlockFoundation, 4 BlockConstruction, 8
+    /// BlockPathfinding, 128 Active.
+    pub flags: u8,
+    /// A cluster's sub-shapes, each `[x, z, width, depth]`.
+    pub clusters: Vec<[i32; 4]>,
 }
 
 /// One item of a trainable or researchable list, read for the producer's
@@ -863,11 +891,6 @@ pub enum Record {
         index: u32,
         json: Vec<u8>,
     },
-    /// Kind 23: the answer to an uplink query of a hosted game, UTF-8 JSON.
-    QueryReply {
-        id: u32,
-        json: Vec<u8>,
-    },
     /// Kind 24: players 1 up, the runs of vertex states that changed.
     Los {
         /// Vertices per side.
@@ -890,6 +913,9 @@ pub enum Record {
     Events(Vec<u8>),
     /// Kind 31: the time notification list, whenever it changed.
     TimeNotifications(Vec<TimeNote>),
+    /// Kind 32: every entity whose control group is not its own id, as
+    /// `(entity, group, group2)`; the whole list, whenever it changed.
+    ControlGroups(Vec<(u32, u32, u32)>),
 }
 
 /// A notification for one player.
@@ -1095,14 +1121,7 @@ pub fn read_record(reader: &mut impl Read, version: u32) -> io::Result<Option<Re
             RECORD_NOTIFICATIONS => return decode_notifications(&payload).map(Some),
             RECORD_EVENTS => return Ok(Some(Record::Events(payload))),
             RECORD_TIME_NOTIFICATIONS => return decode_time_notifications(&payload).map(Some),
-            RECORD_QUERY_REPLY => {
-                let mut cursor = Cursor(&payload);
-                let id = cursor.u32()?;
-                return Ok(Some(Record::QueryReply {
-                    id,
-                    json: cursor.0.to_vec(),
-                }));
-            }
+            RECORD_CONTROL_GROUPS => return decode_control_groups(&payload).map(Some),
             RECORD_PLAYER_GUI => return decode_player_gui(&payload).map(Some),
             RECORD_TEMPLATE_DATA | RECORD_TECHNOLOGY_DATA | RECORD_FORMATION_DATA => {
                 return decode_data(head[0], &payload).map(Some);
@@ -1627,6 +1646,8 @@ fn decode_template_details(payload: &[u8]) -> io::Result<Record> {
         heal_classes: None,
         unhealable_classes: None,
         garrison_size: 0,
+        obstruction: None,
+        placement_flags: 0,
     };
     // A hook from before lang and phenotypes ends here; the feed version
     // stayed, so both lengths are read.
@@ -1664,6 +1685,35 @@ fn decode_template_details(payload: &[u8]) -> io::Result<Record> {
         details.unhealable_classes = optional(cursor.u32()?);
         details.garrison_size = cursor.u32()?;
     }
+    // And for a v15 hook, which ends before the obstruction.
+    if !cursor.0.is_empty() {
+        let kind = cursor.u8()?;
+        let width = cursor.i32()?;
+        let depth = cursor.i32()?;
+        let flags = cursor.u8()?;
+        details.placement_flags = cursor.u8()?;
+        let count = cursor.u32()? as usize;
+        if cursor.0.len() < count.saturating_mul(16) {
+            return Err(invalid("template details record shorter than its shapes"));
+        }
+        let mut clusters = Vec::with_capacity(count);
+        for _ in 0..count {
+            clusters.push([cursor.i32()?, cursor.i32()?, cursor.i32()?, cursor.i32()?]);
+        }
+        let kind = match kind {
+            1 => Some(ObstructionKind::Static),
+            2 => Some(ObstructionKind::Unit),
+            3 => Some(ObstructionKind::Cluster),
+            _ => None,
+        };
+        details.obstruction = kind.map(|kind| Obstruction {
+            kind,
+            width,
+            depth,
+            flags,
+            clusters,
+        });
+    }
     if !cursor.0.is_empty() {
         return Err(invalid("template details record longer than its contents"));
     }
@@ -1671,6 +1721,20 @@ fn decode_template_details(payload: &[u8]) -> io::Result<Record> {
         index,
         details: Box::new(details),
     })
+}
+
+fn decode_control_groups(payload: &[u8]) -> io::Result<Record> {
+    let mut cursor = Cursor(payload);
+    let count = cursor.u32()? as usize;
+    if cursor.0.len() != count.saturating_mul(12) {
+        return Err(invalid(
+            "control groups record length does not match its count",
+        ));
+    }
+    let groups = (0..count)
+        .map(|_| Ok((cursor.u32()?, cursor.u32()?, cursor.u32()?)))
+        .collect::<io::Result<_>>()?;
+    Ok(Record::ControlGroups(groups))
 }
 
 fn decode_details(payload: &[u8]) -> io::Result<Record> {

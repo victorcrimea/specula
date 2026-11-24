@@ -10,10 +10,6 @@
 //! and its points in sixteenths of a metre, each x and z a zigzag varint
 //! delta from the point before (the first from 0, 0).
 //!
-//! A message starting with `QUERY_TAG` is a `Query` instead: a GuiInterface
-//! call the session GUI makes while placing a structure, answered on the
-//! same socket by a text message `{"id": id, "result": JSON}`.
-//!
 //! A message starting with `GROUP_TAG` is a control group, in both
 //! directions (the direction tells them apart). From the page it is a
 //! `GroupSave`: the group, a flags byte (bit 0 is "disjoint") and the
@@ -33,7 +29,7 @@ use crate::bytes::ByteReader;
 
 /// The version of this format, which the server sends as the first byte of
 /// its seat message; a page on another version must reload.
-pub const COMMAND_VERSION: u8 = 14;
+pub const COMMAND_VERSION: u8 = 15;
 
 pub const QUEUED: u8 = 1;
 pub const PUSH_FRONT: u8 = 2;
@@ -100,14 +96,8 @@ pub const DIPLOMACY_ALLY: u8 = 1;
 pub const DIPLOMACY_NEUTRAL: u8 = 2;
 
 /// Above every command kind.
-pub const QUERY_TAG: u8 = 0x80;
-const QUERY_PREVIEW: u8 = 1;
-const QUERY_SNAP: u8 = 2;
-const QUERY_WALL: u8 = 3;
-
-/// Above every command kind, and not `QUERY_TAG`.
 pub const GROUP_TAG: u8 = 0x81;
-/// Above every command kind, and not `QUERY_TAG` or `GROUP_TAG`.
+/// Above every command kind, and not `GROUP_TAG`.
 pub const SELECTION_DEFINE_TAG: u8 = 0x82;
 pub const SELECTION_USE_TAG: u8 = 0x83;
 /// Vanilla's control groups, the keys 1-9 and 0.
@@ -420,159 +410,6 @@ pub struct WallPiece {
 const MAX_PIECES: usize = 1024;
 /// Far more resources than any mod trades.
 const MAX_GOODS: usize = 64;
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct Query {
-    /// Echoed in the reply.
-    pub id: u32,
-    pub kind: QueryKind,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub enum QueryKind {
-    /// `SetBuildingPlacementPreview`; an empty template ends the preview.
-    Preview {
-        template: String,
-        x: f32,
-        z: f32,
-        angle: f32,
-        seed: u32,
-    },
-    /// `GetFoundationSnapData`, with `edges` for the snap to the edges of
-    /// the static obstructions near the point.
-    Snap {
-        template: String,
-        x: f32,
-        z: f32,
-        angle: f32,
-        edges: bool,
-    },
-    /// `SetWallPlacementPreview` of the wall set template's set; no start
-    /// ends the preview. `snap` are the towers the ends may snap to, which
-    /// the session GUI picks with `PickSimilarPlayerEntities`.
-    Wall {
-        wallset: String,
-        start: Option<(f32, f32)>,
-        end: Option<(f32, f32)>,
-        snap: Vec<u32>,
-    },
-}
-
-impl Query {
-    /// As `Command::entity_ids_mut`.
-    pub fn entity_ids_mut(&mut self) -> Vec<&mut u32> {
-        match &mut self.kind {
-            QueryKind::Wall { snap, .. } => snap.iter_mut().filter(|id| **id != 0).collect(),
-            _ => Vec::new(),
-        }
-    }
-
-    pub fn encode(&self) -> Vec<u8> {
-        let mut out = Out(vec![QUERY_TAG]);
-        out.varint(u64::from(self.id));
-        match &self.kind {
-            QueryKind::Preview {
-                template,
-                x,
-                z,
-                angle,
-                seed,
-            } => {
-                out.0.push(QUERY_PREVIEW);
-                out.text(template);
-                out.point(*x, *z);
-                out.0.extend_from_slice(&angle.to_le_bytes());
-                out.varint(u64::from(*seed));
-            }
-            QueryKind::Snap {
-                template,
-                x,
-                z,
-                angle,
-                edges,
-            } => {
-                out.0.push(QUERY_SNAP);
-                out.text(template);
-                out.point(*x, *z);
-                out.0.extend_from_slice(&angle.to_le_bytes());
-                out.0.push(u8::from(*edges));
-            }
-            QueryKind::Wall {
-                wallset,
-                start,
-                end,
-                snap,
-            } => {
-                out.0.push(QUERY_WALL);
-                out.text(wallset);
-                out.0
-                    .push(u8::from(start.is_some()) | u8::from(end.is_some()) << 1);
-                for (x, z) in start.iter().chain(end) {
-                    out.point(*x, *z);
-                }
-                out.entities(snap);
-            }
-        }
-        out.0
-    }
-
-    pub fn decode(bytes: &[u8]) -> Result<Query, &'static str> {
-        let mut input = ByteReader(bytes);
-        if input.u8()? != QUERY_TAG {
-            return Err("not a query");
-        }
-        let id = input.varint_u32()?;
-        let kind = match input.u8()? {
-            QUERY_PREVIEW => {
-                let template = input.text()?;
-                let (x, z) = point(&mut input)?;
-                QueryKind::Preview {
-                    template,
-                    x,
-                    z,
-                    angle: finite(input.f32()?)?,
-                    seed: input.varint_u32()?,
-                }
-            }
-            QUERY_SNAP => {
-                let template = input.text()?;
-                let (x, z) = point(&mut input)?;
-                QueryKind::Snap {
-                    template,
-                    x,
-                    z,
-                    angle: finite(input.f32()?)?,
-                    edges: input.u8()? != 0,
-                }
-            }
-            QUERY_WALL => {
-                let wallset = input.text()?;
-                let present = input.u8()?;
-                let start = if present & 1 != 0 {
-                    Some(point(&mut input)?)
-                } else {
-                    None
-                };
-                let end = if present & 2 != 0 {
-                    Some(point(&mut input)?)
-                } else {
-                    None
-                };
-                QueryKind::Wall {
-                    wallset,
-                    start,
-                    end,
-                    snap: entities(&mut input)?,
-                }
-            }
-            _ => return Err("unknown query"),
-        };
-        if !input.0.is_empty() {
-            return Err("trailing bytes after the query");
-        }
-        Ok(Query { id, kind })
-    }
-}
 
 /// A page's request to keep a selection as a control group; an empty
 /// selection clears the group.
