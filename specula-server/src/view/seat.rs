@@ -1463,8 +1463,9 @@ impl Seat {
         self.stream.set_players(players);
     }
 
-    /// The seat's own top panel; a mutual ally's resources while the seat
-    /// has shared LOS and the ally is not defeated, and its phase always
+    /// The seat's own top panel, with the training-blocked flash, which is
+    /// the seat's own only; a mutual ally's resources while the seat has
+    /// shared LOS and the ally is not defeated, and its phase always
     /// (`CounterManager.js`, `selection_details.js`).
     fn economy(&mut self, feed: &Stream) {
         let me = self.player as usize;
@@ -1496,6 +1497,7 @@ impl Seat {
                 }
                 if !full {
                     local.panel_entities.clear();
+                    local.training_blocked = false;
                 }
                 local.resources = local
                     .resources

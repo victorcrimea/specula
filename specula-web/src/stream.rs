@@ -75,6 +75,8 @@ const TIME_NOTES_WIRE: u8 = 27;
 /// From v28: the player table ends with the team lock and each player's
 /// shared LOS.
 const LOCK_WIRE: u8 = 28;
+/// From v29: each economy ends with its `trainingBlocked` flag.
+const BLOCKED_WIRE: u8 = 29;
 const LEDGER_WIRE: u8 = 24;
 /// A ledger line's seat holds a voluntary pause.
 pub const LEDGER_HOLDS: u8 = 1;
@@ -534,6 +536,8 @@ pub struct Economy {
     pub phase: u32,
     /// Heroes and the like, as `panelEntities`, in their button order.
     pub panel_entities: Vec<u32>,
+    /// `trainingBlocked`, which flashes the population counter; from v29.
+    pub training_blocked: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -803,7 +807,7 @@ impl Scene {
         self.read_tables(cursor)?;
         let count = cursor.varint_u32()?;
         self.economy = (0..count)
-            .map(|_| cursor.economy())
+            .map(|_| cursor.economy(self.wire_version))
             .collect::<Result<_, _>>()?;
         self.economy_changed = true;
         self.dots.clear();
@@ -915,7 +919,7 @@ impl Scene {
         if cursor.u8()? != 0 {
             for _ in 0..cursor.varint_u32()? {
                 let player = cursor.varint()? as usize;
-                let economy = cursor.economy()?;
+                let economy = cursor.economy(self.wire_version)?;
                 if player >= self.economy.len() {
                     self.economy.resize(player + 1, Economy::default());
                 }
@@ -1431,6 +1435,7 @@ impl Scene {
                 out.zigzag_i64(i64::from(*id) - i64::from(last_id));
                 last_id = *id;
             }
+            out.u8(u8::from(economy.training_blocked));
         }
         out.varint(self.dots.len() as u64);
         let mut last_id = 0;
@@ -2086,7 +2091,7 @@ trait Records {
         version: u8,
     ) -> Result<(Dot, Vec<u8>), &'static str>;
     fn capture(&mut self) -> Result<Vec<u8>, &'static str>;
-    fn economy(&mut self) -> Result<Economy, &'static str>;
+    fn economy(&mut self, version: u8) -> Result<Economy, &'static str>;
     fn change(&mut self, id: u32, dot: &Dot, version: u8) -> Result<Change, &'static str>;
     fn shot(&mut self, turn: u32, version: u8) -> Result<Shot, &'static str>;
     fn launch<'b>(
@@ -2255,7 +2260,7 @@ impl Records for ByteReader<'_> {
         Ok(self.take(usize::from(count))?.to_vec())
     }
 
-    fn economy(&mut self) -> Result<Economy, &'static str> {
+    fn economy(&mut self, version: u8) -> Result<Economy, &'static str> {
         let population = self.zigzag()?;
         let population_limit = self.zigzag()?;
         let population_max = self.zigzag()?;
@@ -2276,6 +2281,7 @@ impl Records for ByteReader<'_> {
                 u32::try_from(last_id).map_err(|_| "panel entity out of range")
             })
             .collect::<Result<_, _>>()?;
+        let training_blocked = version >= BLOCKED_WIRE && self.u8()? != 0;
         Ok(Economy {
             population,
             population_limit,
@@ -2283,6 +2289,7 @@ impl Records for ByteReader<'_> {
             resources,
             phase,
             panel_entities,
+            training_blocked,
         })
     }
 

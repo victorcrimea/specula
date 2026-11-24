@@ -174,8 +174,9 @@
 //! population limit, zigzag population max, varint m, m x {varint resource
 //! code, varint amount rounded down, varint gatherers} sorted by code,
 //! varint phase, varint k, k x zigzag panel entity id minus the one before
-//! (from 0), in the order of `panelEntities`}. The code and phase are
-//! 1-based indices into the string table, 0 for none.
+//! (from 0), in the order of `panelEntities`, u8 1 if training is blocked
+//! (v29)}. The code and phase are 1-based indices into the string table, 0
+//! for none.
 //!
 //! A sound is {varint group, u8 target, then by target: 0 (an entity's)
 //! varint entity id, zigzag owner, zigzag x, zigzag z, zigzag y, varint
@@ -711,6 +712,7 @@ struct Funds {
     /// 1-based string index, 0 for none.
     phase: u32,
     panel_entities: Vec<u32>,
+    training_blocked: bool,
 }
 
 impl Funds {
@@ -734,6 +736,7 @@ impl Funds {
                 .collect(),
             phase: one_based(economy.phase),
             panel_entities: economy.panel_entities.clone(),
+            training_blocked: economy.training_blocked,
         }
     }
 }
@@ -3564,6 +3567,7 @@ fn write_funds(out: &mut Writer, funds: &Funds) {
         out.zigzag(i64::from(*id) - i64::from(last_id));
         last_id = *id;
     }
+    out.u8(u8::from(funds.training_blocked));
 }
 
 /// What a delta sends for one entity besides the fields it copies from

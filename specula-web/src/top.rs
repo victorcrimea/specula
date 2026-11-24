@@ -44,6 +44,11 @@ const HERO_ORDER: [&str; 2] = ["Hero", "Relic"];
 /// `200 200 200` at zero.
 const GATHERERS: &str = "rgb(237, 227, 167)";
 const GATHERERS_ZERO: &str = "rgb(200, 200, 200)";
+/// `CounterPopulation.onTick`: `PopulationAlertColor` ("orange",
+/// gui/common/setup.xml) in the first half of every second.
+const POPULATION_ALERT: &str = "rgb(255, 165, 0)";
+const BLINK_PERIOD_MS: f64 = 1000.0;
+const BLINK_ON_MS: f64 = 500.0;
 /// `startColorFade(name, 100, 0, colorFade_attackUnit, ...)` and
 /// `g_FadeAttackUnit` (gui/common/colorFades.js).
 const FADE_TICK_MS: f64 = 100.0;
@@ -111,7 +116,11 @@ impl Counter {
 }
 
 /// The resource counters and the population counter, in that order.
-struct Counters(Vec<Counter>);
+struct Counters {
+    counters: Vec<Counter>,
+    /// `CounterPopulation.isTrainingBlocked`, as of the last `show`.
+    blocked: bool,
+}
 
 impl Counters {
     fn new(document: &Document, parent: &HtmlElement) -> Result<Self, String> {
@@ -130,7 +139,10 @@ impl Counters {
             RESOURCES.len(),
             "resource-population",
         )?);
-        Ok(Counters(counters))
+        Ok(Counters {
+            counters,
+            blocked: false,
+        })
     }
 
     /// `CounterResource.rebuild` and `CounterPopulation.rebuild` for player
@@ -144,7 +156,7 @@ impl Counters {
                 .iter()
                 .find(|resource| string(scene, resource.code) == Some(code))
         };
-        for (counter, code) in self.0.iter_mut().zip(RESOURCES) {
+        for (counter, code) in self.counters.iter_mut().zip(RESOURCES) {
             let (amount, gatherers) =
                 resource(code).map_or((0, 0), |resource| (resource.amount, resource.gatherers));
             counter.show(&abbreviate(amount), gatherers);
@@ -154,7 +166,8 @@ impl Counters {
             .iter()
             .map(|resource| resource.gatherers)
             .sum();
-        if let Some(population) = self.0.last_mut() {
+        self.blocked = economy.training_blocked;
+        if let Some(population) = self.counters.last_mut() {
             population.show(
                 &format!(
                     "{}/{} ({})",
@@ -193,7 +206,7 @@ impl Counters {
             })
         };
         let title = |text: &str| tooltip::tags(text, &[("font", "sans-bold-16")]);
-        for (counter, code) in self.0.iter_mut().zip(RESOURCES) {
+        for (counter, code) in self.counters.iter_mut().zip(RESOURCES) {
             let (name, description) = tooltip::resource_data(code).unwrap_or_default();
             let amount = |economy: &Economy| {
                 economy
@@ -210,7 +223,7 @@ impl Counters {
                 ally_stats(&amount)
             ));
         }
-        if let Some(population) = self.0.last_mut() {
+        if let Some(population) = self.counters.last_mut() {
             let stat = |economy: &Economy| {
                 format!(
                     "{}/{} ({})",
@@ -222,6 +235,19 @@ impl Counters {
                 title(&lang::translate("Population: current/limit (max)")),
                 ally_stats(&stat)
             ));
+        }
+    }
+
+    /// `CounterPopulation.onTick`. One clock drives every counter, so the
+    /// Observer rows blink in phase.
+    fn tick(&mut self, now: f64) {
+        let alert = self.blocked && now.rem_euclid(BLINK_PERIOD_MS) < BLINK_ON_MS;
+        if let Some(population) = self.counters.last_mut() {
+            population.count.style(if alert {
+                format!("color: {POPULATION_ALERT}")
+            } else {
+                String::new()
+            });
         }
     }
 }
@@ -535,8 +561,12 @@ impl TopPanel {
         self.update_heroes(view, now);
     }
 
-    /// The attack fades, every frame.
+    /// The attack fades and the population blink, every frame.
     pub fn tick(&mut self, now: f64) {
+        self.counters.tick(now);
+        for row in &mut self.players {
+            row.counters.tick(now);
+        }
         for (hero, button) in self.heroes.iter_mut().zip(&mut self.buttons) {
             let Some(fade) = &mut hero.fade else {
                 continue;

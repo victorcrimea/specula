@@ -645,6 +645,8 @@ pub struct Economy {
     pub phase: Option<u32>,
     /// Heroes and the like, as `panelEntities`.
     pub panel_entities: Vec<u32>,
+    /// `trainingBlocked`: a queue waits for population room or spawn space.
+    pub training_blocked: bool,
 }
 
 pub struct Resource {
@@ -2021,7 +2023,14 @@ fn decode_economy(payload: &[u8]) -> io::Result<Record> {
             resources,
             phase,
             panel_entities,
+            training_blocked: false,
         });
+    }
+    // A hook from before the flag ends here; the feed version stayed.
+    if !cursor.0.is_empty() {
+        for player in &mut players {
+            player.training_blocked = cursor.u8()? != 0;
+        }
     }
     if !cursor.0.is_empty() {
         return Err(invalid("economy record longer than its contents"));
