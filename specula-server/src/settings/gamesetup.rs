@@ -111,6 +111,16 @@ pub fn map_list<'a>(catalog: &'a Catalog, kind: MapType, filter: &str) -> Vec<&'
     maps
 }
 
+/// The `MapFilters.Filters` names `map` matches, so the page can run
+/// `getFilteredMaps` for any type and filter while it browses.
+pub fn map_filter_names(map: &Map) -> Vec<&'static str> {
+    MAP_FILTERS
+        .iter()
+        .filter(|filter| matches_class_list(&map.keywords, filter.matches))
+        .map(|filter| filter.name)
+        .collect()
+}
+
 /// `getAvailableMapFilters`.
 pub fn available_filters(catalog: &Catalog, kind: MapType) -> Vec<&'static MapFilter> {
     MAP_FILTERS
@@ -352,8 +362,6 @@ pub enum Change {
     MapFilter(String),
     Map(Choice<String>),
     /// `MapBrowserPage.onSubmitMapSelection`.
-    // The setup page has no map browser, so the protocol never builds it.
-    #[allow(dead_code)]
     BrowseMap {
         kind: MapType,
         filter: String,

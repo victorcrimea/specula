@@ -51,6 +51,8 @@ const UNLIMITED_POPULATION: f64 = 10000.0;
 /// The sliders' lowest value for the durations (`Sliders/*Duration.js`).
 const RELIC_DURATION_MIN: f64 = 0.0;
 
+mod map_browser;
+
 type Shared = Rc<RefCell<Page>>;
 type Message = Rc<dyn Fn(Input) -> JsValue>;
 
@@ -441,6 +443,8 @@ struct Page {
     /// never frees a handler, and the list is redrawn on every state. A
     /// member index always names the same member.
     spectator_buttons: HashMap<usize, (HtmlButtonElement, HtmlButtonElement)>,
+    /// The map browser dialog (`MapBrowser.js`).
+    map_browser: map_browser::MapBrowser,
 }
 
 pub async fn run() -> Result<(), String> {
@@ -507,6 +511,7 @@ pub async fn run() -> Result<(), String> {
         retry_ms: RETRY_MS,
         done: false,
         spectator_buttons: HashMap::new(),
+        map_browser: map_browser::MapBrowser::new(&document)?,
     }));
 
     // The language first, so what the page builds is translated.
@@ -518,6 +523,7 @@ pub async fn run() -> Result<(), String> {
     lang::load(lang::choose(&languages, &language_setting)).await;
 
     wire_static(&page);
+    map_browser::wire(&page);
     connect(&page);
     wire_chat(&page);
     Ok(())
@@ -1004,6 +1010,7 @@ fn on_message_value(page: &Shared, message: JsValue) {
             page.done = true;
             page.ai_slot = None;
             show(&page.dom.ai_config, false);
+            map_browser::close(&mut page);
             show(&page.dom.room, false);
             show(&page.dom.join, false);
             show(&page.dom.connection, false);
@@ -1022,6 +1029,7 @@ fn on_message_value(page: &Shared, message: JsValue) {
             page.done = true;
             page.ai_slot = None;
             show(&page.dom.ai_config, false);
+            map_browser::close(&mut page);
             show(&page.dom.room, false);
             show(&page.dom.join, false);
             show(&page.dom.connection, false);
@@ -1065,6 +1073,7 @@ enum Kind {
     Select(Message),
     Check(Message),
     Range(Message, Caption),
+    Button(Rc<dyn Fn(&Shared)>),
 }
 
 fn select_spec(
@@ -1151,6 +1160,12 @@ fn layout() -> Vec<(&'static str, Vec<Spec>)> {
                     "map_filter",
                 ),
                 select_spec("map", "Select Map", "Select a map to play on.", "map"),
+                Spec {
+                    key: "map_browser",
+                    label: "",
+                    tooltip: "Click to view the list of available maps.",
+                    kind: Kind::Button(Rc::new(map_browser::open)),
+                },
                 number_spec(
                     "map_size",
                     "Map Size",
@@ -1362,7 +1377,9 @@ fn build_control(page: &Shared, dom: &Dom, panel: &HtmlElement, spec: Spec) -> C
     tip(&wrap, &translate(spec.tooltip));
     let name: HtmlElement = create(document, "label");
     name.set_class_name("name");
-    name.set_text_content(Some(&titled(&translate(spec.label))));
+    if !spec.label.is_empty() {
+        name.set_text_content(Some(&titled(&translate(spec.label))));
+    }
     let value: HtmlElement = create(document, "div");
     value.set_class_name("value");
     let mut caption = None;
@@ -1387,6 +1404,15 @@ fn build_control(page: &Shared, dom: &Dom, panel: &HtmlElement, spec: Spec) -> C
             });
             caption = Some(create(document, "span"));
             check.unchecked_into()
+        }
+        Kind::Button(action) => {
+            let button: HtmlButtonElement = create(document, "button");
+            button.set_type("button");
+            button.set_class_name("red");
+            button.set_text_content(Some(&translate("Browse Maps")));
+            let shared = Rc::clone(page);
+            listen(&button, "click", move |_| action(&shared));
+            button.unchecked_into()
         }
         Kind::Range(message, make) => {
             let range: HtmlInputElement = create(document, "input");
@@ -1744,6 +1770,7 @@ fn render(shared: &Shared) {
     render_controls(page, &view);
     render_players(shared, page, &view);
     render_spectators(shared, page, &view);
+    map_browser::sync_host(page, &view);
 }
 
 /// What one update reads, resolved once.
@@ -1857,7 +1884,11 @@ fn render_chrome(page: &Page, view: &View) {
 /// for none. A landscape preview is not existence-checked upstream and the
 /// value goes into CSS.
 fn preview_key(attributes: &JsValue) -> String {
-    let preview = text(&get(attributes, "settings"), "mapPreview");
+    preview_stem(&text(&get(attributes, "settings"), "mapPreview"))
+}
+
+/// `preview_key` of a preview file name or path.
+fn preview_stem(preview: &str) -> String {
     let name = preview.rsplit('/').next().unwrap_or_default();
     let stem = name.strip_suffix(".png").unwrap_or(name);
     if stem.is_empty()

@@ -36,6 +36,7 @@ use crate::settings::gamesetup::SEA_LEVEL_RISE_MAX;
 use crate::settings::gamesetup::WONDER_DURATION_MAX;
 use crate::settings::gamesetup::available_filters;
 use crate::settings::gamesetup::map_choices;
+use crate::settings::gamesetup::map_filter_names;
 
 /// D15: a setup nobody starts closes after this.
 pub const SETUP_LIMIT: Duration = Duration::from_secs(600);
@@ -674,6 +675,11 @@ fn parse_change(request: &Value) -> Option<Change> {
         "map_type" => Change::MapType(MapType::from_name(value.as_str()?)?),
         "map_filter" => Change::MapFilter(text()?),
         "map" => Change::Map(Choice::from_name(value.as_str()?)),
+        "browse_map" => Change::BrowseMap {
+            kind: MapType::from_name(request["map_type"].as_str()?)?,
+            filter: request["map_filter"].as_str()?.to_string(),
+            map: Choice::from_name(value.as_str()?),
+        },
         "map_size" => Change::MapSize(whole()?),
         "player_count" => Change::PlayerCount(usize::try_from(value.as_u64()?).ok()?),
         "biome" => Change::Biome(Choice::from_name(value.as_str()?)),
@@ -770,6 +776,7 @@ pub fn catalog_json(catalog: &Catalog) -> String {
             "name": map.name,
             "description": map.description,
             "preview": map.preview,
+            "filters": map_filter_names(map),
         })).collect::<Vec<_>>(),
         "civs": catalog.civs.iter()
             .map(|civ| json!({ "code": civ.code, "selectable": civ.selectable }))

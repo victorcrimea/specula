@@ -129,7 +129,7 @@ input[type=text] { height: 26px; box-sizing: border-box; padding: 0 6px; border:
 .slot .gear:hover { background-image: var(--gui-gear-hover); }
 .slot .gear:active { background-image: var(--gui-gear-press); }
 /* MapPreview.xml. */
-#preview { grid-area: preview; position: relative; overflow: hidden;
+#preview { grid-area: preview; position: relative; overflow: hidden; cursor: pointer;
   background-size: 100% 100%; background-repeat: no-repeat; }
 #preview-title { position: absolute; left: 5px; right: 5px; bottom: 2px;
   text-shadow: 0 0 2px black, 0 0 2px black; }
@@ -165,6 +165,7 @@ input[type=text] { height: 26px; box-sizing: border-box; padding: 0 6px; border:
 .tab .name { text-align: right; }
 .tab .value { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .tab .value select { flex: 1; }
+.tab .value > .red { flex: 1; }
 .tab .value input[type=range] { flex: 1; min-width: 80px; }
 /* GameSettingsTabs.xml and GameDescription.xml. */
 #right { grid-area: right; display: flex; flex-direction: column; gap: 10px; min-height: 0; }
@@ -213,6 +214,50 @@ input[type=text] { height: 26px; box-sizing: border-box; padding: 0 6px; border:
 #ai-description { margin: 16px 8% 0; text-align: center; font-weight: 400; }
 #ai-ok { position: absolute; right: 20px; bottom: 17px; width: 200px; }
 
+/* MapBrowser.xml: ModernFade under a ModernDialog at 5% 5% 95% 95%. */
+#map-browser { position: fixed; inset: 0; z-index: 10; background: rgba(0, 0, 0, 0.6); }
+#map-dialog { position: absolute; inset: 5%; box-sizing: border-box; padding: 15px;
+  display: grid; gap: 10px; grid-template-columns: minmax(0, 1fr) 375px;
+  grid-template-rows: auto minmax(0, 1fr);
+  grid-template-areas: "grid filters" "grid details";
+  background: var(--gui-dialog-background) 0 0 / 512px 512px repeat; }
+#map-dialog > .edge { position: absolute; left: 0; right: 0; height: 8px;
+  background: var(--gui-dialog-border) 0 0 / 2048px 8px repeat-x; }
+#map-dialog > .edge.top { top: -4px; }
+#map-dialog > .edge.bottom { bottom: 0; }
+#map-dialog h2 { position: absolute; left: calc(50% - 128px); width: 256px; top: -18px; height: 33px;
+  margin: 0; font-size: 14px; line-height: 33px; text-align: center;
+  background: var(--gui-dialog-titlebar-middle) 0 0 / 128px 100% repeat-x; }
+#map-grid { grid-area: grid; position: relative; overflow-y: auto; display: grid; align-content: start;
+  grid-template-columns: repeat(var(--columns, 4), minmax(0, 1fr)); }
+.map-tile { aspect-ratio: 4 / 3; padding: 3px; border: 0; background: none; cursor: pointer;
+  min-width: 0; color: inherit; font: inherit; }
+.map-tile:hover { background: rgba(255, 0, 0, 0.39); }
+.map-tile:active { background: rgba(255, 0, 0, 0.59); }
+.map-tile.selected { background: rgb(120, 0, 0); }
+.map-tile .frame { position: relative; display: block; height: 100%; }
+.map-tile img { position: absolute; inset: 1px; width: calc(100% - 2px); height: calc(100% - 2px);
+  object-fit: fill; }
+.map-tile .name { position: absolute; left: 10px; right: 10px; bottom: 6px; text-align: center;
+  text-shadow: 0 0 2px black, 0 0 2px black; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; }
+#map-filters, #map-details { background: rgba(0, 0, 0, 0.4); padding: 0 5px; }
+#map-filters { grid-area: filters; }
+#map-details { grid-area: details; display: flex; flex-direction: column; min-height: 0; }
+#map-filters .zoom { display: flex; justify-content: flex-end; }
+#map-filters .zoom button { width: 29px; height: 28px; padding: 0; }
+#map-filters .row { display: flex; align-items: center; gap: 5px; height: 40px; }
+#map-filters .row > span { white-space: nowrap; }
+#map-filters .row > input, #map-filters .row > select { flex: 1; min-width: 0; }
+#map-selected-preview { position: relative; aspect-ratio: 4 / 3; background-size: 100% 100%; }
+#map-selected-name { position: absolute; left: 0; right: 0; bottom: 2px; text-align: center;
+  font-size: 16px; text-shadow: 0 0 2px black, 0 0 2px black; }
+#map-selected-description { flex: 1; min-height: 0; overflow: auto; margin: 10px;
+  font-weight: 400; white-space: pre-wrap; }
+#map-pick-random { width: 100%; }
+#map-details .choose { display: flex; }
+#map-details .choose > button { flex: 1; }
+
 /* Vanilla is a desktop page; a narrow screen gets its panels in one column. */
 @media (max-width: 1000px) {
   #window { height: auto; min-height: 100%; padding: 40px 16px 22px; }
@@ -225,6 +270,10 @@ input[type=text] { height: 26px; box-sizing: border-box; padding: 0 6px; border:
   #players-head { height: auto; }
   .slot { height: auto; padding: 2px 5px 2px 0; }
   #preview { min-height: 120px; }
+  #map-dialog { inset: 0; grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto minmax(240px, 1fr) auto;
+    grid-template-areas: "filters" "grid" "details"; overflow-y: auto; }
+  #map-selected-preview { max-height: 30vh; }
   #settings-panel, #description { overflow: visible; }
   #chat { min-height: 80px; }
   #bottom { flex-wrap: wrap; }
@@ -256,7 +305,7 @@ input[type=text] { height: 26px; box-sizing: border-box; padding: 0 6px; border:
 <div id="players"></div>
 </section>
 
-<section id="preview" class="gold-box"><div id="preview-title"></div></section>
+<section id="preview" class="gold-box" data-tip="Click to view the list of available maps." data-i18n-attrs="data-tip"><div id="preview-title"></div></section>
 
 <section id="left">
 <div id="spectators-box" class="gold-box">
@@ -321,6 +370,28 @@ input[type=text] { height: 26px; box-sizing: border-box; padding: 0 6px; border:
 </div>
 <p id="ai-description"></p>
 <button id="ai-ok" class="red" type="button" data-i18n>OK</button>
+</div>
+</div>
+
+<div id="map-browser" hidden>
+<div id="map-dialog" role="dialog" aria-modal="true" aria-labelledby="map-browser-title">
+<div class="edge top"></div>
+<div class="edge bottom"></div>
+<h2 id="map-browser-title" data-i18n>Map Browser</h2>
+<div id="map-grid"></div>
+<div id="map-filters">
+<div class="zoom"><button id="map-zoom-in" class="red" type="button"></button><button id="map-zoom-out" class="red" type="button"></button></div>
+<div id="map-count"></div>
+<label class="row"><span data-i18n>Search Map:</span><input id="map-search" type="text" autocomplete="off" spellcheck="false"></label>
+<label class="row"><span data-i18n>Map Type:</span><select id="map-browser-type"></select></label>
+<label class="row"><span data-i18n>Map Filter:</span><select id="map-browser-filter"></select></label>
+</div>
+<div id="map-details">
+<div id="map-selected-preview"><div id="map-selected-name"></div></div>
+<div id="map-selected-description"></div>
+<button id="map-pick-random" class="red" type="button" data-i18n>Pick Random Map</button>
+<div class="choose"><button id="map-cancel" class="red" type="button"></button><button id="map-select" class="red" type="button" disabled></button></div>
+</div>
 </div>
 </div>
 
