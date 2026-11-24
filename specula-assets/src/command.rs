@@ -18,12 +18,20 @@
 //! selection to keep. From the server it is a `GroupContents`: the group
 //! and its members' handles. Neither is an engine order, so they are not
 //! in `Command`.
+//!
+//! A message starting with `SELECTION_DEFINE_TAG` or `SELECTION_USE_TAG`
+//! wraps a command, because orders are spammed with the same selection and
+//! resending the whole list each time dominates their size. DEFINE is a
+//! varint token and a full command, which the server keeps the list of for
+//! the socket. USE is the token, the handles that left the kept list since
+//! (as an entity list) and a command with an empty selection; the server
+//! shrinks its list by them and fills it back in.
 
 use crate::bytes::ByteReader;
 
 /// The version of this format, which the server sends as the first byte of
 /// its seat message; a page on another version must reload.
-pub const COMMAND_VERSION: u8 = 10;
+pub const COMMAND_VERSION: u8 = 11;
 
 pub const QUEUED: u8 = 1;
 pub const PUSH_FRONT: u8 = 2;
@@ -88,6 +96,9 @@ const QUERY_WALL: u8 = 3;
 
 /// Above every command kind, and not `QUERY_TAG`.
 pub const GROUP_TAG: u8 = 0x81;
+/// Above every command kind, and not `QUERY_TAG` or `GROUP_TAG`.
+pub const SELECTION_DEFINE_TAG: u8 = 0x82;
+pub const SELECTION_USE_TAG: u8 = 0x83;
 /// Vanilla's control groups, the keys 1-9 and 0.
 pub const GROUP_COUNT: usize = 10;
 /// The same as the page's selection limit (`MAX_SELECTION` in
@@ -558,6 +569,67 @@ impl GroupSave {
     }
 }
 
+/// An order that names its selection by the socket's token.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Tokened {
+    /// `command.selection()` is the full list, kept under `token`.
+    Define { token: u32, command: Command },
+    /// `command.selection()` is empty; the kept list minus `removed`
+    /// is the selection, and is kept from now on.
+    Use {
+        token: u32,
+        removed: Vec<u32>,
+        command: Command,
+    },
+}
+
+impl Tokened {
+    pub fn encode(&self) -> Vec<u8> {
+        let (tag, token, command) = match self {
+            Tokened::Define { token, command } => (SELECTION_DEFINE_TAG, token, command),
+            Tokened::Use { token, command, .. } => (SELECTION_USE_TAG, token, command),
+        };
+        let mut out = Out(vec![tag]);
+        out.varint(u64::from(*token));
+        if let Tokened::Use { removed, .. } = self {
+            out.entities(removed);
+        }
+        out.0.extend_from_slice(&command.encode());
+        out.0
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<Tokened, &'static str> {
+        let mut input = ByteReader(bytes);
+        let tag = input.u8()?;
+        if tag != SELECTION_DEFINE_TAG && tag != SELECTION_USE_TAG {
+            return Err("not a tokened order");
+        }
+        let token = input.varint_u32()?;
+        let removed = if tag == SELECTION_USE_TAG {
+            entities(&mut input)?
+        } else {
+            Vec::new()
+        };
+        let command = Command::decode(input.0)?;
+        let selection = command.selection().ok_or("order has no selection")?;
+        if tag == SELECTION_USE_TAG {
+            if !selection.is_empty() {
+                return Err("token order with a selection");
+            }
+            Ok(Tokened::Use {
+                token,
+                removed,
+                command,
+            })
+        } else {
+            if selection.is_empty() {
+                return Err("token definition without a selection");
+            }
+            Ok(Tokened::Define { token, command })
+        }
+    }
+}
+
 /// A control group's members, as the server pushes it to the page.
 #[derive(Clone, Debug, PartialEq)]
 pub struct GroupContents {
@@ -591,6 +663,108 @@ impl GroupContents {
 }
 
 impl Command {
+    /// The entities the order is given to; `holders` and a lone `entity`
+    /// are not a selection.
+    pub fn selection(&self) -> Option<&Vec<u32>> {
+        match self {
+            Command::Walk { entities, .. }
+            | Command::AttackWalk { entities, .. }
+            | Command::Attack { entities, .. }
+            | Command::Gather { entities, .. }
+            | Command::Repair { entities, .. }
+            | Command::Garrison { entities, .. }
+            | Command::ReturnResource { entities, .. }
+            | Command::Construct { entities, .. }
+            | Command::Train { entities, .. }
+            | Command::Stop { entities, .. }
+            | Command::Delete { entities, .. }
+            | Command::Rally { entities, .. }
+            | Command::Stance { entities, .. }
+            | Command::ConstructWall { entities, .. }
+            | Command::Autoqueue { entities, .. }
+            | Command::Formation { entities, .. }
+            | Command::UnloadTurrets { entities, .. }
+            | Command::LeaveTurret { entities, .. }
+            | Command::BackToWork { entities, .. }
+            | Command::RemoveGuard { entities, .. }
+            | Command::DropsiteSharing { entities, .. }
+            | Command::Guard { entities, .. }
+            | Command::OccupyTurret { entities, .. }
+            | Command::Patrol { entities, .. }
+            | Command::CallToArms { entities, .. }
+            | Command::AlertRaise { entities, .. }
+            | Command::AlertEnd { entities, .. }
+            | Command::Upgrade { entities, .. }
+            | Command::CancelUpgrade { entities, .. }
+            | Command::SetupTradeRoute { entities, .. }
+            | Command::CancelTradeRoute { entities, .. }
+            | Command::LockGate { entities, .. }
+            | Command::Pack { entities, .. }
+            | Command::CancelPack { entities, .. } => Some(entities),
+            Command::Research { .. }
+            | Command::StopProduction { .. }
+            | Command::UnloadAll { .. }
+            | Command::UnloadAllByOwner { .. }
+            | Command::UnloadTemplate { .. }
+            | Command::Barter { .. }
+            | Command::SetTradingGoods { .. }
+            | Command::Tribute { .. }
+            | Command::Diplomacy { .. }
+            | Command::AttackRequest { .. }
+            | Command::SpyRequest { .. } => None,
+        }
+    }
+
+    pub fn selection_mut(&mut self) -> Option<&mut Vec<u32>> {
+        match self {
+            Command::Walk { entities, .. }
+            | Command::AttackWalk { entities, .. }
+            | Command::Attack { entities, .. }
+            | Command::Gather { entities, .. }
+            | Command::Repair { entities, .. }
+            | Command::Garrison { entities, .. }
+            | Command::ReturnResource { entities, .. }
+            | Command::Construct { entities, .. }
+            | Command::Train { entities, .. }
+            | Command::Stop { entities, .. }
+            | Command::Delete { entities, .. }
+            | Command::Rally { entities, .. }
+            | Command::Stance { entities, .. }
+            | Command::ConstructWall { entities, .. }
+            | Command::Autoqueue { entities, .. }
+            | Command::Formation { entities, .. }
+            | Command::UnloadTurrets { entities, .. }
+            | Command::LeaveTurret { entities, .. }
+            | Command::BackToWork { entities, .. }
+            | Command::RemoveGuard { entities, .. }
+            | Command::DropsiteSharing { entities, .. }
+            | Command::Guard { entities, .. }
+            | Command::OccupyTurret { entities, .. }
+            | Command::Patrol { entities, .. }
+            | Command::CallToArms { entities, .. }
+            | Command::AlertRaise { entities, .. }
+            | Command::AlertEnd { entities, .. }
+            | Command::Upgrade { entities, .. }
+            | Command::CancelUpgrade { entities, .. }
+            | Command::SetupTradeRoute { entities, .. }
+            | Command::CancelTradeRoute { entities, .. }
+            | Command::LockGate { entities, .. }
+            | Command::Pack { entities, .. }
+            | Command::CancelPack { entities, .. } => Some(entities),
+            Command::Research { .. }
+            | Command::StopProduction { .. }
+            | Command::UnloadAll { .. }
+            | Command::UnloadAllByOwner { .. }
+            | Command::UnloadTemplate { .. }
+            | Command::Barter { .. }
+            | Command::SetTradingGoods { .. }
+            | Command::Tribute { .. }
+            | Command::Diplomacy { .. }
+            | Command::AttackRequest { .. }
+            | Command::SpyRequest { .. } => None,
+        }
+    }
+
     /// Every entity id the command names, for a server that numbers the
     /// entities its player is shown on its own (a seat's handles). An id
     /// of 0, "none", is left out.

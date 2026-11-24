@@ -2,7 +2,8 @@
 //! `/play/command` WebSocket, which the page holds itself: orders are page
 //! events and few, so they need not pass through the stream worker. The
 //! server's first message names the player the visitor commands; its text
-//! messages answer the placement queries.
+//! messages answer the placement queries. An order naming a selection the
+//! socket sent before names it by a per-socket token instead.
 
 use std::cell::Cell;
 use std::cell::RefCell;
@@ -16,6 +17,7 @@ use specula_assets::command::GroupContents;
 use specula_assets::command::GroupSave;
 use specula_assets::command::Query;
 use specula_assets::command::QueryKind;
+use specula_assets::command::Tokened;
 use wasm_bindgen::JsCast;
 use wasm_bindgen::JsValue;
 use wasm_bindgen::closure::Closure;
@@ -28,8 +30,18 @@ use web_sys::WebSocket;
 const RECONNECT_MS: i32 = 1000;
 const RECONNECT_MAX_MS: i32 = 30_000;
 
+/// Below this the tag and token cost about as much as the list.
+const MIN_TOKEN_LIST: usize = 4;
+
 pub struct Uplink {
     inner: Rc<RefCell<Inner>>,
+}
+
+/// The list the server keeps for this socket's token, as handles,
+/// sorted and deduped.
+struct Sent {
+    token: u32,
+    handles: Vec<u32>,
 }
 
 struct Inner {
@@ -39,6 +51,9 @@ struct Inner {
     /// The map's starting camera of the seat, x and z, when it has one.
     starting_camera: Rc<Cell<Option<[f32; 2]>>>,
     next_query: u32,
+    /// What the server keeps under this socket's token.
+    sent: Option<Sent>,
+    next_token: u32,
     /// Query id and result, as they came.
     replies: Rc<RefCell<Vec<(u32, JsValue)>>>,
     /// The control groups the server pushed, as they came.
@@ -60,6 +75,8 @@ impl Uplink {
             seat: Rc::new(Cell::new(0)),
             starting_camera: Rc::new(Cell::new(None)),
             next_query: 1,
+            sent: None,
+            next_token: 1,
             replies: Rc::new(RefCell::new(Vec::new())),
             groups: Rc::new(RefCell::new(Vec::new())),
             reconnect_ms: RECONNECT_MS,
@@ -84,12 +101,17 @@ impl Uplink {
     /// Dropped while the socket is not open: an order is worth giving only
     /// now.
     pub fn send(&self, command: &Command) {
-        let inner = self.inner.borrow();
-        let Some(socket) = &inner.socket else {
+        let mut inner = self.inner.borrow_mut();
+        let Some(socket) = inner.socket.clone() else {
             return;
         };
         if socket.ready_state() == WebSocket::OPEN && inner.seat.get() != 0 {
-            let _ = socket.send_with_u8_array(&command.encode());
+            let inner = &mut *inner;
+            let bytes = wire(command, &mut inner.sent, &mut inner.next_token);
+            if socket.send_with_u8_array(&bytes).is_err() {
+                // The server may never have got the list.
+                inner.sent = None;
+            }
         }
     }
 
@@ -128,6 +150,55 @@ impl Uplink {
     pub fn take_replies(&self) -> Vec<(u32, JsValue)> {
         std::mem::take(&mut *self.inner.borrow().replies.borrow_mut())
     }
+}
+
+/// The bytes of `command`, naming its selection by the token when that
+/// is cheaper; updates what the server will keep.
+fn wire(command: &Command, sent: &mut Option<Sent>, next_token: &mut u32) -> Vec<u8> {
+    let Some(selection) = command.selection() else {
+        return command.encode();
+    };
+    let mut list = selection.clone();
+    list.sort_unstable();
+    list.dedup();
+    if list.len() < MIN_TOKEN_LIST {
+        return command.encode();
+    }
+    if let Some(kept) = sent {
+        let subset = list.iter().all(|h| kept.handles.binary_search(h).is_ok());
+        if subset {
+            let removed: Vec<u32> = kept
+                .handles
+                .iter()
+                .copied()
+                .filter(|h| list.binary_search(h).is_err())
+                .collect();
+            if removed.len() <= list.len() {
+                let mut bare = command.clone();
+                if let Some(selection) = bare.selection_mut() {
+                    selection.clear();
+                }
+                kept.handles = list;
+                return Tokened::Use {
+                    token: kept.token,
+                    removed,
+                    command: bare,
+                }
+                .encode();
+            }
+        }
+    }
+    let token = *next_token;
+    *next_token = next_token.wrapping_add(1).max(1);
+    *sent = Some(Sent {
+        token,
+        handles: list,
+    });
+    Tokened::Define {
+        token,
+        command: command.clone(),
+    }
+    .encode()
 }
 
 fn connect(inner: &Weak<RefCell<Inner>>) {
@@ -206,6 +277,9 @@ fn connect(inner: &Weak<RefCell<Inner>>) {
             inner.seat.set(0);
             inner.starting_camera.set(None);
             inner.socket = None;
+            // The server's slot died with the socket.
+            inner.sent = None;
+            inner.next_token = 1;
             let wait = inner.reconnect_ms;
             inner.reconnect_ms = (wait * 2).min(RECONNECT_MAX_MS);
             wait

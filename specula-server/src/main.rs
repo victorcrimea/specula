@@ -62,6 +62,9 @@ use specula_assets::command::GroupContents;
 use specula_assets::command::GroupSave;
 use specula_assets::command::QUERY_TAG;
 use specula_assets::command::Query;
+use specula_assets::command::SELECTION_DEFINE_TAG;
+use specula_assets::command::SELECTION_USE_TAG;
+use specula_assets::command::Tokened;
 
 use crate::classify::Classifier;
 use crate::config::Config;
@@ -1032,7 +1035,8 @@ fn play_data(
 /// none, then the seat's starting camera (x and z, f32 LE) when the map
 /// gives one. The seat is the one held when the socket opened: orders are
 /// dropped once the visitor no longer holds it. A query's reply goes only
-/// to the connection that asked.
+/// to the connection that asked. Orders may name the socket's last selection
+/// by token (`Tokened`), kept only for this connection.
 #[rocket::get("/g/<id>/play/command")]
 fn play_command(
     id: MatchId,
@@ -1053,6 +1057,9 @@ fn play_command(
             let _presence = bound
                 .and(visitor.as_deref())
                 .map(|cookie| play.present(cookie));
+            // The token's list as the feed's ids, for this socket only, since
+            // the page numbers its tokens per connection.
+            let mut kept: Option<(u32, Vec<u32>)> = None;
             let mut replies = play.replies();
             // Before the snapshot, so a push in between is not missed.
             let mut pushes = play.group_pushes();
@@ -1159,6 +1166,50 @@ fn play_command(
                             }
                         }
                         Err(error) => eprintln!("bad control group from the player: {error}"),
+                    }
+                    continue;
+                }
+                if matches!(
+                    bytes.first(),
+                    Some(&SELECTION_DEFINE_TAG | &SELECTION_USE_TAG)
+                ) {
+                    match Tokened::decode(&bytes) {
+                        Ok(Tokened::Define { token, mut command }) => {
+                            // The page counts this as kept whatever happens
+                            // here, so a refused list must not leave an
+                            // older one in its place.
+                            kept = None;
+                            if to_feed(command.entity_ids_mut()) {
+                                let ids = command.selection().cloned().unwrap_or_default();
+                                kept = Some((token, ids));
+                                play.send(seat, &command);
+                            }
+                        }
+                        Ok(Tokened::Use {
+                            token,
+                            removed,
+                            mut command,
+                        }) => match &mut kept {
+                            Some((kept_token, ids)) if *kept_token == token => {
+                                // Before the order may be refused: the page
+                                // has already shrunk its list.
+                                let gone: HashSet<u32> = removed
+                                    .iter()
+                                    .filter_map(|handle| hub.seat_entity(u32::from(seat), *handle))
+                                    .collect();
+                                ids.retain(|id| !gone.contains(id));
+                                // The selection is empty here, so only the
+                                // other ids (a target, say) are handles.
+                                if to_feed(command.entity_ids_mut()) {
+                                    if let Some(selection) = command.selection_mut() {
+                                        selection.clone_from(ids);
+                                    }
+                                    play.send(seat, &command);
+                                }
+                            }
+                            _ => eprintln!("order with an unknown selection token {token}"),
+                        },
+                        Err(error) => eprintln!("bad tokened order from the player: {error}"),
                     }
                     continue;
                 }
