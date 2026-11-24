@@ -142,6 +142,7 @@
   "%(player)s: %(time)s": "%(player)s: %(time)s",
   "%(player)s (disconnected): %(time)s": "%(player)s (bağlantı kesildi): %(time)s",
   "%(player)s is out of pause time; their pause ends in %(time)s.": "%(player)s duraklatma süresini tüketti; duraklatması %(time)s içinde bitecek.",
+  "Mutual pause: nobody is charged.": "Karşılıklı duraklatma: kimsenin süresi azalmıyor.",
   "Pause time left: %(time)s": "Kalan duraklatma süresi: %(time)s",
   "You have no pause time left.": "Duraklatma süreniz kalmadı.",
   "Claim victory": "Zafer talep et",

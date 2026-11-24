@@ -142,6 +142,7 @@
   "%(player)s: %(time)s": "%(player)s: %(time)s",
   "%(player)s (disconnected): %(time)s": "%(player)s (terputus): %(time)s",
   "%(player)s is out of pause time; their pause ends in %(time)s.": "%(player)s kehabisan waktu jeda; jedanya berakhir dalam %(time)s.",
+  "Mutual pause: nobody is charged.": "Jeda bersama: tidak ada yang dikenai waktu.",
   "Pause time left: %(time)s": "Sisa waktu jeda: %(time)s",
   "You have no pause time left.": "Kamu tidak punya sisa waktu jeda.",
   "Claim victory": "Klaim kemenangan",

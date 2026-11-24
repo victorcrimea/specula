@@ -142,6 +142,7 @@
   "%(player)s: %(time)s": "%(player)s: %(time)s",
   "%(player)s (disconnected): %(time)s": "%(player)s（已断开连接）：%(time)s",
   "%(player)s is out of pause time; their pause ends in %(time)s.": "%(player)s 的暂停时间已用完，其暂停将在 %(time)s 后结束。",
+  "Mutual pause: nobody is charged.": "双方暂停：不扣除任何人的暂停时间。",
   "Pause time left: %(time)s": "剩余暂停时间：%(time)s",
   "You have no pause time left.": "你没有剩余暂停时间了。",
   "Claim victory": "宣布胜利",

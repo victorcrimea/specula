@@ -142,6 +142,7 @@
   "%(player)s: %(time)s": "%(player)s: %(time)s",
   "%(player)s (disconnected): %(time)s": "%(player)s (deskonektatuta): %(time)s",
   "%(player)s is out of pause time; their pause ends in %(time)s.": "%(player)s(e)k ez du pausa-denbora gehiagorik; bere pausa %(time)s barru amaituko da.",
+  "Mutual pause: nobody is charged.": "Elkarrekiko etenaldia: inori ez zaio denborarik kentzen.",
   "Pause time left: %(time)s": "Geratzen den pausa-denbora: %(time)s",
   "You have no pause time left.": "Ez zaizu pausa-denbora gehiagorik geratzen.",
   "Claim victory": "Eskatu garaipena",

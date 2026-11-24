@@ -142,6 +142,7 @@
   "%(player)s: %(time)s": "%(player)s: %(time)s",
   "%(player)s (disconnected): %(time)s": "%(player)s (mất kết nối): %(time)s",
   "%(player)s is out of pause time; their pause ends in %(time)s.": "%(player)s đã hết thời gian tạm dừng; tạm dừng của họ sẽ kết thúc sau %(time)s.",
+  "Mutual pause: nobody is charged.": "Tạm dừng chung: không ai bị trừ thời gian.",
   "Pause time left: %(time)s": "Thời gian tạm dừng còn lại: %(time)s",
   "You have no pause time left.": "Bạn không còn thời gian tạm dừng.",
   "Claim victory": "Yêu cầu chiến thắng",

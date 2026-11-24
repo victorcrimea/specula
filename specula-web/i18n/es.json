@@ -142,6 +142,7 @@
   "%(player)s: %(time)s": "%(player)s: %(time)s",
   "%(player)s (disconnected): %(time)s": "%(player)s (desconectado): %(time)s",
   "%(player)s is out of pause time; their pause ends in %(time)s.": "%(player)s no tiene tiempo de pausa; su pausa termina en %(time)s.",
+  "Mutual pause: nobody is charged.": "Pausa mutua: no se descuenta tiempo a nadie.",
   "Pause time left: %(time)s": "Tiempo de pausa restante: %(time)s",
   "You have no pause time left.": "No te queda tiempo de pausa.",
   "Claim victory": "Reclamar la victoria",

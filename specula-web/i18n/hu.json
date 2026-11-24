@@ -142,6 +142,7 @@
   "%(player)s: %(time)s": "%(player)s: %(time)s",
   "%(player)s (disconnected): %(time)s": "%(player)s (leválasztva): %(time)s",
   "%(player)s is out of pause time; their pause ends in %(time)s.": "%(player)s szünetideje elfogyott; a szünete %(time)s múlva véget ér.",
+  "Mutual pause: nobody is charged.": "Közös szünet: senkitől sem vonódik le idő.",
   "Pause time left: %(time)s": "Hátralévő szünetidő: %(time)s",
   "You have no pause time left.": "Nem maradt szünetidőd.",
   "Claim victory": "Győzelem igénylése",

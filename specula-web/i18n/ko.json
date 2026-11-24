@@ -142,6 +142,7 @@
   "%(player)s: %(time)s": "%(player)s: %(time)s",
   "%(player)s (disconnected): %(time)s": "%(player)s (연결 끊김): %(time)s",
   "%(player)s is out of pause time; their pause ends in %(time)s.": "%(player)s 님은 일시정지 시간을 다 썼습니다. %(time)s 후에 일시정지가 끝납니다.",
+  "Mutual pause: nobody is charged.": "상호 일시 정지: 아무도 시간이 차감되지 않습니다.",
   "Pause time left: %(time)s": "남은 일시정지 시간: %(time)s",
   "You have no pause time left.": "남은 일시정지 시간이 없습니다.",
   "Claim victory": "승리 주장",

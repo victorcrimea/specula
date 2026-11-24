@@ -1,9 +1,9 @@
 //! The pause ledger: which human seats hold a pause, what each has left of
 //! its pause budget, and the pauser set the engine is told (D41 to D43).
 //! Pauses are unlimited in number but cost at least 5 s each, so a
-//! pause-unpause cycle cannot be free; a mutual pause (every active seat
-//! holds one and all are connected) costs nothing; a seat away from the
-//! game pauses it at its own cost; and a budget that runs out ends that
+//! pause-unpause cycle cannot be free; a mutual pause (every connected
+//! active seat holds one, away seats aside) costs nothing; a seat away from
+//! the game pauses it at its own cost; and a budget that runs out ends that
 //! seat's pause after a 5 s countdown.
 //!
 //! Charging is wall time and happens when the server polls, so a budget can
@@ -147,15 +147,20 @@ impl Ledger {
                     && (!account.budget.is_zero() || account.countdown.is_some())))
     }
 
-    /// Whether every active seat holds a pause and all are connected: no
-    /// seat is charged then (D42).
+    /// Whether every connected active seat holds a pause, and at least one
+    /// does: no seat is charged then (D42). Away seats do not break it, so
+    /// the others can wait for a dropped player at nobody's cost, its own
+    /// included; an away seat is free only while they all hold.
     fn mutual(&self) -> bool {
         let mut any = false;
         for account in self.accounts.values().filter(|account| account.active) {
-            any = true;
-            if !account.connected || account.hold.is_none() {
+            if !account.connected {
+                continue;
+            }
+            if account.hold.is_none() {
                 return false;
             }
+            any = true;
         }
         any
     }

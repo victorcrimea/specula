@@ -142,6 +142,7 @@
   "%(player)s: %(time)s": "%(player)s: %(time)s",
   "%(player)s (disconnected): %(time)s": "%(player)s (odpojený): %(time)s",
   "%(player)s is out of pause time; their pause ends in %(time)s.": "%(player)s nemá čas pauzy; jeho pauza sa skončí o %(time)s.",
+  "Mutual pause: nobody is charged.": "Spoločná pauza: nikomu sa neodpočítava čas.",
   "Pause time left: %(time)s": "Zostávajúci čas pauzy: %(time)s",
   "You have no pause time left.": "Nemáš žiadny čas pauzy.",
   "Claim victory": "Uplatniť víťazstvo",

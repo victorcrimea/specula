@@ -142,6 +142,7 @@
   "%(player)s: %(time)s": "%(player)s: %(time)s",
   "%(player)s (disconnected): %(time)s": "%(player)s（切断）: %(time)s",
   "%(player)s is out of pause time; their pause ends in %(time)s.": "%(player)s は一時停止時間を使い切りました。あと %(time)s で一時停止が終了します。",
+  "Mutual pause: nobody is charged.": "相互一時停止中：誰の一時停止時間も減りません。",
   "Pause time left: %(time)s": "残りの一時停止時間: %(time)s",
   "You have no pause time left.": "一時停止時間が残っていません。",
   "Claim victory": "勝利を主張",

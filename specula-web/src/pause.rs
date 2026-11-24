@@ -182,5 +182,27 @@ impl PauseOverlay {
             line.set_text_content(Some(&text));
             let _ = self.budgets.append_child(&line);
         }
+        if mutual(ledger)
+            && let Ok(line) = self.document.create_element("div")
+        {
+            line.set_text_content(Some(&lang::translate("Mutual pause: nobody is charged.")));
+            let _ = self.budgets.append_child(&line);
+        }
     }
+}
+
+/// The server's mutual pause (D42) as the ledger shows it: every connected
+/// seat holds a pause, and at least one does; away seats do not break it.
+fn mutual(ledger: &[LedgerEntry]) -> bool {
+    let mut any = false;
+    for entry in ledger {
+        if entry.flags & crate::stream::LEDGER_AWAY != 0 {
+            continue;
+        }
+        if entry.flags & crate::stream::LEDGER_HOLDS == 0 {
+            return false;
+        }
+        any = true;
+    }
+    any
 }
