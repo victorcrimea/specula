@@ -278,17 +278,26 @@ pub fn foundation_shapes<'a>(
         {
             return None;
         }
-        let name = scene.templates.get(dot.template as usize)?;
-        // Those are visual or local entities, with no obstruction of their
-        // own.
-        if ["construction|", "preview|", "corpse|", "decay|"]
-            .iter()
-            .any(|prefix| name.starts_with(prefix))
-        {
+        if is_local(scene, dot) {
             return None;
         }
         Some((*id, dot, obstruction))
     })
+}
+
+/// Whether the dot is one of the visual or local entities, which have no
+/// obstruction of their own and which the range manager never sees: a
+/// destroyed foundation's corpse keeps its BuildRestrictions and owner,
+/// yet must not count for the distance rules.
+fn is_local(scene: &Scene, dot: &Dot) -> bool {
+    scene
+        .templates
+        .get(dot.template as usize)
+        .is_some_and(|name| {
+            ["construction|", "preview|", "corpse|", "decay|"]
+                .iter()
+                .any(|prefix| name.starts_with(prefix))
+        })
 }
 
 /// `TestStaticShape` against the stream's entities.
@@ -509,7 +518,7 @@ fn check_distance(world: &World, candidate: &Candidate) -> Result<(), Refusal> {
     };
     let near = |range: f64| {
         world.scene.dots.values().any(|dot| {
-            if dot.owner != world.seat || dot.mirage != 0 {
+            if dot.owner != world.seat || dot.mirage != 0 || is_local(world.scene, dot) {
                 return false;
             }
             let Some(details) = world
