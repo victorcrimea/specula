@@ -238,6 +238,8 @@
   "Players do not see observer chat in this match.": "Spelers zien de chat van waarnemers in dit spel niet.",
   "Too many people are watching on this server. Trying again...": "Te veel mensen kijken mee op deze server. Opnieuw proberen...",
   "Show unfinished matches": "Onvoltooide wedstrijden tonen",
+  "Show demo matches": "Demowedstrijden tonen",
+  "Demo": "Demo",
   "+ %(count)s AI": "+ %(count)s AI",
   "%(count)s AI": "%(count)s AI",
   "Feedback": "Feedback",

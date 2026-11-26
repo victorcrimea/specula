@@ -238,6 +238,8 @@
   "Players do not see observer chat in this match.": "Els jugadors no veuen el xat dels observadors en aquesta partida.",
   "Too many people are watching on this server. Trying again...": "Massa gent mira en aquest servidor. Es torna a provar...",
   "Show unfinished matches": "Mostra les partides inacabades",
+  "Show demo matches": "Mostra les partides de demostració",
+  "Demo": "Demostració",
   "+ %(count)s AI": "+ %(count)s IA",
   "%(count)s AI": "%(count)s IA",
   "Feedback": "Comentaris",

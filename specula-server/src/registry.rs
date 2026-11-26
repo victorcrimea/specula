@@ -96,6 +96,17 @@ const HOST_GRACE: Duration = Duration::from_secs(5 * 60);
 /// How long a decided game's engine runs on, so its final summary comes in
 /// and the seat's Continue watching shows a while of the rest.
 const DECIDED_GRACE: Duration = Duration::from_secs(60);
+/// How much game time a demo match may play, whatever `--game-limit` says:
+/// an AI game that never settles should not hold the demo slot all day.
+const DEMO_GAME_LIMIT: Duration = Duration::from_secs(90 * 60);
+/// The pause between two demos, so the last one's engine has let go of the
+/// slot's port and viewers see the match end.
+const DEMO_PAUSE: Duration = Duration::from_secs(10);
+/// How long the demo driver waits after a match it could not open or start.
+const DEMO_RETRY: Duration = Duration::from_secs(30);
+/// Owns every demo match; no browser holds this cookie.
+const DEMO_OWNER: &str = "specula-demo";
+const DEMO_NAME: &str = "Demo";
 /// The time left at which everyone is warned (D20), longest first; the
 /// pages keep the same list.
 const LIMIT_WARNINGS: [Duration; 3] = [
@@ -184,6 +195,8 @@ pub enum MatchState {
 
 pub struct Match {
     pub slot: u16,
+    /// A `--demo` match: nobody hosts it, and it is stored as a demo.
+    pub demo: bool,
     /// `<SOCKET>.<uuid>`; its pid file is `<socket>.observer`.
     pub socket: String,
     pub hub: Arc<Hub>,
@@ -266,6 +279,7 @@ impl Match {
 
     /// The wall time and the game time left before a limit stops it.
     fn limit_left(&self, config: &Config) -> (Duration, Duration) {
+        let game_limit = self.game_limit(config);
         (
             config.wall_limit.saturating_sub(
                 self.launched
@@ -274,8 +288,16 @@ impl Match {
                     .unwrap_or_else(Instant::now)
                     .elapsed(),
             ),
-            config.game_limit.saturating_sub(self.game_time()),
+            game_limit.saturating_sub(self.game_time()),
         )
+    }
+
+    fn game_limit(&self, config: &Config) -> Duration {
+        if self.demo {
+            config.game_limit.min(DEMO_GAME_LIMIT)
+        } else {
+            config.game_limit
+        }
     }
 }
 
@@ -456,6 +478,9 @@ struct Ended {
 }
 
 struct Inner {
+    /// The slot `--demo` reserves: the last, so humans fill the others
+    /// first. Humans never get it, the demo driver always does.
+    demo_slot: Option<u16>,
     matches: HashMap<MatchId, Arc<Match>>,
     ended: HashMap<MatchId, Ended>,
     /// Launch order, oldest first.
@@ -508,6 +533,7 @@ impl Registry {
         usage: Arc<Usage>,
     ) -> Self {
         let slots = vec![None; usize::from(config.slots)];
+        let demo_slot = config.demo.then(|| config.slots - 1);
         let catalog_json = catalog.as_ref().map(catalog_json);
         let observer_slots = Arc::new(ObserverSlots {
             open: AtomicU32::new(0),
@@ -524,6 +550,7 @@ impl Registry {
             catalog_json,
             usage,
             inner: Mutex::new(Inner {
+                demo_slot,
                 matches: HashMap::new(),
                 ended: HashMap::new(),
                 order: Vec::new(),
@@ -638,7 +665,7 @@ impl Registry {
     /// `/lobby.json` (M40, D59): the setups, the running matches and the
     /// newest `replays` stored ones.
     /// `unfinished`: also the stored matches with no result.
-    pub fn lobby_json(&self, replays: usize, unfinished: bool) -> String {
+    pub fn lobby_json(&self, replays: usize, unfinished: bool, demo: bool) -> String {
         let hosted: Vec<(MatchId, Arc<Match>)> = {
             let inner = self.inner.lock().unwrap();
             inner
@@ -679,6 +706,12 @@ impl Registry {
                     }));
                 }
                 MatchState::Running => {
+                    // A demo's page cannot open before the engine has loaded
+                    // the map and played a turn, and nobody is there to wait
+                    // for it, so the card appears only then.
+                    if found.demo && found.hub.turn() == 0 {
+                        continue;
+                    }
                     let map = found.play.lobby_info();
                     let mut players: Vec<Value> = found
                         .hub
@@ -712,13 +745,14 @@ impl Registry {
                         "observers": found.hub.observer_count(),
                         "observers_mode": found.observers().map(|(mode, _)| mode.name()),
                         "observers_delay": found.observers().map(|(_, delay)| delay.as_secs()),
+                        "demo": found.demo,
                     }));
                 }
                 MatchState::Ended => {}
             }
         }
         let (stored, more) = match &self.history {
-            Some(history) => history.lock().unwrap().list(replays, unfinished),
+            Some(history) => history.lock().unwrap().list(replays, unfinished, demo),
             None => (Vec::new(), false),
         };
         let stored: Vec<Value> = stored
@@ -748,6 +782,7 @@ impl Registry {
                     "duration": info.duration_secs,
                     "started": info.started_ms,
                     "replay": info.replay,
+                    "demo": meta.is_some_and(|meta| meta.demo),
                 })
             })
             .collect();
@@ -761,7 +796,12 @@ impl Registry {
     }
 
     pub fn slot_free(&self) -> bool {
-        self.inner.lock().unwrap().slots.iter().any(Option::is_none)
+        let inner = self.inner.lock().unwrap();
+        inner
+            .slots
+            .iter()
+            .enumerate()
+            .any(|(slot, held)| held.is_none() && inner.demo_slot != Some(slot as u16))
     }
 
     /// Opens a setup for `owner`, its host, seated as a player (vanilla's
@@ -777,6 +817,19 @@ impl Registry {
         nickname: Nickname,
         from: Option<(Settings, Option<u8>, Followers)>,
         batch: Option<&Value>,
+    ) -> Result<MatchId, &'static str> {
+        self.open_in(owner, nickname, from, batch, false)
+    }
+
+    /// `open_setup`, or with `demo` the demo slot's setup: owned by
+    /// `DEMO_OWNER`, which is host without a seat, with random settings.
+    fn open_in(
+        self: &Arc<Self>,
+        owner: &str,
+        nickname: Nickname,
+        from: Option<(Settings, Option<u8>, Followers)>,
+        batch: Option<&Value>,
+        demo: bool,
     ) -> Result<MatchId, &'static str> {
         let catalog = self.catalog.as_ref().ok_or("not hosting")?;
         let default_delay = u32::try_from(self.delay.as_secs()).unwrap_or(u32::MAX);
@@ -808,7 +861,10 @@ impl Registry {
             None => inner
                 .slots
                 .iter()
-                .position(Option::is_none)
+                .enumerate()
+                .position(|(slot, held)| {
+                    held.is_none() && (inner.demo_slot == Some(slot as u16)) == demo
+                })
                 .ok_or("every match slot is in use")? as u16,
         };
         let seats = Arc::new(Seats::new());
@@ -820,6 +876,15 @@ impl Registry {
             })
             .unwrap_or(1);
         let (settings, followers) = match from {
+            _ if demo => (
+                Settings::demo(catalog, default_delay, &mut rand::thread_rng()).map_err(
+                    |error| {
+                        eprintln!("cannot open a demo: {error}");
+                        "cannot open a demo"
+                    },
+                )?,
+                Vec::new(),
+            ),
             Some((mut settings, _, players)) => {
                 settings.on_seated(catalog, &[seat]);
                 (settings, players)
@@ -848,7 +913,9 @@ impl Registry {
                 name.as_str()
             );
         }
-        seats.set_player(owner, Some(seat))?;
+        if !demo {
+            seats.set_player(owner, Some(seat))?;
+        }
         seats.force_host_stay();
         // Only now: nothing above can fail after the old game was ended.
         if let Some((old_id, old)) = &old {
@@ -877,11 +944,16 @@ impl Registry {
             id,
             Arc::new(Match {
                 slot,
+                demo,
                 socket,
                 hub,
                 play,
                 seats,
-                room: Arc::new(SetupRoom::new(settings, reserved, self.config.ai_only)),
+                room: Arc::new(SetupRoom::new(
+                    settings,
+                    reserved,
+                    self.config.ai_only || demo,
+                )),
                 chat: Arc::new(Chat::new(self.delay)),
                 state: Mutex::new(MatchState::Setup),
                 runner: Mutex::new(None),
@@ -979,6 +1051,7 @@ impl Registry {
             map_name: launch.settings.map_name.clone(),
             preview: launch.settings.map_preview.clone(),
             ai_players: ai_players.clone(),
+            demo: found.demo,
         });
         let engine_done = Arc::new(AtomicBool::new(false));
         {
@@ -1273,7 +1346,7 @@ impl Registry {
             return None;
         }
         let (wall, _) = found.limit_left(&self.config);
-        Some((wall, self.config.game_limit))
+        Some((wall, found.game_limit(&self.config)))
     }
 
     /// Never returns; one thread for every hosted match.
@@ -1314,7 +1387,7 @@ impl Registry {
                 if left.is_zero() && found.play.tick_limit(limit) && found.play.end_at_limit() {
                     println!("match {id} reached the {limit} time limit, stopping its engine");
                 }
-                if found.play.ai_only() {
+                if found.play.ai_only() && !found.demo {
                     // Nobody else can end it, so a host who left must not
                     // leave an engine running unwatched.
                     let here = found
@@ -1344,6 +1417,41 @@ impl Registry {
             self.drop_settled();
             std::thread::sleep(WATCH_POLL);
         }
+    }
+
+    /// Never returns until the server stops; one thread for `--demo`. Each
+    /// pass opens a setup in the demo slot, starts it with random settings
+    /// and waits for its engine to end.
+    pub fn run_demos(self: &Arc<Self>) {
+        let Some(nickname) = Nickname::parse(DEMO_NAME) else {
+            return;
+        };
+        while !self.stopping() {
+            let started = self
+                .open_in(DEMO_OWNER, nickname.clone(), None, None, true)
+                .and_then(|id| self.launch_setup(id, DEMO_OWNER).map(|()| id));
+            match started {
+                Ok(id) => {
+                    while !self.stopping() && self.state_of(id) == Some(MatchState::Running) {
+                        std::thread::sleep(WATCH_POLL);
+                    }
+                    std::thread::sleep(DEMO_PAUSE);
+                }
+                Err(error) => {
+                    eprintln!("demo not started: {error}");
+                    std::thread::sleep(DEMO_RETRY);
+                }
+            }
+        }
+    }
+
+    fn state_of(&self, id: MatchId) -> Option<MatchState> {
+        self.inner
+            .lock()
+            .unwrap()
+            .matches
+            .get(&id)
+            .map(|found| found.state())
     }
 
     pub fn stopping(&self) -> bool {
@@ -1384,7 +1492,11 @@ impl Registry {
             };
             // Off the registry lock: stopping an engine runs `kill`.
             for found in &running {
-                found.play.end_decided();
+                if found.demo {
+                    found.play.end_for_stop();
+                } else {
+                    found.play.end_decided();
+                }
             }
             if self.idle() {
                 return;

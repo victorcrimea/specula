@@ -238,6 +238,8 @@
   "Players do not see observer chat in this match.": "Игроки не видят чат наблюдателей в этом матче.",
   "Too many people are watching on this server. Trying again...": "На этом сервере слишком много зрителей. Пробуем снова...",
   "Show unfinished matches": "Показывать незавершённые матчи",
+  "Show demo matches": "Показывать демонстрационные матчи",
+  "Demo": "Демо",
   "+ %(count)s AI": "+ %(count)s ИИ",
   "%(count)s AI": "%(count)s ИИ",
   "Feedback": "Обратная связь",

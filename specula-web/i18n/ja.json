@@ -238,6 +238,8 @@
   "Players do not see observer chat in this match.": "この試合では、プレイヤーに観戦者のチャットは見えません。",
   "Too many people are watching on this server. Trying again...": "このサーバーで観戦している人が多すぎます。再試行しています...",
   "Show unfinished matches": "未完了の試合を表示",
+  "Show demo matches": "デモ対戦を表示",
+  "Demo": "デモ",
   "+ %(count)s AI": "+ AI %(count)s 人",
   "%(count)s AI": "AI %(count)s 人",
   "Feedback": "フィードバック",

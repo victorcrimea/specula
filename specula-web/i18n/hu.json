@@ -238,6 +238,8 @@
   "Players do not see observer chat in this match.": "A játékosok nem látják a megfigyelők csevegését ebben a meccsben.",
   "Too many people are watching on this server. Trying again...": "Túl sokan nézik ezt a szervert. Újrapróbálkozás...",
   "Show unfinished matches": "Befejezetlen meccsek megjelenítése",
+  "Show demo matches": "Bemutató meccsek megjelenítése",
+  "Demo": "Bemutató",
   "+ %(count)s AI": "+ %(count)s MI",
   "%(count)s AI": "%(count)s MI",
   "Feedback": "Visszajelzés",

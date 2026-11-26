@@ -31,6 +31,9 @@ pub struct Config {
     pub game_limit: Duration,
     /// Lets a host start a game whose every slot is an AI, to watch it.
     pub ai_only: bool,
+    /// Keeps one slot running AI-only matches with random settings, so the
+    /// lobby always has something to watch.
+    pub demo: bool,
 }
 
 impl Config {
@@ -60,8 +63,13 @@ impl Config {
         } else {
             ""
         };
+        let demo = if self.demo {
+            ", one slot runs demo matches"
+        } else {
+            ""
+        };
         format!(
-            "{hosting}, at most {} observers, {admin}, matches stop after {} min of wall time or {} min of game time{ai_only}",
+            "{hosting}, at most {} observers, {admin}, matches stop after {} min of wall time or {} min of game time{ai_only}{demo}",
             self.max_observers,
             self.wall_limit.as_secs() / 60,
             self.game_limit.as_secs() / 60

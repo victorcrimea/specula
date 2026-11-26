@@ -238,6 +238,8 @@
   "Players do not see observer chat in this match.": "Bu maçta oyuncular gözlemci sohbetini görmez.",
   "Too many people are watching on this server. Trying again...": "Bu sunucuyu izleyen çok fazla kişi var. Yeniden deneniyor...",
   "Show unfinished matches": "Bitmemiş maçları göster",
+  "Show demo matches": "Demo maçlarını göster",
+  "Demo": "Demo",
   "+ %(count)s AI": "+ %(count)s YZ",
   "%(count)s AI": "%(count)s YZ",
   "Feedback": "Geri bildirim",

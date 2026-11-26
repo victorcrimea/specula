@@ -238,6 +238,8 @@
   "Players do not see observer chat in this match.": "Pelaajat eivät näe katsojien keskustelua tässä pelissä.",
   "Too many people are watching on this server. Trying again...": "Liian moni katsoo tällä palvelimella. Yritetään uudelleen...",
   "Show unfinished matches": "Näytä keskeneräiset pelit",
+  "Show demo matches": "Näytä esittelyottelut",
+  "Demo": "Esittely",
   "+ %(count)s AI": "+ %(count)s tekoälyä",
   "%(count)s AI": "%(count)s tekoälyä",
   "Feedback": "Palaute",

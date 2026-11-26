@@ -238,6 +238,8 @@
   "Players do not see observer chat in this match.": "Οι παίκτες δεν βλέπουν τη συνομιλία των παρατηρητών σε αυτόν τον αγώνα.",
   "Too many people are watching on this server. Trying again...": "Πάρα πολλοί παρακολουθούν σε αυτόν τον διακομιστή. Γίνεται νέα προσπάθεια...",
   "Show unfinished matches": "Εμφάνιση ημιτελών αγώνων",
+  "Show demo matches": "Εμφάνιση επιδεικτικών αγώνων",
+  "Demo": "Επίδειξη",
   "+ %(count)s AI": "+ %(count)s ΤΝ",
   "%(count)s AI": "%(count)s ΤΝ",
   "Feedback": "Σχόλια",

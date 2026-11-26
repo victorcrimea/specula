@@ -238,6 +238,8 @@
   "Players do not see observer chat in this match.": "Người chơi không thấy trò chuyện của người xem trong trận này.",
   "Too many people are watching on this server. Trying again...": "Quá nhiều người đang xem trên máy chủ này. Đang thử lại...",
   "Show unfinished matches": "Hiện các trận chưa kết thúc",
+  "Show demo matches": "Hiện các trận demo",
+  "Demo": "Demo",
   "+ %(count)s AI": "+ %(count)s AI",
   "%(count)s AI": "%(count)s AI",
   "Feedback": "Phản hồi",

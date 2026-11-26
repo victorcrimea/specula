@@ -1945,6 +1945,8 @@ pub struct MetaSource {
     pub preview: Option<String>,
     /// Player numbers an AI plays; the feed does not say which are bots.
     pub ai_players: Vec<u32>,
+    /// A `--demo` match, which the lobby hides from its replays by default.
+    pub demo: bool,
 }
 
 /// Each player's name, civ and colour, gaia left out.
@@ -3404,6 +3406,7 @@ impl Hub {
             players,
             preview: source.preview,
             ai_known: true,
+            demo: source.demo,
             // Only the end writes it, so a match cut short stays undecided.
             decided: with_players.then_some(decided),
             winners: if with_players { winners } else { Vec::new() },

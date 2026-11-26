@@ -238,6 +238,8 @@
   "Players do not see observer chat in this match.": "이 경기에서는 플레이어가 관전자 채팅을 볼 수 없습니다.",
   "Too many people are watching on this server. Trying again...": "이 서버를 보는 사람이 너무 많습니다. 다시 시도하는 중...",
   "Show unfinished matches": "끝나지 않은 경기 표시",
+  "Show demo matches": "데모 경기 표시",
+  "Demo": "데모",
   "+ %(count)s AI": "+ AI %(count)s명",
   "%(count)s AI": "AI %(count)s명",
   "Feedback": "피드백",

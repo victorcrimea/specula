@@ -238,6 +238,8 @@
   "Players do not see observer chat in this match.": "Jokalariek ez dute behatzaileen txata ikusten partida honetan.",
   "Too many people are watching on this server. Trying again...": "Jende gehiegi ari da zerbitzari honetan ikusten. Berriro saiatzen...",
   "Show unfinished matches": "Erakutsi amaitu gabeko partidak",
+  "Show demo matches": "Erakutsi erakustaldi-partidak",
+  "Demo": "Erakustaldia",
   "+ %(count)s AI": "+ %(count)s IA",
   "%(count)s AI": "%(count)s IA",
   "Feedback": "Iritzia",

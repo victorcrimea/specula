@@ -22,6 +22,7 @@ use crate::catalog::MapType;
 use crate::catalog::VictoryCondition;
 
 mod compare;
+mod demo;
 mod from_init;
 pub mod gamesetup;
 mod random;

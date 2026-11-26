@@ -100,7 +100,7 @@ const USAGE: &str = "usage: specula-server [SOCKET] [--observe HOST:PORT | [--sl
                      [--port-base PORT]] [--max-observers N] [--admin-key KEY] \
                      [--delay SECONDS] [--history DIR] [--history-limit SIZE] [--usage DIR] \
                      [--engine-dir DIR] [--stats-key KEY] [--wall-limit MINUTES] \
-                     [--game-limit MINUTES] [--allow-ai-only]";
+                     [--game-limit MINUTES] [--allow-ai-only] [--demo]";
 /// Relative to the working directory, so the server runs from the repo root.
 pub const WEB_ROOT: &str = "specula-web";
 
@@ -231,6 +231,10 @@ async fn main() {
     if config.slots > 0 {
         let watcher = Arc::clone(&registry);
         std::thread::spawn(move || watcher.watch_matches());
+    }
+    if config.demo {
+        let demos = Arc::clone(&registry);
+        std::thread::spawn(move || demos.run_demos());
     }
 
     // Signals are `stop::watch`'s: Rocket's own handling would end the web
@@ -469,7 +473,15 @@ fn play_status(
 ) -> Option<Json> {
     let visitor = usage::visitor(cookies);
     let status = match registry.hosted(id) {
-        Some(found) => found.play.status(visitor.as_deref()),
+        // A demo has no host to wait for, so its page must not warn that
+        // the match ends when the host leaves.
+        Some(found) => {
+            let status = found.play.status(visitor.as_deref());
+            play::Status {
+                ai_only: status.ai_only && !found.demo,
+                ..status
+            }
+        }
         // The broadcast has no seats, but the observer page still asks. A
         // dropped match has no seat routes left, only its rematch.
         None => {
@@ -561,17 +573,22 @@ async fn match_replay(id: MatchId, registry: &State<Arc<Registry>>) -> Option<Re
 struct ReplayZip(Vec<u8>, Header<'static>, Header<'static>);
 
 /// The lobby's lists (M40); a visitor's own game is in `/new`.
-#[rocket::get("/lobby.json?<replays>&<unfinished>")]
+#[rocket::get("/lobby.json?<replays>&<unfinished>&<demo>")]
 fn lobby(
     registry: &State<Arc<Registry>>,
     replays: Option<usize>,
     unfinished: Option<bool>,
+    demo: Option<bool>,
 ) -> Option<Json> {
     if registry.broadcast().is_some() {
         return None;
     }
     Some(Json(
-        registry.lobby_json(replays.unwrap_or(20).min(200), unfinished.unwrap_or(false)),
+        registry.lobby_json(
+            replays.unwrap_or(20).min(200),
+            unfinished.unwrap_or(false),
+            demo.unwrap_or(false),
+        ),
         Header::new("Cache-Control", "no-store"),
     ))
 }
@@ -1725,6 +1742,7 @@ fn parse_args() -> Result<Args, String> {
     let mut wall_limit = config::DEFAULT_LIMIT_MINUTES;
     let mut game_limit = config::DEFAULT_LIMIT_MINUTES;
     let mut ai_only = false;
+    let mut demo = false;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         if arg == "--delay" {
@@ -1747,6 +1765,8 @@ fn parse_args() -> Result<Args, String> {
             }
         } else if arg == "--allow-ai-only" {
             ai_only = true;
+        } else if arg == "--demo" {
+            demo = true;
         } else if arg == "--history" {
             history_dir = args.next().ok_or("--history needs DIR")?.into();
         } else if arg == "--history-limit" {
@@ -1807,6 +1827,9 @@ fn parse_args() -> Result<Args, String> {
     } else {
         slots.unwrap_or(config::DEFAULT_SLOTS)
     };
+    if demo && slots == 0 {
+        return Err("--demo needs a hosting slot, so not --observe or --slots 0".to_string());
+    }
     let port_base = port_base.unwrap_or(config::DEFAULT_PORT_BASE);
     if slots > 0 && u32::from(port_base) + u32::from(slots) - 1 > u32::from(u16::MAX) {
         return Err(format!(
@@ -1827,6 +1850,7 @@ fn parse_args() -> Result<Args, String> {
             wall_limit: Duration::from_secs(u64::from(wall_limit) * 60),
             game_limit: Duration::from_secs(u64::from(game_limit) * 60),
             ai_only,
+            demo,
         },
         delay,
         history_dir,

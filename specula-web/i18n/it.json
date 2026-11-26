@@ -238,6 +238,8 @@
   "Players do not see observer chat in this match.": "I giocatori non vedono la chat degli osservatori in questa partita.",
   "Too many people are watching on this server. Trying again...": "Troppe persone stanno guardando su questo server. Nuovo tentativo...",
   "Show unfinished matches": "Mostra le partite non concluse",
+  "Show demo matches": "Mostra le partite dimostrative",
+  "Demo": "Demo",
   "+ %(count)s AI": "+ %(count)s IA",
   "%(count)s AI": "%(count)s IA",
   "Feedback": "Feedback",

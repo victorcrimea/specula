@@ -238,6 +238,8 @@
   "Players do not see observer chat in this match.": "Pemain tidak melihat obrolan pengamat di pertandingan ini.",
   "Too many people are watching on this server. Trying again...": "Terlalu banyak orang menonton di server ini. Mencoba lagi...",
   "Show unfinished matches": "Tampilkan pertandingan yang belum selesai",
+  "Show demo matches": "Tampilkan pertandingan demo",
+  "Demo": "Demo",
   "+ %(count)s AI": "+ %(count)s AI",
   "%(count)s AI": "%(count)s AI",
   "Feedback": "Masukan",

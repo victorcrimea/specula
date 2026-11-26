@@ -238,6 +238,8 @@
   "Players do not see observer chat in this match.": "Hráči v této hře nevidí chat pozorovatelů.",
   "Too many people are watching on this server. Trying again...": "Na tomto serveru sleduje příliš mnoho lidí. Zkouším to znovu...",
   "Show unfinished matches": "Zobrazit nedokončené zápasy",
+  "Show demo matches": "Zobrazit ukázkové zápasy",
+  "Demo": "Ukázka",
   "+ %(count)s AI": "+ %(count)s AI",
   "%(count)s AI": "%(count)s AI",
   "Feedback": "Zpětná vazba",

@@ -238,6 +238,8 @@
   "Players do not see observer chat in this match.": "Spelare ser inte åskådarnas chatt i den här matchen.",
   "Too many people are watching on this server. Trying again...": "För många tittar på den här servern. Försöker igen...",
   "Show unfinished matches": "Visa ofullbordade matcher",
+  "Show demo matches": "Visa demomatcher",
+  "Demo": "Demo",
   "+ %(count)s AI": "+ %(count)s AI",
   "%(count)s AI": "%(count)s AI",
   "Feedback": "Feedback",

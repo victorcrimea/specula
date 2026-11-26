@@ -238,6 +238,8 @@
   "Players do not see observer chat in this match.": "note under the chat window for an observer when the host chose that players only see what is explored: what observers write is not shown to players",
   "Too many people are watching on this server. Trying again...": "banner on a match page when the server already has the most observers it allows; the page asks again every 15 seconds",
   "Show unfinished matches": "checkbox above the lobby page's replay list: also list stored matches that ended without a winner or were cut short",
+  "Show demo matches": "checkbox above the lobby page's replay list: also list the matches the server played by itself with computer players, which are hidden by default",
+  "Demo": "badge on a lobby card of a match the server plays by itself with computer players, to show the server's own matches",
   "+ %(count)s AI": "end of the players line of a lobby card, after the human players' names: how many computer players took part, e.g. \"Anna, Ben + 4 AI\"",
   "%(count)s AI": "players line of a lobby card when only computer players took part, e.g. \"4 AI\"",
   "Feedback": "button among the custom buttons next to Warm up on the game page, and corner button on the other pages, that open the feedback form",

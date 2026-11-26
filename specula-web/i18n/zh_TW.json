@@ -238,6 +238,8 @@
   "Players do not see observer chat in this match.": "在這場比賽中，玩家看不到觀戰者的聊天。",
   "Too many people are watching on this server. Trying again...": "此伺服器上觀看的人太多。正在重試...",
   "Show unfinished matches": "顯示未完成的比賽",
+  "Show demo matches": "顯示展示對局",
+  "Demo": "展示",
   "+ %(count)s AI": "+ %(count)s 個電腦玩家",
   "%(count)s AI": "%(count)s 個電腦玩家",
   "Feedback": "意見回饋",

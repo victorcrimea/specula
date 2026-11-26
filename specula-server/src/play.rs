@@ -1491,6 +1491,17 @@ impl Play {
         true
     }
 
+    /// Stops a demo's engine as the server shuts down; nobody would end it
+    /// otherwise, and the demo's time limit may be far off.
+    pub fn end_for_stop(&self) -> bool {
+        let mut inner = self.inner.lock().unwrap();
+        if !inner.game.as_ref().is_some_and(|game| game.running) {
+            return false;
+        }
+        self.stop_engine(&mut inner, "server stop");
+        true
+    }
+
     /// Stops the engine of a game nobody plays any more, as `end` does but
     /// for no host: a stopping server must not wait on a won game whose
     /// engine stays in its session. Returns whether it stopped one.

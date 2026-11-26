@@ -72,6 +72,7 @@ h2 { font-size: 16px; font-weight: 600; margin: 28px 0 12px; }
 <div id="running" class="cards"></div>
 <h2 data-i18n>Replays</h2>
 <p class="row"><label><input id="unfinished" type="checkbox"> <span data-i18n>Show unfinished matches</span></label></p>
+<p class="row"><label><input id="demo" type="checkbox"> <span data-i18n>Show demo matches</span></label></p>
 <div id="replays" class="cards"></div>
 <button id="more" type="button" hidden data-i18n>Show more</button>
 </main>
@@ -143,6 +144,10 @@ const unfinished = document.getElementById("unfinished");
 // still shows.
 unfinished.checked = true;
 try { unfinished.checked = localStorage.getItem(UNFINISHED_KEY) !== "0"; } catch {}
+// The server's own matches, which are many and not what a visitor came for.
+const DEMO_KEY = "specula.lobby.demo";
+const demo = document.getElementById("demo");
+try { demo.checked = localStorage.getItem(DEMO_KEY) === "1"; } catch {}
 let lobby = null;
 
 const fill = (text, values) => {
@@ -264,6 +269,7 @@ const render = () => {
     thumb.append(image);
     el.append(thumb);
     badge(el, T("Running"));
+    if (entry.demo) badge(el, T("Demo"));
     line(el, fill("Map: %(name)s", { name: mapName(entry.map) }));
     line(el, fill("Host: %(name)s", { name: entry.host }));
     players(el, entry.players);
@@ -280,6 +286,7 @@ const render = () => {
     const el = card();
     el.append(preview(entry.preview ?? guessPreview(entry.map)));
     badge(el, T("Replay"));
+    if (entry.demo) badge(el, T("Demo"));
     line(el, fill("Map: %(name)s", { name: mapName(entry.map) }));
     if (entry.host) line(el, fill("Host: %(name)s", { name: entry.host }));
     if (entry.players.length) players(el, entry.players);
@@ -301,7 +308,7 @@ const render = () => {
 const refresh = async () => {
   if (document.hidden) return;
   try {
-    const response = await fetch("/lobby.json?replays=" + replayCount + (unfinished.checked ? "&unfinished=true" : ""));
+    const response = await fetch("/lobby.json?replays=" + replayCount + (unfinished.checked ? "&unfinished=true" : "") + (demo.checked ? "&demo=true" : ""));
     if (response.ok) {
       lobby = await response.json();
       render();
@@ -314,6 +321,11 @@ document.getElementById("more").addEventListener("click", () => {
 });
 unfinished.addEventListener("change", () => {
   try { localStorage.setItem(UNFINISHED_KEY, unfinished.checked ? "1" : "0"); } catch {}
+  replayCount = PAGE;
+  refresh();
+});
+demo.addEventListener("change", () => {
+  try { localStorage.setItem(DEMO_KEY, demo.checked ? "1" : "0"); } catch {}
   replayCount = PAGE;
   refresh();
 });

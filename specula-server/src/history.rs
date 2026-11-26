@@ -93,6 +93,8 @@ pub struct Meta {
     pub winners: Vec<String>,
     /// False for a record from before the flag, whose `ai` is a guess.
     pub ai_known: bool,
+    /// A `--demo` match, hidden from the lobby's replays unless asked for.
+    pub demo: bool,
 }
 
 /// Name, civ code and 0xRRGGBB colour of a player, gaia left out.
@@ -116,6 +118,7 @@ impl Meta {
             "preview": self.preview,
             "decided": self.decided,
             "winners": self.winners,
+            "demo": self.demo,
         })
         .to_string()
         .into_bytes()
@@ -151,6 +154,10 @@ impl Meta {
                 .and_then(|preview| preview.as_str())
                 .map(str::to_string),
             decided: value.get("decided").and_then(|decided| decided.as_bool()),
+            demo: value
+                .get("demo")
+                .and_then(|demo| demo.as_bool())
+                .unwrap_or(false),
             winners: value
                 .get("winners")
                 .and_then(|winners| winners.as_array())
@@ -338,8 +345,8 @@ impl History {
 
     /// The `limit` newest finished matches, and whether older ones remain;
     /// unless `unfinished`, only those with a result, so the limit counts
-    /// the listed ones.
-    pub fn list(&self, limit: usize, unfinished: bool) -> (Vec<StoredInfo>, bool) {
+    /// the listed ones. Demo matches are left out unless `demo`.
+    pub fn list(&self, limit: usize, unfinished: bool, demo: bool) -> (Vec<StoredInfo>, bool) {
         let mut finished = self
             .matches
             .iter()
@@ -359,7 +366,8 @@ impl History {
                     replay: stored.replay,
                 }
             })
-            .filter(|info| unfinished || info.resolved());
+            .filter(|info| unfinished || info.resolved())
+            .filter(|info| demo || !info.meta.as_ref().is_some_and(|meta| meta.demo));
         let listed = finished.by_ref().take(limit).collect();
         (listed, finished.next().is_some())
     }
