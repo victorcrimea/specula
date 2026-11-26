@@ -204,7 +204,8 @@ const players = (card, list) => {
 };
 const mapName = (map) => (map ? T(map) : T("Unknown map"));
 // The map's stock preview, which the thumbnail covers and which stays when
-// the server has no thumbnail yet.
+// the server has no thumbnail yet. The stored value is the engine's path
+// ("cropped:...:dir/name.png"), so only the file name counts.
 const preview = (preview) => {
   const thumb = document.createElement("div");
   thumb.className = "thumb";
