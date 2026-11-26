@@ -236,5 +236,8 @@
   "The host hid this match from observers until it ends.": "Господар сховав цей матч від спостерігачів до його завершення.",
   "Its replay opens here when it ends.": "Запис матчу відкриється тут, коли він закінчиться.",
   "Players do not see observer chat in this match.": "Гравці не бачать чат спостерігачів у цьому матчі.",
-  "Too many people are watching on this server. Trying again...": "На цьому сервері забагато глядачів. Пробуємо знову..."
+  "Too many people are watching on this server. Trying again...": "На цьому сервері забагато глядачів. Пробуємо знову...",
+  "Show unfinished matches": "Показувати незавершені матчі",
+  "+ %(count)s AI": "+ %(count)s ШІ",
+  "%(count)s AI": "%(count)s ШІ"
 }

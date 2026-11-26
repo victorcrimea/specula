@@ -236,5 +236,8 @@
   "The host hid this match from observers until it ends.": "Värden dolde den här matchen för åskådare tills den är slut.",
   "Its replay opens here when it ends.": "Repriset öppnas här när den är slut.",
   "Players do not see observer chat in this match.": "Spelare ser inte åskådarnas chatt i den här matchen.",
-  "Too many people are watching on this server. Trying again...": "För många tittar på den här servern. Försöker igen..."
+  "Too many people are watching on this server. Trying again...": "För många tittar på den här servern. Försöker igen...",
+  "Show unfinished matches": "Visa ofullbordade matcher",
+  "+ %(count)s AI": "+ %(count)s AI",
+  "%(count)s AI": "%(count)s AI"
 }

@@ -6,6 +6,7 @@
 <script src="/i18n.js"></script>
 <script src="/nickname-hint.js"></script>
 <link rel="stylesheet" href="/gui/session.css?v=SESSION">
+<link rel="stylesheet" href="/player-colors.css">
 <title data-i18n>Lobby</title>
 <style>
 html, body { margin: 0; min-height: 100%; background: #0f1214; color: #e6e9eb;
@@ -41,6 +42,8 @@ h2 { font-size: 16px; font-weight: 600; margin: 28px 0 12px; }
 .badge { align-self: flex-start; padding: 0 6px; border: 1px solid #3a4248; border-radius: 8px; font-size: 12px; color: #b8c0c5; }
 .card a.go { margin-top: 4px; align-self: flex-start; padding: 4px 8px; border: 1px solid #3a4248;
   border-radius: 4px; text-decoration: none; }
+.lang { text-align: right; margin: 0 0 8px; }
+
 .empty { color: #8a949a; margin: 0; }
 #more { margin-top: 12px; }
 #more[hidden] { display: none; }
@@ -48,6 +51,7 @@ h2 { font-size: 16px; font-weight: 600; margin: 28px 0 12px; }
 </head>
 <body>
 <main>
+<p class="lang"><label data-i18n>Language <select id="language"><option value="">Default (browser)</option></select></label></p>
 <h1 data-i18n>New game</h1>
 <p id="stopping" hidden data-i18n>The server is shutting down. No new game can start; games in progress play on to their end.</p>
 <p id="status" hidden>
@@ -67,6 +71,7 @@ h2 { font-size: 16px; font-weight: 600; margin: 28px 0 12px; }
 <h2 data-i18n>Running matches</h2>
 <div id="running" class="cards"></div>
 <h2 data-i18n>Replays</h2>
+<p class="row"><label><input id="unfinished" type="checkbox"> <span data-i18n>Show unfinished matches</span></label></p>
 <div id="replays" class="cards"></div>
 <button id="more" type="button" hidden data-i18n>Show more</button>
 </main>
@@ -131,6 +136,10 @@ const REFRESH_MS = 5000;
 const THUMB_MS = 15000;
 const PAGE = 20;
 let replayCount = PAGE;
+// Matches that ended with no result are mostly ones nobody played.
+const UNFINISHED_KEY = "specula.lobby.unfinished";
+const unfinished = document.getElementById("unfinished");
+try { unfinished.checked = localStorage.getItem(UNFINISHED_KEY) === "1"; } catch {}
 let lobby = null;
 
 const fill = (text, values) => {
@@ -165,16 +174,24 @@ const line = (card, text) => {
   card.append(p);
   return p;
 };
+// Computer players are only counted: their names are the engine's picks and
+// tell nothing, and a game of many bots made the card very tall.
 const players = (card, list) => {
   const p = document.createElement("p");
   p.append(T("Players:"));
-  list.forEach((player, index) => {
+  const humans = list.filter((player) => !player.ai);
+  const bots = list.length - humans.length;
+  humans.forEach((player, index) => {
     p.append(index ? ", " : " ");
     const span = document.createElement("span");
     span.textContent = player.civ ? player.name + " (" + civName(player.civ) + ")" : player.name;
     if (player.color) span.style.color = player.color;
     p.append(span);
   });
+  if (bots) {
+    p.append(" ");
+    p.append(fill(humans.length ? "+ %(count)s AI" : "%(count)s AI", { count: bots }));
+  }
   card.append(p);
 };
 const mapName = (map) => (map ? T(map) : T("Unknown map"));
@@ -187,6 +204,9 @@ const preview = (preview) => {
   thumb.style.backgroundImage = "var(--gui-mappreview-" + (stem || "nopreview") + ", var(--gui-mappreview-nopreview))";
   return thumb;
 };
+// A match stored before the preview was recorded: the map's name is its
+// preview's file name in most cases, and the stock one shows when not.
+const guessPreview = (map) => (map ?? "").toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
 const badge = (card, text) => {
   const span = document.createElement("span");
   span.className = "badge";
@@ -255,6 +275,7 @@ const render = () => {
   const replays = document.getElementById("replays");
   replays.replaceChildren(...lobby.replays.map((entry) => {
     const el = card();
+    el.append(preview(entry.preview ?? guessPreview(entry.map)));
     badge(el, T("Replay"));
     line(el, fill("Map: %(name)s", { name: mapName(entry.map) }));
     if (entry.host) line(el, fill("Host: %(name)s", { name: entry.host }));
@@ -277,7 +298,7 @@ const render = () => {
 const refresh = async () => {
   if (document.hidden) return;
   try {
-    const response = await fetch("/lobby.json?replays=" + replayCount);
+    const response = await fetch("/lobby.json?replays=" + replayCount + (unfinished.checked ? "&unfinished=true" : ""));
     if (response.ok) {
       lobby = await response.json();
       render();
@@ -286,6 +307,11 @@ const refresh = async () => {
 };
 document.getElementById("more").addEventListener("click", () => {
   replayCount += PAGE;
+  refresh();
+});
+unfinished.addEventListener("change", () => {
+  try { localStorage.setItem(UNFINISHED_KEY, unfinished.checked ? "1" : "0"); } catch {}
+  replayCount = PAGE;
   refresh();
 });
 document.addEventListener("visibilitychange", refresh);

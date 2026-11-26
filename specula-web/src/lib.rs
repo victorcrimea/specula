@@ -189,7 +189,6 @@ const SHADOW_SETTINGS_KEY: &str = "specula.shadows";
 const SHADOW_CUTOFF_SETTINGS_KEY: &str = "specula.shadowscutoff";
 /// localStorage key of the texture quality: 1 low, 2 medium, 3 high.
 const TEXTURE_SETTINGS_KEY: &str = "specula.textures";
-const LANGUAGE_SETTINGS_KEY: &str = lang::SETTING_KEY;
 /// localStorage key of the material maps setting: 0 off, 1 on.
 const MAP_SETTINGS_KEY: &str = "specula.maps";
 /// localStorage key of the triplanar setting: 0 off, 1 on.
@@ -2631,12 +2630,19 @@ pub fn observer_main(
     });
 }
 
-/// Entry point of lobby.html, the server's front page: only the language,
-/// for the page's own script to translate with.
+/// Entry point of lobby.html, the server's front page: the language, for the
+/// page's own script to translate with, and its list.
 #[wasm_bindgen]
 pub fn lobby_main() {
     set_panic_hook();
-    lang::start_page();
+    let select = web_sys::window()
+        .and_then(|window| window.document())
+        .and_then(|document| document.get_element_by_id("language"))
+        .and_then(|element| element.dyn_into::<HtmlSelectElement>().ok());
+    match select {
+        Some(select) => wasm_bindgen_futures::spawn_local(lang::wire_selector(select, || {})),
+        None => lang::start_page(),
+    }
 }
 
 /// A civ's name in the language, for the lobby's player lists.
@@ -5061,92 +5067,28 @@ fn wire_ranges(app: &Rc<RefCell<App>>, selects: [HtmlSelectElement; 3]) {
 /// menu names, kept across visits. The names the engine's text is looked
 /// up in change with it, so the panels are made again.
 fn wire_language(app: &Rc<RefCell<App>>, select: HtmlSelectElement) {
-    let storage = web_sys::window().and_then(|window| window.local_storage().ok().flatten());
-    let saved = storage
-        .as_ref()
-        .and_then(|storage| storage.get_item(LANGUAGE_SETTINGS_KEY).ok().flatten())
-        .unwrap_or_default();
     let app = Rc::clone(app);
-    wasm_bindgen_futures::spawn_local(async move {
-        let languages = Rc::new(lang::languages().await);
-        let Some(document) = web_sys::window().and_then(|window| window.document()) else {
-            return;
-        };
-        for language in languages.iter() {
-            let Some(option) = document
-                .create_element("option")
-                .ok()
-                .and_then(|option| option.dyn_into::<HtmlOptionElement>().ok())
-            else {
-                continue;
-            };
-            option.set_value(&language.code);
-            option.set_text(&language.name);
-            let _ = select.append_child(&option);
-        }
-        let default_name = lang::choose(&languages, "")
-            .map_or("English".to_string(), |language| language.name.clone());
-        let apply = {
-            let app = Rc::clone(&app);
-            let languages = Rc::clone(&languages);
-            let select = select.clone();
-            move |setting: String| {
-                let app = Rc::clone(&app);
-                let languages = Rc::clone(&languages);
-                let select = select.clone();
-                let default_name = default_name.clone();
-                wasm_bindgen_futures::spawn_local(async move {
-                    let chosen = lang::choose(&languages, &setting);
-                    if lang::load(chosen).await {
-                        // The list's first entry names the browser's pick in
-                        // the language just loaded.
-                        if let Some(first) = select
-                            .item(0)
-                            .and_then(|option| option.dyn_into::<HtmlOptionElement>().ok())
-                        {
-                            first.set_text(&lang::format(
-                                &lang::translate("Default (browser: %(name)s)"),
-                                &[("name", &default_name)],
-                            ));
-                        }
-                    }
-                    if let Ok(mut app) = app.try_borrow_mut() {
-                        app.details_dirty = true;
-                        app.top_dirty = true;
-                        if let Some(diplomacy_window) = &mut app.diplomacy_window {
-                            diplomacy_window.invalidate();
-                        }
-                        if let Some(chat_window) = &mut app.chat_window {
-                            chat_window.invalidate();
-                        }
-                        if let Some(summary) = &app.summary
-                            && let Ok(mut summary) = summary.try_borrow_mut()
-                        {
-                            summary.invalidate();
-                        }
-                        if let Some(trade_window) = &mut app.trade_window {
-                            trade_window.invalidate();
-                        }
-                        app.dirty = true;
-                    }
-                });
+    wasm_bindgen_futures::spawn_local(lang::wire_selector(select, move || {
+        if let Ok(mut app) = app.try_borrow_mut() {
+            app.details_dirty = true;
+            app.top_dirty = true;
+            if let Some(diplomacy_window) = &mut app.diplomacy_window {
+                diplomacy_window.invalidate();
             }
-        };
-        // A saved code the list no longer has is the default.
-        let known = languages.iter().any(|language| language.code == saved);
-        select.set_value(if known { &saved } else { "" });
-        apply(select.value());
-        let list = select.clone();
-        on_change(&select, move || {
-            let setting = list.value();
-            if let Some(storage) =
-                web_sys::window().and_then(|window| window.local_storage().ok().flatten())
+            if let Some(chat_window) = &mut app.chat_window {
+                chat_window.invalidate();
+            }
+            if let Some(summary) = &app.summary
+                && let Ok(mut summary) = summary.try_borrow_mut()
             {
-                let _ = storage.set_item(LANGUAGE_SETTINGS_KEY, &setting);
+                summary.invalidate();
             }
-            apply(setting);
-        });
-    });
+            if let Some(trade_window) = &mut app.trade_window {
+                trade_window.invalidate();
+            }
+            app.dirty = true;
+        }
+    }));
 }
 
 /// The texture quality list, kept across visits. A device that is not

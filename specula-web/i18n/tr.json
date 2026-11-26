@@ -236,5 +236,8 @@
   "The host hid this match from observers until it ends.": "Ev sahibi bu maçı bitene kadar gözlemcilerden gizledi.",
   "Its replay opens here when it ends.": "Maç bitince tekrarı burada açılacak.",
   "Players do not see observer chat in this match.": "Bu maçta oyuncular gözlemci sohbetini görmez.",
-  "Too many people are watching on this server. Trying again...": "Bu sunucuyu izleyen çok fazla kişi var. Yeniden deneniyor..."
+  "Too many people are watching on this server. Trying again...": "Bu sunucuyu izleyen çok fazla kişi var. Yeniden deneniyor...",
+  "Show unfinished matches": "Bitmemiş maçları göster",
+  "+ %(count)s AI": "+ %(count)s YZ",
+  "%(count)s AI": "%(count)s YZ"
 }

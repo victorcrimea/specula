@@ -557,13 +557,17 @@ async fn match_replay(id: MatchId, registry: &State<Arc<Registry>>) -> Option<Re
 struct ReplayZip(Vec<u8>, Header<'static>, Header<'static>);
 
 /// The lobby's lists (M40); a visitor's own game is in `/new`.
-#[rocket::get("/lobby.json?<replays>")]
-fn lobby(registry: &State<Arc<Registry>>, replays: Option<usize>) -> Option<Json> {
+#[rocket::get("/lobby.json?<replays>&<unfinished>")]
+fn lobby(
+    registry: &State<Arc<Registry>>,
+    replays: Option<usize>,
+    unfinished: Option<bool>,
+) -> Option<Json> {
     if registry.broadcast().is_some() {
         return None;
     }
     Some(Json(
-        registry.lobby_json(replays.unwrap_or(20).min(200)),
+        registry.lobby_json(replays.unwrap_or(20).min(200), unfinished.unwrap_or(false)),
         Header::new("Cache-Control", "no-store"),
     ))
 }

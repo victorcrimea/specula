@@ -411,6 +411,7 @@ use crate::feed::TimeNote;
 use crate::flare;
 use crate::history::History;
 use crate::history::Meta;
+use crate::history::MetaPlayer;
 use crate::limit;
 use crate::pause;
 use crate::registry::MatchId;
@@ -1935,6 +1936,39 @@ impl Stream {
     }
 }
 
+/// What the registry knows of a hosted match for its lobby record.
+#[derive(Clone, Default)]
+pub struct MetaSource {
+    pub host: String,
+    pub map_name: Option<String>,
+    /// The map preview's file stem.
+    pub preview: Option<String>,
+    /// Player numbers an AI plays; the feed does not say which are bots.
+    pub ai_players: Vec<u32>,
+}
+
+/// Each player's name, civ and colour, gaia left out.
+fn meta_players(state: &State) -> Vec<MetaPlayer> {
+    let ai_players = state
+        .meta_source
+        .as_ref()
+        .map_or(&[][..], |source| &source.ai_players[..]);
+    state
+        .observer
+        .players
+        .players
+        .iter()
+        .enumerate()
+        .skip(1)
+        .map(|(index, player)| MetaPlayer {
+            name: player.name.clone(),
+            civ: player.civ.clone(),
+            color: player.color,
+            ai: ai_players.contains(&(index as u32)),
+        })
+        .collect()
+}
+
 struct State {
     turn: u32,
     map_size: u32,
@@ -1996,9 +2030,9 @@ struct State {
     /// A hosted hub's first match takes its registry UUID; any other match
     /// a new one.
     next_uuid: Option<MatchId>,
-    /// The host's nickname and the map's name, which the registry knows and
-    /// the feed does not, for the history's lobby record (M40).
-    meta_source: Option<(String, Option<String>)>,
+    /// What the registry knows and the feed does not, for the history's
+    /// lobby record (M40).
+    meta_source: Option<MetaSource>,
     /// Every match this hub encoded, so `/g/<uuid>` finds it while the hub
     /// holds it.
     uuids: Vec<(MatchId, u64)>,
@@ -2517,16 +2551,9 @@ impl Hub {
     }
 
     /// Each player's name, civ and colour, gaia left out, for the lobby.
-    pub fn lobby_players(&self) -> Vec<(String, String, u32)> {
+    pub fn lobby_players(&self) -> Vec<MetaPlayer> {
         let state = self.state.lock().unwrap();
-        state
-            .observer
-            .players
-            .players
-            .iter()
-            .skip(1)
-            .map(|player| (player.name.clone(), player.civ.clone(), player.color))
-            .collect()
+        meta_players(&state)
     }
 
     /// The latest turn the feed gave, which viewers may not see yet.
@@ -3330,8 +3357,8 @@ impl Hub {
         }
     }
 
-    pub fn set_meta_source(&self, host: String, map_name: Option<String>) {
-        self.state.lock().unwrap().meta_source = Some((host, map_name));
+    pub fn set_meta_source(&self, source: MetaSource) {
+        self.state.lock().unwrap().meta_source = Some(source);
     }
 
     /// Writes the history's lobby record of the encoded match.
@@ -3339,23 +3366,38 @@ impl Hub {
         let Some(history) = &self.history else {
             return;
         };
-        let (host, map_name) = state.meta_source.clone().unwrap_or_default();
+        let source = state.meta_source.clone().unwrap_or_default();
         let players = if with_players {
-            state
-                .observer
-                .players
-                .players
-                .iter()
-                .skip(1)
-                .map(|player| (player.name.clone(), player.civ.clone(), player.color))
-                .collect()
+            meta_players(state)
         } else {
             Vec::new()
         };
+        // Player states are the feed's: 1 defeated, 2 won.
+        let decided = state
+            .observer
+            .players
+            .players
+            .iter()
+            .skip(1)
+            .any(|player| player.state != 0);
+        let winners = state
+            .observer
+            .players
+            .players
+            .iter()
+            .skip(1)
+            .filter(|player| player.state == 2)
+            .map(|player| player.name.clone())
+            .collect();
         let meta = Meta {
-            map_name,
-            host,
+            map_name: source.map_name,
+            host: source.host,
             players,
+            preview: source.preview,
+            ai_known: true,
+            // Only the end writes it, so a match cut short stays undecided.
+            decided: with_players.then_some(decided),
+            winners: if with_players { winners } else { Vec::new() },
             // At the start no turn has run, and `first_turn` is not set yet.
             duration_secs: if with_players {
                 (f64::from(state.turn.saturating_sub(state.first_turn)) * 0.2) as u32

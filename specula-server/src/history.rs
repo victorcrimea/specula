@@ -23,6 +23,7 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::fs;
 use std::io;
+use std::io::BufRead;
 use std::io::ErrorKind;
 use std::path::Path;
 use std::path::PathBuf;
@@ -57,6 +58,8 @@ struct Stored {
     /// The turns of the stored captures, sorted.
     summaries: Vec<u32>,
     replay: bool,
+    /// Read once, so the lobby's polls do not touch the disk per match.
+    meta: Option<Meta>,
 }
 
 impl Stored {
@@ -69,18 +72,36 @@ impl Stored {
             data: Vec::new(),
             summaries: Vec::new(),
             replay: false,
+            meta: None,
         }
     }
 }
 
 /// What the lobby shows of a stored match (M40); written at the start and
 /// again at the end, so a match cut short keeps the first.
+#[derive(Clone)]
 pub struct Meta {
     pub map_name: Option<String>,
     pub host: String,
-    /// Name, civ code and 0xRRGGBB colour, gaia left out.
-    pub players: Vec<(String, String, u32)>,
+    pub players: Vec<MetaPlayer>,
     pub duration_secs: u32,
+    /// The map's preview file stem, for a card's picture.
+    pub preview: Option<String>,
+    /// Some player won or was defeated; None before this was recorded, and
+    /// false when the match was cut short.
+    pub decided: Option<bool>,
+    pub winners: Vec<String>,
+    /// False for a record from before the flag, whose `ai` is a guess.
+    pub ai_known: bool,
+}
+
+/// Name, civ code and 0xRRGGBB colour of a player, gaia left out.
+#[derive(Clone)]
+pub struct MetaPlayer {
+    pub name: String,
+    pub civ: String,
+    pub color: u32,
+    pub ai: bool,
 }
 
 impl Meta {
@@ -89,9 +110,12 @@ impl Meta {
             "map": self.map_name,
             "host": self.host,
             "players": self.players.iter()
-                .map(|(name, civ, color)| serde_json::json!([name, civ, color]))
+                .map(|player| serde_json::json!([player.name, player.civ, player.color, player.ai]))
                 .collect::<Vec<_>>(),
             "duration": self.duration_secs,
+            "preview": self.preview,
+            "decided": self.decided,
+            "winners": self.winners,
         })
         .to_string()
         .into_bytes()
@@ -104,18 +128,39 @@ impl Meta {
             .as_array()?
             .iter()
             .filter_map(|entry| {
-                Some((
-                    entry.get(0)?.as_str()?.to_string(),
-                    entry.get(1)?.as_str()?.to_string(),
-                    u32::try_from(entry.get(2)?.as_u64()?).ok()?,
-                ))
+                Some(MetaPlayer {
+                    name: entry.get(0)?.as_str()?.to_string(),
+                    civ: entry.get(1)?.as_str()?.to_string(),
+                    color: u32::try_from(entry.get(2)?.as_u64()?).ok()?,
+                    ai: entry.get(3).and_then(|ai| ai.as_bool()).unwrap_or(false),
+                })
             })
             .collect();
         Some(Meta {
+            ai_known: value
+                .get("players")?
+                .as_array()?
+                .iter()
+                .all(|entry| entry.get(3).is_some()),
             map_name: value.get("map")?.as_str().map(str::to_string),
             host: value.get("host")?.as_str()?.to_string(),
             players,
             duration_secs: u32::try_from(value.get("duration")?.as_u64()?).ok()?,
+            preview: value
+                .get("preview")
+                .and_then(|preview| preview.as_str())
+                .map(str::to_string),
+            decided: value.get("decided").and_then(|decided| decided.as_bool()),
+            winners: value
+                .get("winners")
+                .and_then(|winners| winners.as_array())
+                .map(|winners| {
+                    winners
+                        .iter()
+                        .filter_map(|name| name.as_str().map(str::to_string))
+                        .collect()
+                })
+                .unwrap_or_default(),
         })
     }
 }
@@ -128,6 +173,20 @@ pub struct StoredInfo {
     /// None for a match stored before M40.
     pub meta: Option<Meta>,
     pub replay: bool,
+}
+
+impl StoredInfo {
+    /// Whether the match reached a result. A record from before the outcome
+    /// was stored is judged by its length and players, since a match
+    /// nobody played out is cut short within moments.
+    pub fn resolved(&self) -> bool {
+        const MIN_SECS: u32 = 120;
+        let Some(meta) = &self.meta else {
+            return false;
+        };
+        meta.decided
+            .unwrap_or(self.duration_secs >= MIN_SECS && !meta.players.is_empty())
+    }
 }
 
 pub struct History {
@@ -194,7 +253,14 @@ impl History {
             } else {
                 continue;
             };
-            let stored = scan_match(&dir, uuid)?;
+            let mut stored = scan_match(&dir, uuid)?;
+            stored.meta = fs::read(dir.join(META_FILE))
+                .ok()
+                .and_then(|bytes| Meta::from_bytes(&bytes))
+                .map(|mut meta| {
+                    guess_ai(&dir, &mut meta);
+                    meta
+                });
             history.add(match_id, stored);
         }
         Ok(history)
@@ -263,24 +329,24 @@ impl History {
             return Ok(());
         };
         let path = self.dir.join(stored.uuid.to_string()).join(META_FILE);
-        self.write(match_id, &path, &meta.to_bytes(), protect)
+        self.write(match_id, &path, &meta.to_bytes(), protect)?;
+        if let Some(stored) = self.matches.get_mut(&match_id) {
+            stored.meta = Some(meta.clone());
+        }
+        Ok(())
     }
 
-    /// The `limit` newest finished matches, and whether older ones remain.
-    pub fn list(&self, limit: usize) -> (Vec<StoredInfo>, bool) {
+    /// The `limit` newest finished matches, and whether older ones remain;
+    /// unless `unfinished`, only those with a result, so the limit counts
+    /// the listed ones.
+    pub fn list(&self, limit: usize, unfinished: bool) -> (Vec<StoredInfo>, bool) {
         let mut finished = self
             .matches
             .iter()
             .rev()
-            .filter(|(id, _)| !self.live.contains(id));
-        let listed = finished
-            .by_ref()
-            .take(limit)
+            .filter(|(id, _)| !self.live.contains(id))
             .map(|(match_id, stored)| {
-                let path = self.dir.join(stored.uuid.to_string()).join(META_FILE);
-                let meta = fs::read(path)
-                    .ok()
-                    .and_then(|bytes| Meta::from_bytes(&bytes));
+                let meta = stored.meta.clone();
                 StoredInfo {
                     uuid: stored.uuid,
                     // Match ids are nanoseconds since the epoch.
@@ -293,7 +359,8 @@ impl History {
                     replay: stored.replay,
                 }
             })
-            .collect();
+            .filter(|info| unfinished || info.resolved());
+        let listed = finished.by_ref().take(limit).collect();
         (listed, finished.next().is_some())
     }
 
@@ -680,4 +747,41 @@ pub fn parse_size(text: &str) -> Option<u64> {
         _ => (text, 0),
     };
     digits.parse::<u64>().ok()?.checked_mul(1 << shift)
+}
+
+/// A record from before the AI flag: the replay's start settings say which
+/// slots had a bot; without a replay, whoever is not the host is taken for
+/// one, since a hosted match is mostly the host against bots.
+fn guess_ai(dir: &Path, meta: &mut Meta) {
+    if meta.ai_known {
+        return;
+    }
+    let bots: Option<Vec<bool>> = fs::File::open(dir.join(REPLAY_DIR).join(REPLAY_COMMANDS))
+        .ok()
+        .and_then(|file| {
+            let mut first = String::new();
+            std::io::BufReader::new(file).read_line(&mut first).ok()?;
+            let start: serde_json::Value =
+                serde_json::from_str(first.strip_prefix("start ")?).ok()?;
+            Some(
+                start
+                    .get("settings")?
+                    .get("PlayerData")?
+                    .as_array()?
+                    .iter()
+                    .map(|slot| {
+                        slot.get("AI")
+                            .and_then(|ai| ai.as_str())
+                            .is_some_and(|ai| !ai.is_empty())
+                    })
+                    .collect(),
+            )
+        });
+    let host = meta.host.clone();
+    for (index, player) in meta.players.iter_mut().enumerate() {
+        player.ai = match &bots {
+            Some(bots) => bots.get(index).copied().unwrap_or(false),
+            None => player.name != host,
+        };
+    }
 }

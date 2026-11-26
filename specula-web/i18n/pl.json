@@ -236,5 +236,8 @@
   "The host hid this match from observers until it ends.": "Gospodarz ukrył tę grę przed obserwatorami do jej końca.",
   "Its replay opens here when it ends.": "Jej powtórka otworzy się tutaj po zakończeniu.",
   "Players do not see observer chat in this match.": "Gracze nie widzą czatu obserwatorów w tej grze.",
-  "Too many people are watching on this server. Trying again...": "Zbyt wiele osób ogląda na tym serwerze. Ponawiam próbę..."
+  "Too many people are watching on this server. Trying again...": "Zbyt wiele osób ogląda na tym serwerze. Ponawiam próbę...",
+  "Show unfinished matches": "Pokaż niedokończone mecze",
+  "+ %(count)s AI": "+ %(count)s SI",
+  "%(count)s AI": "%(count)s SI"
 }

@@ -236,5 +236,8 @@
   "The host hid this match from observers until it ends.": "Isäntä piilotti tämän pelin katsojilta sen loppuun asti.",
   "Its replay opens here when it ends.": "Sen uusinta avautuu tässä, kun peli päättyy.",
   "Players do not see observer chat in this match.": "Pelaajat eivät näe katsojien keskustelua tässä pelissä.",
-  "Too many people are watching on this server. Trying again...": "Liian moni katsoo tällä palvelimella. Yritetään uudelleen..."
+  "Too many people are watching on this server. Trying again...": "Liian moni katsoo tällä palvelimella. Yritetään uudelleen...",
+  "Show unfinished matches": "Näytä keskeneräiset pelit",
+  "+ %(count)s AI": "+ %(count)s tekoälyä",
+  "%(count)s AI": "%(count)s tekoälyä"
 }

@@ -236,5 +236,8 @@
   "The host hid this match from observers until it ends.": "Chủ phòng đã giấu trận này khỏi người xem cho đến khi nó kết thúc.",
   "Its replay opens here when it ends.": "Bản xem lại sẽ mở ở đây khi trận kết thúc.",
   "Players do not see observer chat in this match.": "Người chơi không thấy trò chuyện của người xem trong trận này.",
-  "Too many people are watching on this server. Trying again...": "Quá nhiều người đang xem trên máy chủ này. Đang thử lại..."
+  "Too many people are watching on this server. Trying again...": "Quá nhiều người đang xem trên máy chủ này. Đang thử lại...",
+  "Show unfinished matches": "Hiện các trận chưa kết thúc",
+  "+ %(count)s AI": "+ %(count)s AI",
+  "%(count)s AI": "%(count)s AI"
 }

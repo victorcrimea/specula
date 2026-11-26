@@ -1,0 +1,12 @@
+/* Player colours include dark blues, purples and greens that vanish on the
+   dark pages. Every element given a text colour inline (the clients set a
+   player's colour that way) is lightened towards white and edged with a
+   darker shade of its own colour, like a caption. currentColor in the
+   fill and the stroke is the element's own colour. */
+[style^="color:"],
+[style*=";color:"],
+[style*="; color:"] {
+  -webkit-text-fill-color: color-mix(in srgb, currentColor 45%, #fff);
+  -webkit-text-stroke: 0.17em color-mix(in srgb, currentColor 70%, #000);
+  paint-order: stroke fill;
+}

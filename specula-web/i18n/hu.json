@@ -236,5 +236,8 @@
   "The host hid this match from observers until it ends.": "A házigazda a megfigyelők elől elrejtette ezt a meccset a végéig.",
   "Its replay opens here when it ends.": "Az ismétlése itt nyílik meg, amikor véget ér.",
   "Players do not see observer chat in this match.": "A játékosok nem látják a megfigyelők csevegését ebben a meccsben.",
-  "Too many people are watching on this server. Trying again...": "Túl sokan nézik ezt a szervert. Újrapróbálkozás..."
+  "Too many people are watching on this server. Trying again...": "Túl sokan nézik ezt a szervert. Újrapróbálkozás...",
+  "Show unfinished matches": "Befejezetlen meccsek megjelenítése",
+  "+ %(count)s AI": "+ %(count)s MI",
+  "%(count)s AI": "%(count)s MI"
 }

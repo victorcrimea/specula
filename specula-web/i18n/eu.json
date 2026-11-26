@@ -236,5 +236,8 @@
   "The host hid this match from observers until it ends.": "Ostalariak partida hau behatzaileei ezkutatu die amaitu arte.",
   "Its replay opens here when it ends.": "Amaitzen denean, bere errepikapena hemen irekiko da.",
   "Players do not see observer chat in this match.": "Jokalariek ez dute behatzaileen txata ikusten partida honetan.",
-  "Too many people are watching on this server. Trying again...": "Jende gehiegi ari da zerbitzari honetan ikusten. Berriro saiatzen..."
+  "Too many people are watching on this server. Trying again...": "Jende gehiegi ari da zerbitzari honetan ikusten. Berriro saiatzen...",
+  "Show unfinished matches": "Erakutsi amaitu gabeko partidak",
+  "+ %(count)s AI": "+ %(count)s IA",
+  "%(count)s AI": "%(count)s IA"
 }

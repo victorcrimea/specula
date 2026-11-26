@@ -236,5 +236,8 @@
   "The host hid this match from observers until it ends.": "Hostitel skryl tuto hru před pozorovateli, dokud neskončí.",
   "Its replay opens here when it ends.": "Její záznam se zde otevře, až skončí.",
   "Players do not see observer chat in this match.": "Hráči v této hře nevidí chat pozorovatelů.",
-  "Too many people are watching on this server. Trying again...": "Na tomto serveru sleduje příliš mnoho lidí. Zkouším to znovu..."
+  "Too many people are watching on this server. Trying again...": "Na tomto serveru sleduje příliš mnoho lidí. Zkouším to znovu...",
+  "Show unfinished matches": "Zobrazit nedokončené zápasy",
+  "+ %(count)s AI": "+ %(count)s AI",
+  "%(count)s AI": "%(count)s AI"
 }

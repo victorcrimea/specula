@@ -236,5 +236,8 @@
   "The host hid this match from observers until it ends.": "O anfitrión ocultou esta partida aos observadores ata que remate.",
   "Its replay opens here when it ends.": "A súa repetición abrirase aquí cando remate.",
   "Players do not see observer chat in this match.": "Os xogadores non ven o chat dos observadores nesta partida.",
-  "Too many people are watching on this server. Trying again...": "Hai demasiada xente mirando neste servidor. Tentando de novo..."
+  "Too many people are watching on this server. Trying again...": "Hai demasiada xente mirando neste servidor. Tentando de novo...",
+  "Show unfinished matches": "Amosar as partidas sen acabar",
+  "+ %(count)s AI": "+ %(count)s IA",
+  "%(count)s AI": "%(count)s IA"
 }

@@ -236,5 +236,8 @@
   "The host hid this match from observers until it ends.": "Ο οικοδεσπότης έκρυψε αυτόν τον αγώνα από τους παρατηρητές μέχρι να τελειώσει.",
   "Its replay opens here when it ends.": "Η επανάληψή του θα ανοίξει εδώ όταν τελειώσει.",
   "Players do not see observer chat in this match.": "Οι παίκτες δεν βλέπουν τη συνομιλία των παρατηρητών σε αυτόν τον αγώνα.",
-  "Too many people are watching on this server. Trying again...": "Πάρα πολλοί παρακολουθούν σε αυτόν τον διακομιστή. Γίνεται νέα προσπάθεια..."
+  "Too many people are watching on this server. Trying again...": "Πάρα πολλοί παρακολουθούν σε αυτόν τον διακομιστή. Γίνεται νέα προσπάθεια...",
+  "Show unfinished matches": "Εμφάνιση ημιτελών αγώνων",
+  "+ %(count)s AI": "+ %(count)s ΤΝ",
+  "%(count)s AI": "%(count)s ΤΝ"
 }

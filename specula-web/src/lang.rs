@@ -6,11 +6,14 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::rc::Rc;
 
 use wasm_bindgen::JsCast;
 use wasm_bindgen::JsValue;
 use wasm_bindgen::closure::Closure;
 use wasm_bindgen_futures::JsFuture;
+use web_sys::HtmlOptionElement;
+use web_sys::HtmlSelectElement;
 
 /// `localStorage` key of the chosen language code; absent or empty is the
 /// browser's list.
@@ -163,6 +166,78 @@ pub fn start_page() {
         let languages = languages().await;
         load(choose(&languages, &saved)).await;
     });
+}
+
+/// Fills `select` with the languages and keeps it: the saved choice is
+/// shown and loaded, a change is saved and loaded, and `after` runs once
+/// each load is done, for what the page draws from the table itself. The
+/// first option is the browser's pick, named in the language just loaded.
+pub async fn wire_selector(select: HtmlSelectElement, after: impl Fn() + 'static) {
+    let saved = web_sys::window()
+        .and_then(|window| window.local_storage().ok().flatten())
+        .and_then(|storage| storage.get_item(SETTING_KEY).ok().flatten())
+        .unwrap_or_default();
+    let languages = Rc::new(languages().await);
+    let Some(document) = web_sys::window().and_then(|window| window.document()) else {
+        return;
+    };
+    for language in languages.iter() {
+        let Some(option) = document
+            .create_element("option")
+            .ok()
+            .and_then(|option| option.dyn_into::<HtmlOptionElement>().ok())
+        else {
+            continue;
+        };
+        option.set_value(&language.code);
+        option.set_text(&language.name);
+        let _ = select.append_child(&option);
+    }
+    let default_name =
+        choose(&languages, "").map_or("English".to_string(), |language| language.name.clone());
+    let after: Rc<dyn Fn()> = Rc::new(after);
+    let apply = {
+        let languages = Rc::clone(&languages);
+        let select = select.clone();
+        let after = Rc::clone(&after);
+        move |setting: String| {
+            let languages = Rc::clone(&languages);
+            let select = select.clone();
+            let default_name = default_name.clone();
+            let after = Rc::clone(&after);
+            async move {
+                if load(choose(&languages, &setting)).await
+                    && let Some(first) = select
+                        .item(0)
+                        .and_then(|option| option.dyn_into::<HtmlOptionElement>().ok())
+                {
+                    first.set_text(&format(
+                        &translate("Default (browser: %(name)s)"),
+                        &[("name", &default_name)],
+                    ));
+                }
+                after();
+            }
+        }
+    };
+    // A saved code the list no longer has is the default.
+    let known = languages.iter().any(|language| language.code == saved);
+    select.set_value(if known { &saved } else { "" });
+    // Awaited, so a page that builds its text next has the table.
+    apply(select.value()).await;
+    let list = select.clone();
+    let closure = Closure::<dyn FnMut()>::new(move || {
+        let setting = list.value();
+        if let Some(storage) =
+            web_sys::window().and_then(|window| window.local_storage().ok().flatten())
+        {
+            let _ = storage.set_item(SETTING_KEY, &setting);
+        }
+        wasm_bindgen_futures::spawn_local(apply(setting));
+    });
+    select.set_onchange(Some(closure.as_ref().unchecked_ref()));
+    // The control lives as long as the page.
+    closure.forget();
 }
 
 /// The engine's `sprintf` with named placeholders: each `%(name)s` in

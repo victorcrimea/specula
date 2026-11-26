@@ -236,5 +236,8 @@
   "The host hid this match from observers until it ends.": "Tuan rumah menyembunyikan pertandingan ini dari pengamat sampai berakhir.",
   "Its replay opens here when it ends.": "Rekamannya akan terbuka di sini saat pertandingan berakhir.",
   "Players do not see observer chat in this match.": "Pemain tidak melihat obrolan pengamat di pertandingan ini.",
-  "Too many people are watching on this server. Trying again...": "Terlalu banyak orang menonton di server ini. Mencoba lagi..."
+  "Too many people are watching on this server. Trying again...": "Terlalu banyak orang menonton di server ini. Mencoba lagi...",
+  "Show unfinished matches": "Tampilkan pertandingan yang belum selesai",
+  "+ %(count)s AI": "+ %(count)s AI",
+  "%(count)s AI": "%(count)s AI"
 }

@@ -516,13 +516,11 @@ pub async fn run() -> Result<(), String> {
         map_browser: map_browser::MapBrowser::new(&document)?,
     }));
 
-    // The language first, so what the page builds is translated.
-    let language_setting = storage
-        .as_ref()
-        .and_then(|storage| storage.get_item(lang::SETTING_KEY).ok().flatten())
-        .unwrap_or_default();
-    let languages = lang::languages().await;
-    lang::load(lang::choose(&languages, &language_setting)).await;
+    // The language first, so what the page builds is translated; a change
+    // draws the state again, as the page's own text is made from it.
+    let select: HtmlSelectElement = by_id(&document, "language")?;
+    let redraw = Rc::clone(&page);
+    lang::wire_selector(select, move || render(&redraw)).await;
 
     wire_static(&page);
     map_browser::wire(&page);

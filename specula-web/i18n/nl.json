@@ -236,5 +236,8 @@
   "The host hid this match from observers until it ends.": "De host heeft dit spel tot het einde voor waarnemers verborgen.",
   "Its replay opens here when it ends.": "De herhaling opent hier als het spel afgelopen is.",
   "Players do not see observer chat in this match.": "Spelers zien de chat van waarnemers in dit spel niet.",
-  "Too many people are watching on this server. Trying again...": "Te veel mensen kijken mee op deze server. Opnieuw proberen..."
+  "Too many people are watching on this server. Trying again...": "Te veel mensen kijken mee op deze server. Opnieuw proberen...",
+  "Show unfinished matches": "Onvoltooide wedstrijden tonen",
+  "+ %(count)s AI": "+ %(count)s AI",
+  "%(count)s AI": "%(count)s AI"
 }

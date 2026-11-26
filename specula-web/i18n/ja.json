@@ -236,5 +236,8 @@
   "The host hid this match from observers until it ends.": "ホストはこの試合を終了まで観戦者から隠しました。",
   "Its replay opens here when it ends.": "終了すると、ここでリプレイが開きます。",
   "Players do not see observer chat in this match.": "この試合では、プレイヤーに観戦者のチャットは見えません。",
-  "Too many people are watching on this server. Trying again...": "このサーバーで観戦している人が多すぎます。再試行しています..."
+  "Too many people are watching on this server. Trying again...": "このサーバーで観戦している人が多すぎます。再試行しています...",
+  "Show unfinished matches": "未完了の試合を表示",
+  "+ %(count)s AI": "+ AI %(count)s 人",
+  "%(count)s AI": "AI %(count)s 人"
 }

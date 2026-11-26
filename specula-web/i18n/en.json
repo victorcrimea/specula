@@ -236,5 +236,8 @@
   "The host hid this match from observers until it ends.": "notice filling a match page whose host hid the match from observers until it ends; first line",
   "Its replay opens here when it ends.": "second line of that notice: the page switches to the stored replay by itself",
   "Players do not see observer chat in this match.": "note under the chat window for an observer when the host chose that players only see what is explored: what observers write is not shown to players",
-  "Too many people are watching on this server. Trying again...": "banner on a match page when the server already has the most observers it allows; the page asks again every 15 seconds"
+  "Too many people are watching on this server. Trying again...": "banner on a match page when the server already has the most observers it allows; the page asks again every 15 seconds",
+  "Show unfinished matches": "checkbox above the lobby page's replay list: also list stored matches that ended without a winner or were cut short",
+  "+ %(count)s AI": "end of the players line of a lobby card, after the human players' names: how many computer players took part, e.g. \"Anna, Ben + 4 AI\"",
+  "%(count)s AI": "players line of a lobby card when only computer players took part, e.g. \"4 AI\""
 }

@@ -74,6 +74,7 @@ use crate::setup::SetupRoom;
 use crate::setup::catalog_json;
 use crate::view::Hub;
 use crate::view::Message;
+use crate::view::MetaSource;
 use crate::view::SummaryBody;
 use crate::view::TerrainFile;
 use crate::view::View;
@@ -632,7 +633,8 @@ impl Registry {
 
     /// `/lobby.json` (M40, D59): the setups, the running matches and the
     /// newest `replays` stored ones.
-    pub fn lobby_json(&self, replays: usize) -> String {
+    /// `unfinished`: also the stored matches with no result.
+    pub fn lobby_json(&self, replays: usize, unfinished: bool) -> String {
         let hosted: Vec<(MatchId, Arc<Match>)> = {
             let inner = self.inner.lock().unwrap();
             inner
@@ -678,8 +680,13 @@ impl Registry {
                         .hub
                         .lobby_players()
                         .into_iter()
-                        .map(|(name, civ, rgb)| {
-                            json!({ "name": name, "civ": civ, "color": color(rgb) })
+                        .map(|player| {
+                            json!({
+                                "name": player.name,
+                                "civ": player.civ,
+                                "color": color(player.color),
+                                "ai": player.ai,
+                            })
                         })
                         .collect();
                     // Before the first turn the feed has no players yet.
@@ -688,7 +695,7 @@ impl Registry {
                             .seats
                             .seated_names()
                             .into_iter()
-                            .map(|(_, name)| json!({ "name": name.as_str(), "civ": "", "color": null }))
+                            .map(|(_, name)| json!({ "name": name.as_str(), "civ": "", "color": null, "ai": false }))
                             .collect();
                     }
                     running.push(json!({
@@ -707,7 +714,7 @@ impl Registry {
             }
         }
         let (stored, more) = match &self.history {
-            Some(history) => history.lock().unwrap().list(replays),
+            Some(history) => history.lock().unwrap().list(replays, unfinished),
             None => (Vec::new(), false),
         };
         let stored: Vec<Value> = stored
@@ -721,11 +728,19 @@ impl Registry {
                     "players": meta.map_or_else(Vec::new, |meta| {
                         meta.players
                             .iter()
-                            .map(|(name, civ, rgb)| {
-                                json!({ "name": name, "civ": civ, "color": color(*rgb) })
+                            .map(|player| {
+                                json!({
+                                    "name": player.name,
+                                    "civ": player.civ,
+                                    "color": color(player.color),
+                                    "ai": player.ai,
+                                })
                             })
                             .collect()
                     }),
+                    "preview": meta.and_then(|meta| meta.preview.clone()),
+                    "resolved": info.resolved(),
+                    "winners": meta.map_or_else(Vec::new, |meta| meta.winners.clone()),
                     "duration": info.duration_secs,
                     "started": info.started_ms,
                     "replay": info.replay,
@@ -929,7 +944,7 @@ impl Registry {
         let observers = launch.settings.observers;
         let delay = observers.effective_delay();
         found.hub.set_delay(delay);
-        let ai_players = launch
+        let ai_players: Vec<u32> = launch
             .settings
             .player_ai
             .iter()
@@ -939,7 +954,7 @@ impl Registry {
             .collect();
         found
             .hub
-            .set_observer_mode(observers.mode == ObserverMode::Explored, ai_players);
+            .set_observer_mode(observers.mode == ObserverMode::Explored, ai_players.clone());
         found.chat.set_delay(delay);
         found
             .chat
@@ -950,15 +965,17 @@ impl Registry {
             observers.mode.name(),
             delay.as_secs()
         );
-        found.hub.set_meta_source(
-            found
+        found.hub.set_meta_source(MetaSource {
+            host: found
                 .seats
                 .host()
                 .and_then(|host| found.seats.nickname_of(&host))
                 .map(|nickname| nickname.as_str().to_string())
                 .unwrap_or_default(),
-            launch.settings.map_name.clone(),
-        );
+            map_name: launch.settings.map_name.clone(),
+            preview: launch.settings.map_preview.clone(),
+            ai_players: ai_players.clone(),
+        });
         let engine_done = Arc::new(AtomicBool::new(false));
         {
             let (hub, play) = (Arc::clone(&found.hub), Arc::clone(&found.play));

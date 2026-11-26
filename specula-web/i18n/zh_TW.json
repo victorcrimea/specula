@@ -236,5 +236,8 @@
   "The host hid this match from observers until it ends.": "主機已將這場比賽對觀戰者隱藏，直到結束。",
   "Its replay opens here when it ends.": "比賽結束後，重播會在此開啟。",
   "Players do not see observer chat in this match.": "在這場比賽中，玩家看不到觀戰者的聊天。",
-  "Too many people are watching on this server. Trying again...": "此伺服器上觀看的人太多。正在重試..."
+  "Too many people are watching on this server. Trying again...": "此伺服器上觀看的人太多。正在重試...",
+  "Show unfinished matches": "顯示未完成的比賽",
+  "+ %(count)s AI": "+ %(count)s 個電腦玩家",
+  "%(count)s AI": "%(count)s 個電腦玩家"
 }
