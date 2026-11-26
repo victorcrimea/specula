@@ -36,6 +36,10 @@ path = "src/bake_unit/main.rs"
 name = "bake-assets"
 path = "src/bake_assets/main.rs"
 
+[[bin]]
+name = "harness"
+path = "src/harness/main.rs"
+
 [dependencies]
 brotli = "9"
 fast_image_resize = "6.1.0"

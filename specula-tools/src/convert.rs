@@ -208,7 +208,7 @@ fn watch(child: &mut Child, log_path: &Path) -> Result<std::process::ExitStatus,
 
 /// The resident memory of every process in the group `group`, from
 /// /proc; processes that cannot be read count as 0.
-fn group_resident_bytes(group: u32) -> u64 {
+pub fn group_resident_bytes(group: u32) -> u64 {
     let Ok(entries) = fs::read_dir("/proc") else {
         return 0;
     };
@@ -228,7 +228,7 @@ fn group_resident_bytes(group: u32) -> u64 {
 }
 
 /// SIGKILL to the whole process group.
-fn kill_group(group: u32) {
+pub fn kill_group(group: u32) {
     let _ = Command::new("kill")
         .arg("-KILL")
         .arg("--")
@@ -237,7 +237,7 @@ fn kill_group(group: u32) {
         .status();
 }
 
-fn read_from(path: &Path, start: u64) -> String {
+pub fn read_from(path: &Path, start: u64) -> String {
     let mut text = Vec::new();
     if let Ok(mut file) = File::open(path)
         && file.seek(SeekFrom::Start(start)).is_ok()
@@ -247,7 +247,7 @@ fn read_from(path: &Path, start: u64) -> String {
     String::from_utf8_lossy(&text).into_owned()
 }
 
-fn log_tail(path: &Path) -> String {
+pub fn log_tail(path: &Path) -> String {
     let size = fs::metadata(path).map_or(0, |metadata| metadata.len());
     read_from(path, size.saturating_sub(LOG_TAIL_BYTES))
 }
