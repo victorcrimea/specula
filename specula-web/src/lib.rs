@@ -3421,8 +3421,8 @@ fn apply_request(renderer: &mut dyn View, request: Request, scene: &Scene) {
 
 /// A hero button selects its entity, with Shift (selection.add) adds it,
 /// and on a double click also follows it with the camera.
-/// The buttons that open the window (`#diplomacy-open` in the controls,
-/// `#top-diplomacy` in the top bar, as `diplomacyButton`), its Close, and
+/// The button that opens the window (`#top-diplomacy` in the top bar, as
+/// `diplomacyButton`), its Close, and
 /// the engine's session.gui.diplomacy.toggle (Ctrl+H); Escape closes it,
 /// as `closeOpenDialogs`.
 fn wire_diplomacy_window(app: &Rc<RefCell<App>>, window: &web_sys::Window) {
@@ -3450,12 +3450,10 @@ fn wire_diplomacy_window(app: &Rc<RefCell<App>>, window: &web_sys::Window) {
     let Some(document) = window.document() else {
         return;
     };
-    for id in ["diplomacy-open", "top-diplomacy"] {
-        // An older page lacks either; the window still opens by key.
-        if let Ok(button) = element::<HtmlElement>(&document, id) {
-            let target = Rc::clone(app);
-            on_click(&button, move || set(&target, None));
-        }
+    // An older page lacks it; the window still opens by key.
+    if let Ok(button) = element::<HtmlElement>(&document, "top-diplomacy") {
+        let target = Rc::clone(app);
+        on_click(&button, move || set(&target, None));
     }
     let target = Rc::clone(app);
     let on_key = Closure::<dyn FnMut(web_sys::Event)>::new(move |event: web_sys::Event| {
