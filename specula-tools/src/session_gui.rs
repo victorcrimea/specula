@@ -361,6 +361,16 @@ const FONTS: [(&str, u16, &str); 4] = [
     ("0ad sans fallback", 400, "FreeSans.ttf"),
     ("0ad sans fallback", 700, "FreeSansBold.ttf"),
 ];
+/// The font licences require their text to travel with the fonts, and the
+/// art's CC-BY-SA its notice with the textures, so `LICENSE` holds them all.
+const FONT_LICENSES: [&str; 3] = [
+    "LICENSE.txt",
+    "LibBiolinum-LICENSE.txt",
+    "FreeFont-LICENSE.txt",
+];
+/// A fixed name, so the game page can link it; the engine's licence texts
+/// do not change within a release.
+const LICENSE: &str = "LICENSE.txt";
 
 struct Rgba {
     width: u32,
@@ -499,9 +509,41 @@ fn run(mod_dir: &Path, output: &Path, civs_path: &Path) -> Result<(), String> {
         written += bytes.len();
         faces.push((family, weight, name));
     }
+    let mut license = String::from(
+        "The files in this directory were converted from 0 A.D. (Wildfire Games,\n\
+         https://www.wildfiregames.com/) by specula-tools session-gui. The\n\
+         textures, cursors and map previews are under the art licence below\n\
+         (CC-BY-SA 3.0), and so are these converted copies; the fonts (.ttf) are\n\
+         under their own licences, after it.\n",
+    );
+    // Headed by the mod path, not the local one, which the file would leak.
+    let notices = [
+        (
+            "public/art/LICENSE.txt".to_string(),
+            mod_dir.join("art/LICENSE.txt"),
+        ),
+        (
+            "mod/art/LICENSE.txt".to_string(),
+            engine_mod.join("art/LICENSE.txt"),
+        ),
+    ]
+    .into_iter()
+    .chain(
+        FONT_LICENSES
+            .iter()
+            .map(|file| (format!("mod/fonts/{file}"), fonts_dir.join(file))),
+    );
+    for (label, path) in notices {
+        let text =
+            fs::read_to_string(&path).map_err(|error| format!("{}: {error}", path.display()))?;
+        license.push_str(&format!("\n==== {label} ====\n\n"));
+        license.push_str(text.trim_end());
+        license.push('\n');
+    }
+    write(&output.join(LICENSE), license.as_bytes())?;
 
     let mut css = String::from(
-        "/* Written by specula-tools session-gui; textures of 0 A.D. by Wildfire\n   Games, CC-BY-SA 3.0, fonts under their own licences (gui.LICENSE). */\n",
+        "/* Written by specula-tools session-gui; textures of 0 A.D. by Wildfire\n   Games, CC-BY-SA 3.0, fonts under their own licences (LICENSE.txt). */\n",
     );
     for (family, weight, name) in &faces {
         css.push_str(&format!(

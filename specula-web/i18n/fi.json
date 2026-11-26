@@ -253,5 +253,7 @@
   "A cookie keeps your seat in a game. May we also count visits and games, anonymously, to improve the site?": "Eväste pitää paikkasi pelissä. Saammeko laskea lisäksi käyntejä ja pelejä nimettömästi sivuston parantamiseksi?",
   "Allow": "Salli",
   "Decline": "Hylkää",
-  "Source code (GPLv3)": "Lähdekoodi (GPLv3)"
+  "Source code (GPLv3)": "Lähdekoodi (GPLv3)",
+  "Art and sounds: copyright Wildfire Games, from 0 A.D., converted for the web, licensed under CC BY-SA 3.0.": "Grafiikka ja äänet: tekijänoikeus Wildfire Games, pelistä 0 A.D., muunnettu verkkoon, lisenssi CC BY-SA 3.0.",
+  "Font licences": "Fonttien lisenssit"
 }

@@ -253,5 +253,7 @@
   "A cookie keeps your seat in a game. May we also count visits and games, anonymously, to improve the site?": "Un cookie garde votre place dans une partie. Pouvons-nous aussi compter, de façon anonyme, les visites et les parties pour améliorer le site ?",
   "Allow": "Autoriser",
   "Decline": "Refuser",
-  "Source code (GPLv3)": "Code source (GPLv3)"
+  "Source code (GPLv3)": "Code source (GPLv3)",
+  "Art and sounds: copyright Wildfire Games, from 0 A.D., converted for the web, licensed under CC BY-SA 3.0.": "Graphismes et sons : copyright Wildfire Games, issus de 0 A.D., convertis pour le web, sous licence CC BY-SA 3.0.",
+  "Font licences": "Licences des polices"
 }

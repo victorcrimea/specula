@@ -32,6 +32,7 @@ button { cursor: pointer; }
 a { color: #8fc1e3; }
 /* the bottom padding keeps the link clear of the fixed Feedback and cookie corners */
 footer { max-width: 960px; margin: 0 auto; padding: 8px 16px 56px; color: #8a949b; font-size: 12px; text-align: center; }
+footer p { margin: 4px 0 0; }
 form { max-width: 640px; }
 h2 { font-size: 16px; font-weight: 600; margin: 28px 0 12px; }
 .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 12px; }
@@ -78,7 +79,12 @@ h2 { font-size: 16px; font-weight: 600; margin: 28px 0 12px; }
 <div id="replays" class="cards"></div>
 <button id="more" type="button" hidden data-i18n>Show more</button>
 </main>
-<footer><a href="https://github.com/victorcrimea/specula" data-i18n>Source code (GPLv3)</a></footer>
+<footer>
+<a href="https://github.com/victorcrimea/specula" data-i18n>Source code (GPLv3)</a>
+<p><span data-i18n>Art and sounds: copyright Wildfire Games, from 0 A.D., converted for the web, licensed under CC BY-SA 3.0.</span>
+<a href="https://www.wildfiregames.com/">wildfiregames.com</a> |
+<a href="https://creativecommons.org/licenses/by-sa/3.0/">creativecommons.org/licenses/by-sa/3.0</a></p>
+</footer>
 <script>
 const T = (text) => window.speculaT(text);
 

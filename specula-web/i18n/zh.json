@@ -253,5 +253,7 @@
   "A cookie keeps your seat in a game. May we also count visits and games, anonymously, to improve the site?": "一个 Cookie 用于保留你在游戏中的席位。我们是否可以匿名统计访问和游戏次数，以改进网站？",
   "Allow": "允许",
   "Decline": "拒绝",
-  "Source code (GPLv3)": "源代码 (GPLv3)"
+  "Source code (GPLv3)": "源代码 (GPLv3)",
+  "Art and sounds: copyright Wildfire Games, from 0 A.D., converted for the web, licensed under CC BY-SA 3.0.": "美术与音效：版权归 Wildfire Games 所有，来自 0 A.D.，已为网页转换，采用 CC BY-SA 3.0 许可。",
+  "Font licences": "字体许可"
 }

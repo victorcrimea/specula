@@ -253,5 +253,7 @@
   "A cookie keeps your seat in a game. May we also count visits and games, anonymously, to improve the site?": "notice at the bottom of every page, shown once; the cookie is the one that binds a player to their seat; the question is whether anonymous usage statistics (visits, games, play time) may be logged with it. Followed by the buttons \"Allow\" and \"Decline\"",
   "Allow": "button of the cookie notice: allow usage statistics",
   "Decline": "button of the cookie notice: refuse usage statistics",
-  "Source code (GPLv3)": "link in the lobby page footer to Specula's source code repository; keep GPLv3 as is, it is the licence name"
+  "Source code (GPLv3)": "link in the lobby page footer to Specula's source code repository; keep GPLv3 as is, it is the licence name",
+  "Art and sounds: copyright Wildfire Games, from 0 A.D., converted for the web, licensed under CC BY-SA 3.0.": "lobby page footer, the attribution the CC BY-SA 3.0 licence of 0 A.D.'s art and sounds requires; keep Wildfire Games, 0 A.D. and CC BY-SA 3.0 as they are (names); \"converted for the web\" means the files were adapted (re-encoded) for the browser. Followed by links to wildfiregames.com and the licence",
+  "Font licences": "link in the game page's settings panel, next to the art credits, to the licence texts of the fonts the page uses"
 }

@@ -1096,6 +1096,10 @@ body:not([data-debug="storage"]) #stats-storage { display: none; }
 #settings .tabs button[aria-selected="true"] { border-color: #8fa3b0; }
 #settings .pane { display: flex; flex-direction: column; gap: 10px; padding: 12px; }
 #settings .pane[hidden] { display: none; }
+/* the auto top margin keeps the credits at the foot of a short pane */
+#settings-credits { margin: auto 0 0; padding: 12px; border-top: 1px solid #3a4248;
+  color: #8a949b; font-size: 12px; }
+#settings-credits a { color: #8fc1e3; }
 #settings .pane label { display: flex; align-items: center;
   justify-content: space-between; gap: 8px; }
 #settings .pane h3 { margin: 6px 0 0; font-size: 11px; font-weight: 600;
@@ -1647,6 +1651,11 @@ body:not([data-debug="storage"]) #stats-storage { display: none; }
 <option value="">Default (browser)</option>
 </select></label>
 </div>
+<p id="settings-credits"><span data-i18n>Art and sounds: copyright Wildfire Games, from 0 A.D., converted for the web, licensed under CC BY-SA 3.0.</span>
+<a href="https://www.wildfiregames.com/" target="_blank" rel="noopener">wildfiregames.com</a> |
+<a href="https://creativecommons.org/licenses/by-sa/3.0/" target="_blank" rel="noopener">creativecommons.org/licenses/by-sa/3.0</a> |
+<a href="/gui/LICENSE.txt" target="_blank" rel="noopener" data-i18n>Font licences</a> |
+<a href="https://github.com/victorcrimea/specula" target="_blank" rel="noopener" data-i18n>Source code (GPLv3)</a></p>
 </div>
 <div id="storage-notice" role="dialog" aria-modal="true" aria-labelledby="storage-notice-title" hidden>
 <div id="storage-notice-box">

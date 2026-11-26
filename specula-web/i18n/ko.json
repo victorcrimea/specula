@@ -253,5 +253,7 @@
   "A cookie keeps your seat in a game. May we also count visits and games, anonymously, to improve the site?": "쿠키 하나가 게임에서 자리를 유지합니다. 사이트 개선을 위해 방문 수와 게임 수도 익명으로 집계해도 될까요?",
   "Allow": "허용",
   "Decline": "거부",
-  "Source code (GPLv3)": "소스 코드 (GPLv3)"
+  "Source code (GPLv3)": "소스 코드 (GPLv3)",
+  "Art and sounds: copyright Wildfire Games, from 0 A.D., converted for the web, licensed under CC BY-SA 3.0.": "그래픽과 사운드: copyright Wildfire Games, 0 A.D.에서 가져와 웹용으로 변환, CC BY-SA 3.0 라이선스.",
+  "Font licences": "글꼴 라이선스"
 }
