@@ -548,9 +548,11 @@ impl Data {
             })
             .unwrap_or_else(|| RESOURCES.iter().map(|code| code.to_string()).collect());
 
-        // `initTeamData`.
+        // `initTeamData`, which also groups the players of unlocked teams
+        // when the server saw their alliances follow the teams all along
+        // (a deviation from vanilla).
         let mut teams: Vec<(i32, Vec<usize>)> = Vec::new();
-        if get(&settings, "LockTeams").is_truthy() {
+        if get(&settings, "LockTeams").is_truthy() || get(&envelope, "teamsHeld").is_truthy() {
             for (index, player) in players.iter().enumerate() {
                 if player.team < 0 {
                     continue;

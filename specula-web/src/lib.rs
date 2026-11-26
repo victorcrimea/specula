@@ -143,6 +143,7 @@ use crate::worker::COMMAND_SCRUB;
 use crate::worker::COMMAND_SEEK;
 use crate::worker::COMMAND_SPEED;
 use crate::worker::POST_DETAIL;
+use crate::worker::POST_DISPLACED;
 use crate::worker::POST_FLARE;
 use crate::worker::POST_SCENE;
 use crate::worker::POST_STARTS;
@@ -703,6 +704,11 @@ struct App {
     claim_offered: bool,
     /// On `/play`: the seat's kick was noticed, which its popup says once.
     kicked_noticed: bool,
+    /// On `/play`: the worker's seat stream was closed because another
+    /// page took the seat over (D64).
+    stream_displaced: bool,
+    /// On `/play`: the takeover's popup was shown, once.
+    displaced_noticed: bool,
     /// On `/play`: the observers' view is being checked for now that the
     /// seat's last ally fell; cleared when the answer left the page on its
     /// stream, so the check is asked again.
@@ -904,14 +910,14 @@ struct ReplayLink {
     asking: Rc<Cell<bool>>,
     /// When the server is asked next, on the frame clock.
     ask_at: f64,
+    /// Whether the tooltip carries the note on more than 8 players.
+    noted: bool,
 }
 
 struct OwnerButtons {
     new_match: HtmlButtonElement,
     rematch: HtmlButtonElement,
     /// The follower's Join rematch (M35), shown once the setup opens.
-    /// Whether the tooltip carries the note on more than 8 players.
-    noted: bool,
     join: HtmlButtonElement,
     lobby: HtmlButtonElement,
     can_rematch: bool,
@@ -1007,12 +1013,6 @@ impl MatchOver {
             if replay.button.hidden() != hidden {
                 replay.button.set_hidden(hidden);
             }
-        }
-        if !self.ended || self.closed {
-            return;
-        }
-        let left = self.switch_at - now;
-        let text = if let Some(error) = self.error.borrow().clone() {
             // Vanilla's own screens were laid out for 8 players, so a
             // downloader of a bigger game is told what to expect.
             let noted = players > 8;
@@ -1028,6 +1028,12 @@ impl MatchOver {
                 }
                 replay.button.set_title(&title);
             }
+        }
+        if !self.ended || self.closed {
+            return;
+        }
+        let left = self.switch_at - now;
+        let text = if let Some(error) = self.error.borrow().clone() {
             error
         } else if self.owner.is_some() {
             lang::translate("Match over")
@@ -1285,6 +1291,7 @@ impl App {
     /// `now` is the requestAnimationFrame timestamp in milliseconds.
     fn frame(&mut self, now: f64) {
         let start = page_now();
+        self.sync_displaced();
         usage::frame(
             now,
             match (self.page, self.live) {
@@ -2330,6 +2337,33 @@ impl App {
         names.join(&separator)
     }
 
+    /// Another page took the seat over (D64): every seat socket of this one
+    /// goes, so it neither commands nor watches, and the popup says so
+    /// over whatever was open.
+    fn sync_displaced(&mut self) {
+        if self.displaced_noticed {
+            return;
+        }
+        let uplink_displaced = self.uplink.as_ref().is_some_and(Uplink::displaced);
+        if !uplink_displaced && !self.stream_displaced {
+            return;
+        }
+        self.displaced_noticed = true;
+        if let Some(uplink) = &self.uplink {
+            uplink.shut();
+        }
+        self.worker.terminate();
+        if let Some(diplomacy_window) = &mut self.diplomacy_window {
+            diplomacy_window.set_open(false);
+        }
+        if let Some(trade_window) = &mut self.trade_window {
+            trade_window.set_open(false, self.perspective);
+        }
+        if let Some(message_box) = &mut self.message_box {
+            message_box.notify_displaced();
+        }
+    }
+
     /// The control's two popups: the seat was kicked, once; a claim is
     /// available, once per page. Each waits for no other box to be open,
     /// and the kick closes the dialogs.
@@ -2852,7 +2886,8 @@ async fn run(
         js_sys::encode_uri_component(&match_base())
     );
     if seated {
-        worker_url.push_str("&play=1");
+        worker_url.push_str("&play=1&tab=");
+        worker_url.push_str(&tab_id());
     }
     // A shared link names a match and a moment in it; the worker opens it.
     if let Some(value) = query_param(&search, "t") {
@@ -2938,6 +2973,7 @@ async fn run(
                     ready: Rc::new(Cell::new(false)),
                     asking: Rc::new(Cell::new(false)),
                     ask_at: 0.0,
+                    noted: false,
                 }),
         },
         stream_start: StreamStart {
@@ -2973,11 +3009,12 @@ async fn run(
         message_box,
         game_menu,
         pause_overlay,
-                    noted: false,
         finish_noticed: status.as_ref().is_some_and(|status| status.defeated),
         pending_follow: None,
         claim_offered: false,
         kicked_noticed: false,
+        stream_displaced: false,
+        displaced_noticed: false,
         watch_asked: Rc::new(Cell::new(false)),
         summary,
         owner_seat: status
@@ -4199,7 +4236,7 @@ fn cancel_message_box(app: &Rc<RefCell<App>>, no_button: bool) {
     match app.message_box.as_mut().and_then(MessageBox::cancel) {
         Some(Pending::Result { won: false }) => game_menu::after_defeat(),
         Some(Pending::ReturnQuestion) if no_button => game_menu::watch(),
-        Some(Pending::Kicked) => game_menu::reload(),
+        Some(Pending::Kicked | Pending::Displaced) => game_menu::reload(),
         _ => {}
     }
 }
@@ -4276,7 +4313,7 @@ fn wire_message_box(app: &Rc<RefCell<App>>, window: &web_sys::Window) {
                     }
                 })
             }
-            Some(Pending::Kicked) => game_menu::reload(),
+            Some(Pending::Kicked | Pending::Displaced) => game_menu::reload(),
             Some(Pending::Result { won }) => {
                 app.offer_return = Some(won);
                 let source = summary_source(&app);
@@ -5950,6 +5987,31 @@ pub fn match_base() -> String {
     }
 }
 
+thread_local! {
+    static TAB_ID: String = {
+        // Not a secret (the cookie is): it only tells this page from
+        // another holding the same cookie, so Math.random will do.
+        (0..4)
+            .map(|_| format!("{:08x}", (js_sys::Math::random() * 4_294_967_296.0) as u32))
+            .collect()
+    };
+}
+
+/// This page's own name for itself (D64), drawn once per page load, so
+/// its reconnects keep holding the seat and a second page takes it over.
+pub fn tab_id() -> String {
+    TAB_ID.with(String::clone)
+}
+
+/// The `code` of a socket's close event, read without the `CloseEvent`
+/// binding; 0 when there is none.
+pub fn close_code(event: &JsValue) -> u16 {
+    js_sys::Reflect::get(event, &"code".into())
+        .ok()
+        .and_then(|code| code.as_f64())
+        .map_or(0, |code| code as u16)
+}
+
 /// The value of `name` in a `?a=1&b=2` query, undecoded; the values read
 /// here are hex digits and numbers.
 pub fn query_param(search: &str, name: &str) -> Option<String> {
@@ -5973,6 +6035,7 @@ fn connect(app: &Rc<RefCell<App>>) {
                 }
             }
             Some((&POST_DETAIL, message)) => receive_detail(&receiver, message),
+            Some((&POST_DISPLACED, _)) => receiver.borrow_mut().stream_displaced = true,
             Some((&POST_FLARE, rest)) => match stream::read_observer_flare(rest) {
                 Ok((x, z, name)) => receiver.borrow_mut().accept_flare(0, name, x, z),
                 Err(error) => {

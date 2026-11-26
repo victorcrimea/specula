@@ -374,7 +374,9 @@ async fn post_form(path: &str, body: &str) -> Result<String, String> {
 /// Posts `play/<action>` of the match (resign, end or rematch); the answer
 /// is the body, and the error the server's reason.
 pub async fn post(action: &str) -> Result<String, String> {
-    post_path(&format!("/play/{action}")).await
+    // The server takes a seat's action only from the page holding it (D64).
+    let separator = if action.contains('?') { '&' } else { '?' };
+    post_path(&format!("/play/{action}{separator}tab={}", crate::tab_id())).await
 }
 
 /// Posts to `path` under the match's base.

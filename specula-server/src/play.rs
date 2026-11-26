@@ -54,6 +54,7 @@ use crate::feed;
 use crate::feed::Summary;
 use crate::groups;
 use crate::history;
+use crate::lease;
 use crate::observer;
 use crate::observer::EngineDirs;
 use crate::pause;
@@ -205,6 +206,8 @@ pub struct Play {
     groups: Mutex<groups::Store>,
     /// Changed groups, for the command socket of the seat's page.
     group_pushes: broadcast::Sender<groups::Push>,
+    /// Which page holds each seat (D64): a leaf lock.
+    leases: Arc<lease::Leases>,
     /// Set when the engine reports its replay's metadata written: a leaf
     /// lock, which the thread stopping the engine waits on.
     metadata_saved: Arc<(Mutex<bool>, Condvar)>,
@@ -356,6 +359,7 @@ impl Play {
             control: Mutex::new(ControlState::default()),
             groups: Mutex::new(groups::Store::default()),
             group_pushes: broadcast::channel(GROUP_BACKLOG).0,
+            leases: Arc::new(lease::Leases::default()),
             metadata_saved: Arc::new((Mutex::new(false), Condvar::new())),
         }
     }
@@ -457,7 +461,7 @@ impl Play {
     /// Compares what the engine reports it launched with to what was sent,
     /// and logs every difference (D29). It never changes the game.
     pub fn check_attributes(&self, json: &[u8]) {
-        let launched: Value = match serde_json::from_slice(json) {
+        let mut launched: Value = match serde_json::from_slice(json) {
             Ok(value) => value,
             Err(error) => {
                 let generation = self.generation.load(Ordering::SeqCst);
@@ -465,6 +469,14 @@ impl Play {
                 return;
             }
         };
+        // LoadPlayerSettings prepends gaia to the very object the engine
+        // keeps as its init attributes, so its PlayerData is one slot ahead
+        // of the one sent.
+        if let Some(players) = launched["settings"]["PlayerData"].as_array_mut()
+            && players.first().is_some_and(Value::is_null)
+        {
+            players.remove(0);
+        }
         let sent = {
             let inner = self.inner.lock().unwrap();
             match inner.game.as_ref() {
@@ -487,6 +499,23 @@ impl Play {
     /// The player number `visitor` commands, if they hold a seat.
     pub fn seat(&self, visitor: Option<&str>) -> Option<u8> {
         self.seats.player_of(visitor?)
+    }
+
+    /// Makes the page `tab` the one holding `cookie`'s seat for a socket of
+    /// `kind` (D64); none when `tab` is no valid tab id.
+    pub fn claim_lease(
+        &self,
+        cookie: &str,
+        tab: Option<&str>,
+        kind: lease::Kind,
+    ) -> Option<lease::Lease> {
+        let tab = lease::valid_tab(tab)?;
+        Some(self.leases.claim(cookie, tab, kind))
+    }
+
+    /// Whether the page `tab` may act for `cookie`'s seat (D64).
+    pub fn holds(&self, cookie: &str, tab: Option<&str>) -> bool {
+        self.leases.holds(cookie, tab)
     }
 
     /// Where the map puts `seat`'s camera at the start (x, z), as the engine
@@ -664,6 +693,7 @@ impl Play {
     /// opponents' statistics.
     pub fn set_summary(&self, summary: Summary) {
         let players = self.seats.players();
+        let teams_held = self.hub.teams_held();
         let mut compress = Vec::with_capacity(players.len());
         {
             let mut inner = self.inner.lock().unwrap();
@@ -674,7 +704,9 @@ impl Play {
             if summary.is_final {
                 game.decided = true;
             }
-            if let Some(raw) = summary_envelope(summary.turn, summary.is_final, &summary.full) {
+            if let Some(raw) =
+                summary_envelope(summary.turn, summary.is_final, teams_held, &summary.full)
+            {
                 let raw: Arc<[u8]> = raw.into();
                 let capture = Arc::new(SeatCapture {
                     turn: summary.turn,
@@ -694,7 +726,8 @@ impl Play {
                 else {
                     continue;
                 };
-                let Some(raw) = summary_envelope(summary.turn, summary.is_final, view) else {
+                let Some(raw) = summary_envelope(summary.turn, summary.is_final, teams_held, view)
+                else {
                     continue;
                 };
                 let raw: Arc<[u8]> = raw.into();

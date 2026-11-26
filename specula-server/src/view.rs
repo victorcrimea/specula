@@ -1953,6 +1953,10 @@ struct State {
     has_turn: bool,
     /// `settings.LockTeams` of the running match.
     lock_teams: bool,
+    /// No players record of the running match has had its active players'
+    /// alliances differ from their teams, so the summary may group by team
+    /// even with the teams unlocked.
+    teams_held: bool,
     /// Set when a new observer connects: its entity ids belong to another
     /// match, so its first turn must replace, not patch, what viewers have.
     new_feed: bool,
@@ -2254,6 +2258,7 @@ impl Hub {
                 los: Los::default(),
                 has_turn: false,
                 lock_teams: false,
+                teams_held: true,
                 new_feed: true,
                 ended: false,
                 feed_activity: None,
@@ -2418,6 +2423,9 @@ impl Hub {
     pub fn set_players(&self, mut players: Players) {
         let mut state = self.state.lock().unwrap();
         players.lock_teams = state.lock_teams;
+        if !seat::alliances_follow_teams(&players) {
+            state.teams_held = false;
+        }
         // The players record does not carry the time notes (kind 31 does).
         players.time_notes = state.observer.players.time_notes.clone();
         state.observer.set_players(players);
@@ -2449,6 +2457,9 @@ impl Hub {
             .unwrap_or(false);
         let mut state = self.state.lock().unwrap();
         state.lock_teams = locked;
+        // The init attributes start a match, before its first players
+        // record.
+        state.teams_held = true;
         // The seats read the players through the observer, so its copy
         // carries the lock; the equality check flags it for the streams.
         if state.observer.players.lock_teams != locked {
@@ -2456,6 +2467,10 @@ impl Hub {
             players.lock_teams = locked;
             state.observer.set_players(players);
         }
+    }
+
+    pub fn teams_held(&self) -> bool {
+        self.state.lock().unwrap().teams_held
     }
 
     pub fn observer_guard(self: &Arc<Self>) -> ObserverGuard {
@@ -2970,13 +2985,14 @@ impl Hub {
     pub fn set_summary(self: &Arc<Self>, turn: u32, is_final: bool, full: Arc<[u8]>) {
         // Before the envelope is built: a capture outside a match costs
         // nothing.
-        {
+        let teams_held = {
             let state = self.state.lock().unwrap();
             if !state.has_turn || state.ended {
                 return;
             }
-        }
-        let Some(raw) = summary_envelope(turn, is_final, &full) else {
+            state.teams_held
+        };
+        let Some(raw) = summary_envelope(turn, is_final, teams_held, &full) else {
             return;
         };
         let raw: Arc<[u8]> = raw.into();

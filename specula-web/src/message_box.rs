@@ -46,6 +46,9 @@ pub enum Pending {
     BanMember(usize),
     /// The seat was kicked; the box only says so, and OK reloads the page.
     Kicked,
+    /// Another page took the seat over (D64); the one button reloads this
+    /// page, which takes it back.
+    Displaced,
     /// The seat's game is decided: Continue watching (No, Escape) or View
     /// summary (Yes). `won` is the outcome.
     Result {
@@ -254,6 +257,19 @@ impl MessageBox {
             &lang::translate("You have been kicked."),
             (&lang::translate("OK"), &lang::translate("OK")),
             Pending::Kicked,
+        );
+        self.set_single(true);
+    }
+
+    /// Another page holds the seat now (D64): one answer, which reloads
+    /// the page and so takes the seat back.
+    pub fn notify_displaced(&mut self) {
+        let label = lang::translate("Take control here");
+        self.open_text(
+            &lang::translate("Controlled elsewhere"),
+            &lang::translate("This seat is now being controlled from another window or computer."),
+            (&label, &label),
+            Pending::Displaced,
         );
         self.set_single(true);
     }

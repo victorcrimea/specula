@@ -9,6 +9,7 @@ mod feed;
 mod flare;
 mod groups;
 mod history;
+mod lease;
 mod limit;
 mod nickname;
 mod observer;
@@ -56,6 +57,8 @@ use rocket::tokio::sync::broadcast::error::RecvError;
 use rocket::tokio::time::MissedTickBehavior;
 use rocket_ws::Channel;
 use rocket_ws::WebSocket;
+use rocket_ws::frame::CloseCode;
+use rocket_ws::frame::CloseFrame;
 use specula_assets::command::COMMAND_VERSION;
 use specula_assets::command::Command as Order;
 use specula_assets::command::GROUP_TAG;
@@ -63,6 +66,7 @@ use specula_assets::command::GroupContents;
 use specula_assets::command::GroupSave;
 use specula_assets::command::SELECTION_DEFINE_TAG;
 use specula_assets::command::SELECTION_USE_TAG;
+use specula_assets::command::TAKEN_OVER;
 use specula_assets::command::Tokened;
 
 use crate::classify::Classifier;
@@ -70,6 +74,7 @@ use crate::config::Config;
 use crate::delta::DeltaMeter;
 use crate::feed::Record;
 use crate::history::History;
+use crate::lease::Lease;
 use crate::play::Play;
 use crate::registry::MatchId;
 use crate::registry::Registry;
@@ -602,12 +607,13 @@ fn play_new(
 /// The player's page's Resign, Pause, Claim, End, Exit, Rematch and Flare,
 /// for the visitor's game; the text says why not. A rematch answers the new
 /// game's UUID.
-#[rocket::post("/g/<id>/play/<action>?<x>&<z>")]
+#[rocket::post("/g/<id>/play/<action>?<x>&<z>&<tab>")]
 fn play_action(
     id: MatchId,
     action: &str,
     x: Option<f32>,
     z: Option<f32>,
+    tab: Option<&str>,
     registry: &State<Arc<Registry>>,
     cookies: &CookieJar<'_>,
 ) -> Result<String, rocket::response::status::BadRequest<&'static str>> {
@@ -622,6 +628,9 @@ fn play_action(
     }
     let found = registry.hosted(id).ok_or(refuse("not in play mode"))?;
     let play = &found.play;
+    if !play.holds(&visitor, tab) {
+        return Err(refuse(TAKEN_OVER_REASON));
+    }
     match action {
         "resign" => play.resign(&visitor).map(|()| String::new()),
         "pause" => play.set_paused(&visitor, true).map(|()| String::new()),
@@ -636,6 +645,10 @@ fn play_action(
     }
     .map_err(refuse)
 }
+
+/// The refusal of an action from a page that no longer holds the seat
+/// (D64).
+const TAKEN_OVER_REASON: &str = "This seat is controlled from another window";
 
 /// An observer's flare, for the other observers only (D51).
 #[rocket::post("/g/<id>/flare?<x>&<z>")]
@@ -668,17 +681,21 @@ fn observer_flare(
 
 /// The host's kick of a seat from the diplomacy window (M29), with a ban
 /// when `ban=true` (D54).
-#[rocket::post("/g/<id>/play/kick/<player>?<ban>")]
+#[rocket::post("/g/<id>/play/kick/<player>?<ban>&<tab>")]
 fn play_kick(
     id: MatchId,
     player: u8,
     ban: Option<bool>,
+    tab: Option<&str>,
     registry: &State<Arc<Registry>>,
     cookies: &CookieJar<'_>,
 ) -> Result<String, rocket::response::status::BadRequest<&'static str>> {
     let refuse = rocket::response::status::BadRequest;
     let visitor = usage::visitor(cookies).ok_or(refuse("no visitor cookie"))?;
     let found = registry.hosted(id).ok_or(refuse("not in play mode"))?;
+    if !found.play.holds(&visitor, tab) {
+        return Err(refuse(TAKEN_OVER_REASON));
+    }
     found
         .play
         .kick(&visitor, player, ban.unwrap_or(false))
@@ -687,16 +704,20 @@ fn play_kick(
 }
 
 /// The host's ban of an observer member from the chat window (D54).
-#[rocket::post("/g/<id>/play/ban_member/<member>")]
+#[rocket::post("/g/<id>/play/ban_member/<member>?<tab>")]
 fn play_ban_member(
     id: MatchId,
     member: usize,
+    tab: Option<&str>,
     registry: &State<Arc<Registry>>,
     cookies: &CookieJar<'_>,
 ) -> Result<String, rocket::response::status::BadRequest<&'static str>> {
     let refuse = rocket::response::status::BadRequest;
     let visitor = usage::visitor(cookies).ok_or(refuse("no visitor cookie"))?;
     let found = registry.hosted(id).ok_or(refuse("not in play mode"))?;
+    if !found.play.holds(&visitor, tab) {
+        return Err(refuse(TAKEN_OVER_REASON));
+    }
     found
         .play
         .ban_observer(&visitor, member)
@@ -967,30 +988,48 @@ fn seat_view(found: &registry::Match, cookies: &CookieJar<'_>) -> Option<View> {
     Some(View::Seat(u32::from(seat)))
 }
 
-#[rocket::get("/g/<id>/play/ws")]
-fn play_viewer(
-    id: MatchId,
-    socket: WebSocket,
-    registry: &State<Arc<Registry>>,
+/// `seat_view` for a socket of the page `tab`, which now holds the seat
+/// (D64); a page without a tab id gets none.
+fn seat_stream(
+    found: &registry::Match,
     cookies: &CookieJar<'_>,
-) -> Option<Channel<'static>> {
-    let found = registry.hosted(id)?;
-    let view = seat_view(&found, cookies)?;
-    let hub = Arc::clone(&found.hub);
-    Some(relay(socket, (), move || hub.subscribe(view)))
+    tab: Option<&str>,
+    kind: lease::Kind,
+) -> Option<(View, Lease)> {
+    let view = seat_view(found, cookies)?;
+    let visitor = usage::visitor(cookies)?;
+    let lease = found.play.claim_lease(&visitor, tab, kind)?;
+    Some((view, lease))
 }
 
-#[rocket::get("/g/<id>/play/detail")]
-fn play_detail_viewer(
+#[rocket::get("/g/<id>/play/ws?<tab>")]
+fn play_viewer(
     id: MatchId,
+    tab: Option<&str>,
     socket: WebSocket,
     registry: &State<Arc<Registry>>,
     cookies: &CookieJar<'_>,
 ) -> Option<Channel<'static>> {
     let found = registry.hosted(id)?;
-    let view = seat_view(&found, cookies)?;
+    let (view, lease) = seat_stream(&found, cookies, tab, lease::Kind::View)?;
     let hub = Arc::clone(&found.hub);
-    Some(relay(socket, (), move || hub.subscribe_detail(view)))
+    Some(relay_leased(socket, lease, move || hub.subscribe(view)))
+}
+
+#[rocket::get("/g/<id>/play/detail?<tab>")]
+fn play_detail_viewer(
+    id: MatchId,
+    tab: Option<&str>,
+    socket: WebSocket,
+    registry: &State<Arc<Registry>>,
+    cookies: &CookieJar<'_>,
+) -> Option<Channel<'static>> {
+    let found = registry.hosted(id)?;
+    let (view, lease) = seat_stream(&found, cookies, tab, lease::Kind::Detail)?;
+    let hub = Arc::clone(&found.hub);
+    Some(relay_leased(socket, lease, move || {
+        hub.subscribe_detail(view)
+    }))
 }
 
 #[rocket::get("/g/<id>/play/match/<mid>/seg/<index>")]
@@ -1071,9 +1110,10 @@ fn play_data(
 /// gives one. The seat is the one held when the socket opened: orders are
 /// dropped once the visitor no longer holds it. Orders may name the socket's last selection
 /// by token (`Tokened`), kept only for this connection.
-#[rocket::get("/g/<id>/play/command")]
+#[rocket::get("/g/<id>/play/command?<tab>")]
 fn play_command(
     id: MatchId,
+    tab: Option<&str>,
     socket: WebSocket,
     registry: &State<Arc<Registry>>,
     cookies: &CookieJar<'_>,
@@ -1082,9 +1122,15 @@ fn play_command(
     let play = Arc::clone(&found.play);
     let hub = Arc::clone(&found.hub);
     let visitor = usage::visitor(cookies);
+    let tab = tab.map(str::to_string);
     Some(socket.channel(move |mut stream| {
         Box::pin(async move {
-            let bound = play.seat(visitor.as_deref());
+            // A seated page without a tab id commands nothing, or a copied
+            // cookie could skip the one-page rule (D64).
+            let mut lease = play.seat(visitor.as_deref()).and_then(|_| {
+                play.claim_lease(visitor.as_deref()?, tab.as_deref(), lease::Kind::Command)
+            });
+            let bound = lease.as_ref().and(play.seat(visitor.as_deref()));
             // Only a socket bound to a seat counts against presence, and it
             // counts for as long as the loop below runs (M25).
             let _presence = bound
@@ -1110,6 +1156,7 @@ fn play_command(
             }
             loop {
                 let message = rocket::tokio::select! {
+                    () = taken_over(&mut lease) => return close_taken_over(&mut stream).await,
                     push = pushes.recv() => match push {
                         Ok(push) => {
                             if Some(push.seat) == bound
@@ -1250,38 +1297,77 @@ fn relay(
     held: impl Send + 'static,
     subscribe: impl Fn() -> Option<(Vec<Message>, Receiver<Message>)> + Send + 'static,
 ) -> Channel<'static> {
-    socket.channel(move |mut stream| {
-        Box::pin(async move {
-            let _held = held;
-            let Some((mut first, mut receiver)) = subscribe() else {
-                return Ok(());
-            };
-            loop {
-                for message in first.drain(..) {
-                    stream.send(rocket_ws::Message::binary(&*message)).await?;
-                }
-                rocket::tokio::select! {
-                    broadcast = receiver.recv() => match broadcast {
-                        Ok(message) => stream.send(rocket_ws::Message::binary(&*message)).await?,
-                        // Missed deltas cannot be patched over; start again
-                        // from a fresh keyframe.
-                        Err(RecvError::Lagged(_)) => match subscribe() {
-                            Some(again) => (first, receiver) = again,
-                            None => return Ok(()),
-                        },
-                        Err(RecvError::Closed) => return Ok(()),
-                    },
-                    incoming = stream.next() => match incoming {
-                        None => return Ok(()),
-                        Some(Err(error)) => return Err(error),
-                        // Nothing is read from viewers yet; the stream is
-                        // polled only to notice the close.
-                        Some(Ok(_)) => {}
-                    },
-                }
-            }
-        })
-    })
+    socket.channel(move |stream| Box::pin(relay_loop(stream, held, None, subscribe)))
+}
+
+/// `relay` for a seat's stream, which closes once another page or socket
+/// takes the seat over (D64).
+fn relay_leased(
+    socket: WebSocket,
+    lease: Lease,
+    subscribe: impl Fn() -> Option<(Vec<Message>, Receiver<Message>)> + Send + 'static,
+) -> Channel<'static> {
+    socket.channel(move |stream| Box::pin(relay_loop(stream, (), Some(lease), subscribe)))
+}
+
+async fn relay_loop(
+    mut stream: rocket_ws::stream::DuplexStream,
+    held: impl Send + 'static,
+    mut lease: Option<Lease>,
+    subscribe: impl Fn() -> Option<(Vec<Message>, Receiver<Message>)> + Send + 'static,
+) -> rocket_ws::result::Result<()> {
+    let _held = held;
+    let Some((mut first, mut receiver)) = subscribe() else {
+        return Ok(());
+    };
+    loop {
+        for message in first.drain(..) {
+            stream.send(rocket_ws::Message::binary(&*message)).await?;
+        }
+        rocket::tokio::select! {
+            () = taken_over(&mut lease) => return close_taken_over(&mut stream).await,
+            broadcast = receiver.recv() => match broadcast {
+                Ok(message) => stream.send(rocket_ws::Message::binary(&*message)).await?,
+                // Missed deltas cannot be patched over; start again
+                // from a fresh keyframe.
+                Err(RecvError::Lagged(_)) => match subscribe() {
+                    Some(again) => (first, receiver) = again,
+                    None => return Ok(()),
+                },
+                Err(RecvError::Closed) => return Ok(()),
+            },
+            incoming = stream.next() => match incoming {
+                None => return Ok(()),
+                Some(Err(error)) => return Err(error),
+                // Nothing is read from viewers yet; the stream is
+                // polled only to notice the close.
+                Some(Ok(_)) => {}
+            },
+        }
+    }
+}
+
+/// Fires once another page or socket took the seat's slot over (D64);
+/// never without a lease.
+async fn taken_over(lease: &mut Option<Lease>) {
+    if let Some(lease) = lease
+        && (&mut lease.closed).await.is_ok()
+    {
+        return;
+    }
+    std::future::pending().await
+}
+
+/// Tells a displaced page why its socket closes, so it does not reconnect
+/// and take the seat straight back.
+async fn close_taken_over(
+    stream: &mut rocket_ws::stream::DuplexStream,
+) -> rocket_ws::result::Result<()> {
+    let frame = CloseFrame {
+        code: CloseCode::from(TAKEN_OVER),
+        reason: "taken over".into(),
+    };
+    stream.send(rocket_ws::Message::Close(Some(frame))).await
 }
 
 #[derive(rocket::Responder)]
@@ -1352,10 +1438,18 @@ fn match_uuid(id: MatchId, mid: &str, registry: &State<Arc<Registry>>) -> Option
 struct MatchInfo(String, Header<'static>);
 
 /// The envelope the summary routes answer: the capture's turn, whether it
-/// is the final one, and the engine's JSON as it is.
-pub(crate) fn summary_envelope(turn: u32, is_final: bool, metadata: &[u8]) -> Option<Vec<u8>> {
+/// is the final one, whether the alliances have followed the teams so far
+/// (`Hub::teams_held`), and the engine's JSON as it is.
+pub(crate) fn summary_envelope(
+    turn: u32,
+    is_final: bool,
+    teams_held: bool,
+    metadata: &[u8],
+) -> Option<Vec<u8>> {
     std::str::from_utf8(metadata).ok()?;
-    let mut body = format!("{{\"turn\":{turn},\"final\":{is_final},\"metadata\":").into_bytes();
+    let mut body =
+        format!("{{\"turn\":{turn},\"final\":{is_final},\"teamsHeld\":{teams_held},\"metadata\":")
+            .into_bytes();
     body.extend_from_slice(metadata);
     body.push(b'}');
     Some(body)

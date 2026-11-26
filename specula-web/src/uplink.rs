@@ -14,8 +14,10 @@ use specula_assets::command::Command;
 use specula_assets::command::GROUP_TAG;
 use specula_assets::command::GroupContents;
 use specula_assets::command::GroupSave;
+use specula_assets::command::TAKEN_OVER;
 use specula_assets::command::Tokened;
 use wasm_bindgen::JsCast;
+use wasm_bindgen::JsValue;
 use wasm_bindgen::closure::Closure;
 use web_sys::BinaryType;
 use web_sys::MessageEvent;
@@ -52,13 +54,16 @@ struct Inner {
     /// The control groups the server pushed, as they came.
     groups: Rc<RefCell<Vec<GroupContents>>>,
     reconnect_ms: i32,
+    /// Another page holds the seat now (D64): no reconnect, which would
+    /// take it straight back.
+    displaced: Rc<Cell<bool>>,
     /// Kept as long as their socket.
     _handlers: Option<Handlers>,
 }
 
 struct Handlers {
     _on_message: Closure<dyn FnMut(MessageEvent)>,
-    _on_close: Closure<dyn FnMut()>,
+    _on_close: Closure<dyn FnMut(JsValue)>,
 }
 
 impl Uplink {
@@ -71,6 +76,7 @@ impl Uplink {
             next_token: 1,
             groups: Rc::new(RefCell::new(Vec::new())),
             reconnect_ms: RECONNECT_MS,
+            displaced: Rc::new(Cell::new(false)),
             _handlers: None,
         }));
         connect(&Rc::downgrade(&inner));
@@ -87,6 +93,22 @@ impl Uplink {
 
     pub fn starting_camera(&self) -> Option<[f32; 2]> {
         self.inner.borrow().starting_camera.get()
+    }
+
+    /// Whether another page took the seat over (D64).
+    pub fn displaced(&self) -> bool {
+        self.inner.borrow().displaced.get()
+    }
+
+    /// Closes the socket for good, once another page holds the seat
+    /// through some other socket.
+    pub fn shut(&self) {
+        let inner = self.inner.borrow();
+        inner.displaced.set(true);
+        inner.seat.set(0);
+        if let Some(socket) = &inner.socket {
+            let _ = socket.close();
+        }
     }
 
     /// Dropped while the socket is not open: an order is worth giving only
@@ -185,9 +207,10 @@ fn connect(inner: &Weak<RefCell<Inner>>) {
         _ => "ws",
     };
     let url = format!(
-        "{scheme}://{}{}/play/command",
+        "{scheme}://{}{}/play/command?tab={}",
         location.host().unwrap_or_default(),
-        crate::match_base()
+        crate::match_base(),
+        crate::tab_id()
     );
     let Ok(socket) = WebSocket::new(&url) else {
         web_sys::console::error_1(&format!("cannot open {url}").into());
@@ -226,7 +249,7 @@ fn connect(inner: &Weak<RefCell<Inner>>) {
         }
     });
     let weak = inner.clone();
-    let on_close = Closure::<dyn FnMut()>::new(move || {
+    let on_close = Closure::<dyn FnMut(JsValue)>::new(move |event: JsValue| {
         let Some(strong) = weak.upgrade() else {
             return;
         };
@@ -238,6 +261,12 @@ fn connect(inner: &Weak<RefCell<Inner>>) {
             // The server's slot died with the socket.
             inner.sent = None;
             inner.next_token = 1;
+            if crate::close_code(&event) == TAKEN_OVER {
+                inner.displaced.set(true);
+            }
+            if inner.displaced.get() {
+                return;
+            }
             let wait = inner.reconnect_ms;
             inner.reconnect_ms = (wait * 2).min(RECONNECT_MAX_MS);
             wait

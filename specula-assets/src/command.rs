@@ -31,6 +31,11 @@ use crate::bytes::ByteReader;
 /// its seat message; a page on another version must reload.
 pub const COMMAND_VERSION: u8 = 15;
 
+/// The close code of a seat socket (command, view, detail) whose page no
+/// longer holds the seat (D64): another page took it over, so the page
+/// must not reconnect and take it straight back.
+pub const TAKEN_OVER: u16 = 4001;
+
 pub const QUEUED: u8 = 1;
 pub const PUSH_FRONT: u8 = 2;
 pub const ALLOW_CAPTURE: u8 = 4;

@@ -54,7 +54,9 @@ use std::collections::VecDeque;
 use std::rc::Rc;
 use std::rc::Weak;
 
+use specula_assets::command::TAKEN_OVER;
 use wasm_bindgen::JsCast;
+use wasm_bindgen::JsValue;
 use wasm_bindgen::closure::Closure;
 use wasm_bindgen::prelude::wasm_bindgen;
 use wasm_bindgen_futures::JsFuture;
@@ -78,6 +80,9 @@ pub const POST_TERRAIN: u8 = 3;
 pub const POST_DETAIL: u8 = 4;
 pub const POST_STARTS: u8 = 5;
 pub const POST_FLARE: u8 = 6;
+/// A seat stream was closed because another page took the seat over
+/// (D64).
+pub const POST_DISPLACED: u8 = 7;
 pub const STATUS_LIVE: u8 = 1;
 pub const STATUS_PAUSED: u8 = 2;
 /// The shown match has ended.
@@ -155,6 +160,8 @@ struct Playback {
     prefix: String,
     /// The player's page, whose next game is the one just started.
     seated: bool,
+    /// After the seat's socket URLs: the page's tab id (D64), or empty.
+    tab_query: String,
     socket: Option<WebSocket>,
     /// The current socket's handlers, dropped with it.
     socket_handlers: Option<SocketHandlers>,
@@ -1207,7 +1214,12 @@ impl Playback {
             "https:" => "wss",
             _ => "ws",
         };
-        let url = format!("{scheme}://{}{}/detail", location.host(), self.prefix);
+        let url = format!(
+            "{scheme}://{}{}/detail{}",
+            location.host(),
+            self.prefix,
+            self.tab_query
+        );
         let Ok(socket) = WebSocket::new(&url) else {
             web_sys::console::error_1(&format!("cannot open {url}").into());
             return;
@@ -1231,13 +1243,22 @@ impl Playback {
         socket.set_onmessage(Some(on_message.as_ref().unchecked_ref()));
 
         let target = self.this.clone();
-        let on_close = Closure::<dyn FnMut()>::new(move || {
+        let on_close = Closure::<dyn FnMut(JsValue)>::new(move |event: JsValue| {
             let Some(strong) = target.upgrade() else {
                 return;
             };
             let (scope, delay) = {
                 let mut playback = strong.borrow_mut();
-                if playback.detail_generation != generation || !playback.detail_wanted {
+                // An older socket of this page is closed by its successor's
+                // claim; only the current one's takeover is another page's.
+                if playback.detail_generation != generation {
+                    return;
+                }
+                if crate::close_code(&event) == TAKEN_OVER {
+                    playback.post(&[POST_DISPLACED]);
+                    return;
+                }
+                if !playback.detail_wanted {
                     return;
                 }
                 let delay = playback.detail_reconnect_ms;
@@ -1663,6 +1684,10 @@ fn start() -> Result<(), String> {
         detail_linger_wake.forget();
         let search = scope.location().search();
         let seated = crate::query_param(&search, "play").is_some();
+        let tab_query = crate::query_param(&search, "tab")
+            .filter(|_| seated)
+            .map(|tab| format!("?tab={tab}"))
+            .unwrap_or_default();
         let base = crate::query_param(&search, "base")
             .and_then(|base| js_sys::decode_uri_component(&base).ok())
             .and_then(|base| base.as_string())
@@ -1671,6 +1696,7 @@ fn start() -> Result<(), String> {
             this: this.clone(),
             scope: scope.clone(),
             seated,
+            tab_query,
             prefix: if seated {
                 format!("{base}/play")
             } else {
@@ -1816,7 +1842,7 @@ fn open(playback: &Weak<RefCell<Playback>>) -> Result<(), String> {
 
 struct SocketHandlers {
     _on_message: Closure<dyn FnMut(MessageEvent)>,
-    _on_close: Closure<dyn FnMut()>,
+    _on_close: Closure<dyn FnMut(JsValue)>,
 }
 
 /// Opens the stream. A closed one is opened again after a growing pause, as
@@ -1831,8 +1857,11 @@ fn connect(playback: &Weak<RefCell<Playback>>) -> Result<(), String> {
         "https:" => "wss",
         _ => "ws",
     };
-    let prefix = strong.borrow().prefix.clone();
-    let url = format!("{scheme}://{}{prefix}/ws", location.host());
+    let (prefix, tab_query) = {
+        let playback = strong.borrow();
+        (playback.prefix.clone(), playback.tab_query.clone())
+    };
+    let url = format!("{scheme}://{}{prefix}/ws{tab_query}", location.host());
     let socket = WebSocket::new(&url).map_err(|_| format!("cannot open {url}"))?;
     socket.set_binary_type(BinaryType::Arraybuffer);
 
@@ -1851,12 +1880,16 @@ fn connect(playback: &Weak<RefCell<Playback>>) -> Result<(), String> {
     socket.set_onmessage(Some(on_message.as_ref().unchecked_ref()));
 
     let target = playback.clone();
-    let on_close = Closure::<dyn FnMut()>::new(move || {
+    let on_close = Closure::<dyn FnMut(JsValue)>::new(move |event: JsValue| {
         let Some(strong) = target.upgrade() else {
             return;
         };
         let (scope, delay) = {
             let mut playback = strong.borrow_mut();
+            if crate::close_code(&event) == TAKEN_OVER {
+                playback.post(&[POST_DISPLACED]);
+                return;
+            }
             let delay = playback.reconnect_ms;
             playback.reconnect_ms = (delay * 2.0).min(RECONNECT_MAX_MS);
             (playback.scope.clone(), delay)

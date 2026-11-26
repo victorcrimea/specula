@@ -1903,6 +1903,27 @@ impl Seat {
 }
 
 /// Both players are allies of each other (`Diplomacy.IsMutualAlly`).
+/// Whether every two active players are mutual allies exactly when they
+/// share a team, a player with no team being on a team of its own. A
+/// defeated player's stances are left out: the engine keeps them, and a
+/// change to them shapes nothing in the game.
+pub(super) fn alliances_follow_teams(players: &Players) -> bool {
+    let active: Vec<(usize, i32)> = players
+        .players
+        .iter()
+        .enumerate()
+        .skip(1)
+        .filter(|(_, player)| player.state == PLAYER_ACTIVE)
+        .map(|(index, player)| (index, player.team))
+        .collect();
+    active.iter().enumerate().all(|(position, &(a, team_a))| {
+        active[position + 1..].iter().all(|&(b, team_b)| {
+            let same_team = team_a >= 0 && team_a == team_b;
+            mutual_ally(players, a, b) == same_team
+        })
+    })
+}
+
 pub(super) fn mutual_ally(players: &Players, a: usize, b: usize) -> bool {
     let stance = |from: usize, to: usize| {
         players
