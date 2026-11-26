@@ -53,9 +53,10 @@ const ZIPS: [&str; 2] = [
     "binaries/data/mods/mod/mod.zip",
 ];
 /// The domains the in-game text comes from: names and descriptions of what
-/// a match holds, and the GUI strings the session panels and their
-/// tooltips use. Lobby, manual, tutorials and maps are not shown.
-const DOMAINS: [&str; 10] = [
+/// a match holds, the maps and biomes the setup offers, and the GUI strings
+/// the session panels and their tooltips use. Lobby, manual and tutorials
+/// are not shown.
+const DOMAINS: [&str; 11] = [
     "public-civilizations",
     "public-gui-ingame",
     "public-gui-other",
@@ -66,6 +67,7 @@ const DOMAINS: [&str; 10] = [
     "public-templates-other",
     "public-templates-units",
     "public-gui-gamesetup",
+    "public-maps",
 ];
 const BROTLI_QUALITY: u32 = 11;
 const BROTLI_WINDOW_BITS: u32 = 22;
