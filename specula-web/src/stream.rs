@@ -301,6 +301,17 @@ pub struct Ground {
 }
 
 impl Ground {
+    /// Whether it has at least `revision` reveals; a whole terrain has
+    /// everything, which a replay of an explored-mode match relies on, as
+    /// its keyframes name the revisions the live stream had.
+    pub fn holds(&self, revision: u32) -> bool {
+        self.revision == 0 || self.revision >= revision
+    }
+
+    pub fn is_whole(&self) -> bool {
+        self.revision == 0
+    }
+
     pub fn new(id: u64, tiles: u32, heights: Vec<u16>) -> Result<Self, &'static str> {
         let vertices = i64::from(tiles) + 1;
         if tiles == 0 || heights.len() as i64 != vertices * vertices {
@@ -909,9 +920,10 @@ impl Scene {
         };
         let revision = self.terrain_revision;
         if self.terrain_id != 0
-            && self.ground.as_ref().is_none_or(|ground| {
-                ground.id != self.terrain_id || (revision > 0 && ground.revision < revision)
-            })
+            && self
+                .ground
+                .as_ref()
+                .is_none_or(|ground| ground.id != self.terrain_id || !ground.holds(revision))
         {
             return Err("keyframe before its terrain");
         }
@@ -1037,7 +1049,10 @@ impl Scene {
                 let start = cursor.0;
                 let reveal = read_reveal(cursor)?;
                 let bytes = start[..start.len() - cursor.0.len()].to_vec();
-                if let Some(ground) = &mut self.ground {
+                // A whole terrain has no reveal numbering to apply it to.
+                if let Some(ground) = &mut self.ground
+                    && !ground.is_whole()
+                {
                     Rc::make_mut(ground).apply_reveal(revision, &reveal);
                 }
                 self.terrain_revision = self.terrain_revision.max(revision);

@@ -64,6 +64,8 @@ use specula_assets::command::Command as Order;
 use specula_assets::command::GROUP_TAG;
 use specula_assets::command::GroupContents;
 use specula_assets::command::GroupSave;
+use specula_assets::command::OBSERVERS_FULL;
+use specula_assets::command::OBSERVERS_HIDDEN;
 use specula_assets::command::SELECTION_DEFINE_TAG;
 use specula_assets::command::SELECTION_USE_TAG;
 use specula_assets::command::TAKEN_OVER;
@@ -358,9 +360,16 @@ fn viewer(
     cookies: &CookieJar<'_>,
 ) -> Option<Channel<'static>> {
     let hub = registry.resolve(id)?.hub?;
+    if registry.hidden(id) {
+        return Some(close_with(socket, OBSERVERS_HIDDEN, "hidden"));
+    }
+    let visitor = usage::visitor(cookies);
+    let Ok(slot) = registry.observer_slot(id, visitor.as_deref()) else {
+        return Some(close_with(socket, OBSERVERS_FULL, "full"));
+    };
     let watch = usage.watch(cookies);
     let counted = hub.observer_guard();
-    Some(relay(socket, (watch, counted), move || {
+    Some(relay(socket, (watch, counted, slot), move || {
         hub.subscribe(View::Observer)
     }))
 }
@@ -374,6 +383,9 @@ fn detail_viewer(
     registry: &State<Arc<Registry>>,
 ) -> Option<Channel<'static>> {
     let hub = registry.resolve(id)?.hub?;
+    if registry.hidden(id) {
+        return Some(close_with(socket, OBSERVERS_HIDDEN, "hidden"));
+    }
     Some(relay(socket, (), move || {
         hub.subscribe_detail(View::Observer)
     }))
@@ -663,7 +675,7 @@ fn observer_flare(
     let refuse = rocket::response::status::BadRequest;
     let visitor = usage::visitor(cookies).ok_or(refuse("no visitor cookie"))?;
     let hub = registry
-        .resolve(id)
+        .observable(id)
         .and_then(|found| found.hub)
         .ok_or(refuse("no match"))?;
     // The chat's nickname, if the visitor ever joined it; a broadcast has
@@ -888,6 +900,15 @@ fn chat_socket(
         return None;
     };
     let cookie = usage::visitor(cookies);
+    // Observers of a hidden match have no chat either; a defeated player
+    // still holds a seat, so theirs goes on.
+    if found.hidden()
+        && !cookie
+            .as_deref()
+            .is_some_and(|cookie| found.seats.player_of(cookie).is_some())
+    {
+        return Some(done_channel(socket, r#"{"type":"closed"}"#.to_string()));
+    }
     let config = rocket_ws::Config {
         max_message_size: Some(chat::MAX_FRAME),
         max_frame_size: Some(chat::MAX_FRAME),
@@ -1359,6 +1380,20 @@ async fn taken_over(lease: &mut Option<Lease>) {
     std::future::pending().await
 }
 
+/// Accepts the socket only to close it with `code`, so the page learns why;
+/// a refused upgrade would look like a network error and be retried.
+fn close_with(socket: WebSocket, code: u16, reason: &'static str) -> Channel<'static> {
+    socket.channel(move |mut stream| {
+        Box::pin(async move {
+            let frame = CloseFrame {
+                code: CloseCode::from(code),
+                reason: reason.into(),
+            };
+            stream.send(rocket_ws::Message::Close(Some(frame))).await
+        })
+    })
+}
+
 /// Tells a displaced page why its socket closes, so it does not reconnect
 /// and take the seat straight back.
 async fn close_taken_over(
@@ -1382,7 +1417,7 @@ fn segment_file(
     index: usize,
     registry: &State<Arc<Registry>>,
 ) -> Option<SegmentBytes> {
-    let source = registry.resolve(id)?;
+    let source = registry.observable(id)?;
     segment_bytes(
         source.segment(u64::from_str_radix(mid, 16).ok()?, index, false)?,
         false,
@@ -1396,7 +1431,7 @@ fn detail_segment_file(
     index: usize,
     registry: &State<Arc<Registry>>,
 ) -> Option<SegmentBytes> {
-    let source = registry.resolve(id)?;
+    let source = registry.observable(id)?;
     segment_bytes(
         source.segment(u64::from_str_radix(mid, 16).ok()?, index, true)?,
         false,
@@ -1412,7 +1447,7 @@ fn match_info(
     usage: &State<Arc<Usage>>,
     cookies: &CookieJar<'_>,
 ) -> Option<MatchInfo> {
-    let (shown, segments, live) = registry.resolve(id)?.info()?;
+    let (shown, segments, live) = registry.observable(id)?.info()?;
     usage.replay(cookies, &id.to_string());
     Some(MatchInfo(
         format!("{shown:016x} {segments} {}", u8::from(live)),
@@ -1425,7 +1460,7 @@ fn match_info(
 /// the broadcast shows many matches under one UUID.
 #[rocket::get("/g/<id>/match/<mid>/uuid")]
 fn match_uuid(id: MatchId, mid: &str, registry: &State<Arc<Registry>>) -> Option<MatchInfo> {
-    let source = registry.resolve(id)?;
+    let source = registry.observable(id)?;
     let uuid = source.uuid_of(u64::from_str_radix(mid, 16).ok()?, id)?;
     Some(MatchInfo(
         uuid.to_string(),
@@ -1509,7 +1544,7 @@ fn match_summary(
     registry: &State<Arc<Registry>>,
 ) -> Option<web::Encoded<SharedBytes>> {
     let summary = registry
-        .resolve(id)?
+        .observable(id)?
         .summary(u64::from_str_radix(mid, 16).ok()?, turn)?;
     summary_response(summary, accepts.accepts())
 }

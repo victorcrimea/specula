@@ -138,6 +138,18 @@ const fill = (text, values) => {
   for (const [name, value] of Object.entries(values)) out = out.replace("%(" + name + ")s", () => value);
   return out;
 };
+// What the host lets observers see, and how far behind (D56, D57).
+const observerLine = (mode, delay) => {
+  if (!mode) return null;
+  const what = T({
+    everything: "see everything",
+    explored: "only explored areas",
+    none: "none until the end",
+  }[mode] ?? "see everything");
+  if (mode === "none") return fill("Observers: %(mode)s", { mode: what });
+  const behind = delay ? fill("%(seconds)s seconds behind", { seconds: delay }) : T("no delay");
+  return fill("Observers: %(mode)s, %(delay)s", { mode: what, delay: behind });
+};
 const clock = (seconds) => {
   const h = Math.floor(seconds / 3600);
   const m = Math.floor((seconds % 3600) / 60);
@@ -147,6 +159,7 @@ const clock = (seconds) => {
 };
 const civName = (code) => (code && window.speculaCivName ? window.speculaCivName(code) : code);
 const line = (card, text) => {
+  if (text == null) return null;
   const p = document.createElement("p");
   p.textContent = text;
   card.append(p);
@@ -209,6 +222,7 @@ const render = () => {
     line(el, fill("Map: %(name)s", { name: mapName(entry.map) }));
     line(el, fill("Host: %(name)s", { name: entry.host }));
     line(el, fill("Seated: %(seated)s of %(max)s", { seated: entry.seated, max: entry.max }));
+    line(el, observerLine(entry.observers_mode, entry.observers_delay));
     link(el, entry.id, T("Join"));
     return el;
   }));
@@ -231,6 +245,7 @@ const render = () => {
     line(el, fill("Host: %(name)s", { name: entry.host }));
     players(el, entry.players);
     line(el, fill("Time: %(time)s", { time: clock(entry.elapsed) }));
+    line(el, observerLine(entry.observers_mode, entry.observers_delay));
     line(el, fill("Observers: %(count)s", { count: entry.observers }));
     link(el, entry.id, T("Watch"));
     return el;

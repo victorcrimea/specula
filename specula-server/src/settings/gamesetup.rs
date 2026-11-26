@@ -10,6 +10,7 @@ use super::Ai;
 use super::Choice;
 use super::LandscapeChoice;
 use super::MAX_PLAYERS;
+use super::ObserverMode;
 use super::RANDOM;
 use super::Settings;
 use super::rules::ai_by_id;
@@ -456,6 +457,8 @@ pub enum Change {
     },
     ResetCivs,
     ResetTeams,
+    ObserverMode(ObserverMode),
+    ObserverDelay(u32),
 }
 
 impl Settings {
@@ -514,6 +517,11 @@ impl Settings {
         let scenario = self.is_scenario();
         let ok = |valid: bool, reason: &'static str| if valid { Ok(()) } else { Err(reason) };
         match change {
+            Change::ObserverMode(_) => Ok(()),
+            Change::ObserverDelay(secs) => ok(
+                self.observers.mode != ObserverMode::Hidden && self.observers.delay_allowed(*secs),
+                "observer delay",
+            ),
             Change::MapType(_) | Change::Cheats(_) | Change::ResetCivs | Change::ResetTeams => {
                 if scenario && matches!(change, Change::ResetCivs | Change::ResetTeams) {
                     return Err("scenario");
@@ -636,6 +644,8 @@ impl Settings {
         self.check_change(catalog, &change, seated)?;
         let count = self.player_count.players;
         match change {
+            Change::ObserverMode(mode) => self.observers.mode = mode,
+            Change::ObserverDelay(secs) => self.observers.delay_secs = secs,
             Change::MapType(kind) => self.choose_type(catalog, kind),
             Change::MapFilter(filter) => {
                 self.gui.map_filter = filter;
@@ -828,8 +838,9 @@ impl Settings {
         catalog: &Catalog,
         batch: Option<&Value>,
         seated: &[u8],
+        default_delay_secs: u32,
     ) -> Result<Settings, String> {
-        let mut settings = Settings::new(catalog)?;
+        let mut settings = Settings::new(catalog, default_delay_secs)?;
         if let Some(batch) = batch {
             // On the clone, so a batch that fails leaves no filter behind.
             let mut trial = settings.clone();
@@ -840,6 +851,19 @@ impl Settings {
                 Ok(()) => settings = trial,
                 Err(error) => eprintln!("setup batch ignored: {error}"),
             }
+        }
+        if let Some(mode) = batch
+            .and_then(|batch| batch["specula"]["observerMode"].as_str())
+            .and_then(ObserverMode::from_name)
+        {
+            settings.observers.mode = mode;
+        }
+        if let Some(delay) = batch
+            .and_then(|batch| batch["specula"]["delay"].as_u64())
+            .and_then(|delay| u32::try_from(delay).ok())
+            .filter(|delay| settings.observers.delay_allowed(*delay))
+        {
+            settings.observers.delay_secs = delay;
         }
         settings.clear_seated_conflicts(seated);
         if settings.map.kind.is_none() {

@@ -36,6 +36,15 @@ pub const COMMAND_VERSION: u8 = 15;
 /// must not reconnect and take it straight back.
 pub const TAKEN_OVER: u16 = 4001;
 
+/// The close code of an observer's socket the server refuses because it
+/// already holds `--max-observers` of them (D58); the page retries later.
+pub const OBSERVERS_FULL: u16 = 4002;
+
+/// The close code of an observer's socket on a match its host hid from
+/// observers until it ends (D56); the page shows a notice instead of
+/// reconnecting.
+pub const OBSERVERS_HIDDEN: u16 = 4003;
+
 pub const QUEUED: u8 = 1;
 pub const PUSH_FRONT: u8 = 2;
 pub const ALLOW_CAPTURE: u8 = 4;

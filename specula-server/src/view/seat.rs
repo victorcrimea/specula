@@ -23,6 +23,7 @@ use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::io;
+use std::sync::Arc;
 use std::time::Duration;
 
 use specula_assets::shore;
@@ -33,6 +34,7 @@ use specula_assets::variation;
 use specula_assets::variation::Selections;
 
 use super::Common;
+use super::DataFiles;
 use super::Dot;
 use super::Funds;
 use super::LaunchExtra;
@@ -42,6 +44,7 @@ use super::ShotOrigin;
 use super::Shown;
 use super::Stream;
 use super::Template;
+use super::TerrainFile;
 use crate::actors::Actors;
 use crate::feed::DataKey;
 use crate::feed::Details;
@@ -87,6 +90,13 @@ const BLUR: [u32; 7] = [1, 6, 15, 20, 15, 6, 1];
 const BLACK_BELOW: u8 = 8;
 const LOS_TEXEL_VISIBLE: u32 = 255;
 const LOS_TEXEL_EXPLORED: u32 = 127;
+/// What an explored vertex holds in the union. Visible as well, so the
+/// observers' view is lit there and sees projectiles over it, where a
+/// player's explored-only vertex would be dimmed.
+/// Metres an AI's unit or structure is taken to see.
+const AI_SIGHT_UNIT: f32 = 40.0;
+const AI_SIGHT_STRUCTURE: f32 = 80.0;
+const UNION_STATE: u8 = LOS_EXPLORED | LOS_VISIBLE;
 /// `TERRAIN_TILE_SIZE` over `LOS_TILE_SIZE`: both are 4 m, so an LOS
 /// vertex is a terrain vertex.
 const LOS_TILE_SIZE: f32 = 4.0;
@@ -168,6 +178,96 @@ pub(super) struct Seat {
     choices: HashMap<u32, (ChoiceKey, u32)>,
     /// Last turn's mirages and their parents, by the feed's ids.
     held_mirages: HashMap<u32, u32>,
+    /// The observers' stream under D56's "explored" mode: not a player's
+    /// view but what any player has explored, shown late and stored.
+    explored: bool,
+    /// Explored mode: the vertices some player has explored, as an LOS grid
+    /// that never shrinks.
+    union: Vec<u8>,
+    union_side: usize,
+    /// Whether the release has told the shadow the grid's size yet.
+    union_told: bool,
+    /// Explored mode: what the turn just published added to the union.
+    grown: Vec<u32>,
+    /// The AI players: the engine reveals the whole map to them
+    /// (`CCmpAIManager::AddPlayer`), so their grids say nothing of what
+    /// they explored; their entities' surroundings stand in for it.
+    ai_players: Vec<u32>,
+    /// The vertex each AI entity was last marked around, by the feed's id.
+    ai_marked: HashMap<u32, (i32, i32)>,
+    /// Explored mode: what the seat made, for the hub to queue with the
+    /// observers' delay.
+    pub outbox: Vec<Release>,
+}
+
+/// Explored mode's reveal as the observers have been shown it. The encoder
+/// runs `delay` ahead, but the terrain resource is fetched when a keyframe
+/// names it, so serving the encoder's own would show up to `delay` of future
+/// exploration. The reveal is deterministic in the union it is given, so
+/// replaying each turn's growth at release time gives the same palette and
+/// wave numbering the stream carries.
+pub(super) struct ShownReveal {
+    union: Vec<u8>,
+    side: usize,
+    revealed: Revealed,
+    revision: u32,
+    cache: Option<(u32, Arc<[u8]>)>,
+}
+
+impl ShownReveal {
+    pub fn new() -> Self {
+        ShownReveal {
+            union: Vec::new(),
+            side: 0,
+            revealed: Revealed::new(),
+            // As `Seat::new`: never whole.
+            revision: 1,
+            cache: None,
+        }
+    }
+
+    pub fn grow(&mut self, growth: &ExploredGrowth, terrain: &Terrain, water: &SeatWater) {
+        if self.side != growth.side {
+            self.union = vec![0; growth.side * growth.side];
+            self.side = growth.side;
+        }
+        for vertex in &growth.vertices {
+            if let Some(state) = self.union.get_mut(*vertex as usize) {
+                *state = UNION_STATE;
+            }
+        }
+        if self
+            .revealed
+            .update(terrain, water, Some(&self.union))
+            .is_some()
+        {
+            self.revision += 1;
+        }
+    }
+
+    /// The partial terrain resource at the shown revision.
+    pub fn resource(&mut self, terrain: &Terrain, water: &SeatWater) -> Arc<[u8]> {
+        if let Some((revision, bytes)) = &self.cache
+            && *revision == self.revision
+        {
+            return Arc::clone(bytes);
+        }
+        let bytes: Arc<[u8]> = terrain::encode_partial(
+            terrain,
+            self.revision,
+            &self.revealed.snapshot(terrain, water),
+        )
+        .into();
+        self.cache = Some((self.revision, Arc::clone(&bytes)));
+        bytes
+    }
+}
+
+/// What an explored turn adds to the observers' union of explored vertices,
+/// so the hub's shadow of the reveal follows the stream at its own pace.
+pub(super) struct ExploredGrowth {
+    pub side: usize,
+    pub vertices: Vec<u32>,
 }
 
 /// A projectile launched while out of the seat's sight.
@@ -439,7 +539,7 @@ impl Local {
 }
 
 /// What the seat holds of the terrain.
-struct Revealed {
+pub(super) struct Revealed {
     /// Tiles per side.
     size: usize,
     /// By vertex and by tile: sent.
@@ -455,7 +555,7 @@ struct Revealed {
 }
 
 impl Revealed {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         Revealed {
             size: 0,
             vertices: Vec::new(),
@@ -530,7 +630,7 @@ impl Revealed {
     /// seat gets the needed tiles and a ring round them, for the normals,
     /// the blends and `BuildWater`'s look around a tile, and the wave
     /// columns that lie on tiles it holds.
-    fn update(
+    pub(super) fn update(
         &mut self,
         terrain: &Terrain,
         water: &SeatWater,
@@ -591,7 +691,7 @@ impl Revealed {
 
     /// Everything the seat holds, as one reveal, numbered as the reveals
     /// that brought it, so the later ones read on from it.
-    fn snapshot(&self, terrain: &Terrain, water: &SeatWater) -> Vec<u8> {
+    pub(super) fn snapshot(&self, terrain: &Terrain, water: &SeatWater) -> Vec<u8> {
         let mut out = Writer::default();
         let mut palette: Vec<(u16, u16)> = self
             .palette
@@ -785,14 +885,149 @@ impl Seat {
             sent_shots: HashSet::new(),
             choices: HashMap::new(),
             held_mirages: HashMap::new(),
+            explored: false,
+            union: Vec::new(),
+            union_side: 0,
+            union_told: false,
+            grown: Vec::new(),
+            ai_players: Vec::new(),
+            ai_marked: HashMap::new(),
+            outbox: Vec::new(),
         }
+    }
+
+    pub fn set_ai_players(&mut self, players: Vec<u32>) {
+        self.ai_players = players;
+    }
+
+    /// The observers' stream of an explored-mode match. Player 0 is gaia's,
+    /// which no seat has, so nothing in it is read as a player's view.
+    pub fn explored() -> Self {
+        let mut seat = Seat::new(0);
+        seat.explored = true;
+        seat
     }
 
     /// A new match: everything but what its viewers are subscribed to.
     pub fn reset(&mut self) {
         let shown = std::mem::replace(&mut self.shown, Shown::new());
-        *self = Seat::new(self.player);
+        *self = if self.explored {
+            let ai = std::mem::take(&mut self.ai_players);
+            let mut seat = Seat::explored();
+            seat.ai_players = ai;
+            seat
+        } else {
+            Seat::new(self.player)
+        };
         self.shown = shown;
+    }
+
+    /// The seat's own stream, for the lobby's thumbnail.
+    pub fn stream(&self) -> &Stream {
+        &self.stream
+    }
+
+    /// The tiles the seat has revealed, once it has any.
+    pub fn known_tiles(&self) -> Option<&[bool]> {
+        Some(self.revealed.tiles.as_slice()).filter(|tiles| !tiles.is_empty())
+    }
+
+    /// Where a release goes: a player's seat shows it at once, the
+    /// explored stream hands it to the hub, which delays it.
+    fn emit(&mut self, release: Release, match_id: u64) {
+        if self.explored {
+            self.outbox.push(release);
+        } else {
+            self.shown.apply(release, None, match_id);
+        }
+    }
+
+    /// Adds every player's explored vertices to the union.
+    fn grow_union(&mut self, los: &Los, feed: &Stream, entities: &[Entity]) {
+        let side = los.side as usize;
+        self.grown.clear();
+        if side == 0 || los.players.is_empty() {
+            return;
+        }
+        if self.union_side != side {
+            self.union = vec![0; side * side];
+            self.union_side = side;
+            self.union_told = false;
+        }
+        self.mark_ai_sight(feed, entities);
+        for (player, grid) in &los.players {
+            if grid.len() != self.union.len() || self.ai_players.contains(player) {
+                continue;
+            }
+            for (index, state) in grid.iter().enumerate() {
+                if state & (LOS_EXPLORED | LOS_VISIBLE) != 0 && self.union[index] == 0 {
+                    self.union[index] = UNION_STATE;
+                    self.grown.push(index as u32);
+                }
+            }
+        }
+    }
+
+    /// Marks what an AI's entities would see: a disc round each, wider for
+    /// a structure. The feed carries no vision ranges, so these are rough.
+    fn mark_ai_sight(&mut self, feed: &Stream, entities: &[Entity]) {
+        if self.ai_players.is_empty() {
+            return;
+        }
+        let side = self.union_side as i32;
+        for entity in entities {
+            if entity.mirage.is_some()
+                || !u32::try_from(entity.owner).is_ok_and(|owner| self.ai_players.contains(&owner))
+            {
+                continue;
+            }
+            let vertex =
+                |fixed: i32| (f64::from(fixed) / 65536.0 / f64::from(LOS_TILE_SIZE)).round() as i32;
+            let center = (vertex(entity.x), vertex(entity.z));
+            if self.ai_marked.get(&entity.id) == Some(&center) {
+                continue;
+            }
+            self.ai_marked.insert(entity.id, center);
+            let structure = feed
+                .templates
+                .items
+                .get(entity.template as usize)
+                .is_some_and(|template| template.name.contains("structures/"));
+            let radius = if structure {
+                AI_SIGHT_STRUCTURE
+            } else {
+                AI_SIGHT_UNIT
+            };
+            let reach = (radius / LOS_TILE_SIZE).ceil() as i32;
+            for dj in -reach..=reach {
+                for di in -reach..=reach {
+                    let (i, j) = (center.0 + di, center.1 + dj);
+                    let metres = ((di * di + dj * dj) as f32).sqrt() * LOS_TILE_SIZE;
+                    if metres > radius || i < 0 || j < 0 || i >= side || j >= side {
+                        continue;
+                    }
+                    let index = (j * side + i) as usize;
+                    if self.union[index] == 0 {
+                        self.union[index] = UNION_STATE;
+                        self.grown.push(index as u32);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Whether the union holds the vertex nearest to `entity`. With no LOS
+    /// yet nothing is revealed anyway, so gaia stays.
+    fn explored_at(&self, entity: &Entity) -> bool {
+        if self.union.is_empty() {
+            return true;
+        }
+        let side = self.union_side;
+        let vertex = |fixed: i32| {
+            let metres = f64::from(fixed) / 65536.0;
+            ((metres / f64::from(LOS_TILE_SIZE)).round().max(0.0) as usize).min(side - 1)
+        };
+        self.union[vertex(entity.z) * side + vertex(entity.x)] != 0
     }
 
     pub fn named_data(&self, hash: u64) -> bool {
@@ -836,7 +1071,7 @@ impl Seat {
     }
 
     fn sees_all(&self) -> bool {
-        self.won
+        self.won || self.explored
     }
 
     /// Whether the seat gets every group of an entity of `owner`: its own,
@@ -872,9 +1107,17 @@ impl Seat {
         } as u32;
         let eyes = self.eyes as usize;
         let all = self.sees_all();
+        if self.explored {
+            self.grow_union(input.los, feed, input.entities);
+        }
 
         // Which of the feed's entities the seat is shown, and their handles.
         let seen = |entity: &Entity| {
+            if self.explored {
+                // Players' entities, mirages included, are what observers
+                // see; gaia's only where a player has explored.
+                return entity.owner != 0 || self.explored_at(entity);
+            }
             if all {
                 return true;
             }
@@ -1000,7 +1243,13 @@ impl Seat {
                 .flatten()
                 .map(Vec::as_slice);
             // Before the first LOS, nothing is revealed.
-            let reveal = if all || los.is_some() {
+            let reveal = if self.explored {
+                if self.union.is_empty() {
+                    None
+                } else {
+                    self.revealed.update(terrain, water, Some(&self.union))
+                }
+            } else if all || los.is_some() {
                 self.revealed.update(terrain, water, los)
             } else {
                 None
@@ -1017,7 +1266,7 @@ impl Seat {
         self.projectiles(feed, input, actors, &in_view);
 
         let seat_common = Common {
-            delay: Duration::ZERO,
+            delay: self.delay_of(common),
             ..*common
         };
         let (visual, detail) = self.stream.encode_turn(
@@ -1028,13 +1277,22 @@ impl Seat {
             input.ground,
             start,
         )?;
-        self.shown.apply(
+        let growth = (self.explored
+            && (!self.grown.is_empty() || !self.union_told && self.union_side != 0))
+            .then(|| {
+                self.union_told = true;
+                Arc::new(ExploredGrowth {
+                    side: self.union_side,
+                    vertices: std::mem::take(&mut self.grown),
+                })
+            });
+        self.emit(
             Release::Turn {
                 start: start.then_some(common.match_id),
                 visual,
                 detail,
+                explored: growth,
             },
-            None,
             common.match_id,
         );
         self.handles.end_turn();
@@ -1608,6 +1866,10 @@ impl Seat {
     fn los(&mut self, input: &SeatInput) {
         if self.sees_all() {
             self.stream.los = input.los.clone();
+            if self.explored && !self.union.is_empty() {
+                // Key 0 is what the Observer perspective is darkened by.
+                self.stream.los.players.insert(0, self.union.clone());
+            }
             return;
         }
         let mut los = Los {
@@ -1627,7 +1889,7 @@ impl Seat {
         let Some(territory) = &feed.territory else {
             return;
         };
-        if self.sees_all() {
+        if self.won {
             self.stream.set_territory(territory.clone());
             return;
         }
@@ -1835,40 +2097,40 @@ impl Seat {
     /// Tells the seat's viewers who has the game paused.
     pub fn pause(&mut self, turn: u32, players: &[i8]) -> io::Result<()> {
         let visual = self.stream.pause(turn, players)?;
-        self.shown
-            .apply(Release::Pause(visual), None, self.shown.match_id);
+        let match_id = self.shown.match_id;
+        self.emit(Release::Pause(visual), match_id);
         Ok(())
     }
 
     /// Tells the seat's viewers the pause ledger.
     pub fn ledger(&mut self, turn: u32, entries: &[crate::pause::Entry]) -> io::Result<()> {
         let visual = self.stream.set_ledger(turn, entries)?;
-        self.shown
-            .apply(Release::Pause(visual), None, self.shown.match_id);
+        let match_id = self.shown.match_id;
+        self.emit(Release::Pause(visual), match_id);
         Ok(())
     }
 
     /// Tells the seat's viewers a mutual ally's flare.
     pub fn flare(&mut self, turn: u32, sender: u8, x: f32, z: f32) -> io::Result<()> {
         let visual = self.stream.flare_message(turn, sender, x, z)?;
-        self.shown
-            .apply(Release::Flare(visual), None, self.shown.match_id);
+        let match_id = self.shown.match_id;
+        self.emit(Release::Flare(visual), match_id);
         Ok(())
     }
 
     /// Tells the seat's viewers a notification for its player.
     pub fn notification(&mut self, turn: u32, note: &Note) -> io::Result<()> {
         let visual = self.stream.notification_message(turn, note)?;
-        self.shown
-            .apply(Release::Flare(visual), None, self.shown.match_id);
+        let match_id = self.shown.match_id;
+        self.emit(Release::Flare(visual), match_id);
         Ok(())
     }
 
     /// Tells the seat's viewers an event line (`Hub::notify_events`).
     pub fn event(&mut self, turn: u32, json: &str) -> io::Result<()> {
         let visual = self.stream.event_message(turn, json)?;
-        self.shown
-            .apply(Release::Flare(visual), None, self.shown.match_id);
+        let match_id = self.shown.match_id;
+        self.emit(Release::Flare(visual), match_id);
         Ok(())
     }
 
@@ -1876,8 +2138,8 @@ impl Seat {
     /// (`Hub::set_sim_time`).
     pub fn sim_time(&mut self, turn: u32, microseconds: u32) -> io::Result<()> {
         let visual = self.stream.sim_time_message(turn, microseconds)?;
-        self.shown
-            .apply(Release::Flare(visual), None, self.shown.match_id);
+        let match_id = self.shown.match_id;
+        self.emit(Release::Flare(visual), match_id);
         Ok(())
     }
 
@@ -1890,24 +2152,41 @@ impl Seat {
         Ok(())
     }
 
-    pub fn end(&mut self, common: &Common, turn: u32) {
+    /// `terrain` and `data_files` are the observers' to keep for the
+    /// replay, so only the explored stream is given them.
+    pub fn end(
+        &mut self,
+        common: &Common,
+        turn: u32,
+        terrain: Option<(u64, TerrainFile)>,
+        data_files: DataFiles,
+    ) {
         let seat_common = Common {
-            delay: Duration::ZERO,
+            delay: self.delay_of(common),
             ..*common
         };
         let (ended, visual_tail, detail_tail) = self.stream.finish(&seat_common, turn);
-        self.shown.apply(
+        self.emit(
             Release::End {
                 match_id: common.match_id,
                 visual_tail,
                 detail_tail,
                 ended,
-                terrain: None,
-                data_files: HashMap::new(),
+                terrain,
+                data_files,
             },
-            None,
             common.match_id,
         );
+    }
+
+    /// A player's seat is shown at once; the explored stream is delayed
+    /// like the observers'.
+    fn delay_of(&self, common: &Common) -> Duration {
+        if self.explored {
+            common.delay
+        } else {
+            Duration::ZERO
+        }
     }
 }
 

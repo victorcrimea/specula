@@ -700,10 +700,12 @@ impl Entities {
 
     /// `perspective`'s LOS grid and its side, if the stream has it.
     fn los_of(&self, perspective: Perspective) -> Option<(&[u8], u32)> {
-        let Perspective::Player(player) = perspective else {
-            return None;
+        // An explored-mode observer's key 0 is what any player explored.
+        let key = match perspective {
+            Perspective::Player(player) => player as u32,
+            Perspective::Observer => 0,
         };
-        let grid = self.los.players.get(&(player as u32))?;
+        let grid = self.los.players.get(&key)?;
         Some((grid.as_slice(), self.los.side))
     }
 }

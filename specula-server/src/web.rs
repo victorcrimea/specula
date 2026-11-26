@@ -59,6 +59,7 @@ use crate::usage::Usage;
 
 const IMMUTABLE: &str = "public, max-age=31536000, immutable";
 const REVALIDATE: &str = "no-cache";
+const NO_STORE: &str = "no-store";
 const GLUE: &str = "specula_web.js";
 const WASM: &str = "specula_web_bg.wasm";
 const GLUE_PLACEHOLDER: &str = "specula_web.js?v=GLUE";
@@ -492,9 +493,18 @@ pub fn terrain(
     accepts: AcceptsBrotli,
     registry: &State<Arc<Registry>>,
 ) -> Option<Encoded<Vec<u8>>> {
-    let file = registry
-        .resolve(id)?
-        .terrain(u64::from_str_radix(tid, 16).ok()?)?;
+    let source = registry.observable(id)?;
+    let tid = u64::from_str_radix(tid, 16).ok()?;
+    // Not content-addressed: it grows with the shown exploration.
+    if let Some(partial) = source.explored_terrain(tid) {
+        return Some(Encoded {
+            brotli: false,
+            body: partial.to_vec(),
+            content_type: ContentType::Binary,
+            cache: NO_STORE,
+        });
+    }
+    let file = source.terrain(tid)?;
     let brotli = accepts.0.then(|| file.brotli.get()).flatten();
     // The id is a hash of the content, so a copy never goes stale, but the
     // raw file sent while the brotli copy is still being made must not be
@@ -516,7 +526,7 @@ pub fn terrain(
 #[rocket::get("/g/<id>/data/<hash>")]
 pub fn data(id: MatchId, hash: &str, registry: &State<Arc<Registry>>) -> Option<Encoded<Vec<u8>>> {
     let file = registry
-        .resolve(id)?
+        .observable(id)?
         .data(u64::from_str_radix(hash, 16).ok()?)?;
     Some(Encoded {
         brotli: false,

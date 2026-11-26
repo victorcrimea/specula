@@ -615,7 +615,8 @@ impl Renderer {
         let side = scene.los.side;
         let grid = match self.perspective {
             Perspective::Player(player) => scene.los.players.get(&(player as u32)),
-            Perspective::Observer => None,
+            // Key 0 is what any player explored, in explored mode only.
+            Perspective::Observer => scene.los.players.get(&0),
         };
         self.los = grid
             .filter(|grid| side > 0 && grid.len() == side as usize * side as usize)

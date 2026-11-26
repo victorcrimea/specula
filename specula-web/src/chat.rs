@@ -166,6 +166,8 @@ struct Inner {
     /// The host's member index, which only the chat ban needs.
     host: Option<usize>,
     max_length: usize,
+    /// Explored mode: the match's active players do not read observers.
+    observer_chat_locked: bool,
     members: Vec<Member>,
     live: bool,
     entries: Vec<Entry>,
@@ -196,6 +198,7 @@ impl Chat {
             you: None,
             host: None,
             max_length: 1024,
+            observer_chat_locked: false,
             members: Vec::new(),
             live: false,
             entries: Vec::new(),
@@ -262,6 +265,10 @@ impl Chat {
 
     pub fn max_length(&self) -> usize {
         self.inner.borrow().max_length
+    }
+
+    pub fn observer_chat_locked(&self) -> bool {
+        self.inner.borrow().observer_chat_locked
     }
 
     pub fn members(&self) -> Vec<Member> {
@@ -413,6 +420,9 @@ fn handle(inner: &mut Inner, message: &JsValue) -> Option<String> {
             if let Some(length) = number(message, "max_length") {
                 inner.max_length = length as usize;
             }
+            inner.observer_chat_locked = get(message, "observer_chat_locked")
+                .as_bool()
+                .unwrap_or(false);
         }
         "members" => {
             inner.you = number(message, "you").map(|member| member as usize);

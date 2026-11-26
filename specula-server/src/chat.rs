@@ -16,6 +16,8 @@ use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 use std::time::Instant;
 use std::time::SystemTime;
@@ -100,6 +102,9 @@ pub enum Request {
 pub struct Viewer {
     pub member: Option<usize>,
     pub player: Option<u8>,
+    /// Holds a seat whose player has not lost; the observer chat lock
+    /// hides unseated senders from exactly these (D56).
+    pub active: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
@@ -122,6 +127,9 @@ struct Entry {
     /// Unseated viewers receive it (everyone, observers).
     observers: bool,
     to_member: Option<usize>,
+    /// An observer's line under the lock, fixed at send time so a later
+    /// change does not rewrite what was already said.
+    locked: bool,
     /// The message as sent to pages, built once.
     json: String,
 }
@@ -139,7 +147,12 @@ pub struct Chat {
     inner: Mutex<Log>,
     /// Bumped on every entry and on close; sockets then read what is new.
     revision: watch::Sender<u64>,
-    delay: Duration,
+    /// Set once at launch from the host's choice (M38); setup chat is never
+    /// delayed, so changing it then reorders nothing.
+    delay: Mutex<Duration>,
+    /// Explored mode: what unseated senders write in game never reaches an
+    /// active player, who could otherwise be told what observers see.
+    locked: AtomicBool,
 }
 
 impl Chat {
@@ -153,8 +166,21 @@ impl Chat {
                 online: HashMap::new(),
             }),
             revision: watch::channel(0).0,
-            delay,
+            delay: Mutex::new(delay),
+            locked: AtomicBool::new(false),
         }
+    }
+
+    pub fn set_locked(&self, locked: bool) {
+        self.locked.store(locked, Ordering::SeqCst);
+    }
+
+    pub fn is_locked(&self) -> bool {
+        self.locked.load(Ordering::SeqCst)
+    }
+
+    pub fn set_delay(&self, delay: Duration) {
+        *self.delay.lock().unwrap() = delay;
     }
 
     pub fn subscribe(&self) -> watch::Receiver<u64> {
@@ -232,6 +258,7 @@ impl Chat {
     /// The entries at or after `cursor` that `viewer` may read, each with the
     /// instant it is due, in order; advances `cursor` past the log.
     pub fn take(&self, cursor: &mut u64, viewer: &Viewer) -> Vec<(Instant, String)> {
+        let delay = *self.delay.lock().unwrap();
         let log = self.inner.lock().unwrap();
         let mut out = Vec::new();
         for entry in log.entries.iter().filter(|entry| entry.seq >= *cursor) {
@@ -244,7 +271,7 @@ impl Chat {
                 && viewer.player.is_none()
                 && viewer.member != Some(entry.from_member);
             let due = if delayed {
-                entry.sent + self.delay
+                entry.sent + delay
             } else {
                 entry.sent
             };
@@ -283,6 +310,9 @@ fn visible(entry: &Entry, viewer: &Viewer) -> bool {
     if viewer.member == Some(entry.from_member) {
         return true;
     }
+    if entry.locked && viewer.active {
+        return false;
+    }
     let player_receives = viewer
         .player
         .is_some_and(|player| entry.players.contains(&player));
@@ -304,6 +334,7 @@ pub fn you_json(found: &registry::Match, cookie: Option<&str>) -> String {
         "member": member,
         "name": name.as_ref().map(Nickname::as_str),
         "max_length": MAX_LENGTH,
+        "observer_chat_locked": found.chat.is_locked(),
     })
     .to_string()
 }
@@ -414,9 +445,11 @@ fn players_of(diplomacy: &[(u8, Vec<u8>)]) -> impl Iterator<Item = u8> + '_ {
 
 /// Who reads a socket of `found`: its member and seat, if any.
 pub fn viewer(found: &registry::Match, cookie: Option<&str>) -> Viewer {
+    let player = found.play.seat(cookie);
     Viewer {
         member: cookie.and_then(|cookie| found.seats.index_of(cookie)),
-        player: found.play.seat(cookie),
+        player,
+        active: player.is_some_and(|player| is_active(&found.hub.diplomacy(), player)),
     }
 }
 
@@ -569,6 +602,7 @@ pub fn send(
         players,
         observers,
         to_member: to.map(|(to, _)| to),
+        locked: in_game && player.is_none() && found.chat.is_locked(),
         json: String::new(),
     };
     let now = entry.sent;

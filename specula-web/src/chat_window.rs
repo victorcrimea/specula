@@ -111,6 +111,8 @@ pub struct ChatWindow {
     to: HtmlSelectElement,
     ban: HtmlButtonElement,
     input: HtmlInputElement,
+    /// Tells an observer that the match's players do not read the chat.
+    note: HtmlElement,
     send: HtmlButtonElement,
     cancel: HtmlButtonElement,
     extended: HtmlInputElement,
@@ -156,6 +158,7 @@ impl ChatWindow {
             to: crate::element(document, "chat-to")?,
             ban: crate::element(document, "chat-ban")?,
             input: crate::element(document, "chat-input")?,
+            note: find("chat-observer-note")?,
             send: crate::element(document, "chat-send")?,
             cancel: crate::element(document, "chat-cancel")?,
             extended: crate::element(document, "chat-extended")?,
@@ -593,6 +596,10 @@ impl ChatWindow {
         let host = self.chat.you().is_some() && self.chat.host() == self.chat.you();
         self.ban.set_hidden(!host);
         self.ban.set_disabled(self.ban_target().is_none());
+        let locked = self.chat.observer_chat_locked() && !seated;
+        if self.note.hidden() == locked {
+            self.note.set_hidden(!locked);
+        }
         let can_send = self.can_write();
         if self.can_send != Some(can_send) {
             self.can_send = Some(can_send);

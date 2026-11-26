@@ -46,6 +46,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::Weak;
 use std::sync::atomic::AtomicBool;
+use std::sync::atomic::AtomicU32;
 use std::sync::atomic::Ordering;
 use std::thread::JoinHandle;
 use std::time::Duration;
@@ -63,6 +64,7 @@ use crate::nickname::Nickname;
 use crate::observer;
 use crate::play::Play;
 use crate::seats::Seats;
+use crate::settings::ObserverMode;
 use crate::settings::Settings;
 use crate::setup::CLOSED_KEEP;
 use crate::setup::CloseReason;
@@ -212,6 +214,9 @@ pub struct Match {
     /// The setup a rematch opened for this match (M35), once its host
     /// started one.
     rematch: Mutex<Option<MatchId>>,
+    /// The host's observer mode and the delay it was launched with; `None`
+    /// before the launch.
+    observers: Mutex<Option<(ObserverMode, Duration)>>,
 }
 
 impl Match {
@@ -219,13 +224,24 @@ impl Match {
         *self.state.lock().unwrap()
     }
 
+    /// The mode and delay the game started with.
+    pub fn observers(&self) -> Option<(ObserverMode, Duration)> {
+        *self.observers.lock().unwrap()
+    }
+
+    /// Nobody may observe a game its host hid, until it ends (D56); the
+    /// replay then opens.
+    pub fn hidden(&self) -> bool {
+        self.state() == MatchState::Running
+            && matches!(self.observers(), Some((ObserverMode::Hidden, _)))
+    }
+
     /// The thumbnail as WebP, at most `THUMB_TTL` old; None while the
     /// match is not running or has shown nothing yet. Blocks while it
     /// draws, so call it off the async threads.
     pub fn thumb_webp(&self) -> Option<Arc<Vec<u8>>> {
-        // M36's "none" observer mode returns None here, which the lobby
-        // shows as the map's stock preview (D61).
-        if self.state() != MatchState::Running {
+        // A hidden match shows the lobby the map's stock preview (D61).
+        if self.state() != MatchState::Running || self.hidden() {
             return None;
         }
         let mut cached = self.thumb.lock().unwrap();
@@ -318,6 +334,12 @@ impl Source {
         self.summary(self.match_id?, turn)
     }
 
+    /// The terrain an explored-mode match has shown so far, which changes
+    /// as it is explored.
+    pub fn explored_terrain(&self, id: u64) -> Option<Arc<[u8]>> {
+        self.hub.as_ref()?.explored_terrain(id)
+    }
+
     /// Content-addressed, so any match's URL may serve it.
     pub fn terrain(&self, id: u64) -> Option<TerrainFile> {
         match &self.hub {
@@ -381,6 +403,36 @@ pub struct Registry {
     /// What every setup socket is sent first.
     catalog_json: Option<String>,
     inner: Mutex<Inner>,
+    observer_slots: Arc<ObserverSlots>,
+}
+
+/// How many observer sockets are open server-wide against `--max-observers`
+/// (D58).
+pub struct ObserverSlots {
+    open: AtomicU32,
+    max: u32,
+}
+
+/// Frees its slot when the socket closes.
+pub struct SlotGuard(Arc<ObserverSlots>);
+
+impl Drop for SlotGuard {
+    fn drop(&mut self) {
+        self.0.open.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+impl ObserverSlots {
+    /// One atomic update, so two sockets arriving at once cannot both take
+    /// the last slot.
+    pub fn try_acquire(self: &Arc<Self>) -> Option<SlotGuard> {
+        self.open
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |open| {
+                (open < self.max).then_some(open + 1)
+            })
+            .ok()
+            .map(|_| SlotGuard(Arc::clone(self)))
+    }
 }
 
 /// The seated players a rematch holds slots for (M35).
@@ -453,7 +505,12 @@ impl Registry {
     ) -> Self {
         let slots = vec![None; usize::from(config.slots)];
         let catalog_json = catalog.as_ref().map(catalog_json);
+        let observer_slots = Arc::new(ObserverSlots {
+            open: AtomicU32::new(0),
+            max: config.max_observers,
+        });
         Registry {
+            observer_slots,
             config,
             socket_base,
             delay,
@@ -472,6 +529,37 @@ impl Registry {
                 pending: HashMap::new(),
             }),
         }
+    }
+
+    /// `resolve` for what observers may watch: a hosted match its host hid
+    /// is nothing to them until it ends.
+    pub fn observable(&self, id: MatchId) -> Option<Source> {
+        if self.hosted(id).is_some_and(|found| found.hidden()) {
+            return None;
+        }
+        self.resolve(id)
+    }
+
+    /// Whether `/g/<id>` is a hosted match its host hid, for the sockets
+    /// that close with a reason rather than 404.
+    pub fn hidden(&self, id: MatchId) -> bool {
+        self.hosted(id).is_some_and(|found| found.hidden())
+    }
+
+    /// A slot of the server-wide observer limit, unless `cookie` is exempt:
+    /// a seat holder or the host watching their own match must not be
+    /// locked out by a full server. `Err` is a refusal.
+    pub fn observer_slot(
+        &self,
+        id: MatchId,
+        cookie: Option<&str>,
+    ) -> Result<Option<SlotGuard>, ()> {
+        if let (Some(found), Some(cookie)) = (self.hosted(id), cookie)
+            && (found.seats.player_of(cookie).is_some() || found.seats.is_host(cookie))
+        {
+            return Ok(None);
+        }
+        self.observer_slots.try_acquire().map(Some).ok_or(())
     }
 
     pub fn broadcast(&self) -> Option<MatchId> {
@@ -570,7 +658,7 @@ impl Registry {
         for (id, found) in &hosted {
             match found.state() {
                 MatchState::Setup => {
-                    let Some((map, max)) = found.room.lobby_info() else {
+                    let Some((map, max, observers)) = found.room.lobby_info() else {
                         continue;
                     };
                     setups.push(json!({
@@ -580,6 +668,8 @@ impl Registry {
                         "preview": map.preview,
                         "seated": found.seats.seated_names().len(),
                         "max": max,
+                        "observers_mode": observers.mode.name(),
+                        "observers_delay": observers.effective_delay().as_secs(),
                     }));
                 }
                 MatchState::Running => {
@@ -609,6 +699,8 @@ impl Registry {
                         "players": players,
                         "elapsed": found.game_time().as_secs(),
                         "observers": found.hub.observer_count(),
+                        "observers_mode": found.observers().map(|(mode, _)| mode.name()),
+                        "observers_delay": found.observers().map(|(_, delay)| delay.as_secs()),
                     }));
                 }
                 MatchState::Ended => {}
@@ -668,6 +760,7 @@ impl Registry {
         batch: Option<&Value>,
     ) -> Result<MatchId, &'static str> {
         let catalog = self.catalog.as_ref().ok_or("not hosting")?;
+        let default_delay = u32::try_from(self.delay.as_secs()).unwrap_or(u32::MAX);
         let id = MatchId::new_v4();
         let socket = format!("{}.{id}", self.socket_base);
         if socket.len() >= SOCKET_PATH_LIMIT {
@@ -713,7 +806,7 @@ impl Registry {
                 (settings, players)
             }
             None => (
-                Settings::open(catalog, batch, &[seat]).map_err(|error| {
+                Settings::open(catalog, batch, &[seat], default_delay).map_err(|error| {
                     eprintln!("cannot open a setup: {error}");
                     "cannot open a setup"
                 })?,
@@ -780,6 +873,7 @@ impl Registry {
                 decided: Mutex::new(None),
                 host_gone: Mutex::new(None),
                 rematch: Mutex::new(None),
+                observers: Mutex::new(None),
             }),
         );
         inner.order.push(id);
@@ -832,6 +926,30 @@ impl Registry {
                 eprintln!("cannot open the feed socket {socket}: {error}");
                 FEED_SOCKET_ERROR
             })?;
+        let observers = launch.settings.observers;
+        let delay = observers.effective_delay();
+        found.hub.set_delay(delay);
+        let ai_players = launch
+            .settings
+            .player_ai
+            .iter()
+            .enumerate()
+            .filter(|(_, ai)| ai.is_some())
+            .map(|(slot, _)| slot as u32 + 1)
+            .collect();
+        found
+            .hub
+            .set_observer_mode(observers.mode == ObserverMode::Explored, ai_players);
+        found.chat.set_delay(delay);
+        found
+            .chat
+            .set_locked(observers.mode == ObserverMode::Explored);
+        *found.observers.lock().unwrap() = Some((observers.mode, delay));
+        println!(
+            "match {id}: observers {}, delay {} s",
+            observers.mode.name(),
+            delay.as_secs()
+        );
         found.hub.set_meta_source(
             found
                 .seats

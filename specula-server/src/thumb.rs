@@ -54,7 +54,13 @@ pub fn render(thumb: &Thumb, terrain: &Terrain) -> Option<Vec<u8>> {
             let i = ((u * tiles as f32) as usize).min(tiles - 1);
             let average =
                 (height(i, j) + height(i + 1, j) + height(i, j + 1) + height(i + 1, j + 1)) / 4.0;
-            let mut color = if average < water {
+            let unknown = thumb
+                .known
+                .as_ref()
+                .is_some_and(|known| !known.get(j * tiles + i).copied().unwrap_or(false));
+            let mut color = if unknown {
+                [0.0; 3]
+            } else if average < water {
                 if average > water - terrain.shallow_depth {
                     SHALLOW_WATER
                 } else {
@@ -84,7 +90,8 @@ pub fn render(thumb: &Thumb, terrain: &Terrain) -> Option<Vec<u8>> {
                     (base & 0xFF) as f32 * shade,
                 ]
             };
-            if let Some(territory) = &thumb.territory
+            if !unknown
+                && let Some(territory) = &thumb.territory
                 && territory.width > 0
                 && territory.height > 0
             {

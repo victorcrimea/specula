@@ -962,6 +962,15 @@ fn save_settings(state: &JsValue) {
     let Ok(copy) = js_sys::JSON::parse(&json) else {
         return;
     };
+    // Specula's own options, which the engine's attributes do not hold.
+    let observers = get(state, "observers");
+    let own = js_sys::Object::new();
+    if Reflect::set(&own, &"observerMode".into(), &get(&observers, "mode")).is_err()
+        || Reflect::set(&own, &"delay".into(), &get(&observers, "delay")).is_err()
+        || Reflect::set(&copy, &"specula".into(), &own).is_err()
+    {
+        return;
+    }
     let gui_data = js_sys::Object::new();
     let filter = get(&get(state, "gui"), "map_filter");
     if Reflect::set(&gui_data, &"mapFilter".into(), &filter).is_err() {
@@ -1369,7 +1378,52 @@ fn layout() -> Vec<(&'static str, Vec<Spec>)> {
                 ),
             ],
         ),
+        (
+            "Observers",
+            vec![
+                select_spec(
+                    "observer_mode",
+                    "Observers",
+                    "What the people watching the match may see.",
+                    "observer_mode",
+                ),
+                number_spec(
+                    "observer_delay",
+                    "Observer delay",
+                    "How far behind the match observers watch it.",
+                    "observer_delay",
+                ),
+            ],
+        ),
     ]
+}
+
+/// "No delay", whole minutes, else seconds.
+fn delay_text(secs: u32) -> String {
+    if secs == 0 {
+        translate("No delay")
+    } else if secs.is_multiple_of(60) {
+        plural(
+            "ceasefire",
+            "%(minutes)s minute",
+            "%(minutes)s minutes",
+            "minutes",
+            f64::from(secs / 60),
+        )
+    } else {
+        lang::format(
+            &translate("%(seconds)s seconds"),
+            &[("seconds", &secs.to_string())],
+        )
+    }
+}
+
+fn observer_mode_text(mode: &str) -> String {
+    translate(match mode {
+        "explored" => "Only what players explored",
+        "none" => "Nothing until the match ends",
+        _ => "See everything",
+    })
 }
 
 fn build_control(page: &Shared, dom: &Dom, panel: &HtmlElement, spec: Spec) -> Control {
@@ -1464,7 +1518,12 @@ fn build(page: &Shared, state: &mut Page) {
         let button: HtmlElement = create(&document, "button");
         let _ = button.set_attribute("type", "button");
         let _ = button.set_attribute("role", "tab");
-        button.set_text_content(Some(&tc("Match settings tab name", title)));
+        // Specula's own tab has no engine context to look up.
+        button.set_text_content(Some(&if title == "Observers" {
+            translate(title)
+        } else {
+            tc("Match settings tab name", title)
+        }));
         let shared = Rc::clone(page);
         listen(&button, "click", move |_| {
             select_tab(&mut shared.borrow_mut(), index)
@@ -2034,6 +2093,22 @@ fn game_description(view: &View) -> Vec<(String, Details)> {
                     ceasefire,
                 ),
                 &[("min", &ceasefire.to_string())],
+            )
+        },
+    ));
+    let observers = get(&view.state, "observers");
+    let mode = text(&observers, "mode");
+    lines.push(text_line(
+        translate("Observers"),
+        if mode == "none" {
+            observer_mode_text(&mode)
+        } else {
+            lang::format(
+                &translate("%(mode)s, %(delay)s behind"),
+                &[
+                    ("mode", &observer_mode_text(&mode)),
+                    ("delay", &delay_text(number(&observers, "delay") as u32)),
+                ],
             )
         },
     ));
@@ -2644,6 +2719,39 @@ fn render_controls(page: &Page, view: &View) {
         true,
         free && flag(offer, "last_man_standing"),
         flag(&view.settings, "LastManStanding"),
+    );
+
+    // Observers tab
+    let observers = get(&view.state, "observers");
+    let mode = text(&observers, "mode");
+    select(
+        "observer_mode",
+        true,
+        host,
+        &["everything", "explored", "none"]
+            .iter()
+            .map(|name| option(name, observer_mode_text(name)))
+            .collect::<Vec<_>>(),
+        &mode,
+    );
+    let delay = number(&observers, "delay") as u32;
+    let mut choices = list(&observers, "choices")
+        .iter()
+        .filter_map(|value| value.as_f64())
+        .map(|value| value as u32)
+        .collect::<Vec<_>>();
+    if choices.is_empty() {
+        choices.push(delay);
+    }
+    select(
+        "observer_delay",
+        true,
+        host && mode != "none",
+        &choices
+            .iter()
+            .map(|secs| option(secs, delay_text(*secs)))
+            .collect::<Vec<_>>(),
+        &delay.to_string(),
     );
 }
 

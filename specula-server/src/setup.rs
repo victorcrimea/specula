@@ -29,7 +29,10 @@ use crate::settings::Launch;
 use crate::settings::MAPS_UP_TO_8_PLAYERS;
 use crate::settings::MAX_PLAYERS_SMALL_MAP;
 use crate::settings::MapInfo;
+use crate::settings::ObserverMode;
+use crate::settings::Observers;
 use crate::settings::Settings;
+use crate::settings::delay_choices;
 use crate::settings::gamesetup::CEASEFIRE_MAX;
 use crate::settings::gamesetup::Change;
 use crate::settings::gamesetup::MAP_FILTERS;
@@ -145,10 +148,15 @@ impl SetupRoom {
 
     /// The map and the seat count of an open setup, for the lobby; None
     /// once it launched or closed.
-    pub fn lobby_info(&self) -> Option<(MapInfo, usize)> {
+    pub fn lobby_info(&self) -> Option<(MapInfo, usize, Observers)> {
         let inner = self.inner.lock().unwrap();
-        matches!(inner.phase, Phase::Open | Phase::Launching)
-            .then(|| (inner.settings.map_info(), inner.settings.player_count.max))
+        matches!(inner.phase, Phase::Open | Phase::Launching).then(|| {
+            (
+                inner.settings.map_info(),
+                inner.settings.player_count.max,
+                inner.settings.observers,
+            )
+        })
     }
 
     pub fn subscribe(&self) -> watch::Receiver<u64> {
@@ -566,6 +574,11 @@ impl SetupRoom {
             "player_count": settings.player_count.players,
             "attributes": settings.to_init_attributes(),
             "gui": { "map_filter": settings.gui.map_filter },
+            "observers": {
+                "mode": settings.observers.mode.name(),
+                "delay": settings.observers.delay_secs,
+                "choices": delay_choices(settings.observers.default_secs),
+            },
             "offer": offer,
             "launch_blocker": blocker(seats, &inner.reserved, &inner.settings, self.ai_only),
             "reserved": inner.reserved.iter().map(|hold| json!({
@@ -597,6 +610,9 @@ fn blocker(
         if !(ai_only && ai_slot) {
             return Some("no player is seated");
         }
+    }
+    if settings.observers.mode == ObserverMode::Hidden && seats.players().is_empty() {
+        return Some("a game of AIs only cannot be hidden from observers");
     }
     if !seats.everyone_ready() {
         return Some("not every player is ready");
@@ -790,6 +806,8 @@ fn parse_change(request: &Value) -> Option<Change> {
         "remove" => Change::Remove { index: index()? },
         "reset_civs" => Change::ResetCivs,
         "reset_teams" => Change::ResetTeams,
+        "observer_mode" => Change::ObserverMode(ObserverMode::from_name(value.as_str()?)?),
+        "observer_delay" => Change::ObserverDelay(whole()?),
         _ => return None,
     })
 }

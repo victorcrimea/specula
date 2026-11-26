@@ -907,6 +907,8 @@ body:not([data-debug="storage"]) #stats-storage { display: none; }
 #chat-ban:hover:enabled { background-image: var(--gui-stone-button-over); }
 #chat-ban:disabled { filter: brightness(0.75); }
 #chat-input { top: 46px; }
+#chat-observer-note { position: absolute; left: 0; right: 0; top: 134px; text-align: center;
+  text-shadow: 0 0 3px black, 0 0 3px black; }
 #chat-history { position: absolute; left: 10px; right: 10px; top: 46px; bottom: 0; overflow-y: auto;
   box-sizing: border-box; padding: 4px 6px; background: rgba(0, 0, 0, 0.6);
   border: 1px solid var(--gui-gold, #c9a14a); user-select: text; -webkit-user-select: text;
@@ -1141,10 +1143,26 @@ body:not([data-debug="storage"]) #stats-storage { display: none; }
   background: rgba(0, 0, 0, 0.753); border-color: white; }
 #tooltip .icon { display: inline-block; width: 16px; height: 16px;
   vertical-align: -3px; background: center / 100% 100% no-repeat; }
+#hidden-notice, #observers-full { position: fixed; z-index: 50; color: white; text-align: center;
+  font: 700 16px "0ad sans", "0ad sans fallback", system-ui, sans-serif; }
+/* Clicks pass through to the page's own controls (sound, settings). */
+#hidden-notice { left: 0; top: 0; right: 0; bottom: 0; pointer-events: none;
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; }
+#hidden-notice p { padding: 6px 14px; background: rgba(0, 0, 0, 0.75); border-radius: 4px; }
+#hidden-notice p { margin: 0; }
+#observers-full { left: 50%; top: 12px; transform: translateX(-50%); padding: 8px 14px;
+  max-width: calc(100vw - 32px); box-sizing: border-box; background: rgba(15, 18, 20, 0.9);
+  border: 1px solid #3a4248; border-radius: 4px; font-weight: 400; }
+#hidden-notice[hidden], #observers-full[hidden] { display: none; }
 </style>
 </head>
 <body>
 <canvas id="view"></canvas>
+<div id="hidden-notice" role="status" hidden>
+<p data-i18n>The host hid this match from observers until it ends.</p>
+<p data-i18n>Its replay opens here when it ends.</p>
+</div>
+<div id="observers-full" role="status" hidden data-i18n>Too many people are watching on this server. Trying again...</div>
 <div id="bandbox" hidden></div>
 <div id="tooltip" hidden></div>
 <div id="pause-overlay" hidden>
@@ -1384,6 +1402,7 @@ body:not([data-debug="storage"]) #stats-storage { display: none; }
 <div id="chat-page">
 <label id="chat-to-caption" class="caption" for="chat-to"></label><select id="chat-to"></select>
 <button id="chat-ban" class="text center sans-bold-stroke-14 stone" type="button" hidden data-i18n>Ban</button>
+<div id="chat-observer-note" hidden data-i18n>Players do not see observer chat in this match.</div>
 <label id="chat-text-caption" class="caption" for="chat-input"></label><input id="chat-input" type="text" maxlength="1024" autocomplete="off">
 <button id="chat-cancel" class="text center sans-bold-stroke-14 stone" type="button"></button>
 <label id="chat-extended-label"><input id="chat-extended" type="checkbox"><span id="chat-extended-text"></span></label>

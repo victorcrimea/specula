@@ -145,6 +145,9 @@ use crate::worker::COMMAND_SPEED;
 use crate::worker::POST_DETAIL;
 use crate::worker::POST_DISPLACED;
 use crate::worker::POST_FLARE;
+use crate::worker::POST_HIDDEN;
+use crate::worker::POST_OBSERVERS_ADMITTED;
+use crate::worker::POST_OBSERVERS_FULL;
 use crate::worker::POST_SCENE;
 use crate::worker::POST_STARTS;
 use crate::worker::POST_STATUS;
@@ -3277,6 +3280,74 @@ async fn run(
     Ok(())
 }
 
+/// Shows or hides one of the page's fixed notices.
+fn set_notice(id: &str, shown: bool) {
+    let Some(element) = web_sys::window()
+        .and_then(|window| window.document())
+        .and_then(|document| document.get_element_by_id(id))
+    else {
+        return;
+    };
+    if shown {
+        let _ = element.remove_attribute("hidden");
+    } else {
+        let _ = element.set_attribute("hidden", "");
+    }
+}
+
+/// The host hid the match until it ends (D56): the page says so and asks
+/// `<base>/info` until the match has something to watch and is no longer
+/// live, then reloads into its replay.
+fn observers_hidden(app: &Rc<RefCell<App>>) {
+    app.borrow().worker.terminate();
+    set_notice("hidden-notice", true);
+    let Some(window) = web_sys::window() else {
+        return;
+    };
+    let path = window.location().pathname().unwrap_or_default();
+    let mut parts = path.split('/').skip(1);
+    let (Some(g), Some(id)) = (parts.next(), parts.next()) else {
+        return;
+    };
+    let url = format!("/{g}/{id}/info");
+    let poll = Closure::<dyn FnMut()>::new(move || {
+        let url = url.clone();
+        wasm_bindgen_futures::spawn_local(async move {
+            let Some(window) = web_sys::window() else {
+                return;
+            };
+            let Ok(response) = wasm_bindgen_futures::JsFuture::from(window.fetch_with_str(&url))
+                .await
+                .and_then(|response| response.dyn_into::<web_sys::Response>())
+            else {
+                return;
+            };
+            if !response.ok() {
+                return;
+            }
+            let Ok(promise) = response.text() else {
+                return;
+            };
+            let Some(text) = wasm_bindgen_futures::JsFuture::from(promise)
+                .await
+                .ok()
+                .and_then(|text| text.as_string())
+            else {
+                return;
+            };
+            // "<match hex> <segments> <live 0|1>"
+            if text.trim_end().ends_with(" 0") {
+                let _ = window.location().reload();
+            }
+        });
+    });
+    let _ = window.set_interval_with_callback_and_timeout_and_arguments_0(
+        poll.as_ref().unchecked_ref(),
+        10_000,
+    );
+    poll.forget();
+}
+
 fn element<T: JsCast>(document: &Document, id: &str) -> Result<T, String> {
     document
         .get_element_by_id(id)
@@ -6046,6 +6117,9 @@ fn connect(app: &Rc<RefCell<App>>) {
             }
             Some((&POST_DETAIL, message)) => receive_detail(&receiver, message),
             Some((&POST_DISPLACED, _)) => receiver.borrow_mut().stream_displaced = true,
+            Some((&POST_HIDDEN, _)) => observers_hidden(&receiver),
+            Some((&POST_OBSERVERS_FULL, _)) => set_notice("observers-full", true),
+            Some((&POST_OBSERVERS_ADMITTED, _)) => set_notice("observers-full", false),
             Some((&POST_FLARE, rest)) => match stream::read_observer_flare(rest) {
                 Ok((x, z, name)) => receiver.borrow_mut().accept_flare(0, name, x, z),
                 Err(error) => {

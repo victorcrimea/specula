@@ -33,6 +33,17 @@ html, body { margin: 0; height: 100%; background: #0f1214; }
 #match-over button { font: inherit; color: #e6e9eb; background: rgba(15, 18, 20, 0.85);
   border: 1px solid #3a4248; border-radius: 4px; padding: 4px 8px; }
 #match-over :disabled { opacity: 0.5; }
+#hidden-notice, #observers-full { position: fixed; z-index: 50; color: white; text-align: center;
+  font: 700 16px "0ad sans", "0ad sans fallback", system-ui, sans-serif; }
+/* Clicks pass through to the page's own controls (sound, settings). */
+#hidden-notice { left: 0; top: 0; right: 0; bottom: 0; pointer-events: none;
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; }
+#hidden-notice p { padding: 6px 14px; background: rgba(0, 0, 0, 0.75); border-radius: 4px; }
+#hidden-notice p { margin: 0; }
+#observers-full { left: 50%; top: 12px; transform: translateX(-50%); padding: 8px 14px;
+  max-width: calc(100vw - 32px); box-sizing: border-box; background: rgba(15, 18, 20, 0.9);
+  border: 1px solid #3a4248; border-radius: 4px; font-weight: 400; }
+#hidden-notice[hidden], #observers-full[hidden] { display: none; }
 </style>
 </head>
 <body>
@@ -56,6 +67,11 @@ html, body { margin: 0; height: 100%; background: #0f1214; }
 <button id="match-over-current" type="button" disabled data-i18n>Current match</button>
 <button id="match-over-close" type="button" aria-label="Close" data-i18n-attrs="aria-label">x</button>
 </div>
+<div id="hidden-notice" role="status" hidden>
+<p data-i18n>The host hid this match from observers until it ends.</p>
+<p data-i18n>Its replay opens here when it ends.</p>
+</div>
+<div id="observers-full" role="status" hidden data-i18n>Too many people are watching on this server. Trying again...</div>
 <script type="module">
 const glue = "/pkg/specula_web.js?v=GLUE";
 const wasm = "/pkg/specula_web_bg.wasm?v=WASM";

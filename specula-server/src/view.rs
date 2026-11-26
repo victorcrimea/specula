@@ -426,6 +426,7 @@ mod seat;
 use seat::Seat;
 use seat::SeatInput;
 use seat::SeatWater;
+use seat::ShownReveal;
 
 const MESSAGE_KEYFRAME: u8 = 1;
 const MESSAGE_DELTA: u8 = 2;
@@ -906,6 +907,9 @@ pub struct Thumb {
     pub colors: Vec<u32>,
     pub territory: Option<Territory>,
     pub dots: Vec<ThumbDot>,
+    /// Explored mode: the terrain tiles observers may see, by tile; the
+    /// rest is drawn black. Empty before anything is explored.
+    pub known: Option<Arc<Vec<bool>>>,
 }
 
 /// 10 s of game time; the lobby refreshes no faster.
@@ -1209,6 +1213,9 @@ enum Release {
         start: Option<u64>,
         visual: TrackOp,
         detail: TrackOp,
+        /// Explored mode: what this turn added to the explored vertices,
+        /// for the shadow of the reveal (`ShownReveal`).
+        explored: Option<Arc<seat::ExploredGrowth>>,
     },
     /// Queued like the turns around it, so `/` sees it `delay` late.
     Summary(Arc<SummaryEntry>),
@@ -1275,6 +1282,7 @@ impl Shown {
                 start,
                 visual,
                 detail,
+                ..
             } => {
                 // The history restarts only now, so until the new match's
                 // first turn, viewers and segment requests still get the
@@ -1947,6 +1955,12 @@ struct State {
     seats: Vec<Seat>,
     /// The players a hosted game has seats for, set before the feed starts.
     seat_players: Vec<u32>,
+    /// Explored mode (D56): the observers' stream, filtered to what any
+    /// player explored. It replaces the observer stream's output, which
+    /// is still encoded because the seats read its tables.
+    explored: Option<Seat>,
+    /// The terrain reveal as the observers have been shown it.
+    explored_shown: Option<ShownReveal>,
     /// What the seats' water derives from the whole heightmap, once the
     /// terrain is known.
     seat_water: Option<Arc<SeatWater>>,
@@ -2000,9 +2014,10 @@ impl State {
     /// The observers' latest dots, territory and colours; gaia's units and
     /// anything off the minimap (colour 0) are left out, as on the minimap.
     fn thumb(&self) -> Thumb {
-        let templates = &self.observer.templates.items;
-        let dots = self
-            .observer
+        // Explored mode shows what the observers' stream holds.
+        let source = self.explored.as_ref().map_or(&self.observer, Seat::stream);
+        let templates = &source.templates.items;
+        let dots = source
             .dots
             .values()
             .filter(|dot| dot.color != 0 && dot.mirage == 0)
@@ -2017,15 +2032,18 @@ impl State {
             .collect();
         Thumb {
             map_size: self.map_size,
-            colors: self
-                .observer
+            colors: source
                 .players
                 .players
                 .iter()
                 .map(|player| player.color)
                 .collect(),
-            territory: self.observer.territory.clone(),
+            territory: source.territory.clone(),
             dots,
+            known: self
+                .explored
+                .as_ref()
+                .map(|explored| Arc::new(explored.known_tiles().unwrap_or_default().to_vec())),
         }
     }
 
@@ -2261,6 +2279,8 @@ impl Hub {
                 },
                 seats: Vec::new(),
                 seat_players: Vec::new(),
+                explored: None,
+                explored_shown: None,
                 seat_water: None,
                 actors: Actors::new(),
                 pending: VecDeque::new(),
@@ -2606,6 +2626,13 @@ impl Hub {
                 eprintln!("cannot encode a pause: {error}");
             }
         }
+        if let Some(explored) = &mut state.explored {
+            if let Err(error) = explored.pause(turn, players) {
+                eprintln!("cannot encode a pause: {error}");
+            }
+            self.drain_explored(&mut state);
+            return;
+        }
         match state.observer.pause(turn, players) {
             Ok(op) => self.queue(&mut state, Release::Pause(op)),
             Err(error) => eprintln!("cannot encode a pause: {error}"),
@@ -2696,6 +2723,13 @@ impl Hub {
         if !observers {
             return;
         }
+        if let Some(explored) = &mut state.explored {
+            if let Err(error) = explored.event(turn, text) {
+                eprintln!("cannot encode an event: {error}");
+            }
+            self.drain_explored(state);
+            return;
+        }
         match state.observer.event_message(turn, text) {
             Ok(op) => self.queue(state, Release::Flare(op)),
             Err(error) => eprintln!("cannot encode an event: {error}"),
@@ -2718,6 +2752,13 @@ impl Hub {
                 eprintln!("cannot encode a simulation time: {error}");
             }
         }
+        if let Some(explored) = &mut state.explored {
+            if let Err(error) = explored.sim_time(turn, microseconds) {
+                eprintln!("cannot encode a simulation time: {error}");
+            }
+            self.drain_explored(&mut state);
+            return;
+        }
         match state.observer.sim_time_message(turn, microseconds) {
             Ok(op) => self.queue(&mut state, Release::Flare(op)),
             Err(error) => eprintln!("cannot encode a simulation time: {error}"),
@@ -2736,6 +2777,13 @@ impl Hub {
             if let Err(error) = seat.ledger(turn, entries) {
                 eprintln!("cannot encode a ledger: {error}");
             }
+        }
+        if let Some(explored) = &mut state.explored {
+            if let Err(error) = explored.ledger(turn, entries) {
+                eprintln!("cannot encode a ledger: {error}");
+            }
+            self.drain_explored(&mut state);
+            return;
         }
         match state.observer.set_ledger(turn, entries) {
             Ok(op) => self.queue(&mut state, Release::Pause(op)),
@@ -2774,6 +2822,13 @@ impl Hub {
             if let Err(error) = state.seats[index].flare(turn, sender, x, z) {
                 eprintln!("cannot encode a flare: {error}");
             }
+        }
+        if let Some(explored) = &mut state.explored {
+            if let Err(error) = explored.flare(turn, sender, x, z) {
+                eprintln!("cannot encode a flare: {error}");
+            }
+            self.drain_explored(&mut state);
+            return Ok(());
         }
         match state.observer.flare_message(turn, sender, x, z) {
             Ok(op) => self.queue(&mut state, Release::Flare(op)),
@@ -3119,22 +3174,77 @@ impl Hub {
             return;
         }
         let common = state.common();
-        let (ended, visual_tail, detail_tail) = state.observer.finish(&common, state.turn);
-        let release = Release::End {
-            match_id: state.match_id,
-            visual_tail,
-            detail_tail,
-            ended,
-            terrain: state.terrain.clone(),
-            data_files: std::mem::take(&mut state.data_files),
+        let terrain = state.terrain.clone();
+        let data_files = std::mem::take(&mut state.data_files);
+        let turn = state.turn;
+        // Exactly one End is queued, the explored stream's in its mode.
+        let release = match &mut state.explored {
+            Some(explored) => {
+                explored.end(&common, turn, terrain, data_files);
+                None
+            }
+            None => {
+                let (ended, visual_tail, detail_tail) = state.observer.finish(&common, turn);
+                Some(Release::End {
+                    match_id: state.match_id,
+                    visual_tail,
+                    detail_tail,
+                    ended,
+                    terrain,
+                    data_files,
+                })
+            }
         };
         for seat in &mut state.seats {
-            seat.end(&common, state.turn);
+            seat.end(&common, turn, None, HashMap::new());
         }
         state.ended = true;
         self.store_meta(state, true);
         println!("match {:016x} ended at turn {}", state.match_id, state.turn);
-        self.queue(state, release);
+        match release {
+            Some(release) => self.queue(state, release),
+            None => self.drain_explored(state),
+        }
+    }
+
+    /// Queues what the explored stream made, with the observers' delay.
+    fn drain_explored(&self, state: &mut State) {
+        let Some(explored) = &mut state.explored else {
+            return;
+        };
+        for release in std::mem::take(&mut explored.outbox) {
+            self.queue(state, release);
+        }
+    }
+
+    /// The host's observer mode (D56), set once before the feed starts.
+    pub fn set_observer_mode(&self, explored: bool, ai_players: Vec<u32>) {
+        let mut state = self.state.lock().unwrap();
+        if state.has_turn {
+            return;
+        }
+        state.explored = explored.then(|| {
+            let mut seat = Seat::explored();
+            seat.set_ai_players(ai_players);
+            seat
+        });
+        state.explored_shown = explored.then(ShownReveal::new);
+    }
+
+    /// The partial terrain observers have been shown so far, while an
+    /// explored-mode match runs; None once it ended, when the whole terrain
+    /// is theirs, and for any other match.
+    pub fn explored_terrain(&self, id: u64) -> Option<Message> {
+        let state = &mut *self.state.lock().unwrap();
+        if state.shown.ended.is_some() || !state.shown.has_turn {
+            return None;
+        }
+        if state.terrain.as_ref().map(|(known, _)| *known) != Some(id) {
+            return None;
+        }
+        let terrain = state.terrain_source.clone()?;
+        let water = state.seat_water.clone()?;
+        Some(state.explored_shown.as_mut()?.resource(&terrain, &water))
     }
 
     fn queue(&self, state: &mut State, release: Release) {
@@ -3150,6 +3260,23 @@ impl Hub {
         self.queued.notify_one();
     }
 
+    /// Advances the shadow of the explored reveal with a released turn.
+    fn follow_reveal(&self, state: &mut State, start: bool, growth: Option<&seat::ExploredGrowth>) {
+        let (Some(shadow), Some(terrain), Some(water)) = (
+            state.explored_shown.as_mut(),
+            state.terrain_source.as_deref(),
+            state.seat_water.as_deref(),
+        ) else {
+            return;
+        };
+        if start {
+            *shadow = ShownReveal::new();
+        }
+        if let Some(growth) = growth {
+            shadow.grow(growth, terrain, water);
+        }
+    }
+
     /// Shows viewers what the encoder made once it is due, until `retire`.
     pub fn run_publisher(&self) {
         let mut state = self.state.lock().unwrap();
@@ -3162,6 +3289,12 @@ impl Hub {
                 && *due <= now
             {
                 let (_, release) = state.pending.pop_front().unwrap();
+                if let Release::Turn {
+                    start, explored, ..
+                } = &release
+                {
+                    self.follow_reveal(&mut state, start.is_some(), explored.as_deref());
+                }
                 let encoding = state.match_id;
                 state
                     .shown
@@ -3185,6 +3318,16 @@ impl Hub {
             Arc::clone(state.shown.thumb.as_ref()?),
             Arc::clone(state.terrain_source.as_ref()?),
         ))
+    }
+
+    /// The host's per-match delay (M38). Queued releases keep the due time
+    /// they were queued with, so a later change would reorder them; it is
+    /// therefore refused once anything is queued.
+    pub fn set_delay(&self, delay: Duration) {
+        let mut state = self.state.lock().unwrap();
+        if state.pending.is_empty() && !state.has_turn {
+            state.delay = delay;
+        }
     }
 
     pub fn set_meta_source(&self, host: String, map_name: Option<String>) {
@@ -3282,9 +3425,12 @@ impl Hub {
             for seat in &mut state.seats {
                 seat.reset();
             }
+            if let Some(explored) = &mut state.explored {
+                explored.reset();
+            }
         }
         let common = state.common();
-        if !state.seats.is_empty()
+        if (!state.seats.is_empty() || state.explored.is_some())
             && state.seat_water.is_none()
             && let Some(terrain) = &state.terrain_source
         {
@@ -3306,6 +3452,9 @@ impl Hub {
             for seat in &mut state.seats {
                 seat.publish(&common, &input, &mut state.actors, start)?;
             }
+            if let Some(explored) = &mut state.explored {
+                explored.publish(&common, &input, &mut state.actors, start)?;
+            }
         }
         let (visual, detail) = state.observer.encode_turn(
             &common,
@@ -3318,16 +3467,22 @@ impl Hub {
         if start {
             self.store_match_files(state);
         }
-        let release = Release::Turn {
-            start: start.then_some(state.match_id),
-            visual,
-            detail,
-        };
         state.turn = turn;
         state.has_turn = true;
         state.new_feed = false;
         state.feed_activity = Some(Instant::now());
-        self.queue(state, release);
+        if state.explored.is_some() {
+            // The full stream was needed for the seats' tables only.
+            self.drain_explored(state);
+        } else {
+            let release = Release::Turn {
+                start: start.then_some(state.match_id),
+                visual,
+                detail,
+                explored: None,
+            };
+            self.queue(state, release);
+        }
         if start || turn.is_multiple_of(THUMB_TURNS) {
             let thumb = Arc::new(state.thumb());
             self.queue(state, Release::Thumb(thumb));

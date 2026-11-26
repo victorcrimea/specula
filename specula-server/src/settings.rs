@@ -190,6 +190,72 @@ pub struct Settings {
     pub water_level: WaterLevel,
     pub wonder: Wonder,
     pub gui: GuiData,
+    pub observers: Observers,
+}
+
+/// Specula's own options, outside the engine's initAttributes (D56, D57).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ObserverMode {
+    Everything,
+    Explored,
+    /// `"none"` on the wire; named apart so it does not clash with `Option::None`.
+    Hidden,
+}
+
+impl ObserverMode {
+    pub fn name(self) -> &'static str {
+        match self {
+            ObserverMode::Everything => "everything",
+            ObserverMode::Explored => "explored",
+            ObserverMode::Hidden => "none",
+        }
+    }
+
+    pub fn from_name(name: &str) -> Option<ObserverMode> {
+        match name {
+            "everything" => Some(ObserverMode::Everything),
+            "explored" => Some(ObserverMode::Explored),
+            "none" => Some(ObserverMode::Hidden),
+            _ => None,
+        }
+    }
+}
+
+/// Delays the host may pick, in seconds, besides the server's default.
+pub const DELAY_CHOICES: [u32; 7] = [0, 30, 60, 120, 180, 300, 600];
+
+/// The allowed delays, sorted, with the server default among them.
+pub fn delay_choices(default: u32) -> Vec<u32> {
+    let mut choices = DELAY_CHOICES.to_vec();
+    choices.push(default);
+    choices.sort_unstable();
+    choices.dedup();
+    choices
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct Observers {
+    pub mode: ObserverMode,
+    /// Whole seconds; the host's choice, ignored in `Hidden` (see
+    /// `effective_delay`).
+    pub delay_secs: u32,
+    /// `--delay`, which the allowed list always holds.
+    pub default_secs: u32,
+}
+
+impl Observers {
+    /// A hidden match has nothing to delay: nobody watches until it ends,
+    /// and the replay then opens at once.
+    pub fn effective_delay(&self) -> std::time::Duration {
+        match self.mode {
+            ObserverMode::Hidden => std::time::Duration::ZERO,
+            _ => std::time::Duration::from_secs(u64::from(self.delay_secs)),
+        }
+    }
+
+    pub fn delay_allowed(&self, secs: u32) -> bool {
+        delay_choices(self.default_secs).contains(&secs)
+    }
 }
 
 /// What vanilla's setup page holds outside `GameSettings`.
@@ -402,7 +468,7 @@ impl Settings {
     /// The state `GameSettings.init` leaves before any map is chosen,
     /// including what the watchers registered by earlier classes do during
     /// later classes' `init()`. `Err` where vanilla's init would throw.
-    pub fn new(catalog: &Catalog) -> Result<Settings, String> {
+    pub fn new(catalog: &Catalog, default_delay_secs: u32) -> Result<Settings, String> {
         let map_size = catalog
             .map_sizes
             .iter()
@@ -566,6 +632,11 @@ impl Settings {
                 map_filter: "default".into(),
                 allow_fast_forward: None,
                 civ_was_locked: [false; MAX_PLAYERS],
+            },
+            observers: Observers {
+                mode: ObserverMode::Everything,
+                delay_secs: default_delay_secs,
+                default_secs: default_delay_secs,
             },
         };
         // The watchers on `victoryConditions.active` registered before

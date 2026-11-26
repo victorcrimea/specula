@@ -54,6 +54,8 @@ use std::collections::VecDeque;
 use std::rc::Rc;
 use std::rc::Weak;
 
+use specula_assets::command::OBSERVERS_FULL;
+use specula_assets::command::OBSERVERS_HIDDEN;
 use specula_assets::command::TAKEN_OVER;
 use wasm_bindgen::JsCast;
 use wasm_bindgen::JsValue;
@@ -83,6 +85,15 @@ pub const POST_FLARE: u8 = 6;
 /// A seat stream was closed because another page took the seat over
 /// (D64).
 pub const POST_DISPLACED: u8 = 7;
+/// The host hid the match from observers until it ends (D56).
+pub const POST_HIDDEN: u8 = 8;
+/// The server holds `--max-observers` already (D58); the worker retries.
+pub const POST_OBSERVERS_FULL: u8 = 9;
+/// The stream is open again after `POST_OBSERVERS_FULL`.
+pub const POST_OBSERVERS_ADMITTED: u8 = 10;
+/// How long a refused observer waits before asking again, fixed since the
+/// refusal is a queue and not a fault.
+const FULL_RETRY_MS: f64 = 15_000.0;
 pub const STATUS_LIVE: u8 = 1;
 pub const STATUS_PAUSED: u8 = 2;
 /// The shown match has ended.
@@ -176,6 +187,9 @@ struct Playback {
     /// it.
     frame: Option<FrameDecoder>,
     reconnect_ms: f64,
+    /// The last close was the observer limit's refusal, so the page shows
+    /// its banner until a message arrives.
+    observers_full: bool,
     /// Calls `resume`, for timers.
     wake: js_sys::Function,
     /// Calls `switch_due`, for the switch timer.
@@ -310,7 +324,7 @@ impl Playback {
     fn ground(&self, id: u64, revision: u32) -> Option<Rc<Ground>> {
         self.terrains
             .iter()
-            .find(|(ground, _)| ground.id == id && ground.revision >= revision)
+            .find(|(ground, _)| ground.id == id && ground.holds(revision))
             .map(|(ground, _)| Rc::clone(ground))
     }
 
@@ -323,7 +337,7 @@ impl Playback {
             let enough = |ground: &Option<Rc<Ground>>| {
                 ground
                     .as_ref()
-                    .is_some_and(|ground| ground.id == id && ground.revision >= revision)
+                    .is_some_and(|ground| ground.id == id && ground.holds(revision))
             };
             if enough(&scene.ground) {
                 return Ok(());
@@ -450,9 +464,11 @@ impl Playback {
                 Ok((id, revision))
                     if id != 0
                         && self.ground(id, revision).is_none()
-                        && !self.live_scene.ground.as_ref().is_some_and(|ground| {
-                            ground.id == id && ground.revision >= revision
-                        }) =>
+                        && !self
+                            .live_scene
+                            .ground
+                            .as_ref()
+                            .is_some_and(|ground| ground.id == id && ground.holds(revision)) =>
                 {
                     self.held.push(messages);
                     self.request_terrain(id, revision);
@@ -1108,14 +1124,20 @@ impl Playback {
             && let Some((ground, bytes)) = self
                 .terrains
                 .iter()
-                .find(|(ground, _)| ground.id == id && ground.revision >= revision)
+                .find(|(ground, _)| ground.id == id && ground.holds(revision))
         {
             let mut out = Vec::with_capacity(9 + bytes.len());
             out.push(POST_TERRAIN);
             out.extend_from_slice(&id.to_le_bytes());
             out.extend_from_slice(bytes);
             self.post(&out);
-            self.page_terrain.set((id, ground.revision));
+            // A whole terrain satisfies every later keyframe.
+            let held = if ground.is_whole() {
+                u32::MAX
+            } else {
+                ground.revision
+            };
+            self.page_terrain.set((id, held));
         } else if !stream::is_keyframe(message) && page_id == self.live_scene.terrain_id {
             // The page applies the delta's reveals itself.
             self.page_terrain
@@ -1312,6 +1334,10 @@ impl Playback {
                 }
                 if crate::close_code(&event) == TAKEN_OVER {
                     playback.post(&[POST_DISPLACED]);
+                    return;
+                }
+                if crate::close_code(&event) == OBSERVERS_HIDDEN {
+                    playback.post(&[POST_HIDDEN]);
                     return;
                 }
                 if !playback.detail_wanted {
@@ -1767,6 +1793,7 @@ fn start() -> Result<(), String> {
             socket_handlers: None,
             frame: None,
             reconnect_ms: RECONNECT_MIN_MS,
+            observers_full: false,
             wake: function,
             switch_wake: switch_function,
             live_scene: Scene::default(),
@@ -1934,6 +1961,10 @@ fn connect(playback: &Weak<RefCell<Playback>>) -> Result<(), String> {
         let bytes = js_sys::Uint8Array::new(&buffer).to_vec();
         if let Some(playback) = receiver.upgrade() {
             let mut playback = playback.borrow_mut();
+            if playback.observers_full {
+                playback.observers_full = false;
+                playback.post(&[POST_OBSERVERS_ADMITTED]);
+            }
             playback.on_socket(bytes);
             playback.sync_details();
         }
@@ -1951,8 +1982,19 @@ fn connect(playback: &Weak<RefCell<Playback>>) -> Result<(), String> {
                 playback.post(&[POST_DISPLACED]);
                 return;
             }
-            let delay = playback.reconnect_ms;
-            playback.reconnect_ms = (delay * 2.0).min(RECONNECT_MAX_MS);
+            if crate::close_code(&event) == OBSERVERS_HIDDEN {
+                playback.post(&[POST_HIDDEN]);
+                return;
+            }
+            let delay = if crate::close_code(&event) == OBSERVERS_FULL {
+                playback.observers_full = true;
+                playback.post(&[POST_OBSERVERS_FULL]);
+                FULL_RETRY_MS
+            } else {
+                let delay = playback.reconnect_ms;
+                playback.reconnect_ms = (delay * 2.0).min(RECONNECT_MAX_MS);
+                delay
+            };
             (playback.scope.clone(), delay)
         };
         crate::log(&format!("stream closed, reconnecting in {delay} ms"));
