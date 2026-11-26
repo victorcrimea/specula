@@ -1,0 +1,56 @@
+From 9f732be09af2b3e68ac814e1761d22afc8e1052b Mon Sep 17 00:00:00 2001
+From: Viktor Semenov <suit.uanic@gmail.com>
+Date: Tue, 10 Nov 2026 10:29:14 +0000
+Subject: [PATCH 23/45] Send the VisualActor's silhouette flags in the Specula
+ template details
+
+Kind 11's flags add 8192 for SilhouetteDisplay and 16384 for
+SilhouetteOccluder, read as CCmpVisualActor reads them into the model
+flags, so the web client can draw units hidden behind structures, gaia
+and the terrain as the engine's silhouettes. An older hook sends neither
+bit; the feed stays v14.
+---
+ source/network/SpeculaFeed.cpp | 8 ++++++++
+ source/network/SpeculaFeed.h   | 3 ++-
+ 2 files changed, 10 insertions(+), 1 deletion(-)
+
+diff --git a/source/network/SpeculaFeed.cpp b/source/network/SpeculaFeed.cpp
+index df6937b12b..37ef4741a2 100644
+--- a/source/network/SpeculaFeed.cpp
++++ b/source/network/SpeculaFeed.cpp
+@@ -126,6 +126,8 @@ constexpr u16 TEMPLATE_STATUS_BARS = 512;
+ constexpr u16 TEMPLATE_INFINITE_SUPPLY = 1024;
+ constexpr u16 TEMPLATE_UNDELETABLE = 2048;
+ constexpr u16 TEMPLATE_UNCONTROLLABLE = 4096;
++constexpr u16 TEMPLATE_SILHOUETTE_DISPLAY = 8192;
++constexpr u16 TEMPLATE_SILHOUETTE_OCCLUDER = 16384;
+ // Kind 12 group bits, which are also the slots of SDetailGroups.
+ constexpr size_t DETAIL_HEALTH = 0;
+ constexpr size_t DETAIL_CAPTURE = 1;
+@@ -1459,6 +1461,12 @@ void CSpeculaFeed::WriteTemplateDetails(CSimulation2& simulation, u32 index, con
+ 		flags |= TEMPLATE_UNDELETABLE;
+ 	if (templateNode->GetChild("Identity").GetChild("Controllable").ToString() == "false")
+ 		flags |= TEMPLATE_UNCONTROLLABLE;
++	// As CCmpVisualActor::Init reads them into the model flags.
++	const CParamNode& visualActor = templateNode->GetChild("VisualActor");
++	if (visualActor.GetChild("SilhouetteDisplay").ToBool())
++		flags |= TEMPLATE_SILHOUETTE_DISPLAY;
++	if (visualActor.GetChild("SilhouetteOccluder").ToBool())
++		flags |= TEMPLATE_SILHOUETTE_OCCLUDER;
+ 
+ 	u32 components = 0;
+ 	for (size_t i = 0; i < std::size(DETAIL_INTERFACES); ++i)
+diff --git a/source/network/SpeculaFeed.h b/source/network/SpeculaFeed.h
+index 27e0beda94..841edb90c2 100644
+--- a/source/network/SpeculaFeed.h
++++ b/source/network/SpeculaFeed.h
+@@ -159,7 +159,8 @@ class ScriptRequest;
+  *    bounds), 32 the footprint is a square (else a circle), 64 the overlay
+  *    has its own square shape, 128 its own circle shape, 256 Footprint, 512
+  *    StatusBars, 1024 an infinite resource supply, 2048 Identity's Undeletable, 4096 Identity's
+- *    Controllable false. Components, one bit
++ *    Controllable false, 8192 VisualActor's SilhouetteDisplay, 16384 its
++ *    SilhouetteOccluder. Components, one bit
+  *    each: Health, Capturable, ResourceSupply, ProductionQueue,
+  *    GarrisonHolder, Promotion, ResourceGatherer, Foundation, Repairable,
+  *    UnitAI, Trainer, Researcher, Pack, Upgrade, Trader, Garrisonable,

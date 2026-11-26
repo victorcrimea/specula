@@ -1,0 +1,46 @@
+From 18595507b1d0c143370143ec16a7898f5c83c683 Mon Sep 17 00:00:00 2001
+From: Viktor Semenov <suit.uanic@gmail.com>
+Date: Sun, 22 Nov 2026 01:32:12 +0000
+Subject: [PATCH 35/45] Request a summary capture from the Specula feed
+
+Uplink kind 4, with no payload, asks for a kind 25 summary on the next
+turn, so the server can score a match at its time limit from a fresh
+capture rather than one up to 150 turns old. Older readers skip it.
+---
+ source/network/SpeculaFeed.cpp | 3 +++
+ source/network/SpeculaFeed.h   | 1 +
+ 2 files changed, 4 insertions(+)
+
+diff --git a/source/network/SpeculaFeed.cpp b/source/network/SpeculaFeed.cpp
+index 6ecebca9dc..54ca8adbac 100644
+--- a/source/network/SpeculaFeed.cpp
++++ b/source/network/SpeculaFeed.cpp
+@@ -114,6 +114,7 @@ constexpr u8 RECORD_INIT_ATTRIBUTES = 28;
+ constexpr u8 UPLINK_COMMAND = 1;
+ constexpr u8 UPLINK_QUERY = 2;
+ constexpr u8 UPLINK_PAUSE = 3;
++constexpr u8 UPLINK_SUMMARY = 4;
+ // A paused game plays no turns, so the encoder's watchdog, which otherwise
+ // counts the silence between turns, hears this instead; well under its
+ // 120 s limit.
+@@ -3099,6 +3100,8 @@ void CSpeculaFeed::ReadUplink()
+ 			const bool changed = payload[1] ? m_Pausers.insert(player).second : m_Pausers.erase(player) > 0;
+ 			m_PauseChanged = m_PauseChanged || changed;
+ 		}
++		else if (kind == UPLINK_SUMMARY)
++			m_SummaryRequested = true;
+ 		at += 5 + length;
+ 	}
+ 	m_Inbox.erase(m_Inbox.begin(), m_Inbox.begin() + at);
+diff --git a/source/network/SpeculaFeed.h b/source/network/SpeculaFeed.h
+index 5822fec138..a6498e9a81 100644
+--- a/source/network/SpeculaFeed.h
++++ b/source/network/SpeculaFeed.h
+@@ -349,6 +349,7 @@ public:
+ 	 *    Answered by a kind 23 record.
+ 	 *  - kind 3 pause: i8 player, u8 paused (0 or 1). The game is paused
+ 	 *    while any player has it paused; answered by a kind 26 record.
++	 *  - kind 4 summary: no payload. The next turn writes a kind 25 summary.
+ 	 * Unknown kinds are skipped.
+ 	 */
+ 	std::vector<std::pair<player_id_t, std::string>> ReadCommands();

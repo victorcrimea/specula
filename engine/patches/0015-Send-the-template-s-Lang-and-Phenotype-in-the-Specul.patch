@@ -1,0 +1,51 @@
+From 6b5ac86cd89f43f42aab25e4885f77687715b1dd Mon Sep 17 00:00:00 2001
+From: Viktor Semenov <suit.uanic@gmail.com>
+Date: Tue, 20 Oct 2026 14:13:07 +0000
+Subject: [PATCH 15/45] Send the template's Lang and Phenotype in the Specula
+ feed
+
+Kind 11 template details end with Identity's Lang and Phenotype tokens,
+which Sound.js puts into the select sound group's {lang} and {phenotype}.
+---
+ source/network/SpeculaFeed.cpp | 5 +++++
+ source/network/SpeculaFeed.h   | 4 +++-
+ 2 files changed, 8 insertions(+), 1 deletion(-)
+
+diff --git a/source/network/SpeculaFeed.cpp b/source/network/SpeculaFeed.cpp
+index e4914bf79b..515176e0d7 100644
+--- a/source/network/SpeculaFeed.cpp
++++ b/source/network/SpeculaFeed.cpp
+@@ -796,6 +796,9 @@ void CSpeculaFeed::WriteTemplateDetails(CSimulation2& simulation, u32 index, con
+ 	const u32 classes = InternString(identity.GetChild("Classes").ToString());
+ 	const u32 visibleClasses = InternString(identity.GetChild("VisibleClasses").ToString());
+ 	const u32 selectSound = InternString(templateNode->GetChild("Sound").GetChild("SoundGroups").GetChild("select").ToString());
++	// Sound.js fills the select group's {lang} and {phenotype} from these.
++	const u32 lang = InternString(identity.GetChild("Lang").ToString());
++	const u32 phenotypes = InternString(identity.GetChild("Phenotype").ToString());
+ 
+ 	u16 flags = 0;
+ 	if (selectable.IsOk())
+@@ -869,6 +872,8 @@ void CSpeculaFeed::WriteTemplateDetails(CSimulation2& simulation, u32 index, con
+ 	for (const u32 string : { genericName, specificName, icon, selectionGroupName, rank, classes, visibleClasses, selectSound })
+ 		PutU32(m_Buffer, string);
+ 	PutU32(m_Buffer, components);
++	PutU32(m_Buffer, lang);
++	PutU32(m_Buffer, phenotypes);
+ 	EndRecord(m_Buffer, start);
+ }
+ 
+diff --git a/source/network/SpeculaFeed.h b/source/network/SpeculaFeed.h
+index 67be97849c..9ea5b86529 100644
+--- a/source/network/SpeculaFeed.h
++++ b/source/network/SpeculaFeed.h
+@@ -133,7 +133,9 @@ class CSimulation2;
+  *    depth, f32 footprint height, f32 status bar width, f32 status bar
+  *    height, f32 status bar height offset, u32 generic name, u32 specific
+  *    name, u32 icon, u32 selection group name, u32 rank, u32 classes, u32
+- *    visible classes, u32 select sound group, u32 components. Strings are
++ *    visible classes, u32 select sound group, u32 components, u32 lang,
++ *    u32 phenotypes (Identity's Lang and Phenotype tokens, which Sound.js
++ *    puts into the select group's {lang} and {phenotype}). Strings are
+  *    string records (none when absent), read from the template as is: the
+  *    textures relative to art/textures/selection/, the icon to
+  *    art/textures/ui/session/portraits/, the sound group to audio/, the

@@ -1,0 +1,219 @@
+From e74ab064f8a326a6397e87db5da698337ced04fa Mon Sep 17 00:00:00 2001
+From: Viktor Semenov <suit.uanic@gmail.com>
+Date: Wed, 30 Sep 2026 23:21:14 +0000
+Subject: [PATCH 02/45] Send players and player-coloured templates in the
+ Specula feed
+
+Feed format v4. Template records gain a flags byte; flag 1 says the
+template's minimap colour is its owner's player colour (no
+Minimap/Color, as CCmpMinimap::Init decides). A new players record
+gives each player's name, colour, team, state and stance towards every
+other player, read from GuiInterface.GetSimulationState like the
+session GUI does. It is sampled every 5 turns and written only when it
+changes, so viewers can show diplomacy colours themselves.
+---
+ source/network/SpeculaFeed.cpp | 102 ++++++++++++++++++++++++++++++++-
+ source/network/SpeculaFeed.h   |  13 ++++-
+ 2 files changed, 111 insertions(+), 4 deletions(-)
+
+diff --git a/source/network/SpeculaFeed.cpp b/source/network/SpeculaFeed.cpp
+index 5e07aab313..8f56a12b7a 100644
+--- a/source/network/SpeculaFeed.cpp
++++ b/source/network/SpeculaFeed.cpp
+@@ -22,7 +22,11 @@
+ #include "graphics/MiniMapTexture.h"
+ #include "graphics/Terrain.h"
+ #include "ps/CLogger.h"
++#include "scriptinterface/Object.h"
++#include "scriptinterface/ScriptInterface.h"
++#include "scriptinterface/ScriptRequest.h"
+ #include "simulation2/Simulation2.h"
++#include "simulation2/components/ICmpGuiInterface.h"
+ #include "simulation2/components/ICmpMinimap.h"
+ #include "simulation2/components/ICmpOwnership.h"
+ #include "simulation2/components/ICmpPosition.h"
+@@ -32,6 +36,7 @@
+ #include "simulation2/components/ICmpWaterManager.h"
+ #include "simulation2/system/CmpPtr.h"
+ #include "simulation2/system/Entity.h"
++#include "simulation2/system/ParamNode.h"
+ 
+ #include <cerrno>
+ #include <cstring>
+@@ -41,12 +46,22 @@
+ 
+ namespace
+ {
+-constexpr u32 FEED_VERSION = 3;
++constexpr u32 FEED_VERSION = 4;
+ constexpr u8 RECORD_TEMPLATE = 1;
+ constexpr u8 RECORD_TURN = 2;
+ constexpr u8 RECORD_MAP = 3;
+ constexpr u8 RECORD_TERRAIN = 4;
++constexpr u8 RECORD_PLAYERS = 5;
+ constexpr u8 COLOR_MINIMAP = 1;
++constexpr u8 TEMPLATE_PLAYER_COLOR = 1;
++constexpr u8 PLAYER_ACTIVE = 0;
++constexpr u8 PLAYER_DEFEATED = 1;
++constexpr u8 PLAYER_WON = 2;
++constexpr u8 STANCE_ENEMY = 0;
++constexpr u8 STANCE_ALLY = 1;
++constexpr u8 STANCE_NEUTRAL = 2;
++// GetSimulationState is not cheap, and diplomacy changes rarely; about 1 s.
++constexpr u32 PLAYERS_INTERVAL_TURNS = 5;
+ constexpr u16 NO_TEXTURE = 0xFFFF;
+ // CCmpMinimap prepends this to the template's icon file name.
+ const std::string ICON_DIRECTORY = "art/textures/ui/session/icons/minimap/";
+@@ -156,6 +171,9 @@ void CSpeculaFeed::OnTurn(CSimulation2& simulation, u32 turn)
+ 		m_MapSent = true;
+ 	}
+ 
++	if (m_LastPlayers.empty() || turn % PLAYERS_INTERVAL_TURNS == 0)
++		WritePlayers(simulation);
++
+ 	// Template records must precede the turn record that first uses them,
+ 	// so the entities are collected before the turn record is written.
+ 	std::vector<SEntity> entities;
+@@ -186,6 +204,15 @@ void CSpeculaFeed::OnTurn(CSimulation2& simulation, u32 turn)
+ 			u32 iconSizeBits;
+ 			std::memcpy(&iconSizeBits, &iconSize, sizeof(iconSizeBits));
+ 			PutU32(m_Buffer, iconSizeBits);
++			// Same test as CCmpMinimap::Init: a template without its own
++			// colour is drawn in the owner's.
++			bool playerColor = false;
++			if (const CParamNode* templateNode = cmpTemplateManager->GetTemplate(templateName))
++			{
++				const CParamNode& minimapNode = templateNode->GetChild("Minimap");
++				playerColor = minimapNode.IsOk() && !minimapNode.GetChild("Color").IsOk();
++			}
++			m_Buffer.push_back(playerColor ? TEMPLATE_PLAYER_COLOR : 0);
+ 			if (hasIcon)
+ 			{
+ 				std::string icon = cmpMinimap->GetIconPath();
+@@ -240,6 +267,79 @@ void CSpeculaFeed::SetTerrainTextures(const std::vector<std::string>& names, std
+ 	g_TerrainTextureTiles = std::move(tiles);
+ }
+ 
++// Read through the GUI interface, as the session GUI does every turn: team
++// and diplomacy live only in JS components.
++void CSpeculaFeed::WritePlayers(CSimulation2& simulation)
++{
++	CmpPtr<ICmpGuiInterface> cmpGuiInterface(simulation, SYSTEM_ENTITY);
++	if (!cmpGuiInterface)
++		return;
++
++	ScriptRequest rq(simulation.GetScriptInterface());
++	JS::RootedValue arg(rq.cx);
++	JS::RootedValue simulationState(rq.cx);
++	cmpGuiInterface->ScriptCall(INVALID_PLAYER, L"GetSimulationState", arg, &simulationState);
++	JS::RootedValue players(rq.cx);
++	u32 count = 0;
++	if (!Script::GetProperty(rq, simulationState, "players", &players) ||
++	    !Script::GetProperty(rq, players, "length", count))
++		return;
++
++	std::vector<u8> payload;
++	PutU32(payload, count);
++	for (u32 i = 0; i < count; ++i)
++	{
++		JS::RootedValue player(rq.cx);
++		JS::RootedValue color(rq.cx);
++		JS::RootedValue allies(rq.cx);
++		JS::RootedValue neutrals(rq.cx);
++		std::string name;
++		std::string state;
++		float r, g, b;
++		i32 team;
++		if (!Script::GetPropertyInt(rq, players, static_cast<int>(i), &player) ||
++		    !Script::GetProperty(rq, player, "name", name) ||
++		    !Script::GetProperty(rq, player, "color", &color) ||
++		    !Script::GetProperty(rq, color, "r", r) ||
++		    !Script::GetProperty(rq, color, "g", g) ||
++		    !Script::GetProperty(rq, color, "b", b) ||
++		    !Script::GetProperty(rq, player, "team", team) ||
++		    !Script::GetProperty(rq, player, "state", state) ||
++		    !Script::GetProperty(rq, player, "isAlly", &allies) ||
++		    !Script::GetProperty(rq, player, "isNeutral", &neutrals))
++			return;
++
++		PutU16(payload, static_cast<u16>(name.size()));
++		payload.insert(payload.end(), name.begin(), name.end());
++		// Quantized like CCmpMinimap::UpdateColor, so an undiplomatic
++		// palette gives the very colours of the dots.
++		payload.insert(payload.end(), {
++			static_cast<u8>(r * 255),
++			static_cast<u8>(g * 255),
++			static_cast<u8>(b * 255)
++		});
++		PutI32(payload, team);
++		payload.push_back(state == "active" ? PLAYER_ACTIVE : state == "won" ? PLAYER_WON : PLAYER_DEFEATED);
++		for (u32 j = 0; j < count; ++j)
++		{
++			bool ally = false;
++			bool neutral = false;
++			if (!Script::GetPropertyInt(rq, allies, static_cast<int>(j), ally) ||
++			    !Script::GetPropertyInt(rq, neutrals, static_cast<int>(j), neutral))
++				return;
++			// The GUI tests alliance first, then neutrality.
++			payload.push_back(ally ? STANCE_ALLY : neutral ? STANCE_NEUTRAL : STANCE_ENEMY);
++		}
++	}
++
++	if (payload == m_LastPlayers)
++		return;
++	const size_t start = BeginRecord(m_Buffer, RECORD_PLAYERS);
++	m_Buffer.insert(m_Buffer.end(), payload.begin(), payload.end());
++	EndRecord(m_Buffer, start);
++	m_LastPlayers = std::move(payload);
++}
++
+ // Terrain and water level are written once: they only change through
+ // trigger scripts, which the view does not follow yet.
+ void CSpeculaFeed::WriteTerrain(CSimulation2& simulation)
+diff --git a/source/network/SpeculaFeed.h b/source/network/SpeculaFeed.h
+index f73a48acf2..599b67696e 100644
+--- a/source/network/SpeculaFeed.h
++++ b/source/network/SpeculaFeed.h
+@@ -32,11 +32,12 @@ class CSimulation2;
+  * socket. It only reads the simulation, after each turn, so it cannot
+  * change the state hash.
+  *
+- * Feed format v3, little-endian: "SPCF", u32 version, then records of
++ * Feed format v4, little-endian: "SPCF", u32 version, then records of
+  * u8 kind, u32 payload length, payload.
+  *  - kind 1 template: u32 index, u16 name length, UTF-8 name, f32 minimap
+- *    icon size, then the icon file name relative to
+- *    art/textures/ui/session/icons/minimap/ (empty: no icon).
++ *    icon size, u8 flags, then the icon file name relative to
++ *    art/textures/ui/session/icons/minimap/ (empty: no icon). Flag 1: the
++ *    minimap colour is the owner's player colour.
+  *  - kind 2 turn: u32 turn, u32 count, count x {u32 id, u32 template,
+  *    i32 x, i32 z, i32 angle, i32 owner, u8 r, u8 g, u8 b, u8 flags},
+  *    x/z/angle as raw 16.16 fixed. Flag 1: r/g/b is the minimap colour.
+@@ -46,6 +47,10 @@ class CSimulation2;
+  *    u8 circular, (n+1)^2 x u16 heights, u32 texture count, count x
+  *    {u16 length, UTF-8 name}, n^2 x u16 texture index (0xFFFF: none).
+  *    Heights and tiles are row-major, x fastest.
++ *  - kind 5 players, before the turn record, whenever they change: u32
++ *    count n, n x {u16 name length, UTF-8 name, u8 r, u8 g, u8 b, i32 team
++ *    (-1: none), u8 state (0 active, 1 defeated, 2 won), n x u8 stance
++ *    towards player j (0 enemy, 1 ally, 2 neutral)}. Index 0 is gaia.
+  */
+ class CSpeculaFeed
+ {
+@@ -64,6 +69,7 @@ public:
+ 
+ private:
+ 	void WriteTerrain(CSimulation2& simulation);
++	void WritePlayers(CSimulation2& simulation);
+ 	bool Send();
+ 	void Disable(const char* what);
+ 
+@@ -71,6 +77,7 @@ private:
+ 	bool m_MapSent = false;
+ 	std::vector<u8> m_Buffer;
+ 	std::unordered_map<std::string, u32> m_TemplateIndices;
++	std::vector<u8> m_LastPlayers;
+ };
+ 
+ #endif // INCLUDED_SPECULAFEED

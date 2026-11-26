@@ -1,0 +1,159 @@
+From 990d3e9bc34990755468450aba371bbecc6eb2e5 Mon Sep 17 00:00:00 2001
+From: Viktor Semenov <suit.uanic@gmail.com>
+Date: Thu, 26 Nov 2026 18:45:04 +0000
+Subject: [PATCH 45/45] Add the Specula match autostart and the bot test
+ harness script
+
+---
+ .../autostart/autostart_specula_match.js      | 44 +++++++++++
+ .../data/mods/public/autostart/entrypoint.js  |  2 +
+ .../public/maps/scripts/SpeculaHarness.js     | 76 +++++++++++++++++++
+ 3 files changed, 122 insertions(+)
+ create mode 100644 binaries/data/mods/public/autostart/autostart_specula_match.js
+ create mode 100644 binaries/data/mods/public/maps/scripts/SpeculaHarness.js
+
+diff --git a/binaries/data/mods/public/autostart/autostart_specula_match.js b/binaries/data/mods/public/autostart/autostart_specula_match.js
+new file mode 100644
+index 0000000000..eae0b937e1
+--- /dev/null
++++ b/binaries/data/mods/public/autostart/autostart_specula_match.js
+@@ -0,0 +1,44 @@
++/**
++ * Specula: a single-player match for the bot test harness. The settings are
++ * the full init attributes in the JSON file -autostart-specula-settings
++ * names (a VFS path), which -autostart-player and the other command line
++ * options of the plain autostart cannot express; -autostart= only has to be
++ * non-empty. The local player is an observer.
++ */
++class AutoStartSpeculaMatch
++{
++	constructor(cmdLineArgs)
++	{
++		this.playerAssignments = {
++			"local": {
++				"player": -1,
++				"name": "harness"
++			}
++		};
++
++		const path = cmdLineArgs['autostart-specula-settings'];
++		const attribs = path && Engine.ReadJSONFile(path);
++		if (!attribs)
++		{
++			error("Specula: cannot read the settings file " + path);
++			return;
++		}
++
++		this.settings = new GameSettings().init();
++		this.settings.fromInitAttributes(attribs, false);
++		this.settings.launchGame(this.playerAssignments, !('autostart-disable-replay' in cmdLineArgs));
++		this.onLaunch();
++	}
++
++	onTick()
++	{
++	}
++
++	onLaunch()
++	{
++		Engine.SwitchGuiPage("page_loading.xml", {
++			"attribs": this.settings.finalizedAttributes,
++			"playerAssignments": this.playerAssignments
++		});
++	}
++}
+diff --git a/binaries/data/mods/public/autostart/entrypoint.js b/binaries/data/mods/public/autostart/entrypoint.js
+index 42ce4f2b80..11492ef022 100644
+--- a/binaries/data/mods/public/autostart/entrypoint.js
++++ b/binaries/data/mods/public/autostart/entrypoint.js
+@@ -48,6 +48,8 @@ function autostartHost(cmdLineArgs, networked = false)
+ 		autostartInstance = new AutoStartSpeculaPlay(cmdLineArgs);
+ 	else if (networked)
+ 		autostartInstance = new AutoStartHost(cmdLineArgs);
++	else if ('autostart-specula-match' in cmdLineArgs)
++		autostartInstance = new AutoStartSpeculaMatch(cmdLineArgs);
+ 	else
+ 		autostartInstance = new AutoStart(cmdLineArgs);
+ }
+diff --git a/binaries/data/mods/public/maps/scripts/SpeculaHarness.js b/binaries/data/mods/public/maps/scripts/SpeculaHarness.js
+new file mode 100644
+index 0000000000..faca485e80
+--- /dev/null
++++ b/binaries/data/mods/public/maps/scripts/SpeculaHarness.js
+@@ -0,0 +1,76 @@
++/**
++ * Specula's bot test harness reads the result of a match from the lines
++ * this prints: "SPECULA-HARNESS " and a JSON object. The scores are the
++ * summary screen's (gui/summary/counters.js), taken from the last entry of
++ * the statistics sequences. It only reads, so it cannot change how the AIs
++ * play.
++ */
++Trigger.prototype.SpeculaHarnessReport = function(final)
++{
++	const cmpTimer = Engine.QueryInterface(SYSTEM_ENTITY, IID_Timer);
++	const codes = Resources.GetCodes();
++	const players = [];
++	for (const entity of Engine.GetEntitiesWithInterface(IID_StatisticsTracker))
++	{
++		const cmpPlayer = Engine.QueryInterface(entity, IID_Player);
++		// Gaia has a tracker too but is no player.
++		if (!cmpPlayer || cmpPlayer.GetPlayerID() == 0)
++			continue;
++
++		const sequences = Engine.QueryInterface(entity, IID_StatisticsTracker).GetSequences();
++		const last = sequences.time.length - 1;
++
++		let gathered = sequences.tradeIncome[last];
++		for (const code of codes)
++			gathered += sequences.resourcesGathered[code][last];
++
++		const economy = Math.round(gathered / 10);
++		const military = Math.round((sequences.enemyUnitsKilledValue[last] +
++			sequences.unitsCapturedValue[last] +
++			sequences.enemyBuildingsDestroyedValue[last] +
++			sequences.buildingsCapturedValue[last]) / 10);
++		const exploration = sequences.percentMapExplored[last] * 10;
++
++		players.push({
++			"id": cmpPlayer.GetPlayerID(),
++			"civ": Engine.QueryInterface(entity, IID_Identity).GetCiv(),
++			"state": cmpPlayer.GetState(),
++			"economy": economy,
++			"military": military,
++			"exploration": exploration,
++			"total": economy + military + exploration
++		});
++	}
++	players.sort((a, b) => a.id - b.id);
++
++	print("SPECULA-HARNESS " + JSON.stringify({
++		"final": final,
++		"time": cmpTimer.GetTime() / 1000,
++		"players": players
++	}) + "\n");
++};
++
++Trigger.prototype.SpeculaHarnessTick = function()
++{
++	this.SpeculaHarnessReport(false);
++};
++
++Trigger.prototype.SpeculaHarnessEnd = function()
++{
++	if (!this.speculaHarnessOnce ||
++		Engine.QueryInterface(SYSTEM_ENTITY, IID_PlayerManager).GetActivePlayers().length)
++		return;
++
++	this.speculaHarnessOnce = false;
++	this.SpeculaHarnessReport(true);
++};
++
++{
++	const cmpTrigger = Engine.QueryInterface(SYSTEM_ENTITY, IID_Trigger);
++	cmpTrigger.speculaHarnessOnce = true;
++	cmpTrigger.RegisterTrigger("OnPlayerWon", "SpeculaHarnessEnd", { "enabled": true });
++	cmpTrigger.RegisterTrigger("OnPlayerDefeated", "SpeculaHarnessEnd", { "enabled": true });
++	// Each game minute, so the harness has a result when it stops a match
++	// at its time limit.
++	cmpTrigger.DoRepeatedly(60000, "SpeculaHarnessTick");
++}

@@ -1,0 +1,104 @@
+From edfccb719d6787986f59f972a3f9b06c288c9195 Mon Sep 17 00:00:00 2001
+From: Viktor Semenov <suit.uanic@gmail.com>
+Date: Tue, 24 Nov 2026 22:11:11 +0000
+Subject: [PATCH 42/45] Write the replay's metadata on the Specula feed's
+ request
+
+Uplink kind 5 asks for metadata.json, which the next frame writes,
+paused or not, and answers with feed kind 33. The server stops the play
+host with a kill, so ~CGame never writes it, and vanilla's replay menu
+needs it for the summary.
+---
+ source/network/SpeculaFeed.cpp | 16 ++++++++++++++++
+ source/network/SpeculaFeed.h   |  6 ++++++
+ 2 files changed, 22 insertions(+)
+
+diff --git a/source/network/SpeculaFeed.cpp b/source/network/SpeculaFeed.cpp
+index 22fd036e0b..9215782703 100644
+--- a/source/network/SpeculaFeed.cpp
++++ b/source/network/SpeculaFeed.cpp
+@@ -31,6 +31,7 @@
+ #include "ps/CStr.h"
+ #include "ps/ConfigDB.h"
+ #include "ps/Game.h"
++#include "ps/Replay.h"
+ #include "ps/World.h"
+ #include "ps/algorithm.h"
+ #include "scriptinterface/FunctionWrapper.h"
+@@ -116,9 +117,11 @@ constexpr u8 RECORD_NOTIFICATIONS = 29;
+ constexpr u8 RECORD_EVENTS = 30;
+ constexpr u8 RECORD_TIME_NOTIFICATIONS = 31;
+ constexpr u8 RECORD_CONTROL_GROUPS = 32;
++constexpr u8 RECORD_METADATA_SAVED = 33;
+ constexpr u8 UPLINK_COMMAND = 1;
+ constexpr u8 UPLINK_PAUSE = 3;
+ constexpr u8 UPLINK_SUMMARY = 4;
++constexpr u8 UPLINK_METADATA = 5;
+ // A paused game plays no turns, so the encoder's watchdog, which otherwise
+ // counts the silence between turns, hears this instead; well under its
+ // 120 s limit.
+@@ -3460,6 +3463,16 @@ void CSpeculaFeed::AnswerUplink()
+ 		Send();
+ 		m_LastKeepAlive = timer_Time();
+ 	}
++	// Between turns, as ~CGame would, and paused or not, since the server
++	// asks right before it stops the engine.
++	if (m_MetadataRequested && g_Game && g_Game->IsGameStarted())
++	{
++		m_MetadataRequested = false;
++		g_Game->GetReplayLogger().SaveMetadata(*g_Game->GetSimulation2());
++		const size_t start = BeginRecord(m_Buffer, RECORD_METADATA_SAVED);
++		EndRecord(m_Buffer, start);
++		Send();
++	}
+ 	// Only while paused: a running game that gets no turns is stuck in a
+ 	// way the frame loop does not see, and the watchdog must still notice.
+ 	if (!m_Pausers.empty() && timer_Time() - m_LastKeepAlive >= KEEPALIVE_SECONDS)
+@@ -3523,6 +3536,8 @@ void CSpeculaFeed::ReadUplink()
+ 		}
+ 		else if (kind == UPLINK_SUMMARY)
+ 			m_SummaryRequested = true;
++		else if (kind == UPLINK_METADATA)
++			m_MetadataRequested = true;
+ 		at += 5 + length;
+ 	}
+ 	m_Inbox.erase(m_Inbox.begin(), m_Inbox.begin() + at);
+@@ -3539,6 +3554,7 @@ void CSpeculaFeed::Disable(const char* what)
+ 	m_Commands.clear();
+ 	m_Pausers.clear();
+ 	m_PauseChanged = false;
++	m_MetadataRequested = false;
+ 	m_Sounds.clear();
+ 	if (g_SoundFeed == this)
+ 		g_SoundFeed = nullptr;
+diff --git a/source/network/SpeculaFeed.h b/source/network/SpeculaFeed.h
+index 1d8ef405f5..47a4bb82b9 100644
+--- a/source/network/SpeculaFeed.h
++++ b/source/network/SpeculaFeed.h
+@@ -359,6 +359,8 @@ class ScriptRequest;
+  *    second control group (0 for none)}, sorted, for every entity with an
+  *    Obstruction whose group is not its own id or whose second group is
+  *    set (in vanilla only wall pieces). Absent means none.
++ *  - kind 33 replay metadata saved, no payload: the answer to uplink kind
++ *    5, written once metadata.json is on disk.
+  */
+ class CSpeculaFeed
+ {
+@@ -379,6 +381,9 @@ public:
+ 	 *  - kind 3 pause: i8 player, u8 paused (0 or 1). The game is paused
+ 	 *    while any player has it paused; answered by a kind 26 record.
+ 	 *  - kind 4 summary: no payload. The next turn writes a kind 25 summary.
++	 *  - kind 5 replay metadata: no payload. The next frame writes the
++	 *    replay's metadata.json, paused or not, and answers with kind 33. The
++	 *    engine is stopped with a kill, so ~CGame never writes it.
+ 	 * Unknown kinds are skipped.
+ 	 */
+ 	std::vector<std::pair<player_id_t, std::string>> ReadCommands();
+@@ -558,6 +563,7 @@ private:
+ 	// AnswerUplink, which runs every frame, paused or not.
+ 	std::set<player_id_t> m_Pausers;
+ 	bool m_PauseChanged = false;
++	bool m_MetadataRequested = false;
+ 	// When the last pause or keepalive record went out, on timer_Time.
+ 	double m_LastKeepAlive = 0.0;
+ 	std::unordered_map<std::string, u32> m_TemplateIndices;

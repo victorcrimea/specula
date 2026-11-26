@@ -1,0 +1,268 @@
+From fd5b763a5eb0c11655d91c77db16c9116bef1db7 Mon Sep 17 00:00:00 2001
+From: Viktor Semenov <suit.uanic@gmail.com>
+Date: Wed, 7 Oct 2026 21:32:00 +0000
+Subject: [PATCH 07/45] Send projectiles in the Specula feed
+
+Feed format v10. A projectiles record before the turn record lists the
+launches (point, target, speed, gravity, actor, impact actor and its
+lifetime) and removals the turn made, in order. CCmpProjectileManager
+records them before its graphics test, so a nonvisual observer gets
+them too.
+
+The projectile manager is not told who shoots, so the shooter is the
+entity whose launch point Attack.js asked for right before the launch:
+CCmpVisualActor::GetProjectileLaunchPoint notes it before its model
+test.
+---
+ source/network/SpeculaFeed.cpp                | 70 ++++++++++++++++++-
+ source/network/SpeculaFeed.h                  | 48 ++++++++++++-
+ .../components/CCmpProjectileManager.cpp      |  5 ++
+ .../components/CCmpVisualActor.cpp            |  2 +
+ 4 files changed, 122 insertions(+), 3 deletions(-)
+
+diff --git a/source/network/SpeculaFeed.cpp b/source/network/SpeculaFeed.cpp
+index f5ad9d3d6a..6ce9afd886 100644
+--- a/source/network/SpeculaFeed.cpp
++++ b/source/network/SpeculaFeed.cpp
+@@ -54,7 +54,7 @@
+ 
+ namespace
+ {
+-constexpr u32 FEED_VERSION = 9;
++constexpr u32 FEED_VERSION = 10;
+ constexpr u8 RECORD_TEMPLATE = 1;
+ constexpr u8 RECORD_TURN = 2;
+ constexpr u8 RECORD_MAP = 3;
+@@ -64,6 +64,7 @@ constexpr u8 RECORD_STRING = 6;
+ constexpr u8 RECORD_VARIANT_SET = 7;
+ constexpr u8 RECORD_TERRITORY = 8;
+ constexpr u8 RECORD_SOUNDS = 9;
++constexpr u8 RECORD_PROJECTILES = 10;
+ constexpr u8 COLOR_MINIMAP = 1;
+ constexpr u8 HAS_VISUAL = 2;
+ constexpr u8 ANIMATION_ONCE = 4;
+@@ -94,7 +95,7 @@ const std::string CONSTRUCTION_PREFIX = "construction|";
+ // SelectAnimation mirrors the animation name into this variant key.
+ const CStr ANIMATION_KEY = "animation";
+ 
+-// The open feed the sound recorders write to; the
++// The open feed the sound and projectile recorders write to; the
+ // components that call them have no way to reach the turn manager that owns
+ // it.
+ CSpeculaFeed* g_SoundFeed = nullptr;
+@@ -336,6 +337,37 @@ void CSpeculaFeed::OnTurn(CSimulation2& simulation, u32 turn)
+ 		m_Sounds.clear();
+ 	}
+ 
++	if (!m_Launches.empty() || !m_Removals.empty())
++	{
++		const size_t projectilesStart = BeginRecord(m_Buffer, RECORD_PROJECTILES);
++		PutU32(m_Buffer, static_cast<u32>(m_Launches.size()));
++		for (const SProjectile& projectile : m_Launches)
++		{
++			PutU32(m_Buffer, projectile.id);
++			PutU32(m_Buffer, projectile.shooter);
++			PutI32(m_Buffer, projectile.x);
++			PutI32(m_Buffer, projectile.y);
++			PutI32(m_Buffer, projectile.z);
++			PutI32(m_Buffer, projectile.targetX);
++			PutI32(m_Buffer, projectile.targetY);
++			PutI32(m_Buffer, projectile.targetZ);
++			PutI32(m_Buffer, projectile.speed);
++			PutI32(m_Buffer, projectile.gravity);
++			PutU32(m_Buffer, projectile.actor);
++			PutU32(m_Buffer, projectile.impactActor);
++			PutI32(m_Buffer, projectile.impactLifetime);
++		}
++		PutU32(m_Buffer, static_cast<u32>(m_Removals.size()));
++		for (const u32 id : m_Removals)
++			PutU32(m_Buffer, id);
++		EndRecord(m_Buffer, projectilesStart);
++		m_Launches.clear();
++		m_Removals.clear();
++	}
++	// A launch point asked for without a launch must not name the shooter
++	// of a later one.
++	m_Shooter = INVALID_ENTITY;
++
+ 	const size_t start = BeginRecord(m_Buffer, RECORD_TURN);
+ 	PutU32(m_Buffer, turn);
+ 	PutU32(m_Buffer, static_cast<u32>(entities.size()));
+@@ -440,6 +472,40 @@ void CSpeculaFeed::RecordPlayerSound(const std::wstring& group, player_id_t play
+ 	});
+ }
+ 
++void CSpeculaFeed::NoteProjectileShooter(entity_id_t ent)
++{
++	if (g_SoundFeed)
++		g_SoundFeed->m_Shooter = ent;
++}
++
++void CSpeculaFeed::RecordProjectileLaunch(u32 id, const CFixedVector3D& launchPoint, const CFixedVector3D& target, fixed speed, fixed gravity, const std::wstring& actorName, const std::wstring& impactActorName, fixed impactAnimationLifetime)
++{
++	if (!g_SoundFeed)
++		return;
++	g_SoundFeed->m_Launches.push_back({
++		id,
++		g_SoundFeed->m_Shooter,
++		launchPoint.X.GetInternalValue(),
++		launchPoint.Y.GetInternalValue(),
++		launchPoint.Z.GetInternalValue(),
++		target.X.GetInternalValue(),
++		target.Y.GetInternalValue(),
++		target.Z.GetInternalValue(),
++		speed.GetInternalValue(),
++		gravity.GetInternalValue(),
++		g_SoundFeed->InternString(utf8_from_wstring(actorName)),
++		g_SoundFeed->InternString(utf8_from_wstring(impactActorName)),
++		impactAnimationLifetime.GetInternalValue()
++	});
++	g_SoundFeed->m_Shooter = INVALID_ENTITY;
++}
++
++void CSpeculaFeed::RecordProjectileRemove(u32 id)
++{
++	if (g_SoundFeed)
++		g_SoundFeed->m_Removals.push_back(id);
++}
++
+ // An empty text is no string: an actor or animation that was never set.
+ u32 CSpeculaFeed::InternString(const std::string& text)
+ {
+diff --git a/source/network/SpeculaFeed.h b/source/network/SpeculaFeed.h
+index 8da3c89896..c1a2985896 100644
+--- a/source/network/SpeculaFeed.h
++++ b/source/network/SpeculaFeed.h
+@@ -20,6 +20,7 @@
+ 
+ #include "lib/code_annotation.h"
+ #include "lib/types.h"
++#include "maths/Fixed.h"
+ #include "maths/FixedVector3D.h"
+ #include "ps/CStr.h"
+ #include "simulation2/helpers/Player.h"
+@@ -39,7 +40,7 @@ class CSimulation2;
+  * socket. It only reads the simulation, after each turn, so it cannot
+  * change the state hash.
+  *
+- * Feed format v9, little-endian: "SPCF", u32 version, then records of
++ * Feed format v10, little-endian: "SPCF", u32 version, then records of
+  * u8 kind, u32 payload length, payload.
+  *  - kind 1 template: u32 index, u16 name length, UTF-8 name, f32 minimap
+  *    icon size, u8 flags, then the icon file name relative to
+@@ -94,6 +95,17 @@ class CSimulation2;
+  *    regardless of LOS, entity 0, player -1, visibility 0xFFFF. Target 2: a
+  *    player (PlaySoundGroupForPlayer), entity 0, position zero, visibility
+  *    0xFFFF. Positions are raw 16.16.
++ *  - kind 10 projectiles, before the turn record, when the turn launched or
++ *    removed any: u32 launch count, count x {u32 id, u32 shooter, i32 x,
++ *    i32 y, i32 z launch point, i32 x, i32 y, i32 z target, i32 speed,
++ *    i32 gravity, u32 actor string, u32 impact actor string, i32 impact
++ *    lifetime}, then u32 removal count, count x u32 id, each in the order
++ *    the simulation made the calls (LaunchProjectileAtPoint,
++ *    RemoveProjectile). Values are raw 16.16, the lifetime in seconds. The
++ *    shooter is the entity whose launch point Attack.js asked for right
++ *    before the launch, 0 for none. The launch point is the simulation's,
++ *    as this observer has no models to take a prop's from. Actor strings
++ *    are none when empty; the shooter's actor then names the projectile.
+  */
+ class CSpeculaFeed
+ {
+@@ -119,6 +131,20 @@ public:
+ 	static void RecordPositionSound(const std::wstring& group, const CFixedVector3D& position);
+ 	static void RecordPlayerSound(const std::wstring& group, player_id_t player);
+ 
++	/**
++	 * Called by CCmpVisualActor::GetProjectileLaunchPoint, which Attack.js
++	 * calls on the shooter right before it launches; the projectile manager
++	 * is not told who shoots.
++	 */
++	static void NoteProjectileShooter(entity_id_t ent);
++
++	/**
++	 * Called by CCmpProjectileManager whether or not it draws anything;
++	 * no-ops when no feed is open.
++	 */
++	static void RecordProjectileLaunch(u32 id, const CFixedVector3D& launchPoint, const CFixedVector3D& target, fixed speed, fixed gravity, const std::wstring& actorName, const std::wstring& impactActorName, fixed impactAnimationLifetime);
++	static void RecordProjectileRemove(u32 id);
++
+ private:
+ 	struct SSound
+ 	{
+@@ -132,6 +158,23 @@ private:
+ 		u16 visibility;
+ 	};
+ 
++	struct SProjectile
++	{
++		u32 id;
++		u32 shooter;
++		i32 x;
++		i32 y;
++		i32 z;
++		i32 targetX;
++		i32 targetY;
++		i32 targetZ;
++		i32 speed;
++		i32 gravity;
++		u32 actor;
++		u32 impactActor;
++		i32 impactLifetime;
++	};
++
+ 	static u16 Visibility(const CSimContext& context, entity_id_t ent);
+ 
+ 	void WriteTerrain(CSimulation2& simulation);
+@@ -150,6 +193,9 @@ private:
+ 	std::map<std::vector<std::pair<u32, u32>>, u32> m_VariantSetIndices;
+ 	std::vector<u8> m_LastPlayers;
+ 	std::vector<SSound> m_Sounds;
++	std::vector<SProjectile> m_Launches;
++	std::vector<u32> m_Removals;
++	entity_id_t m_Shooter = INVALID_ENTITY;
+ 	size_t m_TerritoryDirtyID = 0;
+ 	size_t m_TerritoryBlinkingDirtyID = 0;
+ };
+diff --git a/source/simulation2/components/CCmpProjectileManager.cpp b/source/simulation2/components/CCmpProjectileManager.cpp
+index bcf9019672..b9d78d0363 100644
+--- a/source/simulation2/components/CCmpProjectileManager.cpp
++++ b/source/simulation2/components/CCmpProjectileManager.cpp
+@@ -29,6 +29,7 @@
+ #include "maths/Matrix3D.h"
+ #include "maths/Quaternion.h"
+ #include "maths/Vector3D.h"
++#include "network/SpeculaFeed.h"
+ #include "ps/CStr.h"
+ #include "renderer/Scene.h"
+ #include "simulation2/MessageTypes.h"
+@@ -186,6 +187,9 @@ uint32_t CCmpProjectileManager::LaunchProjectile(CFixedVector3D launchPoint, CFi
+ {
+ 	// This is network synced so don't use GUI checks before incrementing or it breaks any non GUI simulations
+ 	uint32_t currentId = m_NextId++;
++	// Specula: recorded before the graphics test, as the observer runs
++	// without them.
++	CSpeculaFeed::RecordProjectileLaunch(currentId, launchPoint, targetPoint, speed, gravity, actorName, impactActorName, impactAnimationLifetime);
+ 
+ 	if (!GetSimContext().HasUnitManager() || actorName.empty())
+ 		return currentId; // do nothing if graphics are disabled
+@@ -350,6 +354,7 @@ void CCmpProjectileManager::Interpolate(float frameTime)
+ 
+ void CCmpProjectileManager::RemoveProjectile(uint32_t id)
+ {
++	CSpeculaFeed::RecordProjectileRemove(id);
+ 	// Scan through the projectile list looking for one with the correct id to remove
+ 	for (size_t i = 0; i < m_Projectiles.size(); i++)
+ 	{
+diff --git a/source/simulation2/components/CCmpVisualActor.cpp b/source/simulation2/components/CCmpVisualActor.cpp
+index 34b336f66d..40e06e85be 100644
+--- a/source/simulation2/components/CCmpVisualActor.cpp
++++ b/source/simulation2/components/CCmpVisualActor.cpp
+@@ -417,6 +417,8 @@ public:
+ 
+ 	CFixedVector3D GetProjectileLaunchPoint() const override
+ 	{
++		// Specula: before the model test, as the observer has no models.
++		CSpeculaFeed::NoteProjectileShooter(GetEntityId());
+ 		if (!m_Unit)
+ 			return CFixedVector3D();
+ 

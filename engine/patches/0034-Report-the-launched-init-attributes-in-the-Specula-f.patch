@@ -1,0 +1,82 @@
+From 39bd824f9300a8bb3c55a45ff115c8668eab1386 Mon Sep 17 00:00:00 2001
+From: Viktor Semenov <suit.uanic@gmail.com>
+Date: Sat, 21 Nov 2026 18:30:58 +0000
+Subject: [PATCH 34/45] Report the launched init attributes in the Specula feed
+ Kind 28, written once with the first turn's map record, carries
+ CSimulation2::GetInitAttributes as JSON: what the simulation started with
+ after the engine's own fromInitAttributes, launchGame and the network round
+ trip, so the server can compare it with what it sent. A new kind rather than
+ a new version, so older readers skip it.
+
+---
+ source/network/SpeculaFeed.cpp | 20 ++++++++++++++++++++
+ source/network/SpeculaFeed.h   |  4 ++++
+ 2 files changed, 24 insertions(+)
+
+diff --git a/source/network/SpeculaFeed.cpp b/source/network/SpeculaFeed.cpp
+index 30572ad51e..6ecebca9dc 100644
+--- a/source/network/SpeculaFeed.cpp
++++ b/source/network/SpeculaFeed.cpp
+@@ -110,6 +110,7 @@ constexpr u8 RECORD_LOS = 24;
+ constexpr u8 RECORD_SUMMARY = 25;
+ constexpr u8 RECORD_PAUSE = 26;
+ constexpr u8 RECORD_KEEPALIVE = 27;
++constexpr u8 RECORD_INIT_ATTRIBUTES = 28;
+ constexpr u8 UPLINK_COMMAND = 1;
+ constexpr u8 UPLINK_QUERY = 2;
+ constexpr u8 UPLINK_PAUSE = 3;
+@@ -848,6 +849,9 @@ void CSpeculaFeed::OnTurn(CSimulation2& simulation, u32 turn)
+ 		PutU32(m_Buffer, gameSpeedBits);
+ 		EndRecord(m_Buffer, start);
+ 		WriteTerrain(simulation);
++		// The attributes the simulation started with, for the server to
++		// compare with what it sent (D29).
++		WriteInitAttributes(simulation);
+ 		m_MapSent = true;
+ 	}
+ 
+@@ -2507,6 +2511,22 @@ void CSpeculaFeed::WriteFormationData(CSimulation2& simulation, const ScriptRequ
+ 	EndRecord(m_Buffer, start);
+ }
+ 
++// What the simulation started with, after the engine's own
++// fromInitAttributes, launchGame and the network round trip, so the server
++// can compare it with what it sent (D29).
++void CSpeculaFeed::WriteInitAttributes(CSimulation2& simulation)
++{
++	ScriptRequest rq(simulation.GetScriptInterface());
++	JS::RootedValue attribs(rq.cx);
++	simulation.GetInitAttributes(&attribs);
++	const std::string json = Script::StringifyJSON(rq, &attribs, false);
++	if (json.empty())
++		return;
++	const size_t start = BeginRecord(m_Buffer, RECORD_INIT_ATTRIBUTES);
++	m_Buffer.insert(m_Buffer.end(), json.begin(), json.end());
++	EndRecord(m_Buffer, start);
++}
++
+ // One GetExtendedSimulationState costs a lot (the team exploration is
+ // computed from scratch), so the full copy and every seat's filtered copy
+ // come from a single call.
+diff --git a/source/network/SpeculaFeed.h b/source/network/SpeculaFeed.h
+index 5c836268ed..5822fec138 100644
+--- a/source/network/SpeculaFeed.h
++++ b/source/network/SpeculaFeed.h
+@@ -320,6 +320,9 @@ class ScriptRequest;
+  *    changed (uplink kind 3): u8 count n, then n x i8 player, ascending.
+  *    The game is paused while n > 0. Never written at the start of a game.
+  *  - kind 27 keepalive, every 10 s while paused: no payload.
++ *  - kind 28 init attributes, once, with the first turn's map record: UTF-8
++ *    JSON of CSimulation2::GetInitAttributes, what the simulation started
++ *    with.
+  */
+ class CSpeculaFeed
+ {
+@@ -482,6 +485,7 @@ private:
+ 	static u32 Visibility(const CSimContext& context, entity_id_t ent);
+ 
+ 	void WriteTerrain(CSimulation2& simulation);
++	void WriteInitAttributes(CSimulation2& simulation);
+ 	void WritePlayers(CSimulation2& simulation);
+ 	bool WriteSummary(CSimulation2& simulation, u32 turn, bool isFinal);
+ 	void WriteFormationData(CSimulation2& simulation, const ScriptRequest& rq, const std::string& formation);

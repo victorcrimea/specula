@@ -1,0 +1,219 @@
+From 034de7fa61b5e559357897cf32aadca62956713d Mon Sep 17 00:00:00 2001
+From: Viktor Semenov <suit.uanic@gmail.com>
+Date: Mon, 23 Nov 2026 13:44:07 +0000
+Subject: [PATCH 37/45] Report the other typed notifications and the time
+ notifications in the Specula feed
+
+---
+ .../simulation/components/GuiInterface.js     | 64 ++++++++++++++-----
+ source/network/SpeculaFeed.cpp                | 45 +++++++++++++
+ source/network/SpeculaFeed.h                  | 13 +++-
+ 3 files changed, 106 insertions(+), 16 deletions(-)
+
+diff --git a/binaries/data/mods/public/simulation/components/GuiInterface.js b/binaries/data/mods/public/simulation/components/GuiInterface.js
+index a34358537a..99483c32e5 100644
+--- a/binaries/data/mods/public/simulation/components/GuiInterface.js
++++ b/binaries/data/mods/public/simulation/components/GuiInterface.js
+@@ -30,6 +30,7 @@ GuiInterface.prototype.Init = function()
+ 	this.placementWallLastAngle = 0;
+ 	this.notifications = [];
+ 	this.speculaNotes = [];
++	this.speculaEvents = [];
+ 	this.renamedEntities = [];
+ 	this.miragedEntities = [];
+ 	this.timeNotificationID = 1;
+@@ -855,10 +856,8 @@ GuiInterface.prototype.PushNotification = function(notification)
+ 	else
+ 		this.notifications.push(notification);
+ 
+-	// The headless engine has no GUI to show these two, so the Specula feed
+-	// reads them here. The auto-queue one is untyped, so it is matched by its
+-	// message, which is the only thing that tells it from the other texts.
+-	// focusAttack follows a target that is a unit and looks at the position
++	// The headless engine has no GUI to show these, so the Specula feed
++	// reads them here. focusAttack follows a target that is a unit and looks at the position
+ 	// otherwise; the class is taken now, as the viewer cannot ask later.
+ 	if (notification.type == "attack")
+ 		this.speculaNotes.push({
+@@ -871,17 +870,50 @@ GuiInterface.prototype.PushNotification = function(notification)
+ 			"x": notification.position.x,
+ 			"z": notification.position.z
+ 		});
+-	else if (notification.message == "Could not auto-queue unit, de-activating.")
+-		this.speculaNotes.push({
+-			"kind": 2,
+-			"player": notification.players[0],
+-			"attacker": 0,
+-			"domestic": false,
+-			"unit": false,
+-			"target": 0,
+-			"x": 0,
+-			"z": 0
+-		});
++
++	// The chat lines the session GUI would build from the other typed
++	// notifications; the client formats them, so they are copied as sent.
++	if (["defeat", "won", "phase", "tribute", "barter", "diplomacy", "aichat"].includes(notification.type))
++	{
++		const copy = Object.assign({}, notification);
++		if (notification.type == "phase")
++		{
++			// The client has no technology data, so the names travel along;
++			// GetTechnologyDataHelper picks them the same way.
++			const template = TechnologyTemplates.Get(notification.phaseName);
++			const cmpIdentity = QueryPlayerIDInterface(notification.players[0], IID_Identity);
++			const civ = cmpIdentity && cmpIdentity.GetCiv();
++			if (template)
++				copy.phaseNames = {
++					"generic": template.genericName,
++					"specific": template.specificName ?
++						(template.specificName[civ] || template.specificName.generic) : undefined
++				};
++		}
++		this.speculaEvents.push(copy);
++	}
++};
++
++GuiInterface.prototype.GetSpeculaEvents = function()
++{
++	const events = this.speculaEvents;
++	this.speculaEvents = [];
++	return events;
++};
++
++// Every player's pending time texts, as GetTimeNotifications filters them
++// for one; the viewer picks its own, so the whole list is keyframed.
++GuiInterface.prototype.GetSpeculaTimeNotifications = function()
++{
++	const time = Engine.QueryInterface(SYSTEM_ENTITY, IID_Timer).GetTime();
++	return this.timeNotifications.filter(n => n.endTime > time).map(n => ({
++		"players": n.players,
++		"message": n.message,
++		"parameters": n.parameters,
++		"translateMessage": n.translateMessage,
++		"translateParameters": n.translateParameters,
++		"endTime": n.endTime
++	}));
+ };
+ 
+ GuiInterface.prototype.GetSpeculaNotes = function()
+@@ -2134,6 +2166,8 @@ GuiInterface.prototype.exposedFunctions = {
+ 	"GetReplayMetadata": 1,
+ 	"GetSpeculaSummaries": 1,
+ 	"GetSpeculaNotes": 1,
++	"GetSpeculaEvents": 1,
++	"GetSpeculaTimeNotifications": 1,
+ 	"GetCampaignGameEndData": 1,
+ 	"GetRenamedEntities": 1,
+ 	"ClearRenamedEntities": 1,
+diff --git a/source/network/SpeculaFeed.cpp b/source/network/SpeculaFeed.cpp
+index 92d75d44c6..3f6e28e4d7 100644
+--- a/source/network/SpeculaFeed.cpp
++++ b/source/network/SpeculaFeed.cpp
+@@ -112,6 +112,8 @@ constexpr u8 RECORD_PAUSE = 26;
+ constexpr u8 RECORD_KEEPALIVE = 27;
+ constexpr u8 RECORD_INIT_ATTRIBUTES = 28;
+ constexpr u8 RECORD_NOTIFICATIONS = 29;
++constexpr u8 RECORD_EVENTS = 30;
++constexpr u8 RECORD_TIME_NOTIFICATIONS = 31;
+ constexpr u8 UPLINK_COMMAND = 1;
+ constexpr u8 UPLINK_QUERY = 2;
+ constexpr u8 UPLINK_PAUSE = 3;
+@@ -863,6 +865,8 @@ void CSpeculaFeed::OnTurn(CSimulation2& simulation, u32 turn)
+ 	WriteLos(simulation);
+ 	WriteRenames(simulation);
+ 	WriteNotifications(simulation);
++	WriteEvents(simulation);
++	WriteTimeNotifications(simulation);
+ 
+ 	// Template records must precede the turn record that first uses them,
+ 	// so the entities are collected before the turn record is written.
+@@ -1831,6 +1835,47 @@ void CSpeculaFeed::WriteNotifications(CSimulation2& simulation)
+ 	EndRecord(m_Buffer, start);
+ }
+ 
++// The chat lines of the other typed notifications, as JSON the client
++// formats; a nonvisual observer has no chat to put them in.
++void CSpeculaFeed::WriteEvents(CSimulation2& simulation)
++{
++	CmpPtr<ICmpGuiInterface> cmpGuiInterface(simulation, SYSTEM_ENTITY);
++	if (!cmpGuiInterface)
++		return;
++	ScriptRequest rq(simulation.GetScriptInterface());
++	JS::RootedValue arg(rq.cx);
++	JS::RootedValue events(rq.cx);
++	cmpGuiInterface->ScriptCall(INVALID_PLAYER, L"GetSpeculaEvents", arg, &events);
++	if (!ArrayLength(rq, events))
++		return;
++	const std::string json = Script::StringifyJSON(rq, &events, false);
++	if (json.empty())
++		return;
++	const size_t start = BeginRecord(m_Buffer, RECORD_EVENTS);
++	m_Buffer.insert(m_Buffer.end(), json.begin(), json.end());
++	EndRecord(m_Buffer, start);
++}
++
++// The time texts live in the simulation state, so a viewer that joins late
++// needs them in its keyframe; only a change is written.
++void CSpeculaFeed::WriteTimeNotifications(CSimulation2& simulation)
++{
++	CmpPtr<ICmpGuiInterface> cmpGuiInterface(simulation, SYSTEM_ENTITY);
++	if (!cmpGuiInterface)
++		return;
++	ScriptRequest rq(simulation.GetScriptInterface());
++	JS::RootedValue arg(rq.cx);
++	JS::RootedValue notes(rq.cx);
++	cmpGuiInterface->ScriptCall(INVALID_PLAYER, L"GetSpeculaTimeNotifications", arg, &notes);
++	const std::string json = Script::StringifyJSON(rq, &notes, false);
++	if (json.empty() || json == m_LastTimeNotifications)
++		return;
++	m_LastTimeNotifications = json;
++	const size_t start = BeginRecord(m_Buffer, RECORD_TIME_NOTIFICATIONS);
++	m_Buffer.insert(m_Buffer.end(), json.begin(), json.end());
++	EndRecord(m_Buffer, start);
++}
++
+ // The groups of the components Fogging.js copies into a mirage, whose
+ // copies answer the same getters (the *Mirage classes); false for any other
+ // interface.
+diff --git a/source/network/SpeculaFeed.h b/source/network/SpeculaFeed.h
+index 4e6778f9ec..e0554108af 100644
+--- a/source/network/SpeculaFeed.h
++++ b/source/network/SpeculaFeed.h
+@@ -325,10 +325,17 @@ class ScriptRequest;
+  *    with.
+  *  - kind 29 notifications, before the turn record, when the simulation
+  *    pushed any (GuiInterface.GetSpeculaNotes): u32 count n, then n x
+- *    {u8 kind (1 attacked, 2 auto-queue stopped), u8 player, u8 attacker,
++ *    {u8 kind (1 attacked, 2 auto-queue stopped; no longer produced), u8 player, u8 attacker,
+  *    u8 flags (1 the target is a domestic animal, 2 it is a unit), u32
+  *    target entity, f32 x, f32 z}, the position in metres (target and
+  *    position 0 for kind 2).
++ *  - kind 30 events, before the turn record, when the simulation pushed
++ *    any (GuiInterface.GetSpeculaEvents): UTF-8 JSON array of the defeat,
++ *    won, phase, tribute, barter, diplomacy and aichat notifications.
++ *  - kind 31 time notifications, when the list changed
++ *    (GuiInterface.GetSpeculaTimeNotifications): UTF-8 JSON array of
++ *    {players, message, parameters, translateMessage, translateParameters,
++ *    endTime}, every player's, written on the first turn too.
+  */
+ class CSpeculaFeed
+ {
+@@ -503,6 +510,8 @@ private:
+ 	static bool PutMiragedGroup(const ScriptRequest& rq, std::string_view interface, JS::HandleValue component, SDetailGroups& groups);
+ 	void WriteRenames(CSimulation2& simulation);
+ 	void WriteNotifications(CSimulation2& simulation);
++	void WriteEvents(CSimulation2& simulation);
++	void WriteTimeNotifications(CSimulation2& simulation);
+ 	u32 InternTemplate(CSimulation2& simulation, entity_id_t ent, const std::string& templateName);
+ 	u32 InternString(const std::string& text);
+ 	u32 InternVariants(const std::map<CStr, CStr>& selections);
+@@ -556,6 +565,8 @@ private:
+ 	// Each distinct kind 20 stats JSON, by its index.
+ 	std::unordered_map<std::string, u32> m_StatsIndices;
+ 	std::vector<u8> m_LastPlayers;
++	// The kind 31 JSON last sent; empty until the first turn writes it.
++	std::string m_LastTimeNotifications;
+ 	// The kind 25 cadence: a capture is due on the first turn, every
+ 	// SUMMARY_INTERVAL_TURNS, and when a player's outcome changes; the
+ 	// final one, on the turn the game finishes, is the last.

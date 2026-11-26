@@ -1,0 +1,453 @@
+From 0445bab7590a79dde28a121e6c84ae140ceb0088 Mon Sep 17 00:00:00 2001
+From: Viktor Semenov <suit.uanic@gmail.com>
+Date: Fri, 23 Oct 2026 16:29:19 +0000
+Subject: [PATCH 20/45] Send the stance, formation, command and upgrade state
+ in the Specula feed
+
+The remaining session panels read state the feed did not carry. Kind 12
+gains group 8388608 (UnitAI.GetSelectableStances), 16777216 (the
+formation template the entity is in and GetFormationsList), 33554432
+(command flags: work orders, can guard, guarding, can patrol, gate
+locked, packed, sharable and shared dropsite, ejectable turret, with
+AlertRaiser's target classes and a TurretHolder's ejectable occupants)
+and 67108864 (a kind 17 list of Upgrade.GetUpgrades, each read for the
+owner with its own costs and requirements and the target's limits).
+Kind 21 sends each player's formations and Barter.GetPrices with the
+economy, kind 22 a formation's GetFormationInfoFromTemplate and
+RequiredMemberCount. Kind 11 flags Identity's Undeletable, and Gate,
+AlertRaiser, ResourceDropsite, TurretHolder and Market join the
+component bits. New kinds and group bits, so the feed stays v14.
+---
+ source/network/SpeculaFeed.cpp | 243 ++++++++++++++++++++++++++++++++-
+ source/network/SpeculaFeed.h   |  33 ++++-
+ 2 files changed, 271 insertions(+), 5 deletions(-)
+
+diff --git a/source/network/SpeculaFeed.cpp b/source/network/SpeculaFeed.cpp
+index 37bb4bad1b..4575d70e5f 100644
+--- a/source/network/SpeculaFeed.cpp
++++ b/source/network/SpeculaFeed.cpp
+@@ -97,6 +97,8 @@ constexpr u8 RECORD_PRODUCTION_LIST = 17;
+ constexpr u8 RECORD_TEMPLATE_DATA = 18;
+ constexpr u8 RECORD_TECHNOLOGY_DATA = 19;
+ constexpr u8 RECORD_STATS = 20;
++constexpr u8 RECORD_PLAYER_GUI = 21;
++constexpr u8 RECORD_FORMATION_DATA = 22;
+ constexpr u16 TEMPLATE_SELECTABLE = 1;
+ constexpr u16 TEMPLATE_EDITOR_ONLY = 2;
+ constexpr u16 TEMPLATE_OUTLINE = 4;
+@@ -108,6 +110,7 @@ constexpr u16 TEMPLATE_OVERLAY_CIRCLE = 128;
+ constexpr u16 TEMPLATE_FOOTPRINT = 256;
+ constexpr u16 TEMPLATE_STATUS_BARS = 512;
+ constexpr u16 TEMPLATE_INFINITE_SUPPLY = 1024;
++constexpr u16 TEMPLATE_UNDELETABLE = 2048;
+ // Kind 12 group bits, which are also the slots of SDetailGroups.
+ constexpr size_t DETAIL_HEALTH = 0;
+ constexpr size_t DETAIL_CAPTURE = 1;
+@@ -130,6 +133,20 @@ constexpr size_t DETAIL_RESEARCHABLE = 19;
+ constexpr size_t DETAIL_RALLY = 20;
+ constexpr size_t DETAIL_STATS = 21;
+ constexpr size_t DETAIL_BUILDABLE = 22;
++constexpr size_t DETAIL_STANCES = 23;
++constexpr size_t DETAIL_FORMATIONS = 24;
++constexpr size_t DETAIL_COMMANDS = 25;
++constexpr size_t DETAIL_UPGRADES = 26;
++// Bits of the commands group's flags.
++constexpr u16 COMMAND_WORK_ORDERS = 1;
++constexpr u16 COMMAND_CAN_GUARD = 2;
++constexpr u16 COMMAND_GUARDING = 4;
++constexpr u16 COMMAND_CAN_PATROL = 8;
++constexpr u16 COMMAND_GATE_LOCKED = 16;
++constexpr u16 COMMAND_PACKED = 32;
++constexpr u16 COMMAND_SHARABLE = 64;
++constexpr u16 COMMAND_SHARED = 128;
++constexpr u16 COMMAND_EJECTABLE = 256;
+ constexpr u8 PRODUCTION_REQUIREMENTS_MET = 1;
+ constexpr u8 PRODUCTION_HIDDEN = 2;
+ constexpr u8 PRODUCTION_PAIR_TOP = 4;
+@@ -147,7 +164,8 @@ const char* const DETAIL_INTERFACES[] = {
+ 	"Health", "Capturable", "ResourceSupply", "ProductionQueue", "GarrisonHolder",
+ 	"Promotion", "ResourceGatherer", "Foundation", "Repairable", "UnitAI", "Trainer",
+ 	"Researcher", "Pack", "Upgrade", "Trader", "Garrisonable", "Turretable", "Attack", "Auras",
+-	"Heal", "RallyPoint", "Builder"
++	"Heal", "RallyPoint", "Builder", "Gate", "AlertRaiser", "ResourceDropsite", "TurretHolder",
++	"Market"
+ };
+ // Indices of DETAIL_INTERFACES that are read together.
+ constexpr size_t INTERFACE_PACK = 12;
+@@ -1125,6 +1143,38 @@ void CSpeculaFeed::PutTrainable(CSimulation2& simulation, const ScriptRequest& r
+ 	out.insert(out.end(), it->second.begin(), it->second.end());
+ }
+ 
++// As g_SelectionPanels.Upgrade's setupButton reads it for the owner: the
++// upgrade's own costs and requirements, with the limits of the template it
++// leads to. Its template data is sent as a trainable's is.
++void CSpeculaFeed::PutUpgrade(CSimulation2& simulation, const ScriptRequest& rq, player_id_t owner, JS::HandleValue upgrade, SProductionCache& cache, std::vector<u8>& out)
++{
++	JS::RootedValue entityValue(rq.cx);
++	Script::GetProperty(rq, upgrade, "entity", &entityValue);
++	const std::string templateName = StringOf(rq, entityValue);
++	std::vector<u8> ignored;
++	PutTrainable(simulation, rq, owner, templateName, cache, ignored);
++
++	JS::RootedValue arg(rq.cx);
++	JS::RootedValue data(rq.cx);
++	Script::CreateObject(rq, &arg, "templateName", templateName, "player", owner);
++	CallGui(simulation, owner, L"GetTemplateData", arg, &data);
++	if (!data.isObject())
++	{
++		PutProductionItem(InternString(templateName), PRODUCTION_HIDDEN, PRODUCTION_NO_LIMIT, {}, out);
++		return;
++	}
++	JS::RootedValue requirements(rq.cx);
++	JS::RootedValue requirementsArg(rq.cx);
++	JS::RootedValue met(rq.cx);
++	JS::RootedValue cost(rq.cx);
++	Script::GetProperty(rq, upgrade, "requirements", &requirements);
++	Script::GetProperty(rq, upgrade, "cost", &cost);
++	Script::CreateObject(rq, &requirementsArg, "requirements", requirements, "player", owner);
++	CallGui(simulation, owner, L"AreRequirementsMet", requirementsArg, &met);
++	PutProductionItem(InternString(templateName), Truthy(met) ? PRODUCTION_REQUIREMENTS_MET : 0,
++		LimitOf(CanBeAddedCount(simulation, rq, owner, templateName, data)), ResourceCosts(rq, cost), out);
++}
++
+ // As g_SelectionPanels.Research's setupButton reads it for the owner: the
+ // technology's own costs times the producer's multiplier.
+ void CSpeculaFeed::PutResearchable(CSimulation2& simulation, const ScriptRequest& rq, player_id_t owner, const std::string& technology, const std::map<std::string, float>& multipliers, u8 flags, SProductionCache& cache, std::vector<u8>& out)
+@@ -1304,6 +1354,8 @@ void CSpeculaFeed::WriteTemplateDetails(CSimulation2& simulation, u32 index, con
+ 	const CParamNode& supplyMax = templateNode->GetChild("ResourceSupply").GetChild("Max");
+ 	if (supplyMax.IsOk() && supplyMax.ToString() == "Infinity")
+ 		flags |= TEMPLATE_INFINITE_SUPPLY;
++	if (templateNode->GetChild("Identity").GetChild("Undeletable").ToString() == "true")
++		flags |= TEMPLATE_UNDELETABLE;
+ 
+ 	u32 components = 0;
+ 	for (size_t i = 0; i < std::size(DETAIL_INTERFACES); ++i)
+@@ -1467,6 +1519,15 @@ void CSpeculaFeed::WriteDetails(CSimulation2& simulation, u32 turn)
+ 	}
+ 
+ 	std::unordered_map<entity_id_t, SDetailGroups> current;
++	// Several components add to the commands group, so it is written once
++	// they have all been read.
++	struct SCommandBits
++	{
++		u16 flags = 0;
++		u32 alertClasses = NONE;
++		u16 turrets = 0;
++	};
++	std::unordered_map<entity_id_t, SCommandBits> commands;
+ 	// Producers of one owner list the same items.
+ 	SProductionCache productionCache;
+ 	std::unordered_map<entity_id_t, SRallyGroup> rallyGroups;
+@@ -1598,6 +1659,35 @@ void CSpeculaFeed::WriteDetails(CSimulation2& simulation, u32 turn)
+ 				group.push_back(CallBool(rq, component, "IsIdle") ? 1 : 0);
+ 				PutU32(group, InternString(StringOf(rq, stance)));
+ 				PutU32(group, static_cast<u32>(CallFloat(rq, component, "GetFormationController")));
++
++				std::vector<std::string> stances;
++				ScriptFunction::Call(rq, component, "GetSelectableStances", stances);
++				std::vector<u8>& stanceGroup = groups[DETAIL_STANCES];
++				stanceGroup.push_back(static_cast<u8>(std::min<size_t>(stances.size(), 0xFF)));
++				for (size_t j = 0; j < std::min<size_t>(stances.size(), 0xFF); ++j)
++					PutU32(stanceGroup, InternString(stances[j]));
++
++				std::vector<std::string> formations;
++				ScriptFunction::Call(rq, component, "GetFormationsList", formations);
++				JS::RootedValue formation(rq.cx);
++				ScriptFunction::Call(rq, component, "GetFormationTemplate", &formation);
++				std::vector<u8>& formationGroup = groups[DETAIL_FORMATIONS];
++				PutU32(formationGroup, InternString(StringOf(rq, formation)));
++				PutU16(formationGroup, Clamp16(static_cast<u32>(formations.size())));
++				for (size_t j = 0; j < std::min<size_t>(formations.size(), 0xFFFF); ++j)
++					PutU32(formationGroup, InternString(formations[j]));
++
++				JS::RootedValue guarded(rq.cx);
++				ScriptFunction::Call(rq, component, "IsGuardOf", &guarded);
++				SCommandBits& bits = commands[ent];
++				if (CallBool(rq, component, "HasWorkOrders"))
++					bits.flags |= COMMAND_WORK_ORDERS;
++				if (CallBool(rq, component, "CanGuard"))
++					bits.flags |= COMMAND_CAN_GUARD;
++				if (guarded.isNumber() && guarded.toNumber() != static_cast<double>(INVALID_ENTITY))
++					bits.flags |= COMMAND_GUARDING;
++				if (CallBool(rq, component, "CanPatrol"))
++					bits.flags |= COMMAND_CAN_PATROL;
+ 			}
+ 			else if (interface == "Trainer" || interface == "Researcher" || interface == "Builder")
+ 			{
+@@ -1671,6 +1761,35 @@ void CSpeculaFeed::WriteDetails(CSimulation2& simulation, u32 turn)
+ 			}
+ 			else if (interface == "Pack" || interface == "Upgrade")
+ 			{
++				if (interface == "Pack" && CallBool(rq, component, "IsPacked"))
++					commands[ent].flags |= COMMAND_PACKED;
++				if (interface == "Upgrade")
++				{
++					if (!sampleLists)
++					{
++						const auto last = m_LastDetails.find(ent);
++						if (last != m_LastDetails.end())
++							groups[DETAIL_UPGRADES] = last->second[DETAIL_UPGRADES];
++					}
++					else
++					{
++						CmpPtr<ICmpOwnership> cmpOwnership(simulation, ent);
++						const player_id_t owner = cmpOwnership ? cmpOwnership->GetOwner() : INVALID_PLAYER;
++						JS::RootedValue upgrades(rq.cx);
++						ScriptFunction::Call(rq, component, "GetUpgrades", &upgrades);
++						const u32 length = ArrayLength(rq, upgrades);
++						std::vector<u8> items;
++						u32 count = 0;
++						for (u32 j = 0; j < length && owner != INVALID_PLAYER; ++j)
++						{
++							JS::RootedValue item(rq.cx);
++							Script::GetPropertyInt(rq, upgrades, static_cast<int>(j), &item);
++							PutUpgrade(simulation, rq, owner, item, productionCache, items);
++							++count;
++						}
++						PutU32(groups[DETAIL_UPGRADES], InternProductionList(count, items));
++					}
++				}
+ 				std::vector<u8>& group = groups[DETAIL_PROGRESS];
+ 				if (!group.empty())
+ 					continue;
+@@ -1776,8 +1895,49 @@ void CSpeculaFeed::WriteDetails(CSimulation2& simulation, u32 turn)
+ 				}
+ 				groups[DETAIL_RALLY] = RallyGroup(simulation, ent, points, rallyGroups);
+ 			}
++			else if (interface == "Gate")
++			{
++				if (CallBool(rq, component, "IsLocked"))
++					commands[ent].flags |= COMMAND_GATE_LOCKED;
++			}
++			else if (interface == "AlertRaiser")
++			{
++				JS::RootedValue classes(rq.cx);
++				ScriptFunction::Call(rq, component, "GetTargetClasses", &classes);
++				commands[ent].alertClasses = InternString(StringOf(rq, classes));
++			}
++			else if (interface == "ResourceDropsite")
++			{
++				SCommandBits& bits = commands[ent];
++				if (CallBool(rq, component, "IsSharable"))
++					bits.flags |= COMMAND_SHARABLE;
++				if (CallBool(rq, component, "IsShared"))
++					bits.flags |= COMMAND_SHARED;
++			}
++			else if (interface == "TurretHolder")
++			{
++				// The unload turrets command counts the ejectable occupants.
++				JS::RootedValue points(rq.cx);
++				ScriptFunction::Call(rq, component, "GetTurretPoints", &points);
++				const u32 length = ArrayLength(rq, points);
++				u16 ejectable = 0;
++				for (u32 j = 0; j < length; ++j)
++				{
++					JS::RootedValue point(rq.cx);
++					JS::RootedValue entity(rq.cx);
++					JS::RootedValue eject(rq.cx);
++					Script::GetPropertyInt(rq, points, static_cast<int>(j), &point);
++					Script::GetProperty(rq, point, "entity", &entity);
++					Script::GetProperty(rq, point, "ejectable", &eject);
++					if (Truthy(entity) && Truthy(eject))
++						++ejectable;
++				}
++				commands[ent].turrets = ejectable;
++			}
+ 			else if (interface == "Garrisonable" || interface == "Turretable")
+ 			{
++				if (interface == "Turretable" && CallBool(rq, component, "IsEjectable"))
++					commands[ent].flags |= COMMAND_EJECTABLE;
+ 				std::vector<u8>& group = groups[DETAIL_HOLDER];
+ 				const u32 holder = static_cast<u32>(CallFloat(rq, component, "HolderID"));
+ 				if (!group.empty())
+@@ -1791,6 +1951,14 @@ void CSpeculaFeed::WriteDetails(CSimulation2& simulation, u32 turn)
+ 		}
+ 	}
+ 
++	for (const std::pair<const entity_id_t, SCommandBits>& entry : commands)
++	{
++		std::vector<u8>& group = current[entry.first][DETAIL_COMMANDS];
++		PutU16(group, entry.second.flags);
++		PutU32(group, entry.second.alertClasses);
++		PutU16(group, entry.second.turrets);
++	}
++
+ 	PutStats(simulation, rq, turn, current);
+ 
+ 	std::vector<u8> payload;
+@@ -1975,6 +2143,30 @@ void CSpeculaFeed::PutStats(CSimulation2& simulation, const ScriptRequest& rq, u
+ 
+ // Read through the GUI interface, as the session GUI does every turn: team
+ // and diplomacy live only in JS components.
++// What g_FormationsInfo holds for a formation: GetFormationInfoFromTemplate,
++// with the member count CanMoveEntsIntoFormation tests, so the client can
++// decide it for any selection.
++void CSpeculaFeed::WriteFormationData(CSimulation2& simulation, const ScriptRequest& rq, const std::string& formation)
++{
++	if (!m_FormationData.insert(formation).second)
++		return;
++	JS::RootedValue arg(rq.cx);
++	JS::RootedValue info(rq.cx);
++	Script::CreateObject(rq, &arg, "templateName", formation);
++	CallGui(simulation, INVALID_PLAYER, L"GetFormationInfoFromTemplate", arg, &info);
++	CmpPtr<ICmpTemplateManager> cmpTemplateManager(simulation, SYSTEM_ENTITY);
++	const CParamNode* templateNode = cmpTemplateManager ? cmpTemplateManager->GetTemplate(formation) : nullptr;
++	if (!info.isObject() || !templateNode)
++		return;
++	Script::SetProperty(rq, info, "minCount", NodeFloat(templateNode->GetChild("Formation").GetChild("RequiredMemberCount")));
++	const std::string json = Script::StringifyJSON(rq, &info, false);
++	const u32 name = InternString(formation);
++	const size_t start = BeginRecord(m_Buffer, RECORD_FORMATION_DATA);
++	PutU32(m_Buffer, name);
++	m_Buffer.insert(m_Buffer.end(), json.begin(), json.end());
++	EndRecord(m_Buffer, start);
++}
++
+ void CSpeculaFeed::WritePlayers(CSimulation2& simulation)
+ {
+ 	CmpPtr<ICmpGuiInterface> cmpGuiInterface(simulation, SYSTEM_ENTITY);
+@@ -2047,6 +2239,55 @@ void CSpeculaFeed::WritePlayers(CSimulation2& simulation)
+ 		m_LastEconomy = std::move(economy);
+ 	}
+ 
++	// The barter prices move with every deal, the formations never do, and
++	// the panels read both.
++	std::vector<u8> playerGui;
++	PutU32(playerGui, count);
++	for (u32 i = 0; i < count; ++i)
++	{
++		JS::RootedValue player(rq.cx);
++		JS::RootedValue prices(rq.cx);
++		JS::RootedValue buy(rq.cx);
++		JS::RootedValue sell(rq.cx);
++		Script::GetPropertyInt(rq, players, static_cast<int>(i), &player);
++		Script::GetProperty(rq, player, "barterPrices", &prices);
++		Script::GetProperty(rq, prices, "buy", &buy);
++		Script::GetProperty(rq, prices, "sell", &sell);
++
++		JS::RootedValue playerID(rq.cx);
++		std::vector<std::string> formations;
++		Script::ToJSVal(rq, &playerID, static_cast<i32>(i));
++		JS::RootedValue available(rq.cx);
++		cmpGuiInterface->ScriptCall(INVALID_PLAYER, L"GetAvailableFormations", playerID, &available);
++		Script::FromJSVal(rq, available, formations);
++		PutU16(playerGui, Clamp16(static_cast<u32>(formations.size())));
++		for (size_t j = 0; j < std::min<size_t>(formations.size(), 0xFFFF); ++j)
++		{
++			PutU32(playerGui, InternString(formations[j]));
++			WriteFormationData(simulation, rq, formations[j]);
++		}
++
++		std::vector<std::string> codes;
++		if (buy.isObject())
++			Script::EnumeratePropertyNames(rq, buy, true, codes);
++		std::sort(codes.begin(), codes.end());
++		codes.resize(std::min<size_t>(codes.size(), 0xFF));
++		playerGui.push_back(static_cast<u8>(codes.size()));
++		for (const std::string& code : codes)
++		{
++			PutU32(playerGui, InternString(code));
++			PutF32(playerGui, PropertyFloat(rq, buy, code.c_str()));
++			PutF32(playerGui, PropertyFloat(rq, sell, code.c_str()));
++		}
++	}
++	if (playerGui != m_LastPlayerGui)
++	{
++		const size_t guiStart = BeginRecord(m_Buffer, RECORD_PLAYER_GUI);
++		m_Buffer.insert(m_Buffer.end(), playerGui.begin(), playerGui.end());
++		EndRecord(m_Buffer, guiStart);
++		m_LastPlayerGui = std::move(playerGui);
++	}
++
+ 	std::vector<u8> payload;
+ 	PutU32(payload, count);
+ 	for (u32 i = 0; i < count; ++i)
+diff --git a/source/network/SpeculaFeed.h b/source/network/SpeculaFeed.h
+index 55a431578c..cffae2bc5a 100644
+--- a/source/network/SpeculaFeed.h
++++ b/source/network/SpeculaFeed.h
+@@ -152,11 +152,12 @@ class ScriptRequest;
+  *    always visible, 16 the selection box is the footprint (else the model
+  *    bounds), 32 the footprint is a square (else a circle), 64 the overlay
+  *    has its own square shape, 128 its own circle shape, 256 Footprint, 512
+- *    StatusBars, 1024 an infinite resource supply. Components, one bit
++ *    StatusBars, 1024 an infinite resource supply, 2048 Identity's Undeletable. Components, one bit
+  *    each: Health, Capturable, ResourceSupply, ProductionQueue,
+  *    GarrisonHolder, Promotion, ResourceGatherer, Foundation, Repairable,
+  *    UnitAI, Trainer, Researcher, Pack, Upgrade, Trader, Garrisonable,
+- *    Turretable, Attack, Auras, Heal, RallyPoint, from bit 0 up.
++ *    Turretable, Attack, Auras, Heal, RallyPoint, Builder, Gate, AlertRaiser,
++ *    ResourceDropsite, TurretHolder, Market, from bit 0 up.
+  *  - kind 12 entity details, before the turn record: u32 count, count x
+  *    {u32 id, u32 mask, then for each bit set, in this order: 1 f32
+  *    hitpoints, f32 max hitpoints; 2 u8 n, n x f32 capture points by
+@@ -192,7 +193,16 @@ class ScriptRequest;
+  *    the owner's civ's MarkerTemplate. Sampled every PLAYERS_INTERVAL_TURNS
+  *    turns, n = 0 when unset; 2097152 u32 kind 20 stats index, read every
+  *    STATS_INTERVAL_TURNS turns for every entity that has a group;
+- *    4194304 u32 buildable kind 17 list}, then
++ *    4194304 u32 buildable kind 17 list; 8388608 u8 n, n x u32 stance string,
++ *    UnitAI.GetSelectableStances; 16777216 u32 formation template string,
++ *    UnitAI.GetFormationTemplate (the null formation's when in none), u16 n,
++ *    n x u32 formation template string, UnitAI.GetFormationsList; 33554432
++ *    u16 flags, u32 alert target classes string (none without AlertRaiser):
++ *    flags 1 UnitAI.HasWorkOrders, 2 CanGuard, 4 guards something, 8
++ *    CanPatrol, 16 Gate.IsLocked, 32 Pack.IsPacked, 64 ResourceDropsite
++ *    IsSharable, 128 IsShared, 256 Turretable.IsEjectable, then u16 the
++ *    TurretHolder's occupied ejectable turret points; 67108864 u32 upgrades
++ *    kind 17 list}, then
+  *    u32 count, count x u32
+  *    id of entities that no longer have any of them. A group is written
+  *    when it differs from what was last written for the entity, so every
+@@ -253,6 +263,15 @@ class ScriptRequest;
+  *    entity. A ranged attack's elevationAdaptedRange is rounded to whole
+  *    metres off its range and the turret points are one 0 each, so that
+  *    entities share them. Indices count up from 0.
++ *  - kind 21 player GUI data, with the economy, when it changed: u32 count n,
++ *    n x {u16 f, f x u32 formation template string (Player.GetFormations,
++ *    the formations the player's civ may use), u8 m, m x {u32 resource code
++ *    string, f32 buy price, f32 sell price} (Barter.GetPrices)}. Index 0 is
++ *    gaia.
++ *  - kind 22 formation data, the first time a formation template is named:
++ *    u32 template string, then UTF-8 JSON {name, tooltip, disabledTooltip,
++ *    icon, minCount}: GuiInterface.GetFormationInfoFromTemplate and the
++ *    template's RequiredMemberCount, which CanMoveEntsIntoFormation tests.
+  */
+ class CSpeculaFeed
+ {
+@@ -355,7 +374,7 @@ private:
+ 	 * The last bytes written for each kind 12 group of an entity, by group
+ 	 * bit; an empty slot is a group the entity does not have.
+ 	 */
+-	using SDetailGroups = std::array<std::vector<u8>, 23>;
++	using SDetailGroups = std::array<std::vector<u8>, 27>;
+ 
+ 	/**
+ 	 * An entity's rally group bytes and what they were computed from, as the
+@@ -389,6 +408,7 @@ private:
+ 
+ 	void WriteTerrain(CSimulation2& simulation);
+ 	void WritePlayers(CSimulation2& simulation);
++	void WriteFormationData(CSimulation2& simulation, const ScriptRequest& rq, const std::string& formation);
+ 	void WriteTerritory(CSimulation2& simulation);
+ 	void WriteTemplateDetails(CSimulation2& simulation, u32 index, const std::string& templateName);
+ 	void WriteDetails(CSimulation2& simulation, u32 turn);
+@@ -400,6 +420,7 @@ private:
+ 	u32 InternProductionList(u32 count, const std::vector<u8>& items);
+ 	void PutProductionItem(u32 name, u8 flags, u16 canBeAdded, const std::vector<std::pair<std::string, float>>& costs, std::vector<u8>& out);
+ 	void PutTrainable(CSimulation2& simulation, const ScriptRequest& rq, player_id_t owner, const std::string& templateName, SProductionCache& cache, std::vector<u8>& out);
++	void PutUpgrade(CSimulation2& simulation, const ScriptRequest& rq, player_id_t owner, JS::HandleValue upgrade, SProductionCache& cache, std::vector<u8>& out);
+ 	void PutResearchable(CSimulation2& simulation, const ScriptRequest& rq, player_id_t owner, const std::string& technology, const std::map<std::string, float>& multipliers, u8 flags, SProductionCache& cache, std::vector<u8>& out);
+ 	void WriteTemplateData(CSimulation2& simulation, const ScriptRequest& rq, const std::unordered_map<entity_id_t, SDetailGroups>& entities, const SProductionCache& cache);
+ 	void PutStats(CSimulation2& simulation, const ScriptRequest& rq, u32 turn, std::unordered_map<entity_id_t, SDetailGroups>& entities);
+@@ -425,6 +446,10 @@ private:
+ 	std::unordered_map<std::string, u32> m_StatsIndices;
+ 	std::vector<u8> m_LastPlayers;
+ 	std::vector<u8> m_LastEconomy;
++	// The kind 21 record last written, and the formation templates whose
++	// kind 22 record has been.
++	std::vector<u8> m_LastPlayerGui;
++	std::set<std::string> m_FormationData;
+ 	// Time spent reading the kind 12 details, for the cost log.
+ 	double m_DetailsSeconds = 0.0;
+ 	u32 m_DetailsTurns = 0;

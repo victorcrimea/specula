@@ -1,0 +1,98 @@
+From 1242cc56a9efbee4ad113ec67f16afa694722336 Mon Sep 17 00:00:00 2001
+From: Viktor Semenov <suit.uanic@gmail.com>
+Date: Wed, 7 Oct 2026 21:32:00 +0000
+Subject: [PATCH 08/45] Send the map's light in the Specula feed
+
+Feed format v11. The terrain record gains the map's sun elevation and
+rotation, sun colour and ambient colour, as CLightEnv holds them, so the
+web view can light and shadow the match as the game does.
+CMapReader::ApplyData fills g_LightEnv while loading even when
+nonvisual, and the terrain record goes out with the first turn, after
+that.
+---
+ source/network/SpeculaFeed.cpp | 21 ++++++++++++++++++++-
+ source/network/SpeculaFeed.h   |  6 ++++--
+ 2 files changed, 24 insertions(+), 3 deletions(-)
+
+diff --git a/source/network/SpeculaFeed.cpp b/source/network/SpeculaFeed.cpp
+index 6ce9afd886..688d56b76f 100644
+--- a/source/network/SpeculaFeed.cpp
++++ b/source/network/SpeculaFeed.cpp
+@@ -19,11 +19,13 @@
+ 
+ #include "SpeculaFeed.h"
+ 
++#include "graphics/LightEnv.h"
+ #include "graphics/MiniMapTexture.h"
+ #include "graphics/Terrain.h"
+ #include "lib/utf8.h"
+ #include "ps/CLogger.h"
+ #include "ps/Game.h"
++#include "ps/World.h"
+ #include "scriptinterface/Object.h"
+ #include "scriptinterface/ScriptInterface.h"
+ #include "scriptinterface/ScriptRequest.h"
+@@ -54,7 +56,7 @@
+ 
+ namespace
+ {
+-constexpr u32 FEED_VERSION = 10;
++constexpr u32 FEED_VERSION = 11;
+ constexpr u8 RECORD_TEMPLATE = 1;
+ constexpr u8 RECORD_TURN = 2;
+ constexpr u8 RECORD_MAP = 3;
+@@ -146,6 +148,13 @@ void PutI32(std::vector<u8>& buffer, i32 value)
+ 	PutU32(buffer, static_cast<u32>(value));
+ }
+ 
++void PutF32(std::vector<u8>& buffer, float value)
++{
++	u32 bits;
++	std::memcpy(&bits, &value, sizeof(bits));
++	PutU32(buffer, bits);
++}
++
+ // Returns where the payload starts, for EndRecord to backfill its length.
+ size_t BeginRecord(std::vector<u8>& buffer, u8 kind)
+ {
+@@ -676,6 +685,16 @@ void CSpeculaFeed::WriteTerrain(CSimulation2& simulation)
+ 	std::memcpy(&shallowBits, &shallowDepth, sizeof(shallowBits));
+ 	PutU32(m_Buffer, shallowBits);
+ 	m_Buffer.push_back(cmpRangeManager && cmpRangeManager->GetLosCircular() ? 1 : 0);
++	// CMapReader::ApplyData filled g_LightEnv while loading, nonvisual or
++	// not, and the first turn comes after that.
++	PutF32(m_Buffer, g_LightEnv.GetElevation());
++	PutF32(m_Buffer, g_LightEnv.GetRotation());
++	for (const RGBColor& color : { g_LightEnv.m_SunColor, g_LightEnv.m_AmbientColor })
++	{
++		PutF32(m_Buffer, color.X);
++		PutF32(m_Buffer, color.Y);
++		PutF32(m_Buffer, color.Z);
++	}
+ 
+ 	const u16* heights = terrain->GetHeightMap();
+ 	for (size_t i = 0; i < verticesPerSide * verticesPerSide; ++i)
+diff --git a/source/network/SpeculaFeed.h b/source/network/SpeculaFeed.h
+index c1a2985896..e90c7cb3d8 100644
+--- a/source/network/SpeculaFeed.h
++++ b/source/network/SpeculaFeed.h
+@@ -40,7 +40,7 @@ class CSimulation2;
+  * socket. It only reads the simulation, after each turn, so it cannot
+  * change the state hash.
+  *
+- * Feed format v10, little-endian: "SPCF", u32 version, then records of
++ * Feed format v11, little-endian: "SPCF", u32 version, then records of
+  * u8 kind, u32 payload length, payload.
+  *  - kind 1 template: u32 index, u16 name length, UTF-8 name, f32 minimap
+  *    icon size, u8 flags, then the icon file name relative to
+@@ -72,7 +72,9 @@ class CSimulation2;
+  *    set up for the match), once before the first turn.
+  *  - kind 4 terrain, right after the map record: u32 tiles per side n,
+  *    i32 water level (raw 16.16), f32 shallow water depth in metres,
+- *    u8 circular, (n+1)^2 x u16 heights, u32 texture count, count x
++ *    u8 circular, f32 sun elevation, f32 sun rotation (radians, as
++ *    CLightEnv holds them), f32 r, g, b sun colour, f32 r, g, b ambient
++ *    colour, (n+1)^2 x u16 heights, u32 texture count, count x
+  *    {u16 length, UTF-8 name}, n^2 x u16 texture index (0xFFFF: none),
+  *    n^2 x u32 blend priority. Heights and tiles are row-major, x fastest.
+  *  - kind 5 players, before the turn record, whenever they change: u32

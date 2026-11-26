@@ -1,0 +1,142 @@
+From d3c503b472fbec7a8af8dcb04aed6af094126276 Mon Sep 17 00:00:00 2001
+From: Viktor Semenov <suit.uanic@gmail.com>
+Date: Thu, 26 Nov 2026 11:38:52 +0000
+Subject: [PATCH 43/45] Specula: time each turn's simulation update and feed
+ the mean once a second (kind 34)
+
+---
+ source/network/NetClientTurnManager.cpp   |  2 +-
+ source/network/SpeculaFeed.cpp            | 18 +++++++++++++++++-
+ source/network/SpeculaFeed.h              | 10 +++++++++-
+ source/simulation2/system/TurnManager.cpp |  3 +++
+ source/simulation2/system/TurnManager.h   |  4 ++++
+ 5 files changed, 34 insertions(+), 3 deletions(-)
+
+diff --git a/source/network/NetClientTurnManager.cpp b/source/network/NetClientTurnManager.cpp
+index a413695cfd..8155502699 100644
+--- a/source/network/NetClientTurnManager.cpp
++++ b/source/network/NetClientTurnManager.cpp
+@@ -116,7 +116,7 @@ void CNetClientTurnManager::NotifyFinishedUpdate(u32 turn)
+ 
+ 	// After the hash is sent, so the feed never delays the sync check.
+ 	if (m_SpeculaFeed)
+-		m_SpeculaFeed->OnTurn(m_Simulation2, turn);
++		m_SpeculaFeed->OnTurn(m_Simulation2, turn, m_LastUpdateSeconds);
+ }
+ 
+ void CNetClientTurnManager::AnswerSpeculaUplink()
+diff --git a/source/network/SpeculaFeed.cpp b/source/network/SpeculaFeed.cpp
+index 9215782703..efce017713 100644
+--- a/source/network/SpeculaFeed.cpp
++++ b/source/network/SpeculaFeed.cpp
+@@ -118,6 +118,7 @@ constexpr u8 RECORD_EVENTS = 30;
+ constexpr u8 RECORD_TIME_NOTIFICATIONS = 31;
+ constexpr u8 RECORD_CONTROL_GROUPS = 32;
+ constexpr u8 RECORD_METADATA_SAVED = 33;
++constexpr u8 RECORD_SIM_TIME = 34;
+ constexpr u8 UPLINK_COMMAND = 1;
+ constexpr u8 UPLINK_PAUSE = 3;
+ constexpr u8 UPLINK_SUMMARY = 4;
+@@ -825,7 +826,7 @@ CSpeculaFeed::~CSpeculaFeed()
+ 		close(m_Socket);
+ }
+ 
+-void CSpeculaFeed::OnTurn(CSimulation2& simulation, u32 turn)
++void CSpeculaFeed::OnTurn(CSimulation2& simulation, u32 turn, double updateSeconds)
+ {
+ 	if (m_Socket < 0)
+ 		return;
+@@ -992,6 +993,21 @@ void CSpeculaFeed::OnTurn(CSimulation2& simulation, u32 turn)
+ 
+ 	WriteControlGroups(simulation);
+ 
++	// A mean over about a second, so a viewer's readout does not jump with
++	// every turn's noise.
++	m_SimSeconds += updateSeconds;
++	++m_SimTurns;
++	const double now = timer_Time();
++	if (now - m_SimReported >= 1.0)
++	{
++		const size_t simStart = BeginRecord(m_Buffer, RECORD_SIM_TIME);
++		PutU32(m_Buffer, static_cast<u32>(m_SimSeconds / m_SimTurns * 1e6));
++		EndRecord(m_Buffer, simStart);
++		m_SimSeconds = 0.0;
++		m_SimTurns = 0;
++		m_SimReported = now;
++	}
++
+ 	const size_t start = BeginRecord(m_Buffer, RECORD_TURN);
+ 	PutU32(m_Buffer, turn);
+ 	PutU32(m_Buffer, static_cast<u32>(entities.size()));
+diff --git a/source/network/SpeculaFeed.h b/source/network/SpeculaFeed.h
+index 47a4bb82b9..5c9df83b6d 100644
+--- a/source/network/SpeculaFeed.h
++++ b/source/network/SpeculaFeed.h
+@@ -361,6 +361,9 @@ class ScriptRequest;
+  *    set (in vanilla only wall pieces). Absent means none.
+  *  - kind 33 replay metadata saved, no payload: the answer to uplink kind
+  *    5, written once metadata.json is on disk.
++ *  - kind 34 simulation time, before the turn record, about once a second:
++ *    u32 mean wall time of the simulation updates since the last one, in
++ *    microseconds.
+  */
+ class CSpeculaFeed
+ {
+@@ -369,7 +372,7 @@ public:
+ 	CSpeculaFeed(const std::string& socketPath);
+ 	~CSpeculaFeed();
+ 
+-	void OnTurn(CSimulation2& simulation, u32 turn);
++	void OnTurn(CSimulation2& simulation, u32 turn, double updateSeconds);
+ 
+ 	/**
+ 	 * The commands the encoder has written back over the socket since the
+@@ -600,6 +603,11 @@ private:
+ 	// Time spent reading the kind 12 details, for the cost log.
+ 	double m_DetailsSeconds = 0.0;
+ 	u32 m_DetailsTurns = 0;
++	// The simulation updates since the last kind 34 record: their summed
++	// time, their count, and when that record was written.
++	double m_SimSeconds = 0.0;
++	u32 m_SimTurns = 0;
++	double m_SimReported = 0.0;
+ 	std::vector<SSound> m_Sounds;
+ 	std::vector<SProjectile> m_Launches;
+ 	std::vector<u32> m_Removals;
+diff --git a/source/simulation2/system/TurnManager.cpp b/source/simulation2/system/TurnManager.cpp
+index 1a5bb1b147..325f9a09c0 100644
+--- a/source/simulation2/system/TurnManager.cpp
++++ b/source/simulation2/system/TurnManager.cpp
+@@ -21,6 +21,7 @@
+ 
+ #include "gui/GUIManager.h"
+ #include "lib/debug.h"
++#include "lib/timer.h"
+ #include "maths/MathUtil.h"
+ #include "ps/CLogger.h"
+ #include "ps/ConfigDB.h"
+@@ -172,7 +173,9 @@ bool CTurnManager::Update(float simFrameLength, size_t maxTurns)
+ 
+ 		NETTURN_LOG("Running %d cmds\n", commands.size());
+ 
++		const double updateStart = timer_Time();
+ 		m_Simulation2.Update(m_TurnLength, commands);
++		m_LastUpdateSeconds = timer_Time() - updateStart;
+ 
+ 		NotifyFinishedUpdate(m_CurrentTurn);
+ 
+diff --git a/source/simulation2/system/TurnManager.h b/source/simulation2/system/TurnManager.h
+index 7c31257414..e87aa0851e 100644
+--- a/source/simulation2/system/TurnManager.h
++++ b/source/simulation2/system/TurnManager.h
+@@ -223,6 +223,10 @@ protected:
+ 	/// add elapsed time increments to until we reach 0).
+ 	float m_DeltaSimTime;
+ 
++	/// Specula: the wall time the last turn's simulation update took, in
++	/// seconds, for the broadcast's server-load readout.
++	double m_LastUpdateSeconds = 0.0;
++
+ 	IReplayLogger& m_Replay;
+ 
+ 	// The number of the last turn that is allowed to be executed (used for replays)

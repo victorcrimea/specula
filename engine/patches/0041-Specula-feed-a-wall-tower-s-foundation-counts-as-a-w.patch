@@ -1,0 +1,29 @@
+From 877ea058a318c79952c41cc635645b1cb5380713 Mon Sep 17 00:00:00 2001
+From: Viktor Semenov <suit.uanic@gmail.com>
+Date: Tue, 24 Nov 2026 18:12:07 +0000
+Subject: [PATCH 41/45] Specula feed: a wall tower's foundation counts as a
+ wall piece
+
+---
+ source/network/SpeculaFeed.cpp | 8 +++++++-
+ 1 file changed, 7 insertions(+), 1 deletion(-)
+
+diff --git a/source/network/SpeculaFeed.cpp b/source/network/SpeculaFeed.cpp
+index f7f9039646..22fd036e0b 100644
+--- a/source/network/SpeculaFeed.cpp
++++ b/source/network/SpeculaFeed.cpp
+@@ -1670,7 +1670,13 @@ void CSpeculaFeed::WriteTemplateDetails(CSimulation2& simulation, u32 index, con
+ 	u8 placementFlags = 0;
+ 	if (templateNode->GetChild("BuildRestrictions").IsOk())
+ 		placementFlags |= 1;
+-	if (templateNode->GetChild("WallPiece").IsOk())
++	// The foundation filter drops WallPiece, but a wall starts at a tower's
++	// foundation and shares its control group, so the base template counts.
++	const CParamNode* baseNode = templateNode;
++	const size_t filterEnd = templateName.rfind('|');
++	if (filterEnd != std::string::npos)
++		baseNode = cmpTemplateManager->GetTemplate(templateName.substr(filterEnd + 1));
++	if (baseNode && baseNode->GetChild("WallPiece").IsOk())
+ 		placementFlags |= 2;
+ 	m_Buffer.push_back(obstructionType);
+ 	PutI32(m_Buffer, obstructionWidth);

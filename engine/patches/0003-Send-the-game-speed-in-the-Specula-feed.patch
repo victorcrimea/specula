@@ -1,0 +1,70 @@
+From f18dbaffcff161210b36fc7925df8aa7ca775908 Mon Sep 17 00:00:00 2001
+From: Viktor Semenov <suit.uanic@gmail.com>
+Date: Wed, 30 Sep 2026 23:51:21 +0000
+Subject: [PATCH 03/45] Send the game speed in the Specula feed
+
+Feed format v5. The map record gains the match's sim rate
+(CGame::GetSimRate), so viewers know the pace the match runs at. A
+networked game cannot change its speed after setup, so it is sent once.
+---
+ source/network/SpeculaFeed.cpp | 9 ++++++++-
+ source/network/SpeculaFeed.h   | 5 +++--
+ 2 files changed, 11 insertions(+), 3 deletions(-)
+
+diff --git a/source/network/SpeculaFeed.cpp b/source/network/SpeculaFeed.cpp
+index 8f56a12b7a..e0a12be8f4 100644
+--- a/source/network/SpeculaFeed.cpp
++++ b/source/network/SpeculaFeed.cpp
+@@ -22,6 +22,7 @@
+ #include "graphics/MiniMapTexture.h"
+ #include "graphics/Terrain.h"
+ #include "ps/CLogger.h"
++#include "ps/Game.h"
+ #include "scriptinterface/Object.h"
+ #include "scriptinterface/ScriptInterface.h"
+ #include "scriptinterface/ScriptRequest.h"
+@@ -46,7 +47,7 @@
+ 
+ namespace
+ {
+-constexpr u32 FEED_VERSION = 4;
++constexpr u32 FEED_VERSION = 5;
+ constexpr u8 RECORD_TEMPLATE = 1;
+ constexpr u8 RECORD_TURN = 2;
+ constexpr u8 RECORD_MAP = 3;
+@@ -166,6 +167,12 @@ void CSpeculaFeed::OnTurn(CSimulation2& simulation, u32 turn)
+ 			return;
+ 		const size_t start = BeginRecord(m_Buffer, RECORD_MAP);
+ 		PutU32(m_Buffer, cmpTerrain->GetMapSize());
++		// A networked game cannot change its speed after setup, so the
++		// value sent once holds for the whole match.
++		const float gameSpeed = g_Game ? g_Game->GetSimRate() : 1.0f;
++		u32 gameSpeedBits;
++		std::memcpy(&gameSpeedBits, &gameSpeed, sizeof(gameSpeedBits));
++		PutU32(m_Buffer, gameSpeedBits);
+ 		EndRecord(m_Buffer, start);
+ 		WriteTerrain(simulation);
+ 		m_MapSent = true;
+diff --git a/source/network/SpeculaFeed.h b/source/network/SpeculaFeed.h
+index 599b67696e..5208007bd2 100644
+--- a/source/network/SpeculaFeed.h
++++ b/source/network/SpeculaFeed.h
+@@ -32,7 +32,7 @@ class CSimulation2;
+  * socket. It only reads the simulation, after each turn, so it cannot
+  * change the state hash.
+  *
+- * Feed format v4, little-endian: "SPCF", u32 version, then records of
++ * Feed format v5, little-endian: "SPCF", u32 version, then records of
+  * u8 kind, u32 payload length, payload.
+  *  - kind 1 template: u32 index, u16 name length, UTF-8 name, f32 minimap
+  *    icon size, u8 flags, then the icon file name relative to
+@@ -41,7 +41,8 @@ class CSimulation2;
+  *  - kind 2 turn: u32 turn, u32 count, count x {u32 id, u32 template,
+  *    i32 x, i32 z, i32 angle, i32 owner, u8 r, u8 g, u8 b, u8 flags},
+  *    x/z/angle as raw 16.16 fixed. Flag 1: r/g/b is the minimap colour.
+- *  - kind 3 map: u32 map size in metres, once before the first turn.
++ *  - kind 3 map: u32 map size in metres, f32 game speed (the sim rate
++ *    set up for the match), once before the first turn.
+  *  - kind 4 terrain, right after the map record: u32 tiles per side n,
+  *    i32 water level (raw 16.16), f32 shallow water depth in metres,
+  *    u8 circular, (n+1)^2 x u16 heights, u32 texture count, count x

@@ -1,0 +1,150 @@
+From b3b26163b9193edbe43c2baae85d8522918df14f Mon Sep 17 00:00:00 2001
+From: Viktor Semenov <suit.uanic@gmail.com>
+Date: Thu, 8 Oct 2026 00:08:48 +0000
+Subject: [PATCH 09/45] Send fog and the map's post-processing in the Specula
+ feed
+
+Feed format v12. After the sun and ambient colours, the terrain record
+gains the map's fog colour, factor and max, its brightness, contrast,
+saturation and bloom, and the name of its post effect, so the web view
+can fog and post-process the match as the game does.
+
+The four post-processing values and fog reach g_LightEnv even when
+nonvisual, but CMapReader hands the effect name only to the renderer's
+CPostprocManager, which a nonvisual observer has none of. It now also
+hands it to CSpeculaFeed, wherever it sets or resets it.
+---
+ source/graphics/MapReader.cpp  |  4 ++++
+ source/network/SpeculaFeed.cpp | 18 ++++++++++++++++--
+ source/network/SpeculaFeed.h   | 13 +++++++++++--
+ 3 files changed, 31 insertions(+), 4 deletions(-)
+
+diff --git a/source/graphics/MapReader.cpp b/source/graphics/MapReader.cpp
+index 6f2916c569..f81555861c 100644
+--- a/source/graphics/MapReader.cpp
++++ b/source/graphics/MapReader.cpp
+@@ -149,6 +149,7 @@ void CMapReader::LoadMap(const VfsPath& pathname, const ScriptContext& cx,  JS::
+ 	// reset post effects
+ 	if (pPostproc)
+ 		pPostproc->SetPostEffect(L"default");
++	CSpeculaFeed::SetPostEffect(L"default");
+ 
+ 	// load map or script settings script
+ 	if (settings.isUndefined())
+@@ -812,6 +813,7 @@ void CXMLReader::ReadEnvironment(XMBElement parent)
+ 				{
+ 					if (m_MapReader.pPostproc)
+ 						m_MapReader.pPostproc->SetPostEffect(postproc.GetText().FromUTF8());
++					CSpeculaFeed::SetPostEffect(postproc.GetText().FromUTF8());
+ 				}
+ 			}
+ 		}
+@@ -1640,6 +1642,7 @@ int CMapReader::ParseEnvironment()
+ 
+ 	if (pPostproc)
+ 		pPostproc->SetPostEffect(L"default");
++	CSpeculaFeed::SetPostEffect(L"default");
+ 
+ 	std::wstring skySet;
+ 	GET_ENVIRONMENT_PROPERTY(envObj, SkySet, skySet)
+@@ -1703,6 +1706,7 @@ int CMapReader::ParseEnvironment()
+ 
+ 	if (pPostproc)
+ 		pPostproc->SetPostEffect(postProcEffect);
++	CSpeculaFeed::SetPostEffect(postProcEffect);
+ 
+ 	GET_ENVIRONMENT_PROPERTY(postprocObject, Brightness, m_LightEnv.m_Brightness);
+ 	GET_ENVIRONMENT_PROPERTY(postprocObject, Contrast, m_LightEnv.m_Contrast);
+diff --git a/source/network/SpeculaFeed.cpp b/source/network/SpeculaFeed.cpp
+index 688d56b76f..adaa53b9ac 100644
+--- a/source/network/SpeculaFeed.cpp
++++ b/source/network/SpeculaFeed.cpp
+@@ -56,7 +56,7 @@
+ 
+ namespace
+ {
+-constexpr u32 FEED_VERSION = 11;
++constexpr u32 FEED_VERSION = 12;
+ constexpr u8 RECORD_TEMPLATE = 1;
+ constexpr u8 RECORD_TURN = 2;
+ constexpr u8 RECORD_MAP = 3;
+@@ -105,6 +105,7 @@ CSpeculaFeed* g_SoundFeed = nullptr;
+ std::vector<std::string> g_TerrainTextureNames;
+ std::vector<u16> g_TerrainTextureTiles;
+ std::vector<u32> g_TerrainTexturePriorities;
++std::string g_PostEffect = "default";
+ 
+ struct SEntity
+ {
+@@ -413,6 +414,11 @@ void CSpeculaFeed::SetTerrainTextures(const std::vector<std::string>& names, std
+ 	g_TerrainTexturePriorities = std::move(priorities);
+ }
+ 
++void CSpeculaFeed::SetPostEffect(const std::wstring& name)
++{
++	g_PostEffect = utf8_from_wstring(name);
++}
++
+ // Mirrors the test CCmpSoundManager::PlaySoundGroup makes for the displayed
+ // player, for every player at once.
+ u16 CSpeculaFeed::Visibility(const CSimContext& context, entity_id_t ent)
+@@ -689,12 +695,20 @@ void CSpeculaFeed::WriteTerrain(CSimulation2& simulation)
+ 	// not, and the first turn comes after that.
+ 	PutF32(m_Buffer, g_LightEnv.GetElevation());
+ 	PutF32(m_Buffer, g_LightEnv.GetRotation());
+-	for (const RGBColor& color : { g_LightEnv.m_SunColor, g_LightEnv.m_AmbientColor })
++	for (const RGBColor& color : { g_LightEnv.m_SunColor, g_LightEnv.m_AmbientColor, g_LightEnv.m_FogColor })
+ 	{
+ 		PutF32(m_Buffer, color.X);
+ 		PutF32(m_Buffer, color.Y);
+ 		PutF32(m_Buffer, color.Z);
+ 	}
++	PutF32(m_Buffer, g_LightEnv.m_FogFactor);
++	PutF32(m_Buffer, g_LightEnv.m_FogMax);
++	PutF32(m_Buffer, g_LightEnv.m_Brightness);
++	PutF32(m_Buffer, g_LightEnv.m_Contrast);
++	PutF32(m_Buffer, g_LightEnv.m_Saturation);
++	PutF32(m_Buffer, g_LightEnv.m_Bloom);
++	PutU16(m_Buffer, static_cast<u16>(g_PostEffect.size()));
++	m_Buffer.insert(m_Buffer.end(), g_PostEffect.begin(), g_PostEffect.end());
+ 
+ 	const u16* heights = terrain->GetHeightMap();
+ 	for (size_t i = 0; i < verticesPerSide * verticesPerSide; ++i)
+diff --git a/source/network/SpeculaFeed.h b/source/network/SpeculaFeed.h
+index e90c7cb3d8..76e43f58f4 100644
+--- a/source/network/SpeculaFeed.h
++++ b/source/network/SpeculaFeed.h
+@@ -40,7 +40,7 @@ class CSimulation2;
+  * socket. It only reads the simulation, after each turn, so it cannot
+  * change the state hash.
+  *
+- * Feed format v11, little-endian: "SPCF", u32 version, then records of
++ * Feed format v12, little-endian: "SPCF", u32 version, then records of
+  * u8 kind, u32 payload length, payload.
+  *  - kind 1 template: u32 index, u16 name length, UTF-8 name, f32 minimap
+  *    icon size, u8 flags, then the icon file name relative to
+@@ -74,7 +74,10 @@ class CSimulation2;
+  *    i32 water level (raw 16.16), f32 shallow water depth in metres,
+  *    u8 circular, f32 sun elevation, f32 sun rotation (radians, as
+  *    CLightEnv holds them), f32 r, g, b sun colour, f32 r, g, b ambient
+- *    colour, (n+1)^2 x u16 heights, u32 texture count, count x
++ *    colour, f32 r, g, b fog colour, f32 fog factor, f32 fog max, f32
++ *    brightness, f32 contrast, f32 saturation, f32 bloom, u16 length,
++ *    UTF-8 post effect name ("default", "hdr", "DOF"), (n+1)^2 x u16
++ *    heights, u32 texture count, count x
+  *    {u16 length, UTF-8 name}, n^2 x u16 texture index (0xFFFF: none),
+  *    n^2 x u32 blend priority. Heights and tiles are row-major, x fastest.
+  *  - kind 5 players, before the turn record, whenever they change: u32
+@@ -124,6 +127,12 @@ public:
+ 	 */
+ 	static void SetTerrainTextures(const std::vector<std::string>& names, std::vector<u16> tiles, std::vector<u32> priorities);
+ 
++	/**
++	 * Called by CMapReader wherever it sets the post effect, which it only
++	 * keeps in the renderer's CPostprocManager, absent in nonvisual mode.
++	 */
++	static void SetPostEffect(const std::wstring& name);
++
+ 	/**
+ 	 * Called by CCmpSoundManager, which plays nothing in nonvisual mode;
+ 	 * the sounds go out with the turn they were played in. No-ops when no

@@ -1,0 +1,481 @@
+From 6eba867284e664da76aa3d28a5954fcb7ab6b6b0 Mon Sep 17 00:00:00 2001
+From: Viktor Semenov <suit.uanic@gmail.com>
+Date: Wed, 7 Oct 2026 21:31:59 +0000
+Subject: [PATCH 06/45] Send sounds, entity visibility and civs in the Specula
+ feed
+
+Feed format v9. A sounds record before the turn record lists the sound
+groups the turn played, in order: CCmpSoundManager's PlaySoundGroup,
+PlaySoundGroupAtPosition and PlaySoundGroupForPlayer record them before
+testing for a sound manager, which a nonvisual observer has none of. An
+entity's sound carries its owner, position and visibility as of the
+call, since it may be destroyed in the same turn.
+
+Each turn entity gains the sound group of its current animation, which
+CCmpVisualActor already resolves (ICmpVisual gets a C++-only getter),
+and a mask of the players that see it, by the test PlaySoundGroup makes
+for the displayed player. The players record gains each player's civ
+and battle state, which the session GUI picks its music by.
+
+Only reads are added, so the simulation and its hash are unchanged.
+---
+ source/network/SpeculaFeed.cpp                | 135 +++++++++++++++++-
+ source/network/SpeculaFeed.h                  |  50 ++++++-
+ .../components/CCmpSoundManager.cpp           |   6 +
+ .../components/CCmpVisualActor.cpp            |   6 +
+ source/simulation2/components/ICmpVisual.h    |   6 +
+ 5 files changed, 197 insertions(+), 6 deletions(-)
+
+diff --git a/source/network/SpeculaFeed.cpp b/source/network/SpeculaFeed.cpp
+index ec84e0afe5..f5ad9d3d6a 100644
+--- a/source/network/SpeculaFeed.cpp
++++ b/source/network/SpeculaFeed.cpp
+@@ -31,6 +31,7 @@
+ #include "simulation2/components/ICmpGuiInterface.h"
+ #include "simulation2/components/ICmpMinimap.h"
+ #include "simulation2/components/ICmpOwnership.h"
++#include "simulation2/components/ICmpPlayerManager.h"
+ #include "simulation2/components/ICmpPosition.h"
+ #include "simulation2/components/ICmpRangeManager.h"
+ #include "simulation2/components/ICmpTemplateManager.h"
+@@ -42,7 +43,9 @@
+ #include "simulation2/system/CmpPtr.h"
+ #include "simulation2/system/Entity.h"
+ #include "simulation2/system/ParamNode.h"
++#include "simulation2/system/SimContext.h"
+ 
++#include <algorithm>
+ #include <cerrno>
+ #include <cstring>
+ #include <sys/socket.h>
+@@ -51,7 +54,7 @@
+ 
+ namespace
+ {
+-constexpr u32 FEED_VERSION = 8;
++constexpr u32 FEED_VERSION = 9;
+ constexpr u8 RECORD_TEMPLATE = 1;
+ constexpr u8 RECORD_TURN = 2;
+ constexpr u8 RECORD_MAP = 3;
+@@ -60,6 +63,7 @@ constexpr u8 RECORD_PLAYERS = 5;
+ constexpr u8 RECORD_STRING = 6;
+ constexpr u8 RECORD_VARIANT_SET = 7;
+ constexpr u8 RECORD_TERRITORY = 8;
++constexpr u8 RECORD_SOUNDS = 9;
+ constexpr u8 COLOR_MINIMAP = 1;
+ constexpr u8 HAS_VISUAL = 2;
+ constexpr u8 ANIMATION_ONCE = 4;
+@@ -71,6 +75,14 @@ constexpr u8 PLAYER_WON = 2;
+ constexpr u8 STANCE_ENEMY = 0;
+ constexpr u8 STANCE_ALLY = 1;
+ constexpr u8 STANCE_NEUTRAL = 2;
++constexpr u8 BATTLE_PEACE = 0;
++constexpr u8 BATTLE_BATTLE = 1;
++constexpr u8 SOUND_ENTITY = 0;
++constexpr u8 SOUND_POSITION = 1;
++constexpr u8 SOUND_PLAYER = 2;
++constexpr u16 VISIBLE_TO_ALL = 0xFFFF;
++// The visibility mask has one bit per player.
++constexpr player_id_t MAX_VISIBILITY_PLAYERS = 16;
+ // GetSimulationState is not cheap, and diplomacy changes rarely; about 1 s.
+ constexpr u32 PLAYERS_INTERVAL_TURNS = 5;
+ constexpr u16 NO_TEXTURE = 0xFFFF;
+@@ -82,6 +94,11 @@ const std::string CONSTRUCTION_PREFIX = "construction|";
+ // SelectAnimation mirrors the animation name into this variant key.
+ const CStr ANIMATION_KEY = "animation";
+ 
++// The open feed the sound recorders write to; the
++// components that call them have no way to reach the turn manager that owns
++// it.
++CSpeculaFeed* g_SoundFeed = nullptr;
++
+ std::vector<std::string> g_TerrainTextureNames;
+ std::vector<u16> g_TerrainTextureTiles;
+ std::vector<u32> g_TerrainTexturePriorities;
+@@ -107,6 +124,8 @@ struct SEntity
+ 	i32 syncRepeat;
+ 	i32 syncOffset;
+ 	i32 constructionProgress;
++	u32 soundGroup;
++	u16 visibility;
+ };
+ 
+ void PutU16(std::vector<u8>& buffer, u16 value)
+@@ -167,11 +186,14 @@ CSpeculaFeed::CSpeculaFeed(const std::string& socketPath)
+ 
+ 	m_Buffer.insert(m_Buffer.end(), { 'S', 'P', 'C', 'F' });
+ 	PutU32(m_Buffer, FEED_VERSION);
+-	Send();
++	if (Send())
++		g_SoundFeed = this;
+ }
+ 
+ CSpeculaFeed::~CSpeculaFeed()
+ {
++	if (g_SoundFeed == this)
++		g_SoundFeed = nullptr;
+ 	if (m_Socket >= 0)
+ 		close(m_Socket);
+ }
+@@ -267,7 +289,9 @@ void CSpeculaFeed::OnTurn(CSimulation2& simulation, u32 turn)
+ 			0, 0, 0, 0,
+ 			position.Y.GetInternalValue(),
+ 			NONE, 0, NONE, NONE, 0, 0, 0,
+-			cmpPosition->GetConstructionProgress().GetInternalValue()
++			cmpPosition->GetConstructionProgress().GetInternalValue(),
++			NONE,
++			Visibility(simulation.GetSimContext(), ent)
+ 		};
+ 		CmpPtr<ICmpVisual> cmpVisual(simulation, ent);
+ 		if (cmpVisual)
+@@ -282,6 +306,7 @@ void CSpeculaFeed::OnTurn(CSimulation2& simulation, u32 turn)
+ 			entity.animationSpeed = cmpVisual->GetAnimationSpeed().GetInternalValue();
+ 			entity.syncRepeat = cmpVisual->GetAnimationSyncRepeat().GetInternalValue();
+ 			entity.syncOffset = cmpVisual->GetAnimationSyncOffset().GetInternalValue();
++			entity.soundGroup = InternString(utf8_from_wstring(cmpVisual->GetSoundGroup()));
+ 		}
+ 		// The minimap colour already resolves owner to player colour and
+ 		// gives resources their template colour, as the 2D view needs.
+@@ -292,6 +317,25 @@ void CSpeculaFeed::OnTurn(CSimulation2& simulation, u32 turn)
+ 		entities.push_back(entity);
+ 	}
+ 
++	if (!m_Sounds.empty())
++	{
++		const size_t soundsStart = BeginRecord(m_Buffer, RECORD_SOUNDS);
++		PutU32(m_Buffer, static_cast<u32>(m_Sounds.size()));
++		for (const SSound& sound : m_Sounds)
++		{
++			PutU32(m_Buffer, sound.group);
++			m_Buffer.push_back(sound.target);
++			PutU32(m_Buffer, sound.entity);
++			PutI32(m_Buffer, sound.player);
++			PutI32(m_Buffer, sound.x);
++			PutI32(m_Buffer, sound.y);
++			PutI32(m_Buffer, sound.z);
++			PutU16(m_Buffer, sound.visibility);
++		}
++		EndRecord(m_Buffer, soundsStart);
++		m_Sounds.clear();
++	}
++
+ 	const size_t start = BeginRecord(m_Buffer, RECORD_TURN);
+ 	PutU32(m_Buffer, turn);
+ 	PutU32(m_Buffer, static_cast<u32>(entities.size()));
+@@ -313,6 +357,8 @@ void CSpeculaFeed::OnTurn(CSimulation2& simulation, u32 turn)
+ 		PutI32(m_Buffer, entity.syncRepeat);
+ 		PutI32(m_Buffer, entity.syncOffset);
+ 		PutI32(m_Buffer, entity.constructionProgress);
++		PutU32(m_Buffer, entity.soundGroup);
++		PutU16(m_Buffer, entity.visibility);
+ 	}
+ 	EndRecord(m_Buffer, start);
+ 
+@@ -326,6 +372,74 @@ void CSpeculaFeed::SetTerrainTextures(const std::vector<std::string>& names, std
+ 	g_TerrainTexturePriorities = std::move(priorities);
+ }
+ 
++// Mirrors the test CCmpSoundManager::PlaySoundGroup makes for the displayed
++// player, for every player at once.
++u16 CSpeculaFeed::Visibility(const CSimContext& context, entity_id_t ent)
++{
++	CmpPtr<ICmpRangeManager> cmpRangeManager(context, SYSTEM_ENTITY);
++	CmpPtr<ICmpPlayerManager> cmpPlayerManager(context, SYSTEM_ENTITY);
++	if (!cmpRangeManager || !cmpPlayerManager)
++		return 0;
++	const player_id_t count = std::min(cmpPlayerManager->GetNumPlayers(), MAX_VISIBILITY_PLAYERS);
++	u16 visibility = 0;
++	for (player_id_t player = 0; player < count; ++player)
++		if (cmpRangeManager->GetLosVisibility(ent, player) == LosVisibility::VISIBLE)
++			visibility |= static_cast<u16>(1 << player);
++	return visibility;
++}
++
++void CSpeculaFeed::RecordEntitySound(const CSimContext& context, const std::wstring& group, entity_id_t ent)
++{
++	if (!g_SoundFeed || ent == INVALID_ENTITY)
++		return;
++	// The engine plays nothing for an entity out of the world.
++	CmpPtr<ICmpPosition> cmpPosition(context, ent);
++	if (!cmpPosition || !cmpPosition->IsInWorld())
++		return;
++	CmpPtr<ICmpOwnership> cmpOwnership(context, ent);
++	const CFixedVector3D position = cmpPosition->GetPosition();
++	g_SoundFeed->m_Sounds.push_back({
++		g_SoundFeed->InternString(utf8_from_wstring(group)),
++		SOUND_ENTITY,
++		ent,
++		cmpOwnership ? cmpOwnership->GetOwner() : INVALID_PLAYER,
++		position.X.GetInternalValue(),
++		position.Y.GetInternalValue(),
++		position.Z.GetInternalValue(),
++		Visibility(context, ent)
++	});
++}
++
++void CSpeculaFeed::RecordPositionSound(const std::wstring& group, const CFixedVector3D& position)
++{
++	if (!g_SoundFeed)
++		return;
++	g_SoundFeed->m_Sounds.push_back({
++		g_SoundFeed->InternString(utf8_from_wstring(group)),
++		SOUND_POSITION,
++		INVALID_ENTITY,
++		INVALID_PLAYER,
++		position.X.GetInternalValue(),
++		position.Y.GetInternalValue(),
++		position.Z.GetInternalValue(),
++		VISIBLE_TO_ALL
++	});
++}
++
++void CSpeculaFeed::RecordPlayerSound(const std::wstring& group, player_id_t player)
++{
++	if (!g_SoundFeed)
++		return;
++	g_SoundFeed->m_Sounds.push_back({
++		g_SoundFeed->InternString(utf8_from_wstring(group)),
++		SOUND_PLAYER,
++		INVALID_ENTITY,
++		player,
++		0, 0, 0,
++		VISIBLE_TO_ALL
++	});
++}
++
+ // An empty text is no string: an actor or animation that was never set.
+ u32 CSpeculaFeed::InternString(const std::string& text)
+ {
+@@ -397,10 +511,12 @@ void CSpeculaFeed::WritePlayers(CSimulation2& simulation)
+ 		JS::RootedValue neutrals(rq.cx);
+ 		std::string name;
+ 		std::string state;
++		std::string civ;
+ 		float r, g, b;
+ 		i32 team;
+ 		if (!Script::GetPropertyInt(rq, players, static_cast<int>(i), &player) ||
+ 		    !Script::GetProperty(rq, player, "name", name) ||
++		    !Script::GetProperty(rq, player, "civ", civ) ||
+ 		    !Script::GetProperty(rq, player, "color", &color) ||
+ 		    !Script::GetProperty(rq, color, "r", r) ||
+ 		    !Script::GetProperty(rq, color, "g", g) ||
+@@ -432,6 +548,16 @@ void CSpeculaFeed::WritePlayers(CSimulation2& simulation)
+ 			// The GUI tests alliance first, then neutrality.
+ 			payload.push_back(ally ? STANCE_ALLY : neutral ? STANCE_NEUTRAL : STANCE_ENEMY);
+ 		}
++		PutU16(payload, static_cast<u16>(civ.size()));
++		payload.insert(payload.end(), civ.begin(), civ.end());
++		// The session GUI picks its music by this, though it skips the poll
++		// for observers.
++		JS::RootedValue playerID(rq.cx);
++		JS::RootedValue battleState(rq.cx);
++		Script::ToJSVal(rq, &playerID, static_cast<i32>(i));
++		cmpGuiInterface->ScriptCall(INVALID_PLAYER, L"GetBattleState", playerID, &battleState);
++		std::string battle;
++		payload.push_back(battleState.isString() && Script::FromJSVal(rq, battleState, battle) && battle == "BATTLE" ? BATTLE_BATTLE : BATTLE_PEACE);
+ 	}
+ 
+ 	if (payload == m_LastPlayers)
+@@ -531,4 +657,7 @@ void CSpeculaFeed::Disable(const char* what)
+ 		close(m_Socket);
+ 	m_Socket = -1;
+ 	m_Buffer.clear();
++	m_Sounds.clear();
++	if (g_SoundFeed == this)
++		g_SoundFeed = nullptr;
+ }
+diff --git a/source/network/SpeculaFeed.h b/source/network/SpeculaFeed.h
+index 3d53231875..8da3c89896 100644
+--- a/source/network/SpeculaFeed.h
++++ b/source/network/SpeculaFeed.h
+@@ -20,7 +20,10 @@
+ 
+ #include "lib/code_annotation.h"
+ #include "lib/types.h"
++#include "maths/FixedVector3D.h"
+ #include "ps/CStr.h"
++#include "simulation2/helpers/Player.h"
++#include "simulation2/system/Entity.h"
+ 
+ #include <map>
+ #include <string>
+@@ -28,6 +31,7 @@
+ #include <utility>
+ #include <vector>
+ 
++class CSimContext;
+ class CSimulation2;
+ 
+ /**
+@@ -35,7 +39,7 @@ class CSimulation2;
+  * socket. It only reads the simulation, after each turn, so it cannot
+  * change the state hash.
+  *
+- * Feed format v8, little-endian: "SPCF", u32 version, then records of
++ * Feed format v9, little-endian: "SPCF", u32 version, then records of
+  * u8 kind, u32 payload length, payload.
+  *  - kind 1 template: u32 index, u16 name length, UTF-8 name, f32 minimap
+  *    icon size, u8 flags, then the icon file name relative to
+@@ -45,13 +49,18 @@ class CSimulation2;
+  *    i32 x, i32 z, i32 angle, i32 owner, u8 r, u8 g, u8 b, u8 flags,
+  *    i32 y, u32 actor, u32 seed, u32 variant set, u32 animation,
+  *    i32 animation speed, i32 sync repeat, i32 sync offset,
+- *    i32 construction progress}. x/y/z/angle/speed/progress are raw 16.16
++ *    i32 construction progress, u32 sound group, u16 visibility}.
++ *    x/y/z/angle/speed/progress are raw 16.16
+  *    fixed, sync repeat and offset raw 16.16 milliseconds. actor and
+  *    animation are strings, 0xFFFFFFFF for none, as is an empty variant
+  *    set. Flag 1: r/g/b is the minimap colour. Flag 2: the entity has a
+  *    VisualActor; without it the visual fields are zero or none. Flag 4: the
+  *    animation plays once. Local entities are left out, except the
+  *    construction previews of foundations ("construction|" templates).
++ *    The sound group is a string, the group of the current animation
++ *    relative to audio/ ({lang} and {phenotype} replaced), or none. Bit p
++ *    of the visibility is set when player p sees the entity (LOS VISIBLE),
++ *    for p below 16.
+  *  - kind 6 string, before the turn record that first uses it: u32 index,
+  *    then UTF-8 text. Indices count up from 0.
+  *  - kind 7 variant set, likewise: u32 index, u32 count, count x {u32 key
+@@ -68,12 +77,23 @@ class CSimulation2;
+  *  - kind 5 players, before the turn record, whenever they change: u32
+  *    count n, n x {u16 name length, UTF-8 name, u8 r, u8 g, u8 b, i32 team
+  *    (-1: none), u8 state (0 active, 1 defeated, 2 won), n x u8 stance
+- *    towards player j (0 enemy, 1 ally, 2 neutral)}. Index 0 is gaia.
++ *    towards player j (0 enemy, 1 ally, 2 neutral), u16 civ length, UTF-8
++ *    civ code, u8 battle state (0 peace, 1 battle)}. Index 0 is gaia.
+  *  - kind 8 territory, before the turn record, whenever it changes: u32
+  *    width, u32 height, width*height x u8 territory tile, row-major, x
+  *    fastest, as ICmpTerritoryManager's grid without the processed bit:
+  *    owner in 0x1F, connected 0x20, blinking 0x40. A tile is
+  *    NAVCELLS_PER_TERRITORY_TILE navcells wide.
++ *  - kind 9 sounds, before the turn record, when the turn played any: u32
++ *    count, count x {u32 group string, u8 target, u32 entity, i32 player,
++ *    i32 x, i32 y, i32 z, u16 visibility}, in the order the simulation
++ *    played them. The group is relative to audio/. Target 0: an entity
++ *    (CCmpSoundManager::PlaySoundGroup), with its owner as player and its
++ *    position and visibility as of the call, since it may be destroyed in
++ *    the same turn. Target 1: a position (PlaySoundGroupAtPosition), heard
++ *    regardless of LOS, entity 0, player -1, visibility 0xFFFF. Target 2: a
++ *    player (PlaySoundGroupForPlayer), entity 0, position zero, visibility
++ *    0xFFFF. Positions are raw 16.16.
+  */
+ class CSpeculaFeed
+ {
+@@ -90,7 +110,30 @@ public:
+ 	 */
+ 	static void SetTerrainTextures(const std::vector<std::string>& names, std::vector<u16> tiles, std::vector<u32> priorities);
+ 
++	/**
++	 * Called by CCmpSoundManager, which plays nothing in nonvisual mode;
++	 * the sounds go out with the turn they were played in. No-ops when no
++	 * feed is open.
++	 */
++	static void RecordEntitySound(const CSimContext& context, const std::wstring& group, entity_id_t ent);
++	static void RecordPositionSound(const std::wstring& group, const CFixedVector3D& position);
++	static void RecordPlayerSound(const std::wstring& group, player_id_t player);
++
+ private:
++	struct SSound
++	{
++		u32 group;
++		u8 target;
++		u32 entity;
++		i32 player;
++		i32 x;
++		i32 y;
++		i32 z;
++		u16 visibility;
++	};
++
++	static u16 Visibility(const CSimContext& context, entity_id_t ent);
++
+ 	void WriteTerrain(CSimulation2& simulation);
+ 	void WritePlayers(CSimulation2& simulation);
+ 	void WriteTerritory(CSimulation2& simulation);
+@@ -106,6 +149,7 @@ private:
+ 	std::unordered_map<std::string, u32> m_StringIndices;
+ 	std::map<std::vector<std::pair<u32, u32>>, u32> m_VariantSetIndices;
+ 	std::vector<u8> m_LastPlayers;
++	std::vector<SSound> m_Sounds;
+ 	size_t m_TerritoryDirtyID = 0;
+ 	size_t m_TerritoryBlinkingDirtyID = 0;
+ };
+diff --git a/source/simulation2/components/CCmpSoundManager.cpp b/source/simulation2/components/CCmpSoundManager.cpp
+index 698a6d64ab..72cd3eed23 100644
+--- a/source/simulation2/components/CCmpSoundManager.cpp
++++ b/source/simulation2/components/CCmpSoundManager.cpp
+@@ -21,6 +21,7 @@
+ 
+ #include "lib/path.h"
+ #include "maths/Vector3D.h"
++#include "network/SpeculaFeed.h"
+ #include "scriptinterface/ScriptInterface.h"
+ #include "simulation2/components/ICmpOwnership.h"
+ #include "simulation2/components/ICmpPosition.h"
+@@ -67,6 +68,9 @@ public:
+ 
+ 	void PlaySoundGroup(const std::wstring& name, entity_id_t source) override
+ 	{
++		// Specula: recorded before the sound manager test, as the observer
++		// runs without one.
++		CSpeculaFeed::RecordEntitySound(GetSimContext(), name, source);
+ 		if (!g_SoundManager || (source == INVALID_ENTITY))
+ 			return;
+ 
+@@ -91,6 +95,7 @@ public:
+ 
+ 	void PlaySoundGroupAtPosition(const std::wstring& name, const CFixedVector3D& sourcePos) override
+ 	{
++		CSpeculaFeed::RecordPositionSound(name, sourcePos);
+ 		if (!g_SoundManager)
+ 			return;
+ 		g_SoundManager->PlayAsGroup(name, CVector3D(sourcePos), INVALID_ENTITY, false);
+@@ -98,6 +103,7 @@ public:
+ 
+ 	void PlaySoundGroupForPlayer(const VfsPath& groupPath, const player_id_t playerId) const override
+ 	{
++		CSpeculaFeed::RecordPlayerSound(groupPath.string(), playerId);
+ 		if (!g_SoundManager)
+ 			return;
+ 		g_SoundManager->PlayAsGroup(groupPath, CVector3D(0.f, 0.f, 0.f), INVALID_ENTITY, GetSimContext().GetCurrentDisplayedPlayer() == playerId);
+diff --git a/source/simulation2/components/CCmpVisualActor.cpp b/source/simulation2/components/CCmpVisualActor.cpp
+index c2af774271..34b336f66d 100644
+--- a/source/simulation2/components/CCmpVisualActor.cpp
++++ b/source/simulation2/components/CCmpVisualActor.cpp
+@@ -39,6 +39,7 @@
+ #include "maths/FixedVector3D.h"
+ #include "maths/Matrix3D.h"
+ #include "maths/Vector3D.h"
++#include "network/SpeculaFeed.h"
+ #include "ps/CLogger.h"
+ #include "ps/CStr.h"
+ #include "ps/algorithm.h"
+@@ -493,6 +494,11 @@ public:
+ 		return m_VariantSelections;
+ 	}
+ 
++	const std::wstring& GetSoundGroup() const override
++	{
++		return m_SoundGroup;
++	}
++
+ 	void SelectAnimation(const std::string& name, bool once = false, fixed speed = fixed::FromInt(1)) override
+ 	{
+ 		m_AnimName = name;
+diff --git a/source/simulation2/components/ICmpVisual.h b/source/simulation2/components/ICmpVisual.h
+index e61fcd92e3..d7b2827662 100644
+--- a/source/simulation2/components/ICmpVisual.h
++++ b/source/simulation2/components/ICmpVisual.h
+@@ -128,6 +128,12 @@ public:
+ 	 */
+ 	virtual const std::map<CStr, CStr>& GetVariantSelections() const = 0;
+ 
++	/**
++	 * Returns the sound group the current animation plays at its sound or
++	 * event point, as resolved by SelectAnimation, or an empty string.
++	 */
++	virtual const std::wstring& GetSoundGroup() const = 0;
++
+ 	/**
+ 	 * Start playing the given animation. If there are multiple possible animations then it will
+ 	 * pick one at random (not network-synchronised).

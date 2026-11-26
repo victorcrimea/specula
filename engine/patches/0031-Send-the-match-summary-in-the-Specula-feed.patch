@@ -1,0 +1,233 @@
+From e9f4ba4fd49508f806e9843864c3064bca9b66a5 Mon Sep 17 00:00:00 2001
+From: Viktor Semenov <suit.uanic@gmail.com>
+Date: Thu, 12 Nov 2026 18:11:14 +0000
+Subject: [PATCH 31/45] Send the match summary in the Specula feed
+
+Kind 25 carries GuiInterface.GetSpeculaSummaries: the replay metadata
+once with every player and once per seat, filtered to Gaia, the seat
+and the mutual allies it shares LOS with.
+---
+ .../simulation/components/GuiInterface.js     | 32 ++++++++
+ source/network/SpeculaFeed.cpp                | 76 +++++++++++++++++++
+ source/network/SpeculaFeed.h                  | 15 ++++
+ 3 files changed, 123 insertions(+)
+
+diff --git a/binaries/data/mods/public/simulation/components/GuiInterface.js b/binaries/data/mods/public/simulation/components/GuiInterface.js
+index d846151302..91febe29a1 100644
+--- a/binaries/data/mods/public/simulation/components/GuiInterface.js
++++ b/binaries/data/mods/public/simulation/components/GuiInterface.js
+@@ -217,6 +217,37 @@ GuiInterface.prototype.GetReplayMetadata = function()
+ 	};
+ };
+ 
++/**
++ * The replay metadata, once with every player and once per player with only
++ * what that player may see in the summary (Gaia, the player and the mutual
++ * allies it shares LOS with, as gui/session/MenuButtons.js). The extended
++ * state is read once because it is costly; nothing is changed.
++ */
++GuiInterface.prototype.GetSpeculaSummaries = function()
++{
++	const extended = this.GetExtendedSimulationState();
++	const summaries = [{
++		"timeElapsed": extended.timeElapsed,
++		"playerStates": extended.players,
++		"mapSettings": InitAttributes.settings
++	}];
++	for (let seat = 1; seat < extended.players.length; ++seat)
++	{
++		const included = [];
++		for (let p = 0; p < extended.players.length; ++p)
++			if (p == 0 || p == seat ||
++				extended.players[seat].hasSharedLos && extended.players[p].isMutualAlly[seat])
++				included.push(p);
++		summaries.push({
++			"timeElapsed": extended.timeElapsed,
++			"playerStates": included.map(p => extended.players[p]),
++			"playerIDs": included,
++			"mapSettings": InitAttributes.settings
++		});
++	}
++	return summaries;
++};
++
+ /**
+  * Called when the game ends if the current game is part of a campaign run.
+  */
+@@ -2065,6 +2096,7 @@ GuiInterface.prototype.exposedFunctions = {
+ 	"GetExtendedSimulationState": 1,
+ 	"GetInitAttributes": 1,
+ 	"GetReplayMetadata": 1,
++	"GetSpeculaSummaries": 1,
+ 	"GetCampaignGameEndData": 1,
+ 	"GetRenamedEntities": 1,
+ 	"ClearRenamedEntities": 1,
+diff --git a/source/network/SpeculaFeed.cpp b/source/network/SpeculaFeed.cpp
+index df5170e6c9..7a9daf9078 100644
+--- a/source/network/SpeculaFeed.cpp
++++ b/source/network/SpeculaFeed.cpp
+@@ -107,6 +107,7 @@ constexpr u8 RECORD_PLAYER_GUI = 21;
+ constexpr u8 RECORD_FORMATION_DATA = 22;
+ constexpr u8 RECORD_QUERY_REPLY = 23;
+ constexpr u8 RECORD_LOS = 24;
++constexpr u8 RECORD_SUMMARY = 25;
+ constexpr u8 UPLINK_COMMAND = 1;
+ constexpr u8 UPLINK_QUERY = 2;
+ constexpr u8 QUERY_BUILDING_PREVIEW = 1;
+@@ -232,6 +233,8 @@ constexpr u32 PLAYERS_INTERVAL_TURNS = 5;
+ // The stats are read for every entity and change only with a technology,
+ // an aura or a garrison; about 5 s.
+ constexpr u32 STATS_INTERVAL_TURNS = 25;
++// The statistics tracker samples every 30 s; 150 turns of 200 ms match it.
++constexpr u32 SUMMARY_INTERVAL_TURNS = 150;
+ // The part of GuiInterface.GetEntityState the selection's attack and
+ // resistance tooltip reads (gui/session/selection_details.js), with the
+ // elevation-adapted range in whole metres off the range, which is all
+@@ -1002,6 +1005,22 @@ void CSpeculaFeed::OnTurn(CSimulation2& simulation, u32 turn)
+ 	}
+ 	EndRecord(m_Buffer, start);
+ 
++	// After the turn record, so the server has already named the match, and
++	// before Send(), so the final copy reaches it before the feed closes.
++	const bool isFinal = g_Game && g_Game->IsGameFinished();
++	const bool periodic = !m_HasSummary || turn >= m_NextSummaryTurn;
++	if (!m_FinalSummarySent && (isFinal || m_SummaryRequested || periodic))
++	{
++		if (WriteSummary(simulation, turn, isFinal))
++		{
++			m_HasSummary = true;
++			m_NextSummaryTurn = turn + SUMMARY_INTERVAL_TURNS;
++			m_SummaryRequested = false;
++			if (isFinal)
++				m_FinalSummarySent = true;
++		}
++	}
++
+ 	Send();
+ }
+ 
+@@ -2481,6 +2500,46 @@ void CSpeculaFeed::WriteFormationData(CSimulation2& simulation, const ScriptRequ
+ 	EndRecord(m_Buffer, start);
+ }
+ 
++// One GetExtendedSimulationState costs a lot (the team exploration is
++// computed from scratch), so the full copy and every seat's filtered copy
++// come from a single call.
++bool CSpeculaFeed::WriteSummary(CSimulation2& simulation, u32 turn, bool isFinal)
++{
++	ScriptRequest rq(simulation.GetScriptInterface());
++	JS::RootedValue arg(rq.cx);
++	JS::RootedValue result(rq.cx);
++	if (!CallGui(simulation, INVALID_PLAYER, L"GetSpeculaSummaries", arg, &result))
++		return false;
++	const u32 count = std::min<u32>(ArrayLength(rq, result), 0xFF);
++	if (count == 0)
++		return false;
++
++	std::vector<std::string> views;
++	for (u32 i = 0; i < count; ++i)
++	{
++		JS::RootedValue element(rq.cx);
++		if (!Script::GetPropertyInt(rq, result, static_cast<int>(i), &element))
++			return false;
++		std::string json = Script::StringifyJSON(rq, &element, false);
++		if (json.empty())
++			return false;
++		views.push_back(std::move(json));
++	}
++
++	const size_t start = BeginRecord(m_Buffer, RECORD_SUMMARY);
++	PutU32(m_Buffer, turn);
++	m_Buffer.push_back(isFinal ? 1 : 0);
++	m_Buffer.push_back(static_cast<u8>(views.size()));
++	for (u32 i = 0; i < views.size(); ++i)
++	{
++		m_Buffer.push_back(static_cast<u8>(i));
++		PutU32(m_Buffer, static_cast<u32>(views[i].size()));
++		m_Buffer.insert(m_Buffer.end(), views[i].begin(), views[i].end());
++	}
++	EndRecord(m_Buffer, start);
++	return true;
++}
++
+ void CSpeculaFeed::WritePlayers(CSimulation2& simulation)
+ {
+ 	CmpPtr<ICmpGuiInterface> cmpGuiInterface(simulation, SYSTEM_ENTITY);
+@@ -2501,6 +2560,7 @@ void CSpeculaFeed::WritePlayers(CSimulation2& simulation)
+ 	// never.
+ 	std::vector<u8> economy;
+ 	PutU32(economy, count);
++	std::vector<u8> states;
+ 	for (u32 i = 0; i < count; ++i)
+ 	{
+ 		JS::RootedValue player(rq.cx);
+@@ -2519,6 +2579,9 @@ void CSpeculaFeed::WritePlayers(CSimulation2& simulation)
+ 		Script::GetProperty(rq, player, "resourceGatherers", &gatherers);
+ 		Script::GetProperty(rq, player, "phase", phase);
+ 		Script::GetProperty(rq, player, "panelEntities", &panelEntities);
++		std::string state;
++		Script::GetProperty(rq, player, "state", state);
++		states.push_back(state == "active" ? PLAYER_ACTIVE : state == "won" ? PLAYER_WON : PLAYER_DEFEATED);
+ 		std::vector<std::string> codes;
+ 		if (resources.isObject())
+ 			Script::EnumeratePropertyNames(rq, resources, true, codes);
+@@ -2545,6 +2608,19 @@ void CSpeculaFeed::WritePlayers(CSimulation2& simulation)
+ 			PutU32(economy, id);
+ 		}
+ 	}
++	// A defeated seat's copy of the summary must not wait for the next
++	// periodic capture: the game goes on for the others. The first read is
++	// not a transition.
++	if (!m_LastPlayerStates.empty() && m_LastPlayerStates.size() == states.size())
++	{
++		for (size_t i = 0; i < states.size(); ++i)
++		{
++			if (m_LastPlayerStates[i] == PLAYER_ACTIVE && states[i] != PLAYER_ACTIVE)
++				m_SummaryRequested = true;
++		}
++	}
++	m_LastPlayerStates = std::move(states);
++
+ 	if (economy != m_LastEconomy)
+ 	{
+ 		const size_t economyStart = BeginRecord(m_Buffer, RECORD_ECONOMY);
+diff --git a/source/network/SpeculaFeed.h b/source/network/SpeculaFeed.h
+index a802e14ea8..b8db5872af 100644
+--- a/source/network/SpeculaFeed.h
++++ b/source/network/SpeculaFeed.h
+@@ -310,6 +310,12 @@ class ScriptRequest;
+  *    bit 2 for IsVisible, from GetLosQuerier(player). The first record of
+  *    a match, or of a new grid size, has one run over every vertex; later
+  *    ones only the runs that changed.
++ *  - kind 25 summary, after the turn record, on the first turn, every 150
++ *    turns, when a player's outcome changes and on the turn the game
++ *    finishes: u32 turn, u8 flags (bit 0: final), u8 count, then count x
++ *    {u8 view, u32 length, UTF-8 JSON of GuiInterface.GetSpeculaSummaries
++ *    element view}. View 0 has every player; view n >= 1 only player n, Gaia
++ *    and the mutual allies sharing player n's LOS.
+  */
+ class CSpeculaFeed
+ {
+@@ -471,6 +477,7 @@ private:
+ 
+ 	void WriteTerrain(CSimulation2& simulation);
+ 	void WritePlayers(CSimulation2& simulation);
++	bool WriteSummary(CSimulation2& simulation, u32 turn, bool isFinal);
+ 	void WriteFormationData(CSimulation2& simulation, const ScriptRequest& rq, const std::string& formation);
+ 	void WriteTerritory(CSimulation2& simulation);
+ 	void WriteLos(CSimulation2& simulation);
+@@ -525,6 +532,14 @@ private:
+ 	// Each distinct kind 20 stats JSON, by its index.
+ 	std::unordered_map<std::string, u32> m_StatsIndices;
+ 	std::vector<u8> m_LastPlayers;
++	// The kind 25 cadence: a capture is due on the first turn, every
++	// SUMMARY_INTERVAL_TURNS, and when a player's outcome changes; the
++	// final one, on the turn the game finishes, is the last.
++	bool m_SummaryRequested = true;
++	bool m_HasSummary = false;
++	bool m_FinalSummarySent = false;
++	u32 m_NextSummaryTurn = 0;
++	std::vector<u8> m_LastPlayerStates;
+ 	std::vector<u8> m_LastEconomy;
+ 	// The kind 21 record last written, and the formation templates whose
+ 	// kind 22 record has been.

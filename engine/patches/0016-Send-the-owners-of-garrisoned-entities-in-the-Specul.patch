@@ -1,0 +1,68 @@
+From 944d4909e9b352dc1014d4f25c49b6d23d37e29c Mon Sep 17 00:00:00 2001
+From: Viktor Semenov <suit.uanic@gmail.com>
+Date: Tue, 20 Oct 2026 22:52:35 +0000
+Subject: [PATCH 16/45] Send the owners of garrisoned entities in the Specula
+ feed
+
+Garrisoned entities are out of the world, so the entity records leave
+them out and a viewer cannot colour or group them by owner. Kind 12 group
+131072 sends the owner of each entity of the garrison group, in its
+order. A new group bit, so the feed stays v14.
+---
+ source/network/SpeculaFeed.cpp | 6 ++++++
+ source/network/SpeculaFeed.h   | 7 +++++--
+ 2 files changed, 11 insertions(+), 2 deletions(-)
+
+diff --git a/source/network/SpeculaFeed.cpp b/source/network/SpeculaFeed.cpp
+index 515176e0d7..143ef94c54 100644
+--- a/source/network/SpeculaFeed.cpp
++++ b/source/network/SpeculaFeed.cpp
+@@ -107,6 +107,7 @@ constexpr size_t DETAIL_PROGRESS = 13;
+ constexpr size_t DETAIL_HOLDER = 14;
+ constexpr size_t DETAIL_TRADER = 15;
+ constexpr size_t DETAIL_RANGES = 16;
++constexpr size_t DETAIL_GARRISON_OWNERS = 17;
+ // Bytes of a range overlay in the ranges group: type, radius, texture,
+ // mask, thickness.
+ constexpr u8 RANGE_ATTACK = 0;
+@@ -1032,10 +1033,15 @@ void CSpeculaFeed::WriteDetails(CSimulation2& simulation, u32 turn)
+ 				PutU16(group, Clamp16(static_cast<u32>(CallFloat(rq, component, "GetCapacity"))));
+ 				PutU16(group, Clamp16(static_cast<u32>(CallFloat(rq, component, "OccupiedSlots"))));
+ 				PutU16(group, Clamp16(static_cast<u32>(held.size())));
++				std::vector<u8>& owners = groups[DETAIL_GARRISON_OWNERS];
++				PutU16(owners, Clamp16(static_cast<u32>(held.size())));
+ 				for (size_t j = 0; j < std::min<size_t>(held.size(), 0xFFFF); ++j)
+ 				{
+ 					PutU32(group, held[j]);
+ 					PutU32(group, InternTemplate(simulation, held[j], cmpTemplateManager->GetCurrentTemplateName(held[j])));
++					CmpPtr<ICmpOwnership> cmpOwnership(simulation, held[j]);
++					owners.push_back(static_cast<u8>(static_cast<i8>(
++						cmpOwnership ? cmpOwnership->GetOwner() : INVALID_PLAYER)));
+ 				}
+ 			}
+ 			else if (interface == "Foundation" || interface == "Repairable")
+diff --git a/source/network/SpeculaFeed.h b/source/network/SpeculaFeed.h
+index 9ea5b86529..4452afa320 100644
+--- a/source/network/SpeculaFeed.h
++++ b/source/network/SpeculaFeed.h
+@@ -171,7 +171,10 @@ class CSimulation2;
+  *    1 aura, 2 heal), f32 radius, u32 texture string, u32 mask string, f32
+  *    thickness} range overlays, as RangeOverlayManager hands them to the
+  *    renderer, sampled every PLAYERS_INTERVAL_TURNS turns and written as n =
+- *    0 for an entity that has the components but no range now}, then u32 count, count x u32
++ *    0 for an entity that has the components but no range now; 131072 u16
++ *    n, n x i8 owner of each garrisoned entity of group 128, in its order
++ *    (-1 for none), since they are out of the world and the entity records
++ *    leave them out}, then u32 count, count x u32
+  *    id of entities that no longer have any of them. A group is written
+  *    when it differs from what was last written for the entity, so every
+  *    group an entity has comes on the first turn it is seen. Local entities
+@@ -294,7 +297,7 @@ private:
+ 	 * The last bytes written for each kind 12 group of an entity, by group
+ 	 * bit; an empty slot is a group the entity does not have.
+ 	 */
+-	using SDetailGroups = std::array<std::vector<u8>, 17>;
++	using SDetailGroups = std::array<std::vector<u8>, 18>;
+ 
+ 	static u16 Visibility(const CSimContext& context, entity_id_t ent);
+ 

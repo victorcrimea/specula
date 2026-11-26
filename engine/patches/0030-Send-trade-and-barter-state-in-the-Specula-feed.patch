@@ -1,0 +1,149 @@
+From a1c18222efa738923790a1536793eb46740b3b6b Mon Sep 17 00:00:00 2001
+From: Viktor Semenov <suit.uanic@gmail.com>
+Date: Wed, 11 Nov 2026 13:38:40 +0000
+Subject: [PATCH 30/45] Send trade and barter state in the Specula feed
+
+Kind 21 adds each player's canBarter, GetTradingGoods and
+GetTraderNumber, called as that player, as both read the caller. Kind 12
+adds a trader's markets and gain multipliers and a market's
+international bonus, and the template details mark a market's trade
+types, for the web client's trade dialog and trade route actions.
+---
+ source/network/SpeculaFeed.cpp | 82 ++++++++++++++++++++++++++++++++++
+ source/network/SpeculaFeed.h   |  2 +-
+ 2 files changed, 83 insertions(+), 1 deletion(-)
+
+diff --git a/source/network/SpeculaFeed.cpp b/source/network/SpeculaFeed.cpp
+index a57dd79bf5..df5170e6c9 100644
+--- a/source/network/SpeculaFeed.cpp
++++ b/source/network/SpeculaFeed.cpp
+@@ -156,6 +156,9 @@ constexpr size_t DETAIL_STANCES = 23;
+ constexpr size_t DETAIL_FORMATIONS = 24;
+ constexpr size_t DETAIL_COMMANDS = 25;
+ constexpr size_t DETAIL_UPGRADES = 26;
++constexpr size_t DETAIL_TRADE_ROUTE = 27;
++constexpr size_t DETAIL_MARKET = 28;
++constexpr size_t DETAIL_TRADE_GARRISON = 29;
+ // Bits of the commands group's flags.
+ constexpr u16 COMMAND_WORK_ORDERS = 1;
+ constexpr u16 COMMAND_CAN_GUARD = 2;
+@@ -186,6 +189,11 @@ const char* const DETAIL_INTERFACES[] = {
+ 	"Heal", "RallyPoint", "Builder", "Gate", "AlertRaiser", "ResourceDropsite", "TurretHolder",
+ 	"Market", "Guard"
+ };
++// The template details' component mask bits after DETAIL_INTERFACES': the
++// market's trade types.
++constexpr u32 COMPONENT_MARKET_LAND = 1u << 28;
++constexpr u32 COMPONENT_MARKET_NAVAL = 1u << 29;
++static_assert(std::size(DETAIL_INTERFACES) <= 28);
+ // The interfaces Fogging.js copies into a mirage that a detail group reads.
+ const char* const MIRAGED_INTERFACES[] = { "Health", "Capturable", "ResourceSupply", "Foundation", "Repairable" };
+ // Indices of DETAIL_INTERFACES that are read together.
+@@ -1520,6 +1528,15 @@ void CSpeculaFeed::WriteTemplateDetails(CSimulation2& simulation, u32 index, con
+ 	for (size_t i = 0; i < std::size(DETAIL_INTERFACES); ++i)
+ 		if (templateNode->GetChild(DETAIL_INTERFACES[i]).IsOk())
+ 			components |= 1u << i;
++	// Market.HasType, which the trade actions check, after the interfaces.
++	std::istringstream tradeTypes(templateNode->GetChild("Market").GetChild("TradeType").ToString());
++	for (std::string tradeType; tradeTypes >> tradeType;)
++	{
++		if (tradeType == "land")
++			components |= COMPONENT_MARKET_LAND;
++		else if (tradeType == "naval")
++			components |= COMPONENT_MARKET_NAVAL;
++	}
+ 
+ 	const size_t start = BeginRecord(m_Buffer, RECORD_TEMPLATE_DETAILS);
+ 	PutU32(m_Buffer, index);
+@@ -2081,6 +2098,35 @@ void CSpeculaFeed::WriteDetails(CSimulation2& simulation, u32 turn)
+ 				std::vector<u8>& group = groups[DETAIL_TRADER];
+ 				PutU32(group, typeString);
+ 				PutF32(group, PropertyFloat(rq, amount, "traderGain") + PropertyFloat(rq, amount, "market1Gain") + PropertyFloat(rq, amount, "market2Gain"));
++
++				// What GetTradingDetails compares a market with, and the
++				// multiplier CalculateTraderGain applies, for the page to
++				// pick the trade actions as the session GUI does.
++				JS::RootedValue first(rq.cx);
++				JS::RootedValue second(rq.cx);
++				JS::RootedValue multiplier(rq.cx);
++				ScriptFunction::Call(rq, component, "GetFirstMarket", &first);
++				ScriptFunction::Call(rq, component, "GetSecondMarket", &second);
++				ScriptFunction::Call(rq, component, "GetTraderGainMultiplier", &multiplier);
++				std::vector<u8>& route = groups[DETAIL_TRADE_ROUTE];
++				PutU32(route, first.isNumber() ? static_cast<u32>(first.toNumber()) : 0);
++				PutU32(route, second.isNumber() ? static_cast<u32>(second.toNumber()) : 0);
++				PutF32(route, multiplier.isNumber() ? static_cast<float>(multiplier.toNumber()) : 0.0f);
++
++				// Trader.CalculateGain's garrison multiplier, which only
++				// some traders (merchant ships) have.
++				JS::RootedValue garrisonMultiplier(rq.cx);
++				ScriptFunction::Call(rq, component, "GetGarrisonGainMultiplier", &garrisonMultiplier);
++				if (garrisonMultiplier.isNumber())
++					PutF32(groups[DETAIL_TRADE_GARRISON], static_cast<float>(garrisonMultiplier.toNumber()));
++			}
++			else if (interface == "Market")
++			{
++				// CalculateTraderGain's share for a market of another player
++				// than the other's, modified by technologies and auras.
++				JS::RootedValue bonus(rq.cx);
++				ScriptFunction::Call(rq, component, "GetInternationalBonus", &bonus);
++				PutF32(groups[DETAIL_MARKET], bonus.isNumber() ? static_cast<float>(bonus.toNumber()) : 0.0f);
+ 			}
+ 			else if (interface == "Attack" || interface == "Auras" || interface == "Heal")
+ 			{
+@@ -2547,6 +2593,42 @@ void CSpeculaFeed::WritePlayers(CSimulation2& simulation)
+ 			PutF32(playerGui, PropertyFloat(rq, buy, code.c_str()));
+ 			PutF32(playerGui, PropertyFloat(rq, sell, code.c_str()));
+ 		}
++
++		// The trade dialog's: whether any market is the player's, the
++		// shares its traders carry and how many of them trade. Both calls
++		// read the calling player, not their argument.
++		JS::RootedValue canBarter(rq.cx);
++		Script::GetProperty(rq, player, "canBarter", &canBarter);
++		playerGui.push_back(Truthy(canBarter) ? 1 : 0);
++
++		JS::RootedValue goods(rq.cx);
++		cmpGuiInterface->ScriptCall(static_cast<player_id_t>(i), L"GetTradingGoods", playerID, &goods);
++		std::vector<std::string> goodsCodes;
++		if (goods.isObject())
++			Script::EnumeratePropertyNames(rq, goods, true, goodsCodes);
++		std::sort(goodsCodes.begin(), goodsCodes.end());
++		goodsCodes.resize(std::min<size_t>(goodsCodes.size(), 0xFF));
++		playerGui.push_back(static_cast<u8>(goodsCodes.size()));
++		for (const std::string& code : goodsCodes)
++		{
++			PutU32(playerGui, InternString(code));
++			playerGui.push_back(Clamp8(static_cast<u32>(PropertyFloat(rq, goods, code.c_str()))));
++		}
++
++		JS::RootedValue traders(rq.cx);
++		JS::RootedValue land(rq.cx);
++		JS::RootedValue ship(rq.cx);
++		cmpGuiInterface->ScriptCall(static_cast<player_id_t>(i), L"GetTraderNumber", playerID, &traders);
++		if (traders.isObject())
++		{
++			Script::GetProperty(rq, traders, "landTrader", &land);
++			Script::GetProperty(rq, traders, "shipTrader", &ship);
++		}
++		PutU16(playerGui, Clamp16(static_cast<u32>(PropertyFloat(rq, land, "total"))));
++		PutU16(playerGui, Clamp16(static_cast<u32>(PropertyFloat(rq, land, "trading"))));
++		PutU16(playerGui, Clamp16(static_cast<u32>(PropertyFloat(rq, land, "garrisoned"))));
++		PutU16(playerGui, Clamp16(static_cast<u32>(PropertyFloat(rq, ship, "total"))));
++		PutU16(playerGui, Clamp16(static_cast<u32>(PropertyFloat(rq, ship, "trading"))));
+ 	}
+ 	if (playerGui != m_LastPlayerGui)
+ 	{
+diff --git a/source/network/SpeculaFeed.h b/source/network/SpeculaFeed.h
+index 10897b45b9..a802e14ea8 100644
+--- a/source/network/SpeculaFeed.h
++++ b/source/network/SpeculaFeed.h
+@@ -437,7 +437,7 @@ private:
+ 	 * The last bytes written for each kind 12 group of an entity, by group
+ 	 * bit; an empty slot is a group the entity does not have.
+ 	 */
+-	using SDetailGroups = std::array<std::vector<u8>, 27>;
++	using SDetailGroups = std::array<std::vector<u8>, 30>;
+ 
+ 	/**
+ 	 * An entity's rally group bytes and what they were computed from, as the

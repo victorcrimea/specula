@@ -1,0 +1,447 @@
+From 13e87a1f1da7a1ed62ade50cf56c7fe4c4ba6910 Mon Sep 17 00:00:00 2001
+From: Viktor Semenov <suit.uanic@gmail.com>
+Date: Tue, 6 Oct 2026 14:26:20 +0000
+Subject: [PATCH 04/45] Send the 3D view state in the Specula feed
+
+Feed format v6. Each turn entity grows from 28 to 64 bytes: its height,
+and what its VisualActor shows (actor, seed, variant set, animation with
+its once flag, speed and sync repeat/offset), and its construction
+progress. Actor and animation names and variant keys and selections go
+out once as string records; whole variant sets go out once as variant set
+records, so entities refer to both by index.
+
+The construction previews of foundations, local "construction|" entities,
+are now sent too: they are the rising building the game draws.
+
+ICmpVisual and ICmpPosition gain C++-only getters for state their
+components already keep. They are not exposed to scripts, so the
+simulation and its hash are unchanged.
+---
+ source/network/SpeculaFeed.cpp                | 109 ++++++++++++++++--
+ source/network/SpeculaFeed.h                  |  27 ++++-
+ .../simulation2/components/CCmpPosition.cpp   |   5 +
+ .../components/CCmpVisualActor.cpp            |  30 +++++
+ source/simulation2/components/ICmpPosition.h  |   6 +
+ source/simulation2/components/ICmpVisual.h    |  35 ++++++
+ .../components/tests/test_RangeManager.h      |   1 +
+ .../components/tests/test_TerritoryManager.h  |   1 +
+ 8 files changed, 201 insertions(+), 13 deletions(-)
+
+diff --git a/source/network/SpeculaFeed.cpp b/source/network/SpeculaFeed.cpp
+index e0a12be8f4..da0a6ae6e4 100644
+--- a/source/network/SpeculaFeed.cpp
++++ b/source/network/SpeculaFeed.cpp
+@@ -21,6 +21,7 @@
+ 
+ #include "graphics/MiniMapTexture.h"
+ #include "graphics/Terrain.h"
++#include "lib/utf8.h"
+ #include "ps/CLogger.h"
+ #include "ps/Game.h"
+ #include "scriptinterface/Object.h"
+@@ -34,6 +35,7 @@
+ #include "simulation2/components/ICmpRangeManager.h"
+ #include "simulation2/components/ICmpTemplateManager.h"
+ #include "simulation2/components/ICmpTerrain.h"
++#include "simulation2/components/ICmpVisual.h"
+ #include "simulation2/components/ICmpWaterManager.h"
+ #include "simulation2/system/CmpPtr.h"
+ #include "simulation2/system/Entity.h"
+@@ -47,13 +49,18 @@
+ 
+ namespace
+ {
+-constexpr u32 FEED_VERSION = 5;
++constexpr u32 FEED_VERSION = 6;
+ constexpr u8 RECORD_TEMPLATE = 1;
+ constexpr u8 RECORD_TURN = 2;
+ constexpr u8 RECORD_MAP = 3;
+ constexpr u8 RECORD_TERRAIN = 4;
+ constexpr u8 RECORD_PLAYERS = 5;
++constexpr u8 RECORD_STRING = 6;
++constexpr u8 RECORD_VARIANT_SET = 7;
+ constexpr u8 COLOR_MINIMAP = 1;
++constexpr u8 HAS_VISUAL = 2;
++constexpr u8 ANIMATION_ONCE = 4;
++constexpr u32 NONE = 0xFFFFFFFF;
+ constexpr u8 TEMPLATE_PLAYER_COLOR = 1;
+ constexpr u8 PLAYER_ACTIVE = 0;
+ constexpr u8 PLAYER_DEFEATED = 1;
+@@ -66,6 +73,11 @@ constexpr u32 PLAYERS_INTERVAL_TURNS = 5;
+ constexpr u16 NO_TEXTURE = 0xFFFF;
+ // CCmpMinimap prepends this to the template's icon file name.
+ const std::string ICON_DIRECTORY = "art/textures/ui/session/icons/minimap/";
++// Foundation.js shows the rising building as a local entity of this filter;
++// it is the only local entity a viewer has to see.
++const std::string CONSTRUCTION_PREFIX = "construction|";
++// SelectAnimation mirrors the animation name into this variant key.
++const CStr ANIMATION_KEY = "animation";
+ 
+ std::vector<std::string> g_TerrainTextureNames;
+ std::vector<u16> g_TerrainTextureTiles;
+@@ -81,7 +93,16 @@ struct SEntity
+ 	u8 r;
+ 	u8 g;
+ 	u8 b;
+-	u8 colorFlags;
++	u8 flags;
++	i32 y;
++	u32 actor;
++	u32 seed;
++	u32 variants;
++	u32 animation;
++	i32 animationSpeed;
++	i32 syncRepeat;
++	i32 syncOffset;
++	i32 constructionProgress;
+ };
+ 
+ void PutU16(std::vector<u8>& buffer, u16 value)
+@@ -187,14 +208,13 @@ void CSpeculaFeed::OnTurn(CSimulation2& simulation, u32 turn)
+ 	for (const std::pair<entity_id_t, IComponent*>& pair : simulation.GetEntitiesWithInterface(IID_Position))
+ 	{
+ 		const entity_id_t ent = pair.first;
+-		if (ENTITY_IS_LOCAL(ent))
+-			continue;
+-
+ 		const ICmpPosition* cmpPosition = static_cast<const ICmpPosition*>(pair.second);
+ 		if (!cmpPosition->IsInWorld())
+ 			continue;
+ 
+ 		const std::string templateName = cmpTemplateManager->GetCurrentTemplateName(ent);
++		if (ENTITY_IS_LOCAL(ent) && templateName.compare(0, CONSTRUCTION_PREFIX.size(), CONSTRUCTION_PREFIX) != 0)
++			continue;
+ 		const auto [it, inserted] = m_TemplateIndices.try_emplace(templateName,
+ 			static_cast<u32>(m_TemplateIndices.size()));
+ 		if (inserted)
+@@ -231,22 +251,39 @@ void CSpeculaFeed::OnTurn(CSimulation2& simulation, u32 turn)
+ 		}
+ 
+ 		CmpPtr<ICmpOwnership> cmpOwnership(simulation, ent);
+-		const CFixedVector2D position = cmpPosition->GetPosition2D();
++		const CFixedVector3D position = cmpPosition->GetPosition();
+ 		SEntity entity{
+ 			ent,
+ 			it->second,
+ 			position.X.GetInternalValue(),
+-			position.Y.GetInternalValue(),
++			position.Z.GetInternalValue(),
+ 			cmpPosition->GetRotation().Y.GetInternalValue(),
+ 			cmpOwnership ? cmpOwnership->GetOwner() : INVALID_PLAYER,
+-			0, 0, 0, 0
++			0, 0, 0, 0,
++			position.Y.GetInternalValue(),
++			NONE, 0, NONE, NONE, 0, 0, 0,
++			cmpPosition->GetConstructionProgress().GetInternalValue()
+ 		};
++		CmpPtr<ICmpVisual> cmpVisual(simulation, ent);
++		if (cmpVisual)
++		{
++			entity.flags |= HAS_VISUAL;
++			if (cmpVisual->IsAnimationOnce())
++				entity.flags |= ANIMATION_ONCE;
++			entity.actor = InternString(utf8_from_wstring(cmpVisual->GetActorName()));
++			entity.seed = cmpVisual->GetActorSeed();
++			entity.variants = InternVariants(cmpVisual->GetVariantSelections());
++			entity.animation = InternString(cmpVisual->GetAnimationName());
++			entity.animationSpeed = cmpVisual->GetAnimationSpeed().GetInternalValue();
++			entity.syncRepeat = cmpVisual->GetAnimationSyncRepeat().GetInternalValue();
++			entity.syncOffset = cmpVisual->GetAnimationSyncOffset().GetInternalValue();
++		}
+ 		// The minimap colour already resolves owner to player colour and
+ 		// gives resources their template colour, as the 2D view needs.
+ 		CmpPtr<ICmpMinimap> cmpMinimap(simulation, ent);
+ 		entity_pos_t minimapX, minimapZ;
+ 		if (cmpMinimap && cmpMinimap->GetRenderData(entity.r, entity.g, entity.b, minimapX, minimapZ))
+-			entity.colorFlags = COLOR_MINIMAP;
++			entity.flags |= COLOR_MINIMAP;
+ 		entities.push_back(entity);
+ 	}
+ 
+@@ -261,7 +298,16 @@ void CSpeculaFeed::OnTurn(CSimulation2& simulation, u32 turn)
+ 		PutI32(m_Buffer, entity.z);
+ 		PutI32(m_Buffer, entity.angle);
+ 		PutI32(m_Buffer, entity.owner);
+-		m_Buffer.insert(m_Buffer.end(), { entity.r, entity.g, entity.b, entity.colorFlags });
++		m_Buffer.insert(m_Buffer.end(), { entity.r, entity.g, entity.b, entity.flags });
++		PutI32(m_Buffer, entity.y);
++		PutU32(m_Buffer, entity.actor);
++		PutU32(m_Buffer, entity.seed);
++		PutU32(m_Buffer, entity.variants);
++		PutU32(m_Buffer, entity.animation);
++		PutI32(m_Buffer, entity.animationSpeed);
++		PutI32(m_Buffer, entity.syncRepeat);
++		PutI32(m_Buffer, entity.syncOffset);
++		PutI32(m_Buffer, entity.constructionProgress);
+ 	}
+ 	EndRecord(m_Buffer, start);
+ 
+@@ -274,6 +320,49 @@ void CSpeculaFeed::SetTerrainTextures(const std::vector<std::string>& names, std
+ 	g_TerrainTextureTiles = std::move(tiles);
+ }
+ 
++// An empty text is no string: an actor or animation that was never set.
++u32 CSpeculaFeed::InternString(const std::string& text)
++{
++	if (text.empty())
++		return NONE;
++	const auto [it, inserted] = m_StringIndices.try_emplace(text, static_cast<u32>(m_StringIndices.size()));
++	if (inserted)
++	{
++		const size_t start = BeginRecord(m_Buffer, RECORD_STRING);
++		PutU32(m_Buffer, it->second);
++		m_Buffer.insert(m_Buffer.end(), text.begin(), text.end());
++		EndRecord(m_Buffer, start);
++	}
++	return it->second;
++}
++
++// A few dozen distinct sets cover a whole match, so each one is sent once
++// and entities refer to it by index. An empty selection selects nothing, so
++// its key is left out like a key never set.
++u32 CSpeculaFeed::InternVariants(const std::map<CStr, CStr>& selections)
++{
++	std::vector<std::pair<u32, u32>> pairs;
++	for (const std::pair<const CStr, CStr>& selection : selections)
++		if (selection.first != ANIMATION_KEY && !selection.second.empty())
++			pairs.emplace_back(InternString(selection.first), InternString(selection.second));
++	if (pairs.empty())
++		return NONE;
++	const auto [it, inserted] = m_VariantSetIndices.try_emplace(pairs, static_cast<u32>(m_VariantSetIndices.size()));
++	if (inserted)
++	{
++		const size_t start = BeginRecord(m_Buffer, RECORD_VARIANT_SET);
++		PutU32(m_Buffer, it->second);
++		PutU32(m_Buffer, static_cast<u32>(pairs.size()));
++		for (const std::pair<u32, u32>& pair : pairs)
++		{
++			PutU32(m_Buffer, pair.first);
++			PutU32(m_Buffer, pair.second);
++		}
++		EndRecord(m_Buffer, start);
++	}
++	return it->second;
++}
++
+ // Read through the GUI interface, as the session GUI does every turn: team
+ // and diplomacy live only in JS components.
+ void CSpeculaFeed::WritePlayers(CSimulation2& simulation)
+diff --git a/source/network/SpeculaFeed.h b/source/network/SpeculaFeed.h
+index 5208007bd2..07ccdf4f78 100644
+--- a/source/network/SpeculaFeed.h
++++ b/source/network/SpeculaFeed.h
+@@ -20,9 +20,12 @@
+ 
+ #include "lib/code_annotation.h"
+ #include "lib/types.h"
++#include "ps/CStr.h"
+ 
++#include <map>
+ #include <string>
+ #include <unordered_map>
++#include <utility>
+ #include <vector>
+ 
+ class CSimulation2;
+@@ -32,15 +35,29 @@ class CSimulation2;
+  * socket. It only reads the simulation, after each turn, so it cannot
+  * change the state hash.
+  *
+- * Feed format v5, little-endian: "SPCF", u32 version, then records of
++ * Feed format v6, little-endian: "SPCF", u32 version, then records of
+  * u8 kind, u32 payload length, payload.
+  *  - kind 1 template: u32 index, u16 name length, UTF-8 name, f32 minimap
+  *    icon size, u8 flags, then the icon file name relative to
+  *    art/textures/ui/session/icons/minimap/ (empty: no icon). Flag 1: the
+  *    minimap colour is the owner's player colour.
+  *  - kind 2 turn: u32 turn, u32 count, count x {u32 id, u32 template,
+- *    i32 x, i32 z, i32 angle, i32 owner, u8 r, u8 g, u8 b, u8 flags},
+- *    x/z/angle as raw 16.16 fixed. Flag 1: r/g/b is the minimap colour.
++ *    i32 x, i32 z, i32 angle, i32 owner, u8 r, u8 g, u8 b, u8 flags,
++ *    i32 y, u32 actor, u32 seed, u32 variant set, u32 animation,
++ *    i32 animation speed, i32 sync repeat, i32 sync offset,
++ *    i32 construction progress}. x/y/z/angle/speed/progress are raw 16.16
++ *    fixed, sync repeat and offset raw 16.16 milliseconds. actor and
++ *    animation are strings, 0xFFFFFFFF for none, as is an empty variant
++ *    set. Flag 1: r/g/b is the minimap colour. Flag 2: the entity has a
++ *    VisualActor; without it the visual fields are zero or none. Flag 4: the
++ *    animation plays once. Local entities are left out, except the
++ *    construction previews of foundations ("construction|" templates).
++ *  - kind 6 string, before the turn record that first uses it: u32 index,
++ *    then UTF-8 text. Indices count up from 0.
++ *  - kind 7 variant set, likewise: u32 index, u32 count, count x {u32 key
++ *    string, u32 value string}, sorted by key. The "animation" key is left
++ *    out, as it always holds the animation name, and so are keys whose
++ *    selection is empty.
+  *  - kind 3 map: u32 map size in metres, f32 game speed (the sim rate
+  *    set up for the match), once before the first turn.
+  *  - kind 4 terrain, right after the map record: u32 tiles per side n,
+@@ -71,6 +88,8 @@ public:
+ private:
+ 	void WriteTerrain(CSimulation2& simulation);
+ 	void WritePlayers(CSimulation2& simulation);
++	u32 InternString(const std::string& text);
++	u32 InternVariants(const std::map<CStr, CStr>& selections);
+ 	bool Send();
+ 	void Disable(const char* what);
+ 
+@@ -78,6 +97,8 @@ private:
+ 	bool m_MapSent = false;
+ 	std::vector<u8> m_Buffer;
+ 	std::unordered_map<std::string, u32> m_TemplateIndices;
++	std::unordered_map<std::string, u32> m_StringIndices;
++	std::map<std::vector<std::pair<u32, u32>>, u32> m_VariantSetIndices;
+ 	std::vector<u8> m_LastPlayers;
+ };
+ 
+diff --git a/source/simulation2/components/CCmpPosition.cpp b/source/simulation2/components/CCmpPosition.cpp
+index b34677ccd5..f7aad606c7 100644
+--- a/source/simulation2/components/CCmpPosition.cpp
++++ b/source/simulation2/components/CCmpPosition.cpp
+@@ -512,6 +512,11 @@ public:
+ 		AdvertiseInterpolatedPositionChanges();
+ 	}
+ 
++	fixed GetConstructionProgress() const override
++	{
++		return m_ConstructionProgress;
++	}
++
+ 	CFixedVector3D GetPosition() const override
+ 	{
+ 		if (!m_InWorld)
+diff --git a/source/simulation2/components/CCmpVisualActor.cpp b/source/simulation2/components/CCmpVisualActor.cpp
+index 26b8f6fbe8..c2af774271 100644
+--- a/source/simulation2/components/CCmpVisualActor.cpp
++++ b/source/simulation2/components/CCmpVisualActor.cpp
+@@ -463,6 +463,36 @@ public:
+ 		return m_AnimName;
+ 	}
+ 
++	bool IsAnimationOnce() const override
++	{
++		return m_AnimOnce;
++	}
++
++	fixed GetAnimationSpeed() const override
++	{
++		return m_AnimSpeed;
++	}
++
++	fixed GetAnimationSyncRepeat() const override
++	{
++		return m_AnimSyncRepeatTime;
++	}
++
++	fixed GetAnimationSyncOffset() const override
++	{
++		return m_AnimSyncOffsetTime;
++	}
++
++	const std::wstring& GetActorName() const override
++	{
++		return m_ActorName;
++	}
++
++	const std::map<CStr, CStr>& GetVariantSelections() const override
++	{
++		return m_VariantSelections;
++	}
++
+ 	void SelectAnimation(const std::string& name, bool once = false, fixed speed = fixed::FromInt(1)) override
+ 	{
+ 		m_AnimName = name;
+diff --git a/source/simulation2/components/ICmpPosition.h b/source/simulation2/components/ICmpPosition.h
+index 1ee204d6e9..76d8c8ce1f 100644
+--- a/source/simulation2/components/ICmpPosition.h
++++ b/source/simulation2/components/ICmpPosition.h
+@@ -175,6 +175,12 @@ public:
+ 	 */
+ 	virtual void SetConstructionProgress(fixed progress) = 0;
+ 
++	/**
++	 * Returns the construction progress set by SetConstructionProgress;
++	 * zero, the default, means the model is not offset at all.
++	 */
++	virtual fixed GetConstructionProgress() const = 0;
++
+ 	/**
+ 	 * Returns the current x,y,z position (no interpolation).
+ 	 * Depends on the current terrain heightmap.
+diff --git a/source/simulation2/components/ICmpVisual.h b/source/simulation2/components/ICmpVisual.h
+index 6eb00d4181..e61fcd92e3 100644
+--- a/source/simulation2/components/ICmpVisual.h
++++ b/source/simulation2/components/ICmpVisual.h
+@@ -31,6 +31,7 @@
+ #include "simulation2/system/Component.h"
+ 
+ #include <js/Value.h>
++#include <map>
+ #include <string>
+ 
+ class CUnit;
+@@ -93,6 +94,40 @@ public:
+ 	 */
+ 	virtual std::string GetAnimationName() const = 0;
+ 
++	/**
++	 * Returns whether the current animation plays once rather than loops.
++	 */
++	virtual bool IsAnimationOnce() const = 0;
++
++	/**
++	 * Returns the speed the current animation was selected with.
++	 */
++	virtual fixed GetAnimationSpeed() const = 0;
++
++	/**
++	 * Returns the last value given to SetAnimationSyncRepeat since the
++	 * animation was selected, or zero.
++	 */
++	virtual fixed GetAnimationSyncRepeat() const = 0;
++
++	/**
++	 * Returns the last value given to SetAnimationSyncOffset since the
++	 * animation was selected, or zero.
++	 */
++	virtual fixed GetAnimationSyncOffset() const = 0;
++
++	/**
++	 * Returns the actor file name, after modifications and the {civ} and
++	 * {phenotype} replacements.
++	 */
++	virtual const std::wstring& GetActorName() const = 0;
++
++	/**
++	 * Returns the variant selections by key, as given to SetVariant and
++	 * SelectAnimation.
++	 */
++	virtual const std::map<CStr, CStr>& GetVariantSelections() const = 0;
++
+ 	/**
+ 	 * Start playing the given animation. If there are multiple possible animations then it will
+ 	 * pick one at random (not network-synchronised).
+diff --git a/source/simulation2/components/tests/test_RangeManager.h b/source/simulation2/components/tests/test_RangeManager.h
+index 7fc89a1875..1e0dbc218a 100644
+--- a/source/simulation2/components/tests/test_RangeManager.h
++++ b/source/simulation2/components/tests/test_RangeManager.h
+@@ -79,6 +79,7 @@ public:
+ 	void SetActorFloating(bool /*flag*/) override { }
+ 	void SetActorAnchor(const CStr& /*anchor*/) override { }
+ 	void SetConstructionProgress(fixed /*progress*/) override { }
++	fixed GetConstructionProgress() const override { return fixed::Zero(); }
+ 	CFixedVector3D GetPosition() const override { return m_Pos; }
+ 	CFixedVector2D GetPosition2D() const override { return CFixedVector2D(m_Pos.X, m_Pos.Z); }
+ 	CFixedVector3D GetPreviousPosition() const override { return CFixedVector3D(); }
+diff --git a/source/simulation2/components/tests/test_TerritoryManager.h b/source/simulation2/components/tests/test_TerritoryManager.h
+index 7d9fbda6ed..ce9a34c547 100644
+--- a/source/simulation2/components/tests/test_TerritoryManager.h
++++ b/source/simulation2/components/tests/test_TerritoryManager.h
+@@ -152,6 +152,7 @@ public:
+ 	void SetActorFloating(bool) override {}
+ 	void SetActorAnchor(const CStr&) override {}
+ 	void SetConstructionProgress(fixed) override {}
++	fixed GetConstructionProgress() const override { return fixed::Zero(); }
+ 	CFixedVector3D GetPosition() const override { return m_Pos; }
+ 	CFixedVector2D GetPosition2D() const override { return CFixedVector2D(m_Pos.X, m_Pos.Z); }
+ 	CFixedVector3D GetPreviousPosition() const override { return CFixedVector3D(); }

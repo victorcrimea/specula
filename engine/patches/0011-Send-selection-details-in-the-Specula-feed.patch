@@ -1,0 +1,908 @@
+From d4f42a608fd80606d4d41be8854cf9b8f4a7d520 Mon Sep 17 00:00:00 2001
+From: Viktor Semenov <suit.uanic@gmail.com>
+Date: Sat, 10 Oct 2026 16:33:35 +0000
+Subject: [PATCH 11/45] Send selection details in the Specula feed
+
+New record kinds 11 to 15, skipped by an encoder that does not know them,
+carry what the selection panels and status bars show: template details
+(selection overlay, footprint, status bars, names, icon, classes and
+components), per-entity details (hitpoints, capture points, resources,
+gatherers, experience, production queue, garrison, foundation and repair
+progress, UnitAI state, trainable and researchable lists, pack and
+upgrade progress, holder, trader gain), string lists, renames and the
+players' economy. Values are read as GuiInterface.GetEntityState reads
+them.
+---
+ source/network/SpeculaFeed.cpp | 691 +++++++++++++++++++++++++++++++--
+ source/network/SpeculaFeed.h   |  82 ++++
+ 2 files changed, 738 insertions(+), 35 deletions(-)
+
+diff --git a/source/network/SpeculaFeed.cpp b/source/network/SpeculaFeed.cpp
+index 8eb95671b7..0e17d91243 100644
+--- a/source/network/SpeculaFeed.cpp
++++ b/source/network/SpeculaFeed.cpp
+@@ -22,10 +22,13 @@
+ #include "graphics/LightEnv.h"
+ #include "graphics/MiniMapTexture.h"
+ #include "graphics/Terrain.h"
++#include "lib/debug.h"
++#include "lib/timer.h"
+ #include "lib/utf8.h"
+ #include "ps/CLogger.h"
+ #include "ps/Game.h"
+ #include "ps/World.h"
++#include "scriptinterface/FunctionWrapper.h"
+ #include "scriptinterface/Object.h"
+ #include "scriptinterface/ScriptInterface.h"
+ #include "scriptinterface/ScriptRequest.h"
+@@ -50,6 +53,7 @@
+ #include <algorithm>
+ #include <cerrno>
+ #include <cstring>
++#include <string_view>
+ #include <sys/socket.h>
+ #include <sys/un.h>
+ #include <unistd.h>
+@@ -67,6 +71,52 @@ constexpr u8 RECORD_VARIANT_SET = 7;
+ constexpr u8 RECORD_TERRITORY = 8;
+ constexpr u8 RECORD_SOUNDS = 9;
+ constexpr u8 RECORD_PROJECTILES = 10;
++constexpr u8 RECORD_TEMPLATE_DETAILS = 11;
++constexpr u8 RECORD_DETAILS = 12;
++constexpr u8 RECORD_STRING_LIST = 13;
++constexpr u8 RECORD_RENAMES = 14;
++constexpr u8 RECORD_ECONOMY = 15;
++constexpr u16 TEMPLATE_SELECTABLE = 1;
++constexpr u16 TEMPLATE_EDITOR_ONLY = 2;
++constexpr u16 TEMPLATE_OUTLINE = 4;
++constexpr u16 TEMPLATE_ALWAYS_VISIBLE = 8;
++constexpr u16 TEMPLATE_SELECT_FOOTPRINT = 16;
++constexpr u16 TEMPLATE_FOOTPRINT_SQUARE = 32;
++constexpr u16 TEMPLATE_OVERLAY_SQUARE = 64;
++constexpr u16 TEMPLATE_OVERLAY_CIRCLE = 128;
++constexpr u16 TEMPLATE_FOOTPRINT = 256;
++constexpr u16 TEMPLATE_STATUS_BARS = 512;
++constexpr u16 TEMPLATE_INFINITE_SUPPLY = 1024;
++// Kind 12 group bits, which are also the slots of SDetailGroups.
++constexpr size_t DETAIL_HEALTH = 0;
++constexpr size_t DETAIL_CAPTURE = 1;
++constexpr size_t DETAIL_SUPPLY = 2;
++constexpr size_t DETAIL_GATHERERS = 3;
++constexpr size_t DETAIL_CARRYING = 4;
++constexpr size_t DETAIL_EXPERIENCE = 5;
++constexpr size_t DETAIL_QUEUE = 6;
++constexpr size_t DETAIL_GARRISON = 7;
++constexpr size_t DETAIL_FOUNDATION = 8;
++constexpr size_t DETAIL_REPAIR = 9;
++constexpr size_t DETAIL_UNIT_AI = 10;
++constexpr size_t DETAIL_TRAINABLE = 11;
++constexpr size_t DETAIL_RESEARCHABLE = 12;
++constexpr size_t DETAIL_PROGRESS = 13;
++constexpr size_t DETAIL_HOLDER = 14;
++constexpr size_t DETAIL_TRADER = 15;
++constexpr u8 QUEUE_UNIT = 0;
++constexpr u8 QUEUE_TECHNOLOGY = 1;
++// The scripted components the details are read from, in the bit order of the
++// template details' component mask.
++const char* const DETAIL_INTERFACES[] = {
++	"Health", "Capturable", "ResourceSupply", "ProductionQueue", "GarrisonHolder",
++	"Promotion", "ResourceGatherer", "Foundation", "Repairable", "UnitAI", "Trainer",
++	"Researcher", "Pack", "Upgrade", "Trader", "Garrisonable", "Turretable"
++};
++// Indices of DETAIL_INTERFACES that are read together.
++constexpr size_t INTERFACE_PACK = 12;
++constexpr size_t INTERFACE_UPGRADE = 13;
++constexpr u32 DETAILS_LOG_INTERVAL_TURNS = 1000;
+ constexpr u8 COLOR_MINIMAP = 1;
+ constexpr u8 HAS_VISUAL = 2;
+ constexpr u8 ANIMATION_ONCE = 4;
+@@ -171,6 +221,73 @@ void EndRecord(std::vector<u8>& buffer, size_t payloadStart)
+ 	for (int i = 0; i < 4; ++i)
+ 		buffer[payloadStart - 4 + i] = static_cast<u8>(length >> (8 * i));
+ }
++
++// The getters below are the ones GuiInterface.GetEntityState calls: the
++// session GUI calls them at any time, outside the synchronised turn, so they
++// cannot change the state hash.
++// Several getters return undefined for "none" (HolderID out of a holder,
++// IsPacking before the first pack), which the typed conversions would log as
++// errors; undefined reads as 0 or false.
++float CallFloat(const ScriptRequest& rq, JS::HandleValue component, const char* name)
++{
++	JS::RootedValue value(rq.cx);
++	if (!ScriptFunction::Call(rq, component, name, &value) || !value.isNumber())
++		return 0.0f;
++	return static_cast<float>(value.toNumber());
++}
++
++// Only the getters' own results: true, or a count above 0.
++bool Truthy(JS::HandleValue value)
++{
++	return value.isBoolean() ? value.toBoolean() : value.isNumber() && value.toNumber() != 0.0;
++}
++
++bool CallBool(const ScriptRequest& rq, JS::HandleValue component, const char* name)
++{
++	JS::RootedValue value(rq.cx);
++	return ScriptFunction::Call(rq, component, name, &value) && Truthy(value);
++}
++
++float PropertyFloat(const ScriptRequest& rq, JS::HandleValue object, const char* name)
++{
++	JS::RootedValue value(rq.cx);
++	if (!object.isObject() || !Script::GetProperty(rq, object, name, &value) || !value.isNumber())
++		return 0.0f;
++	return static_cast<float>(value.toNumber());
++}
++
++u32 ArrayLength(const ScriptRequest& rq, JS::HandleValue array)
++{
++	u32 length = 0;
++	if (!array.isObject() || !Script::GetProperty(rq, array, "length", length))
++		return 0;
++	return length;
++}
++
++// A getter's string result, or empty for anything else (undefined when
++// there is nothing to name).
++std::string StringOf(const ScriptRequest& rq, JS::HandleValue value)
++{
++	std::string text;
++	if (value.isString())
++		Script::FromJSVal(rq, value, text);
++	return text;
++}
++
++u8 Clamp8(u32 value)
++{
++	return static_cast<u8>(std::min<u32>(value, 0xFF));
++}
++
++u16 Clamp16(u32 value)
++{
++	return static_cast<u16>(std::min<u32>(value, 0xFFFF));
++}
++
++float NodeFloat(const CParamNode& node)
++{
++	return node.IsOk() ? node.ToFloat() : 0.0f;
++}
+ } // anonymous namespace
+ 
+ CSpeculaFeed::CSpeculaFeed(const std::string& socketPath)
+@@ -240,6 +357,7 @@ void CSpeculaFeed::OnTurn(CSimulation2& simulation, u32 turn)
+ 	if (m_LastPlayers.empty() || turn % PLAYERS_INTERVAL_TURNS == 0)
+ 		WritePlayers(simulation);
+ 	WriteTerritory(simulation);
++	WriteRenames(simulation);
+ 
+ 	// Template records must precede the turn record that first uses them,
+ 	// so the entities are collected before the turn record is written.
+@@ -254,46 +372,13 @@ void CSpeculaFeed::OnTurn(CSimulation2& simulation, u32 turn)
+ 		const std::string templateName = cmpTemplateManager->GetCurrentTemplateName(ent);
+ 		if (ENTITY_IS_LOCAL(ent) && templateName.compare(0, CONSTRUCTION_PREFIX.size(), CONSTRUCTION_PREFIX) != 0)
+ 			continue;
+-		const auto [it, inserted] = m_TemplateIndices.try_emplace(templateName,
+-			static_cast<u32>(m_TemplateIndices.size()));
+-		if (inserted)
+-		{
+-			const size_t start = BeginRecord(m_Buffer, RECORD_TEMPLATE);
+-			PutU32(m_Buffer, it->second);
+-			PutU16(m_Buffer, static_cast<u16>(templateName.size()));
+-			m_Buffer.insert(m_Buffer.end(), templateName.begin(), templateName.end());
+-			// The icon comes from the template, so every entity of it shares
+-			// the first one's.
+-			CmpPtr<ICmpMinimap> cmpMinimap(simulation, ent);
+-			const bool hasIcon = cmpMinimap && cmpMinimap->HasIcon();
+-			const float iconSize = hasIcon ? cmpMinimap->GetIconSize() : 0.0f;
+-			u32 iconSizeBits;
+-			std::memcpy(&iconSizeBits, &iconSize, sizeof(iconSizeBits));
+-			PutU32(m_Buffer, iconSizeBits);
+-			// Same test as CCmpMinimap::Init: a template without its own
+-			// colour is drawn in the owner's.
+-			bool playerColor = false;
+-			if (const CParamNode* templateNode = cmpTemplateManager->GetTemplate(templateName))
+-			{
+-				const CParamNode& minimapNode = templateNode->GetChild("Minimap");
+-				playerColor = minimapNode.IsOk() && !minimapNode.GetChild("Color").IsOk();
+-			}
+-			m_Buffer.push_back(playerColor ? TEMPLATE_PLAYER_COLOR : 0);
+-			if (hasIcon)
+-			{
+-				std::string icon = cmpMinimap->GetIconPath();
+-				if (icon.compare(0, ICON_DIRECTORY.size(), ICON_DIRECTORY) == 0)
+-					icon.erase(0, ICON_DIRECTORY.size());
+-				m_Buffer.insert(m_Buffer.end(), icon.begin(), icon.end());
+-			}
+-			EndRecord(m_Buffer, start);
+-		}
++		const u32 templateIndex = InternTemplate(simulation, ent, templateName);
+ 
+ 		CmpPtr<ICmpOwnership> cmpOwnership(simulation, ent);
+ 		const CFixedVector3D position = cmpPosition->GetPosition();
+ 		SEntity entity{
+ 			ent,
+-			it->second,
++			templateIndex,
+ 			position.X.GetInternalValue(),
+ 			position.Z.GetInternalValue(),
+ 			cmpPosition->GetRotation().Y.GetInternalValue(),
+@@ -329,6 +414,8 @@ void CSpeculaFeed::OnTurn(CSimulation2& simulation, u32 turn)
+ 		entities.push_back(entity);
+ 	}
+ 
++	WriteDetails(simulation, turn);
++
+ 	if (!m_Sounds.empty())
+ 	{
+ 		const size_t soundsStart = BeginRecord(m_Buffer, RECORD_SOUNDS);
+@@ -575,6 +662,484 @@ u32 CSpeculaFeed::InternVariants(const std::map<CStr, CStr>& selections)
+ 	return it->second;
+ }
+ 
++u32 CSpeculaFeed::InternStringList(const std::vector<u32>& strings)
++{
++	const auto [it, inserted] = m_StringListIndices.try_emplace(strings, static_cast<u32>(m_StringListIndices.size()));
++	if (inserted)
++	{
++		const size_t start = BeginRecord(m_Buffer, RECORD_STRING_LIST);
++		PutU32(m_Buffer, it->second);
++		PutU32(m_Buffer, static_cast<u32>(strings.size()));
++		for (const u32 string : strings)
++			PutU32(m_Buffer, string);
++		EndRecord(m_Buffer, start);
++	}
++	return it->second;
++}
++
++u32 CSpeculaFeed::InternTemplate(CSimulation2& simulation, entity_id_t ent, const std::string& templateName)
++{
++	const auto [it, inserted] = m_TemplateIndices.try_emplace(templateName,
++		static_cast<u32>(m_TemplateIndices.size()));
++	if (!inserted)
++		return it->second;
++
++	const size_t start = BeginRecord(m_Buffer, RECORD_TEMPLATE);
++	PutU32(m_Buffer, it->second);
++	PutU16(m_Buffer, static_cast<u16>(templateName.size()));
++	m_Buffer.insert(m_Buffer.end(), templateName.begin(), templateName.end());
++	// The icon comes from the template, so every entity of it shares the
++	// first one's.
++	CmpPtr<ICmpMinimap> cmpMinimap(simulation, ent);
++	const bool hasIcon = cmpMinimap && cmpMinimap->HasIcon();
++	const float iconSize = hasIcon ? cmpMinimap->GetIconSize() : 0.0f;
++	u32 iconSizeBits;
++	std::memcpy(&iconSizeBits, &iconSize, sizeof(iconSizeBits));
++	PutU32(m_Buffer, iconSizeBits);
++	// Same test as CCmpMinimap::Init: a template without its own colour is
++	// drawn in the owner's.
++	bool playerColor = false;
++	CmpPtr<ICmpTemplateManager> cmpTemplateManager(simulation, SYSTEM_ENTITY);
++	if (const CParamNode* templateNode = cmpTemplateManager ? cmpTemplateManager->GetTemplate(templateName) : nullptr)
++	{
++		const CParamNode& minimapNode = templateNode->GetChild("Minimap");
++		playerColor = minimapNode.IsOk() && !minimapNode.GetChild("Color").IsOk();
++	}
++	m_Buffer.push_back(playerColor ? TEMPLATE_PLAYER_COLOR : 0);
++	if (hasIcon)
++	{
++		std::string icon = cmpMinimap->GetIconPath();
++		if (icon.compare(0, ICON_DIRECTORY.size(), ICON_DIRECTORY) == 0)
++			icon.erase(0, ICON_DIRECTORY.size());
++		m_Buffer.insert(m_Buffer.end(), icon.begin(), icon.end());
++	}
++	EndRecord(m_Buffer, start);
++
++	WriteTemplateDetails(simulation, it->second, templateName);
++	return it->second;
++}
++
++// Read from the template as CCmpSelectable, CCmpFootprint, StatusBars.js and
++// Identity.js read it; none of these are changed by technologies.
++void CSpeculaFeed::WriteTemplateDetails(CSimulation2& simulation, u32 index, const std::string& templateName)
++{
++	CmpPtr<ICmpTemplateManager> cmpTemplateManager(simulation, SYSTEM_ENTITY);
++	const CParamNode* templateNode = cmpTemplateManager ? cmpTemplateManager->GetTemplate(templateName) : nullptr;
++	if (!templateNode)
++		return;
++
++	// Interned first, as string records must precede this one.
++	const CParamNode& selectable = templateNode->GetChild("Selectable");
++	const CParamNode& overlay = selectable.GetChild("Overlay");
++	const CParamNode& texture = overlay.GetChild("Texture");
++	const CParamNode& outline = overlay.GetChild("Outline");
++	const u32 overlayTexture = InternString(texture.IsOk() ? texture.GetChild("MainTexture").ToString() : outline.GetChild("LineTexture").ToString());
++	const u32 overlayMask = InternString(texture.IsOk() ? texture.GetChild("MainTextureMask").ToString() : outline.GetChild("LineTextureMask").ToString());
++	const CParamNode& identity = templateNode->GetChild("Identity");
++	const u32 genericName = InternString(identity.GetChild("GenericName").ToString());
++	const u32 specificName = InternString(identity.GetChild("SpecificName").ToString());
++	const u32 icon = InternString(identity.GetChild("Icon").ToString());
++	const u32 selectionGroupName = InternString(identity.GetChild("SelectionGroupName").ToString());
++	const u32 rank = InternString(identity.GetChild("Rank").ToString());
++	const u32 classes = InternString(identity.GetChild("Classes").ToString());
++	const u32 visibleClasses = InternString(identity.GetChild("VisibleClasses").ToString());
++	const u32 selectSound = InternString(templateNode->GetChild("Sound").GetChild("SoundGroups").GetChild("select").ToString());
++
++	u16 flags = 0;
++	if (selectable.IsOk())
++		flags |= TEMPLATE_SELECTABLE;
++	if (selectable.GetChild("EditorOnly").IsOk())
++		flags |= TEMPLATE_EDITOR_ONLY;
++	if (outline.IsOk())
++		flags |= TEMPLATE_OUTLINE;
++	if (overlay.GetChild("AlwaysVisible").IsOk())
++		flags |= TEMPLATE_ALWAYS_VISIBLE;
++	if (templateNode->GetChild("VisualActor").GetChild("SelectionShape").GetChild("Footprint").IsOk())
++		flags |= TEMPLATE_SELECT_FOOTPRINT;
++
++	const CParamNode& shape = overlay.GetChild("Shape");
++	float overlayWidth = 0.0f;
++	float overlayDepth = 0.0f;
++	if (shape.GetChild("Square").IsOk())
++	{
++		flags |= TEMPLATE_OVERLAY_SQUARE;
++		overlayWidth = NodeFloat(shape.GetChild("Square").GetChild("@width"));
++		overlayDepth = NodeFloat(shape.GetChild("Square").GetChild("@depth"));
++	}
++	else if (shape.GetChild("Circle").IsOk())
++	{
++		flags |= TEMPLATE_OVERLAY_CIRCLE;
++		overlayWidth = overlayDepth = NodeFloat(shape.GetChild("Circle").GetChild("@radius"));
++	}
++
++	const CParamNode& footprint = templateNode->GetChild("Footprint");
++	float footprintWidth = 0.0f;
++	float footprintDepth = 0.0f;
++	if (footprint.IsOk())
++	{
++		flags |= TEMPLATE_FOOTPRINT;
++		if (footprint.GetChild("Square").IsOk())
++		{
++			flags |= TEMPLATE_FOOTPRINT_SQUARE;
++			footprintWidth = NodeFloat(footprint.GetChild("Square").GetChild("@width"));
++			footprintDepth = NodeFloat(footprint.GetChild("Square").GetChild("@depth"));
++		}
++		else
++			footprintWidth = footprintDepth = NodeFloat(footprint.GetChild("Circle").GetChild("@radius"));
++	}
++
++	const CParamNode& statusBars = templateNode->GetChild("StatusBars");
++	if (statusBars.IsOk())
++		flags |= TEMPLATE_STATUS_BARS;
++	const CParamNode& supplyMax = templateNode->GetChild("ResourceSupply").GetChild("Max");
++	if (supplyMax.IsOk() && supplyMax.ToString() == "Infinity")
++		flags |= TEMPLATE_INFINITE_SUPPLY;
++
++	u32 components = 0;
++	for (size_t i = 0; i < std::size(DETAIL_INTERFACES); ++i)
++		if (templateNode->GetChild(DETAIL_INTERFACES[i]).IsOk())
++			components |= 1u << i;
++
++	const size_t start = BeginRecord(m_Buffer, RECORD_TEMPLATE_DETAILS);
++	PutU32(m_Buffer, index);
++	PutU16(m_Buffer, flags);
++	PutU32(m_Buffer, overlayTexture);
++	PutU32(m_Buffer, overlayMask);
++	PutF32(m_Buffer, NodeFloat(outline.GetChild("LineThickness")));
++	PutF32(m_Buffer, overlayWidth);
++	PutF32(m_Buffer, overlayDepth);
++	PutF32(m_Buffer, footprintWidth);
++	PutF32(m_Buffer, footprintDepth);
++	PutF32(m_Buffer, NodeFloat(footprint.GetChild("Height")));
++	PutF32(m_Buffer, NodeFloat(statusBars.GetChild("BarWidth")));
++	PutF32(m_Buffer, NodeFloat(statusBars.GetChild("BarHeight")));
++	PutF32(m_Buffer, NodeFloat(statusBars.GetChild("HeightOffset")));
++	for (const u32 string : { genericName, specificName, icon, selectionGroupName, rank, classes, visibleClasses, selectSound })
++		PutU32(m_Buffer, string);
++	PutU32(m_Buffer, components);
++	EndRecord(m_Buffer, start);
++}
++
++// The session GUI reads and clears this list every update; nothing else
++// does in a nonvisual observer, and it is not serialized.
++void CSpeculaFeed::WriteRenames(CSimulation2& simulation)
++{
++	CmpPtr<ICmpGuiInterface> cmpGuiInterface(simulation, SYSTEM_ENTITY);
++	if (!cmpGuiInterface)
++		return;
++	ScriptRequest rq(simulation.GetScriptInterface());
++	JS::RootedValue arg(rq.cx);
++	JS::RootedValue renames(rq.cx);
++	cmpGuiInterface->ScriptCall(INVALID_PLAYER, L"GetRenamedEntities", arg, &renames);
++	JS::RootedValue ignored(rq.cx);
++	cmpGuiInterface->ScriptCall(INVALID_PLAYER, L"ClearRenamedEntities", arg, &ignored);
++
++	const u32 count = ArrayLength(rq, renames);
++	if (!count)
++		return;
++	const size_t start = BeginRecord(m_Buffer, RECORD_RENAMES);
++	PutU32(m_Buffer, count);
++	for (u32 i = 0; i < count; ++i)
++	{
++		JS::RootedValue rename(rq.cx);
++		u32 oldId = 0;
++		u32 newId = 0;
++		if (Script::GetPropertyInt(rq, renames, static_cast<int>(i), &rename))
++		{
++			Script::GetProperty(rq, rename, "entity", oldId);
++			Script::GetProperty(rq, rename, "newentity", newId);
++		}
++		PutU32(m_Buffer, oldId);
++		PutU32(m_Buffer, newId);
++	}
++	EndRecord(m_Buffer, start);
++}
++
++void CSpeculaFeed::WriteDetails(CSimulation2& simulation, u32 turn)
++{
++	const double startTime = timer_Time();
++	CmpPtr<ICmpTemplateManager> cmpTemplateManager(simulation, SYSTEM_ENTITY);
++	if (!cmpTemplateManager)
++		return;
++	const CComponentManager& componentManager = simulation.GetSimContext().GetComponentManager();
++	ScriptRequest rq(simulation.GetScriptInterface());
++	// The lists ask for technology requirements, which costs too much to do
++	// every turn.
++	const bool sampleLists = m_DetailsTurns == 0 || turn % PLAYERS_INTERVAL_TURNS == 0;
++
++	std::array<int, std::size(DETAIL_INTERFACES)> iids;
++	for (size_t i = 0; i < iids.size(); ++i)
++	{
++		JS::RootedValue iid(rq.cx);
++		iids[i] = -1;
++		if (ScriptInterface::GetGlobalProperty(rq, std::string("IID_") + DETAIL_INTERFACES[i], &iid) && iid.isInt32())
++			iids[i] = iid.toInt32();
++	}
++
++	std::unordered_map<entity_id_t, SDetailGroups> current;
++	for (size_t i = 0; i < iids.size(); ++i)
++	{
++		if (iids[i] < 0)
++			continue;
++		const std::string_view interface = DETAIL_INTERFACES[i];
++		for (const std::pair<const entity_id_t, IComponent*>& pair : simulation.GetEntitiesWithInterfaceUnordered(iids[i]))
++		{
++			const entity_id_t ent = pair.first;
++			if (ENTITY_IS_LOCAL(ent))
++				continue;
++			JS::RootedValue component(rq.cx, pair.second->GetJSInstance());
++			SDetailGroups& groups = current[ent];
++			if (interface == "Health")
++			{
++				std::vector<u8>& group = groups[DETAIL_HEALTH];
++				PutF32(group, CallFloat(rq, component, "GetHitpoints"));
++				PutF32(group, CallFloat(rq, component, "GetMaxHitpoints"));
++			}
++			else if (interface == "Capturable")
++			{
++				JS::RootedValue points(rq.cx);
++				ScriptFunction::Call(rq, component, "GetCapturePoints", &points);
++				const u32 count = std::min<u32>(ArrayLength(rq, points), 0xFF);
++				std::vector<u8>& group = groups[DETAIL_CAPTURE];
++				group.push_back(static_cast<u8>(count));
++				for (u32 j = 0; j < count; ++j)
++				{
++					double value = 0.0;
++					Script::GetPropertyInt(rq, points, static_cast<int>(j), value);
++					PutF32(group, static_cast<float>(value));
++				}
++				PutF32(group, CallFloat(rq, component, "GetMaxCapturePoints"));
++			}
++			else if (interface == "ResourceSupply")
++			{
++				PutF32(groups[DETAIL_SUPPLY], CallFloat(rq, component, "GetCurrentAmount"));
++				PutF32(groups[DETAIL_SUPPLY], CallFloat(rq, component, "GetMaxAmount"));
++				groups[DETAIL_GATHERERS].push_back(Clamp8(static_cast<u32>(CallFloat(rq, component, "GetNumGatherers"))));
++				groups[DETAIL_GATHERERS].push_back(Clamp8(static_cast<u32>(CallFloat(rq, component, "GetMaxGatherers"))));
++			}
++			else if (interface == "ResourceGatherer")
++			{
++				JS::RootedValue carrying(rq.cx);
++				ScriptFunction::Call(rq, component, "GetCarryingStatus", &carrying);
++				const u32 count = std::min<u32>(ArrayLength(rq, carrying), 0xFF);
++				std::vector<u8>& group = groups[DETAIL_CARRYING];
++				group.push_back(static_cast<u8>(count));
++				for (u32 j = 0; j < count; ++j)
++				{
++					JS::RootedValue item(rq.cx);
++					std::string type;
++					Script::GetPropertyInt(rq, carrying, static_cast<int>(j), &item);
++					Script::GetProperty(rq, item, "type", type);
++					PutU32(group, InternString(type));
++					PutF32(group, PropertyFloat(rq, item, "amount"));
++					PutF32(group, PropertyFloat(rq, item, "max"));
++				}
++			}
++			else if (interface == "Promotion")
++			{
++				PutF32(groups[DETAIL_EXPERIENCE], CallFloat(rq, component, "GetCurrentXp"));
++				PutF32(groups[DETAIL_EXPERIENCE], CallFloat(rq, component, "GetRequiredXp"));
++			}
++			else if (interface == "ProductionQueue")
++			{
++				JS::RootedValue queue(rq.cx);
++				ScriptFunction::Call(rq, component, "GetQueue", &queue);
++				const u32 count = std::min<u32>(ArrayLength(rq, queue), 0xFF);
++				std::vector<u8>& group = groups[DETAIL_QUEUE];
++				group.push_back(CallBool(rq, component, "IsAutoQueueing") ? 1 : 0);
++				group.push_back(static_cast<u8>(count));
++				for (u32 j = 0; j < count; ++j)
++				{
++					JS::RootedValue item(rq.cx);
++					Script::GetPropertyInt(rq, queue, static_cast<int>(j), &item);
++					std::string name;
++					const bool technology = !Script::HasProperty(rq, item, "unitTemplate");
++					Script::GetProperty(rq, item, technology ? "technologyTemplate" : "unitTemplate", name);
++					JS::RootedValue paused(rq.cx);
++					Script::GetProperty(rq, item, "paused", &paused);
++					PutU32(group, static_cast<u32>(PropertyFloat(rq, item, "id")));
++					group.push_back(technology ? QUEUE_TECHNOLOGY : QUEUE_UNIT);
++					PutU32(group, InternString(name));
++					PutU16(group, technology ? 1 : Clamp16(static_cast<u32>(PropertyFloat(rq, item, "count"))));
++					PutF32(group, PropertyFloat(rq, item, "progress"));
++					PutF32(group, PropertyFloat(rq, item, "timeRemaining"));
++					group.push_back(Truthy(paused) ? 1 : 0);
++					PutU16(group, Clamp16(static_cast<u32>(PropertyFloat(rq, item, "neededSlots"))));
++				}
++			}
++			else if (interface == "GarrisonHolder")
++			{
++				std::vector<u32> held;
++				ScriptFunction::Call(rq, component, "GetEntities", held);
++				std::vector<u8>& group = groups[DETAIL_GARRISON];
++				PutU16(group, Clamp16(static_cast<u32>(CallFloat(rq, component, "GetCapacity"))));
++				PutU16(group, Clamp16(static_cast<u32>(CallFloat(rq, component, "OccupiedSlots"))));
++				PutU16(group, Clamp16(static_cast<u32>(held.size())));
++				for (size_t j = 0; j < std::min<size_t>(held.size(), 0xFFFF); ++j)
++				{
++					PutU32(group, held[j]);
++					PutU32(group, InternTemplate(simulation, held[j], cmpTemplateManager->GetCurrentTemplateName(held[j])));
++				}
++			}
++			else if (interface == "Foundation" || interface == "Repairable")
++			{
++				JS::RootedValue buildTime(rq.cx);
++				ScriptFunction::Call(rq, component, "GetBuildTime", &buildTime);
++				std::vector<u8>& group = groups[interface == "Foundation" ? DETAIL_FOUNDATION : DETAIL_REPAIR];
++				group.push_back(Clamp8(static_cast<u32>(CallFloat(rq, component, "GetNumBuilders"))));
++				PutF32(group, PropertyFloat(rq, buildTime, "timeRemaining"));
++			}
++			else if (interface == "UnitAI")
++			{
++				JS::RootedValue state(rq.cx);
++				JS::RootedValue stance(rq.cx);
++				ScriptFunction::Call(rq, component, "GetCurrentState", &state);
++				ScriptFunction::Call(rq, component, "GetStanceName", &stance);
++				std::vector<u8>& group = groups[DETAIL_UNIT_AI];
++				PutU32(group, InternString(StringOf(rq, state)));
++				group.push_back(CallBool(rq, component, "IsIdle") ? 1 : 0);
++				PutU32(group, InternString(StringOf(rq, stance)));
++				PutU32(group, static_cast<u32>(CallFloat(rq, component, "GetFormationController")));
++			}
++			else if (interface == "Trainer" || interface == "Researcher")
++			{
++				const size_t slot = interface == "Trainer" ? DETAIL_TRAINABLE : DETAIL_RESEARCHABLE;
++				if (!sampleLists)
++				{
++					const auto last = m_LastDetails.find(ent);
++					if (last != m_LastDetails.end())
++						groups[slot] = last->second[slot];
++					continue;
++				}
++				JS::RootedValue list(rq.cx);
++				ScriptFunction::Call(rq, component, interface == "Trainer" ? "GetEntitiesList" : "GetTechnologiesList", &list);
++				const u32 count = ArrayLength(rq, list);
++				std::vector<u32> strings;
++				for (u32 j = 0; j < count; ++j)
++				{
++					JS::RootedValue item(rq.cx);
++					Script::GetPropertyInt(rq, list, static_cast<int>(j), &item);
++					std::string name = StringOf(rq, item);
++					if (item.isObject())
++					{
++						std::string top;
++						std::string bottom;
++						Script::GetProperty(rq, item, "top", top);
++						Script::GetProperty(rq, item, "bottom", bottom);
++						name = top + " " + bottom;
++					}
++					strings.push_back(InternString(name));
++				}
++				PutU32(groups[slot], InternStringList(strings));
++			}
++			else if (interface == "Pack" || interface == "Upgrade")
++			{
++				std::vector<u8>& group = groups[DETAIL_PROGRESS];
++				if (!group.empty())
++					continue;
++				float packProgress = -1.0f;
++				float upgradeProgress = -1.0f;
++				std::string upgradeTarget;
++				if (iids[INTERFACE_PACK] >= 0)
++					if (IComponent* pack = componentManager.QueryInterface(ent, iids[INTERFACE_PACK]))
++					{
++						JS::RootedValue packComponent(rq.cx, pack->GetJSInstance());
++						if (CallBool(rq, packComponent, "IsPacking"))
++							packProgress = CallFloat(rq, packComponent, "GetProgress");
++					}
++				if (iids[INTERFACE_UPGRADE] >= 0)
++					if (IComponent* upgrade = componentManager.QueryInterface(ent, iids[INTERFACE_UPGRADE]))
++					{
++						JS::RootedValue upgradeComponent(rq.cx, upgrade->GetJSInstance());
++						if (CallBool(rq, upgradeComponent, "IsUpgrading"))
++						{
++							upgradeProgress = CallFloat(rq, upgradeComponent, "GetProgress");
++							JS::RootedValue target(rq.cx);
++							ScriptFunction::Call(rq, upgradeComponent, "GetUpgradingTo", &target);
++							upgradeTarget = StringOf(rq, target);
++						}
++					}
++				const u32 target = InternString(upgradeTarget);
++				PutF32(group, packProgress);
++				PutF32(group, upgradeProgress);
++				PutU32(group, target);
++			}
++			else if (interface == "Trader")
++			{
++				JS::RootedValue goods(rq.cx);
++				ScriptFunction::Call(rq, component, "GetGoods", &goods);
++				JS::RootedValue type(rq.cx);
++				JS::RootedValue amount(rq.cx);
++				if (goods.isObject())
++				{
++					Script::GetProperty(rq, goods, "type", &type);
++					Script::GetProperty(rq, goods, "amount", &amount);
++				}
++				const u32 typeString = InternString(StringOf(rq, type));
++				std::vector<u8>& group = groups[DETAIL_TRADER];
++				PutU32(group, typeString);
++				PutF32(group, PropertyFloat(rq, amount, "traderGain") + PropertyFloat(rq, amount, "market1Gain") + PropertyFloat(rq, amount, "market2Gain"));
++			}
++			else if (interface == "Garrisonable" || interface == "Turretable")
++			{
++				std::vector<u8>& group = groups[DETAIL_HOLDER];
++				const u32 holder = static_cast<u32>(CallFloat(rq, component, "HolderID"));
++				if (!group.empty())
++				{
++					if (!holder)
++						continue;
++					group.clear();
++				}
++				PutU32(group, holder);
++			}
++		}
++	}
++
++	std::vector<u8> payload;
++	u32 changed = 0;
++	for (const std::pair<const entity_id_t, SDetailGroups>& entry : current)
++	{
++		const auto last = m_LastDetails.find(entry.first);
++		u32 mask = 0;
++		for (size_t slot = 0; slot < entry.second.size(); ++slot)
++			if (!entry.second[slot].empty() &&
++			    (last == m_LastDetails.end() || last->second[slot] != entry.second[slot]))
++				mask |= 1u << slot;
++		if (!mask)
++			continue;
++		PutU32(payload, entry.first);
++		PutU32(payload, mask);
++		for (size_t slot = 0; slot < entry.second.size(); ++slot)
++			if (mask & (1u << slot))
++				payload.insert(payload.end(), entry.second[slot].begin(), entry.second[slot].end());
++		++changed;
++	}
++	std::vector<u32> gone;
++	for (const std::pair<const entity_id_t, SDetailGroups>& entry : m_LastDetails)
++		if (current.find(entry.first) == current.end())
++			gone.push_back(entry.first);
++
++	if (changed || !gone.empty())
++	{
++		const size_t start = BeginRecord(m_Buffer, RECORD_DETAILS);
++		PutU32(m_Buffer, changed);
++		m_Buffer.insert(m_Buffer.end(), payload.begin(), payload.end());
++		PutU32(m_Buffer, static_cast<u32>(gone.size()));
++		for (const u32 id : gone)
++			PutU32(m_Buffer, id);
++		EndRecord(m_Buffer, start);
++	}
++	m_LastDetails = std::move(current);
++
++	m_DetailsSeconds += timer_Time() - startTime;
++	if (++m_DetailsTurns % DETAILS_LOG_INTERVAL_TURNS == 0)
++	{
++		debug_printf("Specula feed: details took %.2f ms per turn over the last %u turns\n",
++			m_DetailsSeconds * 1000.0 / DETAILS_LOG_INTERVAL_TURNS, DETAILS_LOG_INTERVAL_TURNS);
++		m_DetailsSeconds = 0.0;
++	}
++}
++
+ // Read through the GUI interface, as the session GUI does every turn: team
+ // and diplomacy live only in JS components.
+ void CSpeculaFeed::WritePlayers(CSimulation2& simulation)
+@@ -593,6 +1158,62 @@ void CSpeculaFeed::WritePlayers(CSimulation2& simulation)
+ 	    !Script::GetProperty(rq, players, "length", count))
+ 		return;
+ 
++	// On its own record: it changes with every gather, diplomacy almost
++	// never.
++	std::vector<u8> economy;
++	PutU32(economy, count);
++	for (u32 i = 0; i < count; ++i)
++	{
++		JS::RootedValue player(rq.cx);
++		JS::RootedValue resources(rq.cx);
++		JS::RootedValue gatherers(rq.cx);
++		JS::RootedValue panelEntities(rq.cx);
++		i32 population = 0;
++		i32 populationLimit = 0;
++		i32 populationMax = 0;
++		std::string phase;
++		Script::GetPropertyInt(rq, players, static_cast<int>(i), &player);
++		Script::GetProperty(rq, player, "popCount", population);
++		Script::GetProperty(rq, player, "popLimit", populationLimit);
++		Script::GetProperty(rq, player, "popMax", populationMax);
++		Script::GetProperty(rq, player, "resourceCounts", &resources);
++		Script::GetProperty(rq, player, "resourceGatherers", &gatherers);
++		Script::GetProperty(rq, player, "phase", phase);
++		Script::GetProperty(rq, player, "panelEntities", &panelEntities);
++		std::vector<std::string> codes;
++		if (resources.isObject())
++			Script::EnumeratePropertyNames(rq, resources, true, codes);
++		std::sort(codes.begin(), codes.end());
++		codes.resize(std::min<size_t>(codes.size(), 0xFF));
++
++		PutI32(economy, population);
++		PutI32(economy, populationLimit);
++		PutI32(economy, populationMax);
++		economy.push_back(static_cast<u8>(codes.size()));
++		for (const std::string& code : codes)
++		{
++			PutU32(economy, InternString(code));
++			PutF32(economy, PropertyFloat(rq, resources, code.c_str()));
++			PutU16(economy, Clamp16(static_cast<u32>(PropertyFloat(rq, gatherers, code.c_str()))));
++		}
++		PutU32(economy, InternString(phase));
++		const u32 panelCount = std::min<u32>(ArrayLength(rq, panelEntities), 0xFFFF);
++		PutU16(economy, static_cast<u16>(panelCount));
++		for (u32 j = 0; j < panelCount; ++j)
++		{
++			u32 id = 0;
++			Script::GetPropertyInt(rq, panelEntities, static_cast<int>(j), id);
++			PutU32(economy, id);
++		}
++	}
++	if (economy != m_LastEconomy)
++	{
++		const size_t economyStart = BeginRecord(m_Buffer, RECORD_ECONOMY);
++		m_Buffer.insert(m_Buffer.end(), economy.begin(), economy.end());
++		EndRecord(m_Buffer, economyStart);
++		m_LastEconomy = std::move(economy);
++	}
++
+ 	std::vector<u8> payload;
+ 	PutU32(payload, count);
+ 	for (u32 i = 0; i < count; ++i)
+diff --git a/source/network/SpeculaFeed.h b/source/network/SpeculaFeed.h
+index 259dd3f572..6dfa764f73 100644
+--- a/source/network/SpeculaFeed.h
++++ b/source/network/SpeculaFeed.h
+@@ -27,6 +27,7 @@
+ #include "simulation2/helpers/Player.h"
+ #include "simulation2/system/Entity.h"
+ 
++#include <array>
+ #include <map>
+ #include <string>
+ #include <unordered_map>
+@@ -116,6 +117,70 @@ class CSimulation2;
+  *    before the launch, 0 for none. The launch point is the simulation's,
+  *    as this observer has no models to take a prop's from. Actor strings
+  *    are none when empty; the shooter's actor then names the projectile.
++ *
++ * Kinds 11 to 15 carry what the selection panels and status bars show. They
++ * are new kinds rather than a new version, so an encoder that does not know
++ * them skips them by their length.
++ *  - kind 11 template details, right after the kind 1 record of the same
++ *    template: u32 index, u16 flags, u32 overlay texture string, u32
++ *    overlay mask string, f32 overlay line thickness, f32 overlay shape
++ *    width, f32 overlay shape depth, f32 footprint width, f32 footprint
++ *    depth, f32 footprint height, f32 status bar width, f32 status bar
++ *    height, f32 status bar height offset, u32 generic name, u32 specific
++ *    name, u32 icon, u32 selection group name, u32 rank, u32 classes, u32
++ *    visible classes, u32 select sound group, u32 components. Strings are
++ *    string records (none when absent), read from the template as is: the
++ *    textures relative to art/textures/selection/, the icon to
++ *    art/textures/ui/session/portraits/, the sound group to audio/, the
++ *    classes as the template's token lists. A circle gives its radius as
++ *    width and depth. Flags: 1 Selectable, 2 Selectable only in Atlas, 4
++ *    the overlay is an outline (else a textured quad), 8 the overlay is
++ *    always visible, 16 the selection box is the footprint (else the model
++ *    bounds), 32 the footprint is a square (else a circle), 64 the overlay
++ *    has its own square shape, 128 its own circle shape, 256 Footprint, 512
++ *    StatusBars, 1024 an infinite resource supply. Components, one bit
++ *    each: Health, Capturable, ResourceSupply, ProductionQueue,
++ *    GarrisonHolder, Promotion, ResourceGatherer, Foundation, Repairable,
++ *    UnitAI, Trainer, Researcher, Pack, Upgrade, Trader, Garrisonable,
++ *    Turretable, from bit 0 up.
++ *  - kind 12 entity details, before the turn record: u32 count, count x
++ *    {u32 id, u32 mask, then for each bit set, in this order: 1 f32
++ *    hitpoints, f32 max hitpoints; 2 u8 n, n x f32 capture points by
++ *    player, f32 max capture points; 4 f32 resource amount, f32 max amount;
++ *    8 u8 gatherers, u8 max gatherers; 16 u8 n, n x {u32 resource type
++ *    string, f32 amount, f32 capacity} carried; 32 f32 experience, f32
++ *    experience required; 64 u8 autoqueue, u8 n, n x {u32 item id, u8 kind
++ *    (0 unit, 1 technology), u32 template or technology string, u16 count,
++ *    f32 progress 0..1, f32 time remaining in ms, u8 paused, u16 missing
++ *    population} production queue; 128 u16 capacity, u16 occupied slots,
++ *    u16 n, n x {u32 id, u32 template index} garrison; 256 u8 builders, f32
++ *    seconds remaining of a foundation; 512 the same for a repair; 1024 u32
++ *    UnitAI state string, u8 idle, u32 stance string, u32 formation
++ *    controller id; 2048 u32 trainable list; 4096 u32 researchable list;
++ *    8192 f32 pack progress, f32 upgrade progress (-1 when not packing or
++ *    upgrading), u32 upgrade target string; 16384 u32 holder id (the
++ *    entity it is garrisoned in or a turret on, 0 for none); 32768 u32 goods
++ *    type string, f32 total gain of a trader}, then u32 count, count x u32
++ *    id of entities that no longer have any of them. A group is written
++ *    when it differs from what was last written for the entity, so every
++ *    group an entity has comes on the first turn it is seen. Local entities
++ *    (mirages, previews) are left out; garrisoned entities, out of the
++ *    world, are in. The trainable and researchable lists are sampled every
++ *    PLAYERS_INTERVAL_TURNS turns, the rest every turn. Values are the
++ *    components' own, as GuiInterface.GetEntityState reads them.
++ *  - kind 13 string list, before the record that first uses it: u32 index,
++ *    u32 count, count x u32 string. A researchable pair is one string, the
++ *    top and bottom names separated by a space; an empty slot of the
++ *    researchable row is none.
++ *  - kind 14 renames, before the turn record, when the turn renamed any:
++ *    u32 count, count x {u32 old id, u32 new id}, as
++ *    GuiInterface.GetRenamedEntities lists them (promotion, a finished
++ *    foundation, an upgrade, packing).
++ *  - kind 15 economy, after a players record would be (every
++ *    PLAYERS_INTERVAL_TURNS turns), when it changed: u32 count n, n x {i32
++ *    population, i32 population limit, i32 population max, u8 m, m x {u32
++ *    resource code string, f32 amount, u16 gatherers}, u32 phase string,
++ *    u16 k, k x u32 panel entity id}. Index 0 is gaia.
+  */
+ class CSpeculaFeed
+ {
+@@ -214,13 +279,24 @@ private:
+ 		i32 impactLifetime;
+ 	};
+ 
++	/**
++	 * The last bytes written for each kind 12 group of an entity, by group
++	 * bit; an empty slot is a group the entity does not have.
++	 */
++	using SDetailGroups = std::array<std::vector<u8>, 16>;
++
+ 	static u16 Visibility(const CSimContext& context, entity_id_t ent);
+ 
+ 	void WriteTerrain(CSimulation2& simulation);
+ 	void WritePlayers(CSimulation2& simulation);
+ 	void WriteTerritory(CSimulation2& simulation);
++	void WriteTemplateDetails(CSimulation2& simulation, u32 index, const std::string& templateName);
++	void WriteDetails(CSimulation2& simulation, u32 turn);
++	void WriteRenames(CSimulation2& simulation);
++	u32 InternTemplate(CSimulation2& simulation, entity_id_t ent, const std::string& templateName);
+ 	u32 InternString(const std::string& text);
+ 	u32 InternVariants(const std::map<CStr, CStr>& selections);
++	u32 InternStringList(const std::vector<u32>& strings);
+ 	bool Send();
+ 	void Disable(const char* what);
+ 
+@@ -230,7 +306,13 @@ private:
+ 	std::unordered_map<std::string, u32> m_TemplateIndices;
+ 	std::unordered_map<std::string, u32> m_StringIndices;
+ 	std::map<std::vector<std::pair<u32, u32>>, u32> m_VariantSetIndices;
++	std::map<std::vector<u32>, u32> m_StringListIndices;
++	std::unordered_map<entity_id_t, SDetailGroups> m_LastDetails;
+ 	std::vector<u8> m_LastPlayers;
++	std::vector<u8> m_LastEconomy;
++	// Time spent reading the kind 12 details, for the cost log.
++	double m_DetailsSeconds = 0.0;
++	u32 m_DetailsTurns = 0;
+ 	std::vector<SSound> m_Sounds;
+ 	std::vector<SProjectile> m_Launches;
+ 	std::vector<u32> m_Removals;

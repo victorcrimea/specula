@@ -1,0 +1,251 @@
+From 3c9bc78cd2f8d2c9e35ed83cb9573c15144af16a Mon Sep 17 00:00:00 2001
+From: Viktor Semenov <suit.uanic@gmail.com>
+Date: Sat, 10 Oct 2026 16:53:16 +0000
+Subject: [PATCH 12/45] Send entity variables, corpses and rubble in the
+ Specula feed
+
+Feed format v14. CCmpVisualActor::SetVariable only hands a variable to
+the model, which a nonvisual engine has none of, so it now also keeps
+it, and ICmpVisual::GetVariables returns them. The turn record's entity
+gains a variable set index after its variant set, and the new kind 16
+variable set record lists the names and values, so the web view's
+particles read numbuilders as the construction dust does.
+
+Besides the construction previews, the local entities whose template is
+"corpse|" or "decay|" (the rubble of SpawnEntityOnDeath) are now sent:
+they carry the destruction smoke and dust. Mirages and placement
+previews stay out.
+---
+ source/network/SpeculaFeed.cpp                | 48 ++++++++++++++++---
+ source/network/SpeculaFeed.h                  | 15 ++++--
+ .../components/CCmpVisualActor.cpp            | 10 ++++
+ source/simulation2/components/ICmpVisual.h    |  5 ++
+ 4 files changed, 68 insertions(+), 10 deletions(-)
+
+diff --git a/source/network/SpeculaFeed.cpp b/source/network/SpeculaFeed.cpp
+index 0e17d91243..86320c447e 100644
+--- a/source/network/SpeculaFeed.cpp
++++ b/source/network/SpeculaFeed.cpp
+@@ -60,7 +60,7 @@
+ 
+ namespace
+ {
+-constexpr u32 FEED_VERSION = 13;
++constexpr u32 FEED_VERSION = 14;
+ constexpr u8 RECORD_TEMPLATE = 1;
+ constexpr u8 RECORD_TURN = 2;
+ constexpr u8 RECORD_MAP = 3;
+@@ -76,6 +76,7 @@ constexpr u8 RECORD_DETAILS = 12;
+ constexpr u8 RECORD_STRING_LIST = 13;
+ constexpr u8 RECORD_RENAMES = 14;
+ constexpr u8 RECORD_ECONOMY = 15;
++constexpr u8 RECORD_VARIABLE_SET = 16;
+ constexpr u16 TEMPLATE_SELECTABLE = 1;
+ constexpr u16 TEMPLATE_EDITOR_ONLY = 2;
+ constexpr u16 TEMPLATE_OUTLINE = 4;
+@@ -141,9 +142,11 @@ constexpr u32 PLAYERS_INTERVAL_TURNS = 5;
+ constexpr u16 NO_TEXTURE = 0xFFFF;
+ // CCmpMinimap prepends this to the template's icon file name.
+ const std::string ICON_DIRECTORY = "art/textures/ui/session/icons/minimap/";
+-// Foundation.js shows the rising building as a local entity of this filter;
+-// it is the only local entity a viewer has to see.
+-const std::string CONSTRUCTION_PREFIX = "construction|";
++// The local entities a viewer has to see: Foundation.js shows the rising
++// building as one, and Health.js leaves corpses and the rubble of
++// SpawnEntityOnDeath as others, which carry the destruction particles.
++// Mirages and placement previews stay out.
++const std::array<std::string_view, 3> LOCAL_PREFIXES = { "construction|", "corpse|", "decay|" };
+ // SelectAnimation mirrors the animation name into this variant key.
+ const CStr ANIMATION_KEY = "animation";
+ 
+@@ -174,6 +177,7 @@ struct SEntity
+ 	u32 actor;
+ 	u32 seed;
+ 	u32 variants;
++	u32 variables;
+ 	u32 animation;
+ 	i32 animationSpeed;
+ 	i32 syncRepeat;
+@@ -370,7 +374,8 @@ void CSpeculaFeed::OnTurn(CSimulation2& simulation, u32 turn)
+ 			continue;
+ 
+ 		const std::string templateName = cmpTemplateManager->GetCurrentTemplateName(ent);
+-		if (ENTITY_IS_LOCAL(ent) && templateName.compare(0, CONSTRUCTION_PREFIX.size(), CONSTRUCTION_PREFIX) != 0)
++		if (ENTITY_IS_LOCAL(ent) && std::none_of(LOCAL_PREFIXES.begin(), LOCAL_PREFIXES.end(),
++			[&templateName](std::string_view prefix) { return templateName.compare(0, prefix.size(), prefix) == 0; }))
+ 			continue;
+ 		const u32 templateIndex = InternTemplate(simulation, ent, templateName);
+ 
+@@ -385,7 +390,7 @@ void CSpeculaFeed::OnTurn(CSimulation2& simulation, u32 turn)
+ 			cmpOwnership ? cmpOwnership->GetOwner() : INVALID_PLAYER,
+ 			0, 0, 0, 0,
+ 			position.Y.GetInternalValue(),
+-			NONE, 0, NONE, NONE, 0, 0, 0,
++			NONE, 0, NONE, NONE, NONE, 0, 0, 0,
+ 			cmpPosition->GetConstructionProgress().GetInternalValue(),
+ 			NONE,
+ 			Visibility(simulation.GetSimContext(), ent)
+@@ -399,6 +404,7 @@ void CSpeculaFeed::OnTurn(CSimulation2& simulation, u32 turn)
+ 			entity.actor = InternString(utf8_from_wstring(cmpVisual->GetActorName()));
+ 			entity.seed = cmpVisual->GetActorSeed();
+ 			entity.variants = InternVariants(cmpVisual->GetVariantSelections());
++			entity.variables = InternVariables(cmpVisual->GetVariables());
+ 			entity.animation = InternString(cmpVisual->GetAnimationName());
+ 			entity.animationSpeed = cmpVisual->GetAnimationSpeed().GetInternalValue();
+ 			entity.syncRepeat = cmpVisual->GetAnimationSyncRepeat().GetInternalValue();
+@@ -482,6 +488,7 @@ void CSpeculaFeed::OnTurn(CSimulation2& simulation, u32 turn)
+ 		PutU32(m_Buffer, entity.actor);
+ 		PutU32(m_Buffer, entity.seed);
+ 		PutU32(m_Buffer, entity.variants);
++		PutU32(m_Buffer, entity.variables);
+ 		PutU32(m_Buffer, entity.animation);
+ 		PutI32(m_Buffer, entity.animationSpeed);
+ 		PutI32(m_Buffer, entity.syncRepeat);
+@@ -662,6 +669,35 @@ u32 CSpeculaFeed::InternVariants(const std::map<CStr, CStr>& selections)
+ 	return it->second;
+ }
+ 
++// Only Foundation.js sets one, to its builder count, so the distinct sets
++// of a match are few, as with variants.
++u32 CSpeculaFeed::InternVariables(const std::map<std::string, float>& variables)
++{
++	std::vector<std::pair<u32, u32>> pairs;
++	for (const std::pair<const std::string, float>& variable : variables)
++	{
++		u32 bits;
++		std::memcpy(&bits, &variable.second, sizeof(bits));
++		pairs.emplace_back(InternString(variable.first), bits);
++	}
++	if (pairs.empty())
++		return NONE;
++	const auto [it, inserted] = m_VariableSetIndices.try_emplace(pairs, static_cast<u32>(m_VariableSetIndices.size()));
++	if (inserted)
++	{
++		const size_t start = BeginRecord(m_Buffer, RECORD_VARIABLE_SET);
++		PutU32(m_Buffer, it->second);
++		PutU32(m_Buffer, static_cast<u32>(pairs.size()));
++		for (const std::pair<u32, u32>& pair : pairs)
++		{
++			PutU32(m_Buffer, pair.first);
++			PutU32(m_Buffer, pair.second);
++		}
++		EndRecord(m_Buffer, start);
++	}
++	return it->second;
++}
++
+ u32 CSpeculaFeed::InternStringList(const std::vector<u32>& strings)
+ {
+ 	const auto [it, inserted] = m_StringListIndices.try_emplace(strings, static_cast<u32>(m_StringListIndices.size()));
+diff --git a/source/network/SpeculaFeed.h b/source/network/SpeculaFeed.h
+index 6dfa764f73..fbdb088d4a 100644
+--- a/source/network/SpeculaFeed.h
++++ b/source/network/SpeculaFeed.h
+@@ -42,7 +42,7 @@ class CSimulation2;
+  * socket. It only reads the simulation, after each turn, so it cannot
+  * change the state hash.
+  *
+- * Feed format v13, little-endian: "SPCF", u32 version, then records of
++ * Feed format v14, little-endian: "SPCF", u32 version, then records of
+  * u8 kind, u32 payload length, payload.
+  *  - kind 1 template: u32 index, u16 name length, UTF-8 name, f32 minimap
+  *    icon size, u8 flags, then the icon file name relative to
+@@ -50,16 +50,18 @@ class CSimulation2;
+  *    minimap colour is the owner's player colour.
+  *  - kind 2 turn: u32 turn, u32 count, count x {u32 id, u32 template,
+  *    i32 x, i32 z, i32 angle, i32 owner, u8 r, u8 g, u8 b, u8 flags,
+- *    i32 y, u32 actor, u32 seed, u32 variant set, u32 animation,
++ *    i32 y, u32 actor, u32 seed, u32 variant set, u32 variable set,
++ *    u32 animation,
+  *    i32 animation speed, i32 sync repeat, i32 sync offset,
+  *    i32 construction progress, u32 sound group, u16 visibility}.
+  *    x/y/z/angle/speed/progress are raw 16.16
+  *    fixed, sync repeat and offset raw 16.16 milliseconds. actor and
+  *    animation are strings, 0xFFFFFFFF for none, as is an empty variant
+- *    set. Flag 1: r/g/b is the minimap colour. Flag 2: the entity has a
++ *    or variable set. Flag 1: r/g/b is the minimap colour. Flag 2: the entity has a
+  *    VisualActor; without it the visual fields are zero or none. Flag 4: the
+  *    animation plays once. Local entities are left out, except the
+- *    construction previews of foundations ("construction|" templates).
++ *    construction previews of foundations ("construction|" templates),
++ *    corpses ("corpse|") and what dying entities spawn ("decay|").
+  *    The sound group is a string, the group of the current animation
+  *    relative to audio/ ({lang} and {phenotype} replaced), or none. Bit p
+  *    of the visibility is set when player p sees the entity (LOS VISIBLE),
+@@ -70,6 +72,9 @@ class CSimulation2;
+  *    string, u32 value string}, sorted by key. The "animation" key is left
+  *    out, as it always holds the animation name, and so are keys whose
+  *    selection is empty.
++ *  - kind 16 variable set, likewise: u32 index, u32 count, count x {u32
++ *    name string, f32 value}, sorted by name, the entity variables given to
++ *    ICmpVisual::SetVariable (as "numbuilders").
+  *  - kind 3 map: u32 map size in metres, f32 game speed (the sim rate
+  *    set up for the match), once before the first turn.
+  *  - kind 4 terrain, right after the map record: u32 tiles per side n,
+@@ -296,6 +301,7 @@ private:
+ 	u32 InternTemplate(CSimulation2& simulation, entity_id_t ent, const std::string& templateName);
+ 	u32 InternString(const std::string& text);
+ 	u32 InternVariants(const std::map<CStr, CStr>& selections);
++	u32 InternVariables(const std::map<std::string, float>& variables);
+ 	u32 InternStringList(const std::vector<u32>& strings);
+ 	bool Send();
+ 	void Disable(const char* what);
+@@ -306,6 +312,7 @@ private:
+ 	std::unordered_map<std::string, u32> m_TemplateIndices;
+ 	std::unordered_map<std::string, u32> m_StringIndices;
+ 	std::map<std::vector<std::pair<u32, u32>>, u32> m_VariantSetIndices;
++	std::map<std::vector<std::pair<u32, u32>>, u32> m_VariableSetIndices;
+ 	std::map<std::vector<u32>, u32> m_StringListIndices;
+ 	std::unordered_map<entity_id_t, SDetailGroups> m_LastDetails;
+ 	std::vector<u8> m_LastPlayers;
+diff --git a/source/simulation2/components/CCmpVisualActor.cpp b/source/simulation2/components/CCmpVisualActor.cpp
+index 40e06e85be..695ad1a3e0 100644
+--- a/source/simulation2/components/CCmpVisualActor.cpp
++++ b/source/simulation2/components/CCmpVisualActor.cpp
+@@ -105,6 +105,10 @@ private:
+ 
+ 	std::map<CStr, CStr> m_VariantSelections;
+ 
++	// Kept for the Specula feed, as a nonvisual engine has no model to hold
++	// them. Not serialized, as the model's are not.
++	std::map<std::string, float> m_Variables;
++
+ 	u32 m_Seed; // seed used for random variations
+ 
+ 	bool m_ConstructionPreview;
+@@ -496,6 +500,11 @@ public:
+ 		return m_VariantSelections;
+ 	}
+ 
++	const std::map<std::string, float>& GetVariables() const override
++	{
++		return m_Variables;
++	}
++
+ 	const std::wstring& GetSoundGroup() const override
+ 	{
+ 		return m_SoundGroup;
+@@ -565,6 +574,7 @@ public:
+ 
+ 	void SetVariable(const std::string& name, float value) override
+ 	{
++		m_Variables[name] = value;
+ 		if (m_Unit)
+ 			m_Unit->GetModel().SetEntityVariable(name, value);
+ 	}
+diff --git a/source/simulation2/components/ICmpVisual.h b/source/simulation2/components/ICmpVisual.h
+index d7b2827662..b61474fa21 100644
+--- a/source/simulation2/components/ICmpVisual.h
++++ b/source/simulation2/components/ICmpVisual.h
+@@ -134,6 +134,11 @@ public:
+ 	 */
+ 	virtual const std::wstring& GetSoundGroup() const = 0;
+ 
++	/**
++	 * Returns the entity variables by name, as given to SetVariable.
++	 */
++	virtual const std::map<std::string, float>& GetVariables() const = 0;
++
+ 	/**
+ 	 * Start playing the given animation. If there are multiple possible animations then it will
+ 	 * pick one at random (not network-synchronised).

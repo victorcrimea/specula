@@ -1,0 +1,132 @@
+From af9d73a93405be3ea1407be5f1975ed290045ab9 Mon Sep 17 00:00:00 2001
+From: Viktor Semenov <suit.uanic@gmail.com>
+Date: Wed, 21 Oct 2026 15:09:20 +0000
+Subject: [PATCH 19/45] Send the builders' lists in the Specula feed
+
+Kind 12 group 4194304 names a kind 17 list of Builder.GetEntitiesList,
+each item read for the owner as a trainable one (the construction panel
+reads them so, without the batch), sampled with the other production
+lists. Kind 18 also sends the template data of every buildable item. A
+new group bit, so the feed stays v14.
+---
+ source/network/SpeculaFeed.cpp | 14 +++++++++-----
+ source/network/SpeculaFeed.h   | 26 +++++++++++++++-----------
+ 2 files changed, 24 insertions(+), 16 deletions(-)
+
+diff --git a/source/network/SpeculaFeed.cpp b/source/network/SpeculaFeed.cpp
+index 7283adedb6..37bb4bad1b 100644
+--- a/source/network/SpeculaFeed.cpp
++++ b/source/network/SpeculaFeed.cpp
+@@ -129,6 +129,7 @@ constexpr size_t DETAIL_TRAINABLE = 18;
+ constexpr size_t DETAIL_RESEARCHABLE = 19;
+ constexpr size_t DETAIL_RALLY = 20;
+ constexpr size_t DETAIL_STATS = 21;
++constexpr size_t DETAIL_BUILDABLE = 22;
+ constexpr u8 PRODUCTION_REQUIREMENTS_MET = 1;
+ constexpr u8 PRODUCTION_HIDDEN = 2;
+ constexpr u8 PRODUCTION_PAIR_TOP = 4;
+@@ -146,7 +147,7 @@ const char* const DETAIL_INTERFACES[] = {
+ 	"Health", "Capturable", "ResourceSupply", "ProductionQueue", "GarrisonHolder",
+ 	"Promotion", "ResourceGatherer", "Foundation", "Repairable", "UnitAI", "Trainer",
+ 	"Researcher", "Pack", "Upgrade", "Trader", "Garrisonable", "Turretable", "Attack", "Auras",
+-	"Heal", "RallyPoint"
++	"Heal", "RallyPoint", "Builder"
+ };
+ // Indices of DETAIL_INTERFACES that are read together.
+ constexpr size_t INTERFACE_PACK = 12;
+@@ -1598,9 +1599,10 @@ void CSpeculaFeed::WriteDetails(CSimulation2& simulation, u32 turn)
+ 				PutU32(group, InternString(StringOf(rq, stance)));
+ 				PutU32(group, static_cast<u32>(CallFloat(rq, component, "GetFormationController")));
+ 			}
+-			else if (interface == "Trainer" || interface == "Researcher")
++			else if (interface == "Trainer" || interface == "Researcher" || interface == "Builder")
+ 			{
+-				const size_t slot = interface == "Trainer" ? DETAIL_TRAINABLE : DETAIL_RESEARCHABLE;
++				const size_t slot = interface == "Trainer" ? DETAIL_TRAINABLE
++					: interface == "Researcher" ? DETAIL_RESEARCHABLE : DETAIL_BUILDABLE;
+ 				if (!sampleLists)
+ 				{
+ 					const auto last = m_LastDetails.find(ent);
+@@ -1609,7 +1611,7 @@ void CSpeculaFeed::WriteDetails(CSimulation2& simulation, u32 turn)
+ 					continue;
+ 				}
+ 				JS::RootedValue list(rq.cx);
+-				ScriptFunction::Call(rq, component, interface == "Trainer" ? "GetEntitiesList" : "GetTechnologiesList", &list);
++				ScriptFunction::Call(rq, component, interface == "Researcher" ? "GetTechnologiesList" : "GetEntitiesList", &list);
+ 				CmpPtr<ICmpOwnership> cmpOwnership(simulation, ent);
+ 				const player_id_t owner = cmpOwnership ? cmpOwnership->GetOwner() : INVALID_PLAYER;
+ 				std::map<std::string, float> multipliers;
+@@ -1642,7 +1644,9 @@ void CSpeculaFeed::WriteDetails(CSimulation2& simulation, u32 turn)
+ 						PutProductionItem(InternString(name), PRODUCTION_REQUIREMENTS_MET, PRODUCTION_NO_LIMIT, {}, items);
+ 						++count;
+ 					}
+-					else if (interface == "Trainer")
++					// The construction panel reads its items as the training
++					// panel does, without the batch.
++					else if (interface != "Researcher")
+ 					{
+ 						PutTrainable(simulation, rq, owner, name, productionCache, items);
+ 						++count;
+diff --git a/source/network/SpeculaFeed.h b/source/network/SpeculaFeed.h
+index f27f59aaff..55a431578c 100644
+--- a/source/network/SpeculaFeed.h
++++ b/source/network/SpeculaFeed.h
+@@ -191,15 +191,17 @@ class ScriptRequest;
+  *    not split by what the viewer has explored. The marker is the actor of
+  *    the owner's civ's MarkerTemplate. Sampled every PLAYERS_INTERVAL_TURNS
+  *    turns, n = 0 when unset; 2097152 u32 kind 20 stats index, read every
+- *    STATS_INTERVAL_TURNS turns for every entity that has a group}, then
++ *    STATS_INTERVAL_TURNS turns for every entity that has a group;
++ *    4194304 u32 buildable kind 17 list}, then
+  *    u32 count, count x u32
+  *    id of entities that no longer have any of them. A group is written
+  *    when it differs from what was last written for the entity, so every
+  *    group an entity has comes on the first turn it is seen. Local entities
+  *    (mirages, previews) are left out; garrisoned entities, out of the
+- *    world, are in. The trainable and researchable lists are sampled every
+- *    PLAYERS_INTERVAL_TURNS turns, the rest every turn. Values are the
+- *    components' own, as GuiInterface.GetEntityState reads them.
++ *    world, are in. The trainable, researchable and buildable lists are
++ *    sampled every PLAYERS_INTERVAL_TURNS turns, the rest every turn.
++ *    Values are the components' own, as GuiInterface.GetEntityState reads
++ *    them.
+  *  - kind 13 string list, written by older hooks only: u32 index, u32
+  *    count, count x u32 string. A researchable pair is one string, the top
+  *    and bottom names separated by a space; an empty slot of the
+@@ -217,9 +219,10 @@ class ScriptRequest;
+  *    index, u32 count, count x {u32 template or technology string, u8
+  *    flags, u16 can be added (0xFFFF for no limit), u8 n, n x {u32
+  *    resource code string, f32 cost}}: a producer's
+- *    Trainer.GetEntitiesList or Researcher.GetTechnologiesList, each item
+- *    read for the producer's owner as the session GUI's training and
+- *    research panels read it. Flags: 1 the requirements are met
++ *    Trainer.GetEntitiesList, Researcher.GetTechnologiesList or
++ *    Builder.GetEntitiesList, each item read for the producer's owner as
++ *    the session GUI's training, research and construction panels read it
++ *    (a buildable as a trainable). Flags: 1 the requirements are met
+  *    (AreRequirementsMet, CheckTechnologyRequirements), 2 the panels hide
+  *    it (no template data, or DeriveTechnologyRequirements is false for
+  *    the owner's civ), 4 the top
+@@ -233,9 +236,10 @@ class ScriptRequest;
+  *    u32 template name string, i32 player, then the rest of the record as
+  *    UTF-8 JSON of GuiInterface.GetTemplateData for that player (the
+  *    technology-modified values the tooltips show). Sent for the template
+- *    of every entity of a kind 12 record and every trainable item, for its
+- *    owner, the first time, and again when GuiInterface.IsTemplateModified
+- *    holds for the player and the JSON changed.
++ *    of every entity of a kind 12 record and every trainable and buildable
++ *    item, for its owner, the first time, and again when
++ *    GuiInterface.IsTemplateModified holds for the player and the JSON
++ *    changed.
+  *  - kind 19 technology data, likewise: u32 technology name string, u32
+  *    civ string, then UTF-8 JSON of GetTechnologyDataHelper for that civ,
+  *    as the session GUI's GetTechnologyData makes it, once for each
+@@ -351,7 +355,7 @@ private:
+ 	 * The last bytes written for each kind 12 group of an entity, by group
+ 	 * bit; an empty slot is a group the entity does not have.
+ 	 */
+-	using SDetailGroups = std::array<std::vector<u8>, 22>;
++	using SDetailGroups = std::array<std::vector<u8>, 23>;
+ 
+ 	/**
+ 	 * An entity's rally group bytes and what they were computed from, as the

@@ -1,0 +1,603 @@
+From 887be98a6861998a63b5c04c6b24f807d1f1478b Mon Sep 17 00:00:00 2001
+From: Viktor Semenov <suit.uanic@gmail.com>
+Date: Tue, 10 Nov 2026 20:48:47 +0000
+Subject: [PATCH 26/45] Send each player's LOS and the mirages in the Specula
+ feed
+
+Feed v15. An entity's visibility is GetLosVisibility for every player,
+2 bits each (hidden, fogged, visible), not one visible bit. Mirages are
+sent as entities, with their player and parent, and the details of their
+miraged interfaces (QueryMiragedInterface), so a player's view can show
+them as the session GUI does. A new LOS record carries each player's
+CLosQuerier state of every vertex, as runs of the vertices changed since
+the last one. The players record says whether a player has shared LOS.
+
+The /play autostart reads -autostart-specula-explored and
+-autostart-specula-revealed and sets the map's exploration from them.
+---
+ .../autostart/autostart_specula_play.js       |   7 +
+ source/network/SpeculaFeed.cpp                | 257 ++++++++++++++----
+ source/network/SpeculaFeed.h                  |  50 +++-
+ 3 files changed, 241 insertions(+), 73 deletions(-)
+
+diff --git a/binaries/data/mods/public/autostart/autostart_specula_play.js b/binaries/data/mods/public/autostart/autostart_specula_play.js
+index b6cc35d122..928002b8dc 100644
+--- a/binaries/data/mods/public/autostart/autostart_specula_play.js
++++ b/binaries/data/mods/public/autostart/autostart_specula_play.js
+@@ -66,6 +66,13 @@ class AutoStartSpeculaPlay
+ 		// The player count comes from the map or -autostart-players, not
+ 		// from the clients, as the players are not clients.
+ 		parseCmdLineArgs(this.settings, this.cmdLineArgs);
++		// The setup page's Explored Map and Revealed Map, as the game
++		// setup's checkboxes set them: -autostart-visibility=revealed would
++		// also set Allied View.
++		if ('autostart-specula-explored' in this.cmdLineArgs)
++			this.settings.mapExploration.setExplored(true);
++		if ('autostart-specula-revealed' in this.cmdLineArgs)
++			this.settings.mapExploration.setRevealed(true);
+ 
+ 		this.settings.launchGame(this.playerAssignments, !('autostart-disable-replay' in this.cmdLineArgs));
+ 		Engine.SwitchGuiPage("page_loading.xml", {
+diff --git a/source/network/SpeculaFeed.cpp b/source/network/SpeculaFeed.cpp
+index 351cbbaa19..64115d19d4 100644
+--- a/source/network/SpeculaFeed.cpp
++++ b/source/network/SpeculaFeed.cpp
+@@ -58,6 +58,7 @@
+ #include "simulation2/components/ICmpWaterManager.h"
+ #include "simulation2/helpers/Geometry.h"
+ #include "simulation2/helpers/Grid.h"
++#include "simulation2/helpers/Los.h"
+ #include "simulation2/helpers/PathGoal.h"
+ #include "simulation2/helpers/Pathfinding.h"
+ #include "simulation2/helpers/Render.h"
+@@ -82,7 +83,7 @@
+ 
+ namespace
+ {
+-constexpr u32 FEED_VERSION = 14;
++constexpr u32 FEED_VERSION = 15;
+ constexpr u8 RECORD_TEMPLATE = 1;
+ constexpr u8 RECORD_TURN = 2;
+ constexpr u8 RECORD_MAP = 3;
+@@ -105,6 +106,7 @@ constexpr u8 RECORD_STATS = 20;
+ constexpr u8 RECORD_PLAYER_GUI = 21;
+ constexpr u8 RECORD_FORMATION_DATA = 22;
+ constexpr u8 RECORD_QUERY_REPLY = 23;
++constexpr u8 RECORD_LOS = 24;
+ constexpr u8 UPLINK_COMMAND = 1;
+ constexpr u8 UPLINK_QUERY = 2;
+ constexpr u8 QUERY_BUILDING_PREVIEW = 1;
+@@ -184,6 +186,8 @@ const char* const DETAIL_INTERFACES[] = {
+ 	"Heal", "RallyPoint", "Builder", "Gate", "AlertRaiser", "ResourceDropsite", "TurretHolder",
+ 	"Market", "Guard"
+ };
++// The interfaces Fogging.js copies into a mirage that a detail group reads.
++const char* const MIRAGED_INTERFACES[] = { "Health", "Capturable", "ResourceSupply", "Foundation", "Repairable" };
+ // Indices of DETAIL_INTERFACES that are read together.
+ constexpr size_t INTERFACE_PACK = 12;
+ constexpr size_t INTERFACE_UPGRADE = 13;
+@@ -204,9 +208,17 @@ constexpr u8 BATTLE_BATTLE = 1;
+ constexpr u8 SOUND_ENTITY = 0;
+ constexpr u8 SOUND_POSITION = 1;
+ constexpr u8 SOUND_PLAYER = 2;
+-constexpr u16 VISIBLE_TO_ALL = 0xFFFF;
+-// The visibility mask has one bit per player.
++// LosVisibility::VISIBLE in every player's two bits.
++constexpr u32 VISIBLE_TO_ALL = 0xAAAAAAAA;
++// The visibility mask has two bits per player, and CCmpRangeManager keeps
++// the LOS of players 1 to 16.
+ constexpr player_id_t MAX_VISIBILITY_PLAYERS = 16;
++// The LOS record's vertex states: CLosQuerier's IsExplored and IsVisible.
++constexpr u8 LOS_EXPLORED = 1;
++constexpr u8 LOS_VISIBLE = 2;
++// Changed vertices this close together go into one run, which costs less
++// than a run's header each.
++constexpr size_t LOS_RUN_GAP = 8;
+ // GetSimulationState is not cheap, and diplomacy changes rarely; about 1 s.
+ constexpr u32 PLAYERS_INTERVAL_TURNS = 5;
+ // The stats are read for every entity and change only with a technology,
+@@ -248,9 +260,9 @@ const char* const STATS_SCRIPT = R"js(({
+ 				ret.attack[type].elevationAdaptedRange = range.max + Math.round(real - range.max);
+ 			}
+ 		}
+-		const cmpResistance = Engine.QueryInterface(ent, IID_Resistance);
++		const cmpResistance = QueryMiragedInterface(ent, IID_Resistance);
+ 		if (cmpResistance)
+-			ret.resistance = cmpResistance.GetResistanceOfForm(Engine.QueryInterface(ent, IID_Foundation) ? "Foundation" : "Entity");
++			ret.resistance = cmpResistance.GetResistanceOfForm(QueryMiragedInterface(ent, IID_Foundation) ? "Foundation" : "Entity");
+ 		const cmpBuildingAI = Engine.QueryInterface(ent, IID_BuildingAI);
+ 		if (cmpBuildingAI)
+ 			ret.buildingAI = {
+@@ -322,6 +334,8 @@ const std::string ICON_DIRECTORY = "art/textures/ui/session/icons/minimap/";
+ // Placement previews stay out. So do mirages, which Fogging.js adds as
+ // global entities, so they are told apart by their component, not by id.
+ const std::array<std::string_view, 3> LOCAL_PREFIXES = { "construction|", "corpse|", "decay|" };
++// Fogging.js names a mirage's template after its parent's.
++const std::string MIRAGE_PREFIX = "mirage|";
+ // SelectAnimation mirrors the animation name into this variant key.
+ const CStr ANIMATION_KEY = "animation";
+ 
+@@ -359,7 +373,9 @@ struct SEntity
+ 	i32 syncOffset;
+ 	i32 constructionProgress;
+ 	u32 soundGroup;
+-	u16 visibility;
++	u32 visibility;
++	i32 miragePlayer;
++	u32 mirageParent;
+ };
+ 
+ void PutU16(std::vector<u8>& buffer, u16 value)
+@@ -820,6 +836,7 @@ void CSpeculaFeed::OnTurn(CSimulation2& simulation, u32 turn)
+ 	if (m_LastPlayers.empty() || turn % PLAYERS_INTERVAL_TURNS == 0)
+ 		WritePlayers(simulation);
+ 	WriteTerritory(simulation);
++	WriteLos(simulation);
+ 	WriteRenames(simulation);
+ 
+ 	// Template records must precede the turn record that first uses them,
+@@ -832,14 +849,22 @@ void CSpeculaFeed::OnTurn(CSimulation2& simulation, u32 turn)
+ 		if (!cmpPosition->IsInWorld())
+ 			continue;
+ 
+-		// A mirage is what one player last saw of an entity in the fog; the
+-		// observer sees the entity itself, so the copy would stay on after it
+-		// is gone.
++		// A mirage is what one player last saw of an entity in the fog, and
++		// only that player sees it. It goes under its parent's template, as
++		// it stands for the parent and copies the parts the panels read.
++		std::string templateName = cmpTemplateManager->GetCurrentTemplateName(ent);
++		i32 miragePlayer = INVALID_PLAYER;
++		u32 mirageParent = INVALID_ENTITY;
+ 		CmpPtr<ICmpMirage> cmpMirage(simulation, ent);
+ 		if (cmpMirage)
+-			continue;
+-
+-		const std::string templateName = cmpTemplateManager->GetCurrentTemplateName(ent);
++		{
++			miragePlayer = cmpMirage->GetPlayer();
++			ScriptRequest rq(simulation.GetScriptInterface());
++			JS::RootedValue mirage(rq.cx, cmpMirage->GetJSInstance());
++			ScriptFunction::Call(rq, mirage, "GetParent", mirageParent);
++			if (templateName.compare(0, MIRAGE_PREFIX.size(), MIRAGE_PREFIX) == 0)
++				templateName.erase(0, MIRAGE_PREFIX.size());
++		}
+ 		if (ENTITY_IS_LOCAL(ent) && std::none_of(LOCAL_PREFIXES.begin(), LOCAL_PREFIXES.end(),
+ 			[&templateName](std::string_view prefix) { return templateName.compare(0, prefix.size(), prefix) == 0; }))
+ 			continue;
+@@ -859,7 +884,9 @@ void CSpeculaFeed::OnTurn(CSimulation2& simulation, u32 turn)
+ 			NONE, 0, NONE, NONE, NONE, 0, 0, 0,
+ 			cmpPosition->GetConstructionProgress().GetInternalValue(),
+ 			NONE,
+-			Visibility(simulation.GetSimContext(), ent)
++			Visibility(simulation.GetSimContext(), ent),
++			miragePlayer,
++			mirageParent
+ 		};
+ 		CmpPtr<ICmpVisual> cmpVisual(simulation, ent);
+ 		if (cmpVisual)
+@@ -901,7 +928,7 @@ void CSpeculaFeed::OnTurn(CSimulation2& simulation, u32 turn)
+ 			PutI32(m_Buffer, sound.x);
+ 			PutI32(m_Buffer, sound.y);
+ 			PutI32(m_Buffer, sound.z);
+-			PutU16(m_Buffer, sound.visibility);
++			PutU32(m_Buffer, sound.visibility);
+ 		}
+ 		EndRecord(m_Buffer, soundsStart);
+ 		m_Sounds.clear();
+@@ -961,7 +988,9 @@ void CSpeculaFeed::OnTurn(CSimulation2& simulation, u32 turn)
+ 		PutI32(m_Buffer, entity.syncOffset);
+ 		PutI32(m_Buffer, entity.constructionProgress);
+ 		PutU32(m_Buffer, entity.soundGroup);
+-		PutU16(m_Buffer, entity.visibility);
++		PutU32(m_Buffer, entity.visibility);
++		PutI32(m_Buffer, entity.miragePlayer);
++		PutU32(m_Buffer, entity.mirageParent);
+ 	}
+ 	EndRecord(m_Buffer, start);
+ 
+@@ -990,19 +1019,19 @@ CSpeculaFeed::SEnvironment& CSpeculaFeed::Environment()
+ 	return g_Environment;
+ }
+ 
+-// Mirrors the test CCmpSoundManager::PlaySoundGroup makes for the displayed
+-// player, for every player at once.
+-u16 CSpeculaFeed::Visibility(const CSimContext& context, entity_id_t ent)
++// GetLosVisibility for every player at once: what CCmpUnitRenderer draws
++// (all but HIDDEN) and what CCmpSoundManager::PlaySoundGroup plays
++// (VISIBLE) for the displayed player.
++u32 CSpeculaFeed::Visibility(const CSimContext& context, entity_id_t ent)
+ {
+ 	CmpPtr<ICmpRangeManager> cmpRangeManager(context, SYSTEM_ENTITY);
+ 	CmpPtr<ICmpPlayerManager> cmpPlayerManager(context, SYSTEM_ENTITY);
+ 	if (!cmpRangeManager || !cmpPlayerManager)
+ 		return 0;
+ 	const player_id_t count = std::min(cmpPlayerManager->GetNumPlayers(), MAX_VISIBILITY_PLAYERS);
+-	u16 visibility = 0;
++	u32 visibility = 0;
+ 	for (player_id_t player = 0; player < count; ++player)
+-		if (cmpRangeManager->GetLosVisibility(ent, player) == LosVisibility::VISIBLE)
+-			visibility |= static_cast<u16>(1 << player);
++		visibility |= static_cast<u32>(cmpRangeManager->GetLosVisibility(ent, player)) << (2 * player);
+ 	return visibility;
+ }
+ 
+@@ -1597,6 +1626,76 @@ const std::vector<u8>& CSpeculaFeed::RallyGroup(CSimulation2& simulation, entity
+ 	return group.bytes;
+ }
+ 
++// Each player's LOS as CLOSTexture reads it for the displayed player
++// (GetLosQuerier, so shared LOS and a revealed map are in it): what the
++// encoder blacks out, darkens and filters a player's view by.
++void CSpeculaFeed::WriteLos(CSimulation2& simulation)
++{
++	CmpPtr<ICmpRangeManager> cmpRangeManager(simulation, SYSTEM_ENTITY);
++	CmpPtr<ICmpPlayerManager> cmpPlayerManager(simulation, SYSTEM_ENTITY);
++	if (!cmpRangeManager || !cmpPlayerManager)
++		return;
++	const size_t side = cmpRangeManager->GetVerticesPerSide();
++	const player_id_t players = std::max<player_id_t>(0, std::min(cmpPlayerManager->GetNumPlayers() - 1, MAX_VISIBILITY_PLAYERS));
++	if (side != m_LosSide)
++	{
++		m_LastLos.clear();
++		m_LosSide = side;
++	}
++	m_LastLos.resize(players);
++
++	std::vector<u8> payload;
++	PutU32(payload, static_cast<u32>(side));
++	payload.push_back(static_cast<u8>(players));
++	bool changed = false;
++	std::vector<u8> state(side * side);
++	for (player_id_t player = 1; player <= players; ++player)
++	{
++		const CLosQuerier los = cmpRangeManager->GetLosQuerier(player);
++		for (size_t j = 0; j < side; ++j)
++			for (size_t i = 0; i < side; ++i)
++				state[j * side + i] =
++					(los.IsExplored_UncheckedRange(i, j) ? LOS_EXPLORED : 0) |
++					(los.IsVisible_UncheckedRange(i, j) ? LOS_VISIBLE : 0);
++
++		std::vector<u8>& last = m_LastLos[player - 1];
++		std::vector<std::pair<size_t, size_t>> runs;
++		if (last.size() != state.size())
++			runs.emplace_back(0, state.size());
++		else
++			for (size_t k = 0; k < state.size(); ++k)
++			{
++				if (state[k] == last[k])
++					continue;
++				if (!runs.empty() && k - runs.back().second <= LOS_RUN_GAP)
++					runs.back().second = k + 1;
++				else
++					runs.emplace_back(k, k + 1);
++			}
++		PutU32(payload, static_cast<u32>(runs.size()));
++		for (const std::pair<size_t, size_t>& run : runs)
++		{
++			PutU32(payload, static_cast<u32>(run.first));
++			PutU32(payload, static_cast<u32>(run.second - run.first));
++			for (size_t k = run.first; k < run.second; k += 4)
++			{
++				u8 packed = 0;
++				for (size_t m = 0; m < 4 && k + m < run.second; ++m)
++					packed |= static_cast<u8>(state[k + m] << (2 * m));
++				payload.push_back(packed);
++			}
++		}
++		changed = changed || !runs.empty();
++		last.swap(state);
++		state.resize(side * side);
++	}
++	if (!changed)
++		return;
++	const size_t start = BeginRecord(m_Buffer, RECORD_LOS);
++	m_Buffer.insert(m_Buffer.end(), payload.begin(), payload.end());
++	EndRecord(m_Buffer, start);
++}
++
+ // The session GUI reads and clears this list every update; nothing else
+ // does in a nonvisual observer, and it is not serialized.
+ void CSpeculaFeed::WriteRenames(CSimulation2& simulation)
+@@ -1632,6 +1731,52 @@ void CSpeculaFeed::WriteRenames(CSimulation2& simulation)
+ 	EndRecord(m_Buffer, start);
+ }
+ 
++// The groups of the components Fogging.js copies into a mirage, whose
++// copies answer the same getters (the *Mirage classes); false for any other
++// interface.
++bool CSpeculaFeed::PutMiragedGroup(const ScriptRequest& rq, std::string_view interface, JS::HandleValue component, SDetailGroups& groups)
++{
++	if (interface == "Health")
++	{
++		std::vector<u8>& group = groups[DETAIL_HEALTH];
++		PutF32(group, CallFloat(rq, component, "GetHitpoints"));
++		PutF32(group, CallFloat(rq, component, "GetMaxHitpoints"));
++	}
++	else if (interface == "Capturable")
++	{
++		JS::RootedValue points(rq.cx);
++		ScriptFunction::Call(rq, component, "GetCapturePoints", &points);
++		const u32 count = std::min<u32>(ArrayLength(rq, points), 0xFF);
++		std::vector<u8>& group = groups[DETAIL_CAPTURE];
++		group.push_back(static_cast<u8>(count));
++		for (u32 j = 0; j < count; ++j)
++		{
++			double value = 0.0;
++			Script::GetPropertyInt(rq, points, static_cast<int>(j), value);
++			PutF32(group, static_cast<float>(value));
++		}
++		PutF32(group, CallFloat(rq, component, "GetMaxCapturePoints"));
++	}
++	else if (interface == "ResourceSupply")
++	{
++		PutF32(groups[DETAIL_SUPPLY], CallFloat(rq, component, "GetCurrentAmount"));
++		PutF32(groups[DETAIL_SUPPLY], CallFloat(rq, component, "GetMaxAmount"));
++		groups[DETAIL_GATHERERS].push_back(Clamp8(static_cast<u32>(CallFloat(rq, component, "GetNumGatherers"))));
++		groups[DETAIL_GATHERERS].push_back(Clamp8(static_cast<u32>(CallFloat(rq, component, "GetMaxGatherers"))));
++	}
++	else if (interface == "Foundation" || interface == "Repairable")
++	{
++		JS::RootedValue buildTime(rq.cx);
++		ScriptFunction::Call(rq, component, "GetBuildTime", &buildTime);
++		std::vector<u8>& group = groups[interface == "Foundation" ? DETAIL_FOUNDATION : DETAIL_REPAIR];
++		group.push_back(Clamp8(static_cast<u32>(CallFloat(rq, component, "GetNumBuilders"))));
++		PutF32(group, PropertyFloat(rq, buildTime, "timeRemaining"));
++	}
++	else
++		return false;
++	return true;
++}
++
+ void CSpeculaFeed::WriteDetails(CSimulation2& simulation, u32 turn)
+ {
+ 	const double startTime = timer_Time();
+@@ -1678,35 +1823,9 @@ void CSpeculaFeed::WriteDetails(CSimulation2& simulation, u32 turn)
+ 				continue;
+ 			JS::RootedValue component(rq.cx, pair.second->GetJSInstance());
+ 			SDetailGroups& groups = current[ent];
+-			if (interface == "Health")
+-			{
+-				std::vector<u8>& group = groups[DETAIL_HEALTH];
+-				PutF32(group, CallFloat(rq, component, "GetHitpoints"));
+-				PutF32(group, CallFloat(rq, component, "GetMaxHitpoints"));
+-			}
+-			else if (interface == "Capturable")
+-			{
+-				JS::RootedValue points(rq.cx);
+-				ScriptFunction::Call(rq, component, "GetCapturePoints", &points);
+-				const u32 count = std::min<u32>(ArrayLength(rq, points), 0xFF);
+-				std::vector<u8>& group = groups[DETAIL_CAPTURE];
+-				group.push_back(static_cast<u8>(count));
+-				for (u32 j = 0; j < count; ++j)
+-				{
+-					double value = 0.0;
+-					Script::GetPropertyInt(rq, points, static_cast<int>(j), value);
+-					PutF32(group, static_cast<float>(value));
+-				}
+-				PutF32(group, CallFloat(rq, component, "GetMaxCapturePoints"));
+-			}
+-			else if (interface == "ResourceSupply")
+-			{
+-				PutF32(groups[DETAIL_SUPPLY], CallFloat(rq, component, "GetCurrentAmount"));
+-				PutF32(groups[DETAIL_SUPPLY], CallFloat(rq, component, "GetMaxAmount"));
+-				groups[DETAIL_GATHERERS].push_back(Clamp8(static_cast<u32>(CallFloat(rq, component, "GetNumGatherers"))));
+-				groups[DETAIL_GATHERERS].push_back(Clamp8(static_cast<u32>(CallFloat(rq, component, "GetMaxGatherers"))));
+-			}
+-			else if (interface == "ResourceGatherer")
++			if (PutMiragedGroup(rq, interface, component, groups))
++				continue;
++			if (interface == "ResourceGatherer")
+ 			{
+ 				JS::RootedValue carrying(rq.cx);
+ 				ScriptFunction::Call(rq, component, "GetCarryingStatus", &carrying);
+@@ -1775,14 +1894,6 @@ void CSpeculaFeed::WriteDetails(CSimulation2& simulation, u32 turn)
+ 						cmpOwnership ? cmpOwnership->GetOwner() : INVALID_PLAYER)));
+ 				}
+ 			}
+-			else if (interface == "Foundation" || interface == "Repairable")
+-			{
+-				JS::RootedValue buildTime(rq.cx);
+-				ScriptFunction::Call(rq, component, "GetBuildTime", &buildTime);
+-				std::vector<u8>& group = groups[interface == "Foundation" ? DETAIL_FOUNDATION : DETAIL_REPAIR];
+-				group.push_back(Clamp8(static_cast<u32>(CallFloat(rq, component, "GetNumBuilders"))));
+-				PutF32(group, PropertyFloat(rq, buildTime, "timeRemaining"));
+-			}
+ 			else if (interface == "UnitAI")
+ 			{
+ 				JS::RootedValue state(rq.cx);
+@@ -2086,6 +2197,24 @@ void CSpeculaFeed::WriteDetails(CSimulation2& simulation, u32 turn)
+ 		}
+ 	}
+ 
++	// A mirage's groups are what its player last saw, as
++	// QueryMiragedInterface hands them to GetEntityState.
++	JS::RootedValue mirageIid(rq.cx);
++	if (ScriptInterface::GetGlobalProperty(rq, "IID_Mirage", &mirageIid) && mirageIid.isInt32())
++		for (const std::pair<const entity_id_t, IComponent*>& pair : simulation.GetEntitiesWithInterfaceUnordered(mirageIid.toInt32()))
++		{
++			JS::RootedValue mirage(rq.cx, pair.second->GetJSInstance());
++			for (const char* interface : MIRAGED_INTERFACES)
++			{
++				JS::RootedValue iid(rq.cx);
++				JS::RootedValue component(rq.cx);
++				if (!ScriptInterface::GetGlobalProperty(rq, std::string("IID_") + interface, &iid) || !iid.isInt32() ||
++				    !ScriptFunction::Call(rq, mirage, "Get", &component, iid.toInt32()) || !component.isObject())
++					continue;
++				PutMiragedGroup(rq, interface, component, current[pair.first]);
++			}
++		}
++
+ 	for (const std::pair<const entity_id_t, SCommandBits>& entry : commands)
+ 	{
+ 		std::vector<u8>& group = current[entry.first][DETAIL_COMMANDS];
+@@ -2180,8 +2309,11 @@ void CSpeculaFeed::WriteTemplateData(CSimulation2& simulation, const ScriptReque
+ 	for (const std::pair<const entity_id_t, SDetailGroups>& entry : entities)
+ 	{
+ 		CmpPtr<ICmpOwnership> cmpOwnership(simulation, entry.first);
+-		templates.emplace(cmpTemplateManager->GetCurrentTemplateName(entry.first),
+-			cmpOwnership ? cmpOwnership->GetOwner() : INVALID_PLAYER);
++		// A mirage is sent under its parent's template (OnTurn).
++		std::string templateName = cmpTemplateManager->GetCurrentTemplateName(entry.first);
++		if (templateName.compare(0, MIRAGE_PREFIX.size(), MIRAGE_PREFIX) == 0)
++			templateName.erase(0, MIRAGE_PREFIX.size());
++		templates.emplace(std::move(templateName), cmpOwnership ? cmpOwnership->GetOwner() : INVALID_PLAYER);
+ 	}
+ 	for (const auto& entry : cache.trainable)
+ 		templates.emplace(entry.first.second, entry.first.first);
+@@ -2481,6 +2613,11 @@ void CSpeculaFeed::WritePlayers(CSimulation2& simulation)
+ 		cmpGuiInterface->ScriptCall(INVALID_PLAYER, L"GetBattleState", playerID, &battleState);
+ 		std::string battle;
+ 		payload.push_back(battleState.isString() && Script::FromJSVal(rq, battleState, battle) && battle == "BATTLE" ? BATTLE_BATTLE : BATTLE_PEACE);
++		// The top panel shows a mutual ally's resources only to a player
++		// with shared LOS (CounterManager.js).
++		bool sharedLos = false;
++		Script::GetProperty(rq, player, "hasSharedLos", sharedLos);
++		payload.push_back(sharedLos ? 1 : 0);
+ 	}
+ 	// The end rather than the time left, so the record changes only when
+ 	// a ceasefire starts or ends.
+diff --git a/source/network/SpeculaFeed.h b/source/network/SpeculaFeed.h
+index 6cfe17d70e..10897b45b9 100644
+--- a/source/network/SpeculaFeed.h
++++ b/source/network/SpeculaFeed.h
+@@ -31,6 +31,7 @@
+ #include <array>
+ #include <map>
+ #include <set>
++#include <string_view>
+ #include <string>
+ #include <unordered_map>
+ #include <utility>
+@@ -45,7 +46,7 @@ class ScriptRequest;
+  * socket. It only reads the simulation, after each turn, so it cannot
+  * change the state hash.
+  *
+- * Feed format v14, little-endian: "SPCF", u32 version, then records of
++ * Feed format v15, little-endian: "SPCF", u32 version, then records of
+  * u8 kind, u32 payload length, payload.
+  *  - kind 1 template: u32 index, u16 name length, UTF-8 name, f32 minimap
+  *    icon size, u8 flags, then the icon file name relative to
+@@ -56,7 +57,8 @@ class ScriptRequest;
+  *    i32 y, u32 actor, u32 seed, u32 variant set, u32 variable set,
+  *    u32 animation,
+  *    i32 animation speed, i32 sync repeat, i32 sync offset,
+- *    i32 construction progress, u32 sound group, u16 visibility}.
++ *    i32 construction progress, u32 sound group, u32 visibility, i32
++ *    mirage player, u32 mirage parent}.
+  *    x/y/z/angle/speed/progress are raw 16.16
+  *    fixed, sync repeat and offset raw 16.16 milliseconds. actor and
+  *    animation are strings, 0xFFFFFFFF for none, as is an empty variant
+@@ -65,10 +67,14 @@ class ScriptRequest;
+  *    animation plays once. Local entities are left out, except the
+  *    construction previews of foundations ("construction|" templates),
+  *    corpses ("corpse|") and what dying entities spawn ("decay|").
++ *    Mirages (Fogging.js) are in, under their parent's template (the
++ *    "mirage|" prefix taken off), with the player they stand in for and
++ *    their parent (INVALID_ENTITY once the parent is gone); any other
++ *    entity has mirage player -1 and parent INVALID_ENTITY.
+  *    The sound group is a string, the group of the current animation
+- *    relative to audio/ ({lang} and {phenotype} replaced), or none. Bit p
+- *    of the visibility is set when player p sees the entity (LOS VISIBLE),
+- *    for p below 16.
++ *    relative to audio/ ({lang} and {phenotype} replaced), or none. Bits
++ *    2p and 2p+1 of the visibility are GetLosVisibility(entity, p)
++ *    (0 hidden, 1 fogged, 2 visible), for p below 16.
+  *  - kind 6 string, before the turn record that first uses it: u32 index,
+  *    then UTF-8 text. Indices count up from 0.
+  *  - kind 7 variant set, likewise: u32 index, u32 count, count x {u32 key
+@@ -98,7 +104,8 @@ class ScriptRequest;
+  *    count n, n x {u16 name length, UTF-8 name, u8 r, u8 g, u8 b, i32 team
+  *    (-1: none), u8 state (0 active, 1 defeated, 2 won), n x u8 stance
+  *    towards player j (0 enemy, 1 ally, 2 neutral), u16 civ length, UTF-8
+- *    civ code, u8 battle state (0 peace, 1 battle)}, then u32 ceasefire end
++ *    civ code, u8 battle state (0 peace, 1 battle), u8 shared LOS
++ *    (Diplomacy.HasSharedLos)}, then u32 ceasefire end
+  *    in simulation milliseconds (0: no ceasefire). Index 0 is gaia.
+  *  - kind 8 territory, before the turn record, whenever it changes: u32
+  *    width, u32 height, width*height x u8 territory tile, row-major, x
+@@ -107,14 +114,15 @@ class ScriptRequest;
+  *    NAVCELLS_PER_TERRITORY_TILE navcells wide.
+  *  - kind 9 sounds, before the turn record, when the turn played any: u32
+  *    count, count x {u32 group string, u8 target, u32 entity, i32 player,
+- *    i32 x, i32 y, i32 z, u16 visibility}, in the order the simulation
++ *    i32 x, i32 y, i32 z, u32 visibility}, in the order the simulation
+  *    played them. The group is relative to audio/. Target 0: an entity
+  *    (CCmpSoundManager::PlaySoundGroup), with its owner as player and its
+  *    position and visibility as of the call, since it may be destroyed in
+  *    the same turn. Target 1: a position (PlaySoundGroupAtPosition), heard
+- *    regardless of LOS, entity 0, player -1, visibility 0xFFFF. Target 2: a
++ *    regardless of LOS, entity 0, player -1, visibility 0xAAAAAAAA (visible
++ *    to all, two bits per player as in the turn record). Target 2: a
+  *    player (PlaySoundGroupForPlayer), entity 0, position zero, visibility
+- *    0xFFFF. Positions are raw 16.16.
++ *    0xAAAAAAAA. Positions are raw 16.16.
+  *  - kind 10 projectiles, before the turn record, when the turn launched or
+  *    removed any: u32 launch count, count x {u32 id, u32 shooter, i32 x,
+  *    i32 y, i32 z launch point, i32 x, i32 y, i32 z target, i32 speed,
+@@ -221,8 +229,10 @@ class ScriptRequest;
+  *    id of entities that no longer have any of them. A group is written
+  *    when it differs from what was last written for the entity, so every
+  *    group an entity has comes on the first turn it is seen. Local entities
+- *    (mirages, previews) are left out; garrisoned entities, out of the
+- *    world, are in. The trainable, researchable and buildable lists are
++ *    (previews) are left out; garrisoned entities, out of the world, are
++ *    in. A mirage has the groups of the components it copies (health,
++ *    capture, supply and gatherers, foundation, repair), read from the
++ *    copies as QueryMiragedInterface returns them, and stats. The trainable, researchable and buildable lists are
+  *    sampled every PLAYERS_INTERVAL_TURNS turns, the rest every turn.
+  *    Values are the components' own, as GuiInterface.GetEntityState reads
+  *    them.
+@@ -291,6 +301,15 @@ class ScriptRequest;
+  *  - kind 23 query reply, between turns, for each uplink query: u32 id,
+  *    then UTF-8 JSON of the GuiInterface call's result ("null" for none);
+  *    each piece of a SetWallPlacementPreview result has "actor" added.
++ *  - kind 24 LOS, before the turn record, when any player's changed: u32
++ *    vertices per side v (ICmpRangeManager::GetVerticesPerSide, one vertex
++ *    every LOS_TILE_SIZE metres), u8 players n, then for players 1 to n:
++ *    u32 runs, runs x {u32 first vertex, u32 count, ceil(count / 4) bytes of
++ *    2-bit vertex states, four to a byte from the low bits}. Vertex k is at
++ *    (k % v, k / v). A state has bit 1 for CLosQuerier::IsExplored and
++ *    bit 2 for IsVisible, from GetLosQuerier(player). The first record of
++ *    a match, or of a new grid size, has one run over every vertex; later
++ *    ones only the runs that changed.
+  */
+ class CSpeculaFeed
+ {
+@@ -394,7 +413,7 @@ private:
+ 		i32 x;
+ 		i32 y;
+ 		i32 z;
+-		u16 visibility;
++		u32 visibility;
+ 	};
+ 
+ 	struct SProjectile
+@@ -448,14 +467,16 @@ private:
+ 		std::map<player_id_t, std::string> civs;
+ 	};
+ 
+-	static u16 Visibility(const CSimContext& context, entity_id_t ent);
++	static u32 Visibility(const CSimContext& context, entity_id_t ent);
+ 
+ 	void WriteTerrain(CSimulation2& simulation);
+ 	void WritePlayers(CSimulation2& simulation);
+ 	void WriteFormationData(CSimulation2& simulation, const ScriptRequest& rq, const std::string& formation);
+ 	void WriteTerritory(CSimulation2& simulation);
++	void WriteLos(CSimulation2& simulation);
+ 	void WriteTemplateDetails(CSimulation2& simulation, u32 index, const std::string& templateName);
+ 	void WriteDetails(CSimulation2& simulation, u32 turn);
++	static bool PutMiragedGroup(const ScriptRequest& rq, std::string_view interface, JS::HandleValue component, SDetailGroups& groups);
+ 	void WriteRenames(CSimulation2& simulation);
+ 	u32 InternTemplate(CSimulation2& simulation, entity_id_t ent, const std::string& templateName);
+ 	u32 InternString(const std::string& text);
+@@ -516,6 +537,9 @@ private:
+ 	std::vector<SProjectile> m_Launches;
+ 	std::vector<u32> m_Removals;
+ 	entity_id_t m_Shooter = INVALID_ENTITY;
++	// The kind 24 states last sent, players 1 up, and their grid's side.
++	std::vector<std::vector<u8>> m_LastLos;
++	size_t m_LosSide = 0;
+ 	size_t m_TerritoryDirtyID = 0;
+ 	size_t m_TerritoryBlinkingDirtyID = 0;
+ };

@@ -1,0 +1,511 @@
+From 4a5c5cf5d50707535f559b78f855cc43a93f84ff Mon Sep 17 00:00:00 2001
+From: Viktor Semenov <suit.uanic@gmail.com>
+Date: Wed, 21 Oct 2026 11:47:20 +0000
+Subject: [PATCH 17/45] Send the production lists' state in the Specula feed
+
+The GUI greys a trainable or researchable item by its owner's state:
+requirements, entity limits and the modified cost. A viewer cannot
+derive that from the feed, so the Trainer and Researcher sample now
+evaluates each item for the owner as the GUI does (GetTemplateData,
+AreRequirementsMet, a port of getEntityLimitAndCount, GetTechnologyData
+times the researcher's cost multiplier, CheckTechnologyRequirements).
+Kind 17 interns a list with each item's string, flags (requirements
+met, hidden, pair top), the count that can still be added and the
+costs. Pairs become two entries. Kind 12 groups 262144 (trainable) and
+524288 (researchable) name the list; new group bits, so the feed stays
+v14 and kind 13's plain lists go.
+---
+ source/network/SpeculaFeed.cpp | 282 ++++++++++++++++++++++++++++++---
+ source/network/SpeculaFeed.h   |  57 +++++--
+ 2 files changed, 309 insertions(+), 30 deletions(-)
+
+diff --git a/source/network/SpeculaFeed.cpp b/source/network/SpeculaFeed.cpp
+index 143ef94c54..7f80f191ee 100644
+--- a/source/network/SpeculaFeed.cpp
++++ b/source/network/SpeculaFeed.cpp
+@@ -26,6 +26,7 @@
+ #include "lib/timer.h"
+ #include "lib/utf8.h"
+ #include "ps/CLogger.h"
++#include "ps/CStr.h"
+ #include "ps/Game.h"
+ #include "ps/World.h"
+ #include "scriptinterface/FunctionWrapper.h"
+@@ -34,6 +35,7 @@
+ #include "scriptinterface/ScriptRequest.h"
+ #include "simulation2/Simulation2.h"
+ #include "simulation2/components/ICmpGuiInterface.h"
++#include "simulation2/components/ICmpIdentity.h"
+ #include "simulation2/components/ICmpMinimap.h"
+ #include "simulation2/components/ICmpMirage.h"
+ #include "simulation2/components/ICmpOwnership.h"
+@@ -53,7 +55,9 @@
+ 
+ #include <algorithm>
+ #include <cerrno>
++#include <cmath>
+ #include <cstring>
++#include <limits>
+ #include <string_view>
+ #include <sys/socket.h>
+ #include <sys/un.h>
+@@ -74,10 +78,10 @@ constexpr u8 RECORD_SOUNDS = 9;
+ constexpr u8 RECORD_PROJECTILES = 10;
+ constexpr u8 RECORD_TEMPLATE_DETAILS = 11;
+ constexpr u8 RECORD_DETAILS = 12;
+-constexpr u8 RECORD_STRING_LIST = 13;
+ constexpr u8 RECORD_RENAMES = 14;
+ constexpr u8 RECORD_ECONOMY = 15;
+ constexpr u8 RECORD_VARIABLE_SET = 16;
++constexpr u8 RECORD_PRODUCTION_LIST = 17;
+ constexpr u16 TEMPLATE_SELECTABLE = 1;
+ constexpr u16 TEMPLATE_EDITOR_ONLY = 2;
+ constexpr u16 TEMPLATE_OUTLINE = 4;
+@@ -101,13 +105,17 @@ constexpr size_t DETAIL_GARRISON = 7;
+ constexpr size_t DETAIL_FOUNDATION = 8;
+ constexpr size_t DETAIL_REPAIR = 9;
+ constexpr size_t DETAIL_UNIT_AI = 10;
+-constexpr size_t DETAIL_TRAINABLE = 11;
+-constexpr size_t DETAIL_RESEARCHABLE = 12;
+ constexpr size_t DETAIL_PROGRESS = 13;
+ constexpr size_t DETAIL_HOLDER = 14;
+ constexpr size_t DETAIL_TRADER = 15;
+ constexpr size_t DETAIL_RANGES = 16;
+ constexpr size_t DETAIL_GARRISON_OWNERS = 17;
++constexpr size_t DETAIL_TRAINABLE = 18;
++constexpr size_t DETAIL_RESEARCHABLE = 19;
++constexpr u8 PRODUCTION_REQUIREMENTS_MET = 1;
++constexpr u8 PRODUCTION_HIDDEN = 2;
++constexpr u8 PRODUCTION_PAIR_TOP = 4;
++constexpr u16 PRODUCTION_NO_LIMIT = 0xFFFF;
+ // Bytes of a range overlay in the ranges group: type, radius, texture,
+ // mask, thickness.
+ constexpr u8 RANGE_ATTACK = 0;
+@@ -302,6 +310,101 @@ float NodeFloat(const CParamNode& node)
+ {
+ 	return node.IsOk() ? node.ToFloat() : 0.0f;
+ }
++
++// Population and time are no resources; GetNeededResources skips them, and a
++// cost of 0 is never needed.
++std::vector<std::pair<std::string, float>> ResourceCosts(const ScriptRequest& rq, JS::HandleValue cost)
++{
++	std::vector<std::string> codes;
++	if (cost.isObject())
++		Script::EnumeratePropertyNames(rq, cost, true, codes);
++	std::sort(codes.begin(), codes.end());
++	std::vector<std::pair<std::string, float>> costs;
++	for (const std::string& code : codes)
++	{
++		const float amount = PropertyFloat(rq, cost, code.c_str());
++		if (code != "population" && code != "time" && amount != 0.0f)
++			costs.emplace_back(code, amount);
++	}
++	return costs;
++}
++
++bool CallGui(CSimulation2& simulation, player_id_t player, const std::wstring& name, JS::HandleValue arg, JS::MutableHandleValue ret)
++{
++	CmpPtr<ICmpGuiInterface> cmpGuiInterface(simulation, SYSTEM_ENTITY);
++	if (!cmpGuiInterface)
++		return false;
++	cmpGuiInterface->ScriptCall(player, name, arg, ret);
++	return true;
++}
++
++// The JS component of a player's entity, as QueryPlayerIDInterface.
++IComponent* PlayerComponent(CSimulation2& simulation, const ScriptRequest& rq, player_id_t player, const char* interface)
++{
++	CmpPtr<ICmpPlayerManager> cmpPlayerManager(simulation, SYSTEM_ENTITY);
++	JS::RootedValue iid(rq.cx);
++	if (!cmpPlayerManager || !ScriptInterface::GetGlobalProperty(rq, std::string("IID_") + interface, &iid) || !iid.isInt32())
++		return nullptr;
++	const entity_id_t playerEnt = cmpPlayerManager->GetPlayerByID(player);
++	if (playerEnt == INVALID_ENTITY)
++		return nullptr;
++	return simulation.GetSimContext().GetComponentManager().QueryInterface(playerEnt, iid.toInt32());
++}
++
++// getEntityLimitAndCount's canBeAddedCount (gui/session/input.js), where
++// NaN, as there, is no limit.
++float CanBeAddedCount(CSimulation2& simulation, const ScriptRequest& rq, player_id_t player, const std::string& templateName, JS::HandleValue data)
++{
++	const float none = std::numeric_limits<float>::quiet_NaN();
++	IComponent* limitsComponent = PlayerComponent(simulation, rq, player, "EntityLimits");
++	if (!limitsComponent)
++		return none;
++	JS::RootedValue component(rq.cx, limitsComponent->GetJSInstance());
++	JS::RootedValue restrictions(rq.cx);
++	Script::GetProperty(rq, data, "trainingRestrictions", &restrictions);
++	if (!restrictions.isObject())
++		Script::GetProperty(rq, data, "buildRestrictions", &restrictions);
++	JS::RootedValue categoryValue(rq.cx);
++	Script::GetProperty(rq, restrictions, "category", &categoryValue);
++	const std::string category = StringOf(rq, categoryValue);
++	const float matchLimit = PropertyFloat(rq, restrictions, "matchLimit");
++	if (category.empty() && matchLimit == 0.0f)
++		return none;
++
++	JS::RootedValue limits(rq.cx);
++	JS::RootedValue counts(rq.cx);
++	JS::RootedValue matchCounts(rq.cx);
++	ScriptFunction::Call(rq, component, "GetLimits", &limits);
++	ScriptFunction::Call(rq, component, "GetCounts", &counts);
++	ScriptFunction::Call(rq, component, "GetMatchCounts", &matchCounts);
++	JS::RootedValue limit(rq.cx);
++	if (!category.empty())
++		Script::GetProperty(rq, limits, category.c_str(), &limit);
++
++	float entLimit = none;
++	float entCount = none;
++	float canBeAdded = none;
++	if (!category.empty() && !limit.isUndefined())
++	{
++		entLimit = PropertyFloat(rq, limits, category.c_str());
++		entCount = PropertyFloat(rq, counts, category.c_str());
++		canBeAdded = std::max(entLimit - entCount, 0.0f);
++	}
++	if (matchLimit != 0.0f)
++	{
++		const float matchCount = PropertyFloat(rq, matchCounts, templateName.c_str());
++		// std::max and std::min keep a NaN first argument, as Math does.
++		canBeAdded = std::min(std::max(entLimit - entCount, 0.0f), std::max(matchLimit - matchCount, 0.0f));
++	}
++	return canBeAdded;
++}
++
++u16 LimitOf(float canBeAdded)
++{
++	if (std::isnan(canBeAdded))
++		return PRODUCTION_NO_LIMIT;
++	return static_cast<u16>(std::min(std::floor(canBeAdded), static_cast<float>(PRODUCTION_NO_LIMIT - 1)));
++}
+ } // anonymous namespace
+ 
+ CSpeculaFeed::CSpeculaFeed(const std::string& socketPath)
+@@ -715,21 +818,120 @@ u32 CSpeculaFeed::InternVariables(const std::map<std::string, float>& variables)
+ 	return it->second;
+ }
+ 
+-u32 CSpeculaFeed::InternStringList(const std::vector<u32>& strings)
++// A list changes only with a phase, a technology, a limit or the owner, so
++// the distinct lists of a match are few.
++u32 CSpeculaFeed::InternProductionList(u32 count, const std::vector<u8>& items)
+ {
+-	const auto [it, inserted] = m_StringListIndices.try_emplace(strings, static_cast<u32>(m_StringListIndices.size()));
++	const auto [it, inserted] = m_ProductionListIndices.try_emplace(std::make_pair(count, items),
++		static_cast<u32>(m_ProductionListIndices.size()));
+ 	if (inserted)
+ 	{
+-		const size_t start = BeginRecord(m_Buffer, RECORD_STRING_LIST);
++		const size_t start = BeginRecord(m_Buffer, RECORD_PRODUCTION_LIST);
+ 		PutU32(m_Buffer, it->second);
+-		PutU32(m_Buffer, static_cast<u32>(strings.size()));
+-		for (const u32 string : strings)
+-			PutU32(m_Buffer, string);
++		PutU32(m_Buffer, count);
++		m_Buffer.insert(m_Buffer.end(), items.begin(), items.end());
+ 		EndRecord(m_Buffer, start);
+ 	}
+ 	return it->second;
+ }
+ 
++void CSpeculaFeed::PutProductionItem(u32 name, u8 flags, u16 canBeAdded, const std::vector<std::pair<std::string, float>>& costs, std::vector<u8>& out)
++{
++	PutU32(out, name);
++	out.push_back(flags);
++	PutU16(out, canBeAdded);
++	const size_t count = std::min<size_t>(costs.size(), 0xFF);
++	out.push_back(static_cast<u8>(count));
++	for (size_t i = 0; i < count; ++i)
++	{
++		PutU32(out, InternString(costs[i].first));
++		PutF32(out, costs[i].second);
++	}
++}
++
++// As g_SelectionPanels.Training's setupButton reads it for the owner:
++// GetTemplateData has the costs after the owner's modifiers.
++void CSpeculaFeed::PutTrainable(CSimulation2& simulation, const ScriptRequest& rq, player_id_t owner, const std::string& templateName, SProductionCache& cache, std::vector<u8>& out)
++{
++	const auto [it, inserted] = cache.trainable.try_emplace(std::make_pair(owner, templateName));
++	if (inserted)
++	{
++		JS::RootedValue arg(rq.cx);
++		JS::RootedValue data(rq.cx);
++		Script::CreateObject(rq, &arg, "templateName", templateName, "player", owner);
++		CallGui(simulation, owner, L"GetTemplateData", arg, &data);
++		// setupButton hides an item without template data.
++		if (!data.isObject())
++		{
++			PutProductionItem(InternString(templateName), PRODUCTION_HIDDEN, PRODUCTION_NO_LIMIT, {}, it->second);
++			out.insert(out.end(), it->second.begin(), it->second.end());
++			return;
++		}
++		JS::RootedValue requirements(rq.cx);
++		Script::GetProperty(rq, data, "requirements", &requirements);
++		JS::RootedValue requirementsArg(rq.cx);
++		JS::RootedValue met(rq.cx);
++		Script::CreateObject(rq, &requirementsArg, "requirements", requirements, "player", owner);
++		CallGui(simulation, owner, L"AreRequirementsMet", requirementsArg, &met);
++		JS::RootedValue cost(rq.cx);
++		Script::GetProperty(rq, data, "cost", &cost);
++		PutProductionItem(InternString(templateName), Truthy(met) ? PRODUCTION_REQUIREMENTS_MET : 0,
++			LimitOf(CanBeAddedCount(simulation, rq, owner, templateName, data)), ResourceCosts(rq, cost), it->second);
++	}
++	out.insert(out.end(), it->second.begin(), it->second.end());
++}
++
++// As g_SelectionPanels.Research's setupButton reads it for the owner: the
++// technology's own costs times the producer's multiplier.
++void CSpeculaFeed::PutResearchable(CSimulation2& simulation, const ScriptRequest& rq, player_id_t owner, const std::string& technology, const std::map<std::string, float>& multipliers, u8 flags, SProductionCache& cache, std::vector<u8>& out)
++{
++	const auto [it, inserted] = cache.technologies.try_emplace(std::make_pair(owner, technology));
++	STechnologyState& state = it->second;
++	if (inserted)
++	{
++		const auto [civ, civInserted] = cache.civs.try_emplace(owner);
++		if (civInserted)
++		{
++			CmpPtr<ICmpPlayerManager> cmpPlayerManager(simulation, SYSTEM_ENTITY);
++			CmpPtr<ICmpIdentity> cmpIdentity(simulation, cmpPlayerManager ? cmpPlayerManager->GetPlayerByID(owner) : INVALID_ENTITY);
++			if (cmpIdentity)
++				civ->second = CStrW(cmpIdentity->GetCiv()).ToUTF8();
++		}
++		JS::RootedValue templates(rq.cx);
++		JS::RootedValue techTemplate(rq.cx);
++		if (ScriptInterface::GetGlobalProperty(rq, "TechnologyTemplates", &templates))
++			ScriptFunction::Call(rq, templates, "Get", &techTemplate, technology);
++		// As GetTechnologyData without a template: setupButton hides it.
++		if (!techTemplate.isObject())
++			state.flags = PRODUCTION_HIDDEN;
++		else
++		{
++			// GetTechnologyBasicDataHelper's reqs: false when the civ cannot
++			// research it at all.
++			JS::RootedValue global(rq.cx, rq.globalValue());
++			JS::RootedValue reqs(rq.cx);
++			ScriptFunction::Call(rq, global, "DeriveTechnologyRequirements", &reqs, techTemplate, civ->second);
++			JS::RootedValue arg(rq.cx);
++			JS::RootedValue met(rq.cx);
++			Script::CreateObject(rq, &arg, "tech", technology, "player", owner);
++			CallGui(simulation, owner, L"CheckTechnologyRequirements", arg, &met);
++			JS::RootedValue cost(rq.cx);
++			Script::GetProperty(rq, techTemplate, "cost", &cost);
++			state.flags = (Truthy(met) ? PRODUCTION_REQUIREMENTS_MET : 0) |
++				(reqs.isObject() ? 0 : PRODUCTION_HIDDEN);
++			state.costs = ResourceCosts(rq, cost);
++		}
++	}
++	std::vector<std::pair<std::string, float>> costs = state.costs;
++	for (std::pair<std::string, float>& cost : costs)
++	{
++		const auto multiplier = multipliers.find(cost.first);
++		if (multiplier != multipliers.end())
++			cost.second *= multiplier->second;
++	}
++	PutProductionItem(InternString(technology), state.flags | flags, PRODUCTION_NO_LIMIT, costs, out);
++}
++
+ u32 CSpeculaFeed::InternTemplate(CSimulation2& simulation, entity_id_t ent, const std::string& templateName)
+ {
+ 	const auto [it, inserted] = m_TemplateIndices.try_emplace(templateName,
+@@ -935,6 +1137,8 @@ void CSpeculaFeed::WriteDetails(CSimulation2& simulation, u32 turn)
+ 	}
+ 
+ 	std::unordered_map<entity_id_t, SDetailGroups> current;
++	// Producers of one owner list the same items.
++	SProductionCache productionCache;
+ 	for (size_t i = 0; i < iids.size(); ++i)
+ 	{
+ 		if (iids[i] < 0)
+@@ -1076,24 +1280,60 @@ void CSpeculaFeed::WriteDetails(CSimulation2& simulation, u32 turn)
+ 				}
+ 				JS::RootedValue list(rq.cx);
+ 				ScriptFunction::Call(rq, component, interface == "Trainer" ? "GetEntitiesList" : "GetTechnologiesList", &list);
+-				const u32 count = ArrayLength(rq, list);
+-				std::vector<u32> strings;
+-				for (u32 j = 0; j < count; ++j)
++				CmpPtr<ICmpOwnership> cmpOwnership(simulation, ent);
++				const player_id_t owner = cmpOwnership ? cmpOwnership->GetOwner() : INVALID_PLAYER;
++				std::map<std::string, float> multipliers;
++				if (interface == "Researcher")
++				{
++					JS::RootedValue multiplier(rq.cx);
++					ScriptFunction::Call(rq, component, "GetTechCostMultiplier", &multiplier);
++					std::vector<std::string> codes;
++					if (multiplier.isObject())
++						Script::EnumeratePropertyNames(rq, multiplier, true, codes);
++					for (const std::string& code : codes)
++					{
++						JS::RootedValue value(rq.cx);
++						if (Script::GetProperty(rq, multiplier, code.c_str(), &value) && value.isNumber())
++							multipliers[code] = static_cast<float>(value.toNumber());
++					}
++				}
++				const u32 length = ArrayLength(rq, list);
++				std::vector<u8> items;
++				u32 count = 0;
++				for (u32 j = 0; j < length; ++j)
+ 				{
+ 					JS::RootedValue item(rq.cx);
+ 					Script::GetPropertyInt(rq, list, static_cast<int>(j), &item);
+-					std::string name = StringOf(rq, item);
+-					if (item.isObject())
++					const std::string name = StringOf(rq, item);
++					if (owner == INVALID_PLAYER || (name.empty() && !item.isObject()))
++					{
++						// An empty slot of the research row, or nothing to
++						// read the items for.
++						PutProductionItem(InternString(name), PRODUCTION_REQUIREMENTS_MET, PRODUCTION_NO_LIMIT, {}, items);
++						++count;
++					}
++					else if (interface == "Trainer")
++					{
++						PutTrainable(simulation, rq, owner, name, productionCache, items);
++						++count;
++					}
++					else if (item.isObject())
++					{
++						JS::RootedValue top(rq.cx);
++						JS::RootedValue bottom(rq.cx);
++						Script::GetProperty(rq, item, "top", &top);
++						Script::GetProperty(rq, item, "bottom", &bottom);
++						PutResearchable(simulation, rq, owner, StringOf(rq, top), multipliers, PRODUCTION_PAIR_TOP, productionCache, items);
++						PutResearchable(simulation, rq, owner, StringOf(rq, bottom), multipliers, 0, productionCache, items);
++						count += 2;
++					}
++					else
+ 					{
+-						std::string top;
+-						std::string bottom;
+-						Script::GetProperty(rq, item, "top", top);
+-						Script::GetProperty(rq, item, "bottom", bottom);
+-						name = top + " " + bottom;
++						PutResearchable(simulation, rq, owner, name, multipliers, 0, productionCache, items);
++						++count;
+ 					}
+-					strings.push_back(InternString(name));
+ 				}
+-				PutU32(groups[slot], InternStringList(strings));
++				PutU32(groups[slot], InternProductionList(count, items));
+ 			}
+ 			else if (interface == "Pack" || interface == "Upgrade")
+ 			{
+diff --git a/source/network/SpeculaFeed.h b/source/network/SpeculaFeed.h
+index 4452afa320..64a9bd1c79 100644
+--- a/source/network/SpeculaFeed.h
++++ b/source/network/SpeculaFeed.h
+@@ -36,6 +36,7 @@
+ 
+ class CSimContext;
+ class CSimulation2;
++class ScriptRequest;
+ 
+ /**
+  * Streams a per-turn entity snapshot to the Specula encoder over a Unix
+@@ -163,8 +164,8 @@ class CSimulation2;
+  *    u16 n, n x {u32 id, u32 template index} garrison; 256 u8 builders, f32
+  *    seconds remaining of a foundation; 512 the same for a repair; 1024 u32
+  *    UnitAI state string, u8 idle, u32 stance string, u32 formation
+- *    controller id; 2048 u32 trainable list; 4096 u32 researchable list;
+- *    8192 f32 pack progress, f32 upgrade progress (-1 when not packing or
++ *    controller id; 2048 u32 trainable and 4096 u32 researchable kind 13
++ *    list, written by older hooks only; 8192 f32 pack progress, f32 upgrade progress (-1 when not packing or
+  *    upgrading), u32 upgrade target string; 16384 u32 holder id (the
+  *    entity it is garrisoned in or a turret on, 0 for none); 32768 u32 goods
+  *    type string, f32 total gain of a trader; 65536 u8 n, n x {u8 type (0 attack,
+@@ -174,7 +175,8 @@ class CSimulation2;
+  *    0 for an entity that has the components but no range now; 131072 u16
+  *    n, n x i8 owner of each garrisoned entity of group 128, in its order
+  *    (-1 for none), since they are out of the world and the entity records
+- *    leave them out}, then u32 count, count x u32
++ *    leave them out; 262144 u32 trainable and 524288 u32 researchable kind
++ *    17 list}, then u32 count, count x u32
+  *    id of entities that no longer have any of them. A group is written
+  *    when it differs from what was last written for the entity, so every
+  *    group an entity has comes on the first turn it is seen. Local entities
+@@ -182,9 +184,9 @@ class CSimulation2;
+  *    world, are in. The trainable and researchable lists are sampled every
+  *    PLAYERS_INTERVAL_TURNS turns, the rest every turn. Values are the
+  *    components' own, as GuiInterface.GetEntityState reads them.
+- *  - kind 13 string list, before the record that first uses it: u32 index,
+- *    u32 count, count x u32 string. A researchable pair is one string, the
+- *    top and bottom names separated by a space; an empty slot of the
++ *  - kind 13 string list, written by older hooks only: u32 index, u32
++ *    count, count x u32 string. A researchable pair is one string, the top
++ *    and bottom names separated by a space; an empty slot of the
+  *    researchable row is none.
+  *  - kind 14 renames, before the turn record, when the turn renamed any:
+  *    u32 count, count x {u32 old id, u32 new id}, as
+@@ -195,6 +197,22 @@ class CSimulation2;
+  *    population, i32 population limit, i32 population max, u8 m, m x {u32
+  *    resource code string, f32 amount, u16 gatherers}, u32 phase string,
+  *    u16 k, k x u32 panel entity id}. Index 0 is gaia.
++ *  - kind 17 production list, before the record that first uses it: u32
++ *    index, u32 count, count x {u32 template or technology string, u8
++ *    flags, u16 can be added (0xFFFF for no limit), u8 n, n x {u32
++ *    resource code string, f32 cost}}: a producer's
++ *    Trainer.GetEntitiesList or Researcher.GetTechnologiesList, each item
++ *    read for the producer's owner as the session GUI's training and
++ *    research panels read it. Flags: 1 the requirements are met
++ *    (AreRequirementsMet, CheckTechnologyRequirements), 2 the panels hide
++ *    it (no template data, or DeriveTechnologyRequirements is false for
++ *    the owner's civ), 4 the top
++ *    of a pair, whose bottom is the next item. Can be added is
++ *    getEntityLimitAndCount's canBeAddedCount. Costs are those of
++ *    GetTemplateData for the owner, or a technology's own times the
++ *    producer's GetTechCostMultiplier, without population and time. An
++ *    empty slot of the researchable row is a none string; it and every item
++ *    of a producer without an owner have flag 1, no limit and no costs.
+  */
+ class CSpeculaFeed
+ {
+@@ -297,7 +315,25 @@ private:
+ 	 * The last bytes written for each kind 12 group of an entity, by group
+ 	 * bit; an empty slot is a group the entity does not have.
+ 	 */
+-	using SDetailGroups = std::array<std::vector<u8>, 18>;
++	using SDetailGroups = std::array<std::vector<u8>, 20>;
++
++	struct STechnologyState
++	{
++		u8 flags = 0;
++		// Before the producer's cost multiplier.
++		std::vector<std::pair<std::string, float>> costs;
++	};
++
++	/**
++	 * What one sample of the production lists read, by owner: a trainable
++	 * item's bytes, a technology's state, a civ.
++	 */
++	struct SProductionCache
++	{
++		std::map<std::pair<player_id_t, std::string>, std::vector<u8>> trainable;
++		std::map<std::pair<player_id_t, std::string>, STechnologyState> technologies;
++		std::map<player_id_t, std::string> civs;
++	};
+ 
+ 	static u16 Visibility(const CSimContext& context, entity_id_t ent);
+ 
+@@ -311,7 +347,10 @@ private:
+ 	u32 InternString(const std::string& text);
+ 	u32 InternVariants(const std::map<CStr, CStr>& selections);
+ 	u32 InternVariables(const std::map<std::string, float>& variables);
+-	u32 InternStringList(const std::vector<u32>& strings);
++	u32 InternProductionList(u32 count, const std::vector<u8>& items);
++	void PutProductionItem(u32 name, u8 flags, u16 canBeAdded, const std::vector<std::pair<std::string, float>>& costs, std::vector<u8>& out);
++	void PutTrainable(CSimulation2& simulation, const ScriptRequest& rq, player_id_t owner, const std::string& templateName, SProductionCache& cache, std::vector<u8>& out);
++	void PutResearchable(CSimulation2& simulation, const ScriptRequest& rq, player_id_t owner, const std::string& technology, const std::map<std::string, float>& multipliers, u8 flags, SProductionCache& cache, std::vector<u8>& out);
+ 	bool Send();
+ 	void Disable(const char* what);
+ 
+@@ -322,7 +361,7 @@ private:
+ 	std::unordered_map<std::string, u32> m_StringIndices;
+ 	std::map<std::vector<std::pair<u32, u32>>, u32> m_VariantSetIndices;
+ 	std::map<std::vector<std::pair<u32, u32>>, u32> m_VariableSetIndices;
+-	std::map<std::vector<u32>, u32> m_StringListIndices;
++	std::map<std::pair<u32, std::vector<u8>>, u32> m_ProductionListIndices;
+ 	std::unordered_map<entity_id_t, SDetailGroups> m_LastDetails;
+ 	std::vector<u8> m_LastPlayers;
+ 	std::vector<u8> m_LastEconomy;

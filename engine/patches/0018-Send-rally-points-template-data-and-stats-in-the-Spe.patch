@@ -1,0 +1,778 @@
+From feb5aa04c83e73a93498e74eb2590d66d23c509a Mon Sep 17 00:00:00 2001
+From: Viktor Semenov <suit.uanic@gmail.com>
+Date: Wed, 21 Oct 2026 13:06:38 +0000
+Subject: [PATCH 18/45] Send rally points, template data and stats in the
+ Specula feed
+
+Kind 12 group 1048576 carries each building's RallyPoint positions with
+the path CCmpRallyPointRenderer computes to them (footprint edge,
+ComputePathImmediate, averaging, ReduceSegmentsByVisibility,
+InterpolatePointsRNS) and the flag actor of the owner's civ, sampled
+every 5 turns and cached until the points, the building or its owner
+change. Kind 11 adds the RallyPointRenderer line texture, mask,
+thickness and caps.
+
+Kind 18 sends GetTemplateData for each entity's template and trainable
+item for its owner, again when IsTemplateModified holds (then
+ResetTemplateModified, which nothing else calls here), and kind 19 each
+researchable technology's data for the civ. Kind 20 interns the
+attack and resistance part of GetEntityState, read every 25 turns, and
+group 2097152 names it. New kinds and group bits, so the feed stays v14.
+---
+ source/network/SpeculaFeed.cpp | 490 ++++++++++++++++++++++++++++++++-
+ source/network/SpeculaFeed.h   |  64 ++++-
+ 2 files changed, 549 insertions(+), 5 deletions(-)
+
+diff --git a/source/network/SpeculaFeed.cpp b/source/network/SpeculaFeed.cpp
+index 7f80f191ee..7283adedb6 100644
+--- a/source/network/SpeculaFeed.cpp
++++ b/source/network/SpeculaFeed.cpp
+@@ -20,25 +20,32 @@
+ #include "SpeculaFeed.h"
+ 
+ #include "graphics/LightEnv.h"
++#include "graphics/Overlay.h"
+ #include "graphics/MiniMapTexture.h"
+ #include "graphics/Terrain.h"
+ #include "lib/debug.h"
+ #include "lib/timer.h"
+ #include "lib/utf8.h"
++#include "maths/Vector2D.h"
+ #include "ps/CLogger.h"
+ #include "ps/CStr.h"
+ #include "ps/Game.h"
+ #include "ps/World.h"
++#include "ps/algorithm.h"
+ #include "scriptinterface/FunctionWrapper.h"
++#include "scriptinterface/JSON.h"
+ #include "scriptinterface/Object.h"
+ #include "scriptinterface/ScriptInterface.h"
+ #include "scriptinterface/ScriptRequest.h"
+ #include "simulation2/Simulation2.h"
++#include "simulation2/components/ICmpFootprint.h"
+ #include "simulation2/components/ICmpGuiInterface.h"
+ #include "simulation2/components/ICmpIdentity.h"
+ #include "simulation2/components/ICmpMinimap.h"
+ #include "simulation2/components/ICmpMirage.h"
++#include "simulation2/components/ICmpObstructionManager.h"
+ #include "simulation2/components/ICmpOwnership.h"
++#include "simulation2/components/ICmpPathfinder.h"
+ #include "simulation2/components/ICmpPlayerManager.h"
+ #include "simulation2/components/ICmpPosition.h"
+ #include "simulation2/components/ICmpRangeManager.h"
+@@ -47,7 +54,11 @@
+ #include "simulation2/components/ICmpTerritoryManager.h"
+ #include "simulation2/components/ICmpVisual.h"
+ #include "simulation2/components/ICmpWaterManager.h"
++#include "simulation2/helpers/Geometry.h"
+ #include "simulation2/helpers/Grid.h"
++#include "simulation2/helpers/PathGoal.h"
++#include "simulation2/helpers/Pathfinding.h"
++#include "simulation2/helpers/Render.h"
+ #include "simulation2/system/CmpPtr.h"
+ #include "simulation2/system/Entity.h"
+ #include "simulation2/system/ParamNode.h"
+@@ -58,6 +69,7 @@
+ #include <cmath>
+ #include <cstring>
+ #include <limits>
++#include <set>
+ #include <string_view>
+ #include <sys/socket.h>
+ #include <sys/un.h>
+@@ -82,6 +94,9 @@ constexpr u8 RECORD_RENAMES = 14;
+ constexpr u8 RECORD_ECONOMY = 15;
+ constexpr u8 RECORD_VARIABLE_SET = 16;
+ constexpr u8 RECORD_PRODUCTION_LIST = 17;
++constexpr u8 RECORD_TEMPLATE_DATA = 18;
++constexpr u8 RECORD_TECHNOLOGY_DATA = 19;
++constexpr u8 RECORD_STATS = 20;
+ constexpr u16 TEMPLATE_SELECTABLE = 1;
+ constexpr u16 TEMPLATE_EDITOR_ONLY = 2;
+ constexpr u16 TEMPLATE_OUTLINE = 4;
+@@ -112,6 +127,8 @@ constexpr size_t DETAIL_RANGES = 16;
+ constexpr size_t DETAIL_GARRISON_OWNERS = 17;
+ constexpr size_t DETAIL_TRAINABLE = 18;
+ constexpr size_t DETAIL_RESEARCHABLE = 19;
++constexpr size_t DETAIL_RALLY = 20;
++constexpr size_t DETAIL_STATS = 21;
+ constexpr u8 PRODUCTION_REQUIREMENTS_MET = 1;
+ constexpr u8 PRODUCTION_HIDDEN = 2;
+ constexpr u8 PRODUCTION_PAIR_TOP = 4;
+@@ -129,7 +146,7 @@ const char* const DETAIL_INTERFACES[] = {
+ 	"Health", "Capturable", "ResourceSupply", "ProductionQueue", "GarrisonHolder",
+ 	"Promotion", "ResourceGatherer", "Foundation", "Repairable", "UnitAI", "Trainer",
+ 	"Researcher", "Pack", "Upgrade", "Trader", "Garrisonable", "Turretable", "Attack", "Auras",
+-	"Heal"
++	"Heal", "RallyPoint"
+ };
+ // Indices of DETAIL_INTERFACES that are read together.
+ constexpr size_t INTERFACE_PACK = 12;
+@@ -156,6 +173,110 @@ constexpr u16 VISIBLE_TO_ALL = 0xFFFF;
+ constexpr player_id_t MAX_VISIBILITY_PLAYERS = 16;
+ // GetSimulationState is not cheap, and diplomacy changes rarely; about 1 s.
+ constexpr u32 PLAYERS_INTERVAL_TURNS = 5;
++// The stats are read for every entity and change only with a technology,
++// an aura or a garrison; about 5 s.
++constexpr u32 STATS_INTERVAL_TURNS = 25;
++// The part of GuiInterface.GetEntityState the selection's attack and
++// resistance tooltip reads (gui/session/selection_details.js), with the
++// elevation-adapted range in whole metres off the range, which is all
++// the tooltip shows, and the turret points as one 0 each, which is all it
++// counts, so that entities apart or with other turrets share their stats.
++const char* const STATS_SCRIPT = R"js(({
++	"stats": function(ent)
++	{
++		const ret = {};
++		const cmpPosition = Engine.QueryInterface(ent, IID_Position);
++		const cmpUnitAI = Engine.QueryInterface(ent, IID_UnitAI);
++		const cmpAttack = Engine.QueryInterface(ent, IID_Attack);
++		if (cmpAttack)
++		{
++			const cmpRangeManager = Engine.QueryInterface(SYSTEM_ENTITY, IID_RangeManager);
++			const types = cmpAttack.GetAttackTypes();
++			if (types.length)
++				ret.attack = {};
++			for (const type of types)
++			{
++				ret.attack[type] = {};
++				Object.assign(ret.attack[type], cmpAttack.GetAttackEffectsData(type));
++				ret.attack[type].attackName = cmpAttack.GetAttackName(type);
++				ret.attack[type].splash = cmpAttack.GetSplashData(type);
++				if (ret.attack[type].splash)
++					Object.assign(ret.attack[type].splash, cmpAttack.GetAttackEffectsData(type, true));
++				const range = cmpAttack.GetRange(type);
++				ret.attack[type].minRange = range.min;
++				ret.attack[type].maxRange = range.max;
++				ret.attack[type].repeatTime = cmpAttack.GetTimers(type).repeat;
++				if (type != "Ranged" || !cmpPosition || !cmpPosition.IsInWorld())
++					continue;
++				const real = cmpRangeManager.GetElevationAdaptedRange(cmpPosition.GetPosition(), cmpPosition.GetRotation(), range.max, cmpAttack.GetAttackYOrigin(type), cmpUnitAI ? 0 : 2 * Math.PI);
++				ret.attack[type].elevationAdaptedRange = range.max + Math.round(real - range.max);
++			}
++		}
++		const cmpResistance = Engine.QueryInterface(ent, IID_Resistance);
++		if (cmpResistance)
++			ret.resistance = cmpResistance.GetResistanceOfForm(Engine.QueryInterface(ent, IID_Foundation) ? "Foundation" : "Entity");
++		const cmpBuildingAI = Engine.QueryInterface(ent, IID_BuildingAI);
++		if (cmpBuildingAI)
++			ret.buildingAI = {
++				"defaultArrowCount": cmpBuildingAI.GetDefaultArrowCount(),
++				"maxArrowCount": cmpBuildingAI.GetMaxArrowCount(),
++				"garrisonArrowMultiplier": cmpBuildingAI.GetGarrisonArrowMultiplier(),
++				"arrowCount": cmpBuildingAI.GetArrowCount()
++			};
++		const cmpHeal = Engine.QueryInterface(ent, IID_Heal);
++		if (cmpHeal)
++			ret.heal = {
++				"health": cmpHeal.GetHealth(),
++				"range": cmpHeal.GetRange().max,
++				"interval": cmpHeal.GetInterval()
++			};
++		const cmpResourceGatherer = Engine.QueryInterface(ent, IID_ResourceGatherer);
++		if (cmpResourceGatherer)
++			ret.resourceGatherRates = cmpResourceGatherer.GetGatherRates();
++		const cmpUnitMotion = Engine.QueryInterface(ent, IID_UnitMotion);
++		if (cmpUnitMotion)
++			ret.speed = {
++				"walk": cmpUnitMotion.GetWalkSpeed(),
++				"run": cmpUnitMotion.GetWalkSpeed() * cmpUnitMotion.GetRunMultiplier(),
++				"acceleration": cmpUnitMotion.GetAcceleration()
++			};
++		const cmpGarrisonHolder = Engine.QueryInterface(ent, IID_GarrisonHolder);
++		if (cmpGarrisonHolder)
++			ret.garrisonHolder = {
++				"buffHeal": cmpGarrisonHolder.GetHealRate(),
++				"capacity": cmpGarrisonHolder.GetCapacity(),
++				"occupiedSlots": cmpGarrisonHolder.OccupiedSlots()
++			};
++		const cmpGarrisonable = Engine.QueryInterface(ent, IID_Garrisonable);
++		if (cmpGarrisonable)
++			ret.garrisonable = { "size": cmpGarrisonable.UnitSize() };
++		const cmpTurretHolder = Engine.QueryInterface(ent, IID_TurretHolder);
++		if (cmpTurretHolder)
++			ret.turretHolder = { "turretPoints": cmpTurretHolder.GetTurretPoints().map(() => 0) };
++		const cmpPopulation = Engine.QueryInterface(ent, IID_Population);
++		if (cmpPopulation)
++			ret.population = { "bonus": cmpPopulation.GetPopBonus() };
++		const cmpLoot = Engine.QueryInterface(ent, IID_Loot);
++		if (cmpLoot)
++		{
++			ret.loot = cmpLoot.GetResources();
++			ret.loot.xp = cmpLoot.GetXp();
++		}
++		const cmpResourceTrickle = Engine.QueryInterface(ent, IID_ResourceTrickle);
++		if (cmpResourceTrickle)
++			ret.resourceTrickle = {
++				"interval": cmpResourceTrickle.GetInterval(),
++				"rates": cmpResourceTrickle.GetRates()
++			};
++		const cmpUpkeep = Engine.QueryInterface(ent, IID_Upkeep);
++		if (cmpUpkeep)
++			ret.upkeep = {
++				"interval": cmpUpkeep.GetInterval(),
++				"rates": cmpUpkeep.GetRates()
++			};
++		return ret;
++	}
++}))js";
+ constexpr u16 NO_TEXTURE = 0xFFFF;
+ // CCmpMinimap prepends this to the template's icon file name.
+ const std::string ICON_DIRECTORY = "art/textures/ui/session/icons/minimap/";
+@@ -405,6 +526,128 @@ u16 LimitOf(float canBeAdded)
+ 		return PRODUCTION_NO_LIMIT;
+ 	return static_cast<u16>(std::min(std::floor(canBeAdded), static_cast<float>(PRODUCTION_NO_LIMIT - 1)));
+ }
++
++// The rally line helpers below are CCmpRallyPointRenderer's, which builds its
++// path only when the GUI displays a rally point, never in this observer.
++
++// GetClosestsEdgePointFrom: the point of the footprint's outline nearest to
++// target, or the centre without a footprint.
++CFixedVector2D ClosestEdgePoint(const CFixedVector2D& target, CmpPtr<ICmpPosition>& cmpPosition, CmpPtr<ICmpFootprint>& cmpFootprint)
++{
++	const CFixedVector2D center = cmpPosition->GetPosition2D();
++	if (!cmpFootprint)
++		return center;
++	ICmpFootprint::EShape shape;
++	entity_pos_t size0;
++	entity_pos_t size1;
++	entity_pos_t height;
++	cmpFootprint->GetShape(shape, size0, size1, height);
++	if (shape == ICmpFootprint::SQUARE)
++	{
++		fixed s;
++		fixed c;
++		sincos_approx(cmpPosition->GetRotation().Y, s, c);
++		const CFixedVector2D u(c, -s);
++		const CFixedVector2D v(s, c);
++		const CFixedVector2D halfSize(size0 / 2, size1 / 2);
++		return center + Geometry::NearestPointOnSquare(target - center, u, v, halfSize);
++	}
++	CFixedVector2D centerToTarget(target - center);
++	centerToTarget.Normalize();
++	return center + centerToTarget.Multiply(size0);
++}
++
++// ReduceSegmentsByVisibility, floating, as the renderer calls it.
++void ReduceSegmentsByVisibility(const CSimContext& context, std::vector<CVector2D>& coords, unsigned maxSegmentLinks, entity_pos_t lineRadius, pass_class_t passClass)
++{
++	CmpPtr<ICmpPathfinder> cmpPathfinder(context, SYSTEM_ENTITY);
++	CmpPtr<ICmpTerrain> cmpTerrain(context, SYSTEM_ENTITY);
++	CmpPtr<ICmpWaterManager> cmpWaterManager(context, SYSTEM_ENTITY);
++	if (!cmpPathfinder || !cmpTerrain || !cmpWaterManager || coords.size() < 3)
++		return;
++
++	const auto height = [&](const CVector2D& point) {
++		return std::max(cmpTerrain->GetExactGroundLevel(point.X, point.Y), cmpWaterManager->GetExactWaterLevel(point.X, point.Y));
++	};
++	std::vector<CVector2D> newCoords;
++	StationaryOnlyObstructionFilter obstructionFilter;
++	newCoords.push_back(coords[0]);
++	size_t baseNodeIdx = 0;
++	size_t curNodeIdx = 1;
++	entity_pos_t baseNodeX = fixed::FromFloat(coords[baseNodeIdx].X);
++	entity_pos_t baseNodeZ = fixed::FromFloat(coords[baseNodeIdx].Y);
++	float baseNodeY = height(coords[baseNodeIdx]);
++	while (curNodeIdx < coords.size())
++	{
++		const entity_pos_t curNodeX = fixed::FromFloat(coords[curNodeIdx].X);
++		const entity_pos_t curNodeZ = fixed::FromFloat(coords[curNodeIdx].Y);
++		const float curNodeY = height(coords[curNodeIdx]);
++		bool curNodeVisible = cmpPathfinder->CheckMovement(obstructionFilter, baseNodeX, baseNodeZ, curNodeX, curNodeZ, lineRadius, passClass);
++		curNodeVisible = curNodeVisible && fabsf(curNodeY - baseNodeY) < 3.f;
++		if (maxSegmentLinks > 0)
++			curNodeVisible = curNodeVisible && curNodeIdx - baseNodeIdx <= maxSegmentLinks;
++		if (!curNodeVisible)
++		{
++			if (curNodeIdx > baseNodeIdx + 1)
++				baseNodeIdx = curNodeIdx - 1;
++			else
++			{
++				baseNodeIdx = curNodeIdx;
++				++curNodeIdx;
++			}
++			newCoords.push_back(coords[baseNodeIdx]);
++			baseNodeX = fixed::FromFloat(coords[baseNodeIdx].X);
++			baseNodeZ = fixed::FromFloat(coords[baseNodeIdx].Y);
++			baseNodeY = height(coords[baseNodeIdx]);
++		}
++		++curNodeIdx;
++	}
++	newCoords.push_back(coords[coords.size() - 1]);
++	coords.swap(newCoords);
++}
++
++// RecomputeRallyPointPath up to the smoothing: the line to point index, from
++// that point back to the previous one or the footprint's edge.
++std::vector<CVector2D> RallyPath(const CSimContext& context, CmpPtr<ICmpPosition>& cmpPosition, CmpPtr<ICmpFootprint>& cmpFootprint, const std::vector<CFixedVector2D>& points, size_t index, pass_class_t passClass, entity_pos_t lineRadius)
++{
++	std::vector<CVector2D> coords;
++	CmpPtr<ICmpPathfinder> cmpPathfinder(context, SYSTEM_ENTITY);
++	if (!cmpPathfinder)
++		return coords;
++	const CFixedVector2D start = index == 0 ? ClosestEdgePoint(points[0], cmpPosition, cmpFootprint) : points[index - 1];
++	WaypointPath path;
++	std::vector<Waypoint>& waypoints = path.m_Waypoints;
++	PathGoal goal = { PathGoal::POINT, points[index].X, points[index].Y };
++	cmpPathfinder->ComputePathImmediate(start.X, start.Y, goal, passClass, path);
++	if (waypoints.size() < 2)
++	{
++		coords.emplace_back(start.X.ToFloat(), start.Y.ToFloat());
++		coords.emplace_back(points[index].X.ToFloat(), points[index].Y.ToFloat());
++		return coords;
++	}
++	if (index == 0)
++	{
++		const CFixedVector2D beforeEnd(waypoints[waypoints.size() - 2].x, waypoints[waypoints.size() - 2].z);
++		const CFixedVector2D newEnd = ClosestEdgePoint(beforeEnd, cmpPosition, cmpFootprint);
++		waypoints.back().x = newEnd.X;
++		waypoints.back().z = newEnd.Y;
++	}
++	else
++	{
++		waypoints.back().x = points[index - 1].X;
++		waypoints.back().z = points[index - 1].Y;
++	}
++	waypoints[0].x = points[index].X;
++	waypoints[0].z = points[index].Y;
++
++	for (const Waypoint& waypoint : waypoints)
++		coords.emplace_back(waypoint.x.ToFloat(), waypoint.z.ToFloat());
++	for (size_t i = coords.size() - 2; i > 0; --i)
++		coords[i] = (coords[i] + coords[i - 1]) / 2.0f;
++	ReduceSegmentsByVisibility(context, coords, 6, lineRadius, passClass);
++	SimRender::InterpolatePointsRNS(coords, false, 0, 4);
++	return coords;
++}
+ } // anonymous namespace
+ 
+ CSpeculaFeed::CSpeculaFeed(const std::string& socketPath)
+@@ -1002,6 +1245,14 @@ void CSpeculaFeed::WriteTemplateDetails(CSimulation2& simulation, u32 index, con
+ 	// Sound.js fills the select group's {lang} and {phenotype} from these.
+ 	const u32 lang = InternString(identity.GetChild("Lang").ToString());
+ 	const u32 phenotypes = InternString(identity.GetChild("Phenotype").ToString());
++	const CParamNode& rallyRenderer = templateNode->GetChild("RallyPointRenderer");
++	const u32 rallyTexture = InternString(rallyRenderer.GetChild("LineTexture").ToString());
++	const u32 rallyMask = InternString(rallyRenderer.GetChild("LineTextureMask").ToString());
++	// StrToLineCapType warns about anything but a cap name.
++	const auto lineCap = [&](const char* name) -> u8 {
++		const CParamNode& cap = rallyRenderer.GetChild(name);
++		return cap.IsOk() ? static_cast<u8>(SOverlayTexturedLine::StrToLineCapType(cap.ToWString())) : 0;
++	};
+ 
+ 	u16 flags = 0;
+ 	if (selectable.IsOk())
+@@ -1077,9 +1328,87 @@ void CSpeculaFeed::WriteTemplateDetails(CSimulation2& simulation, u32 index, con
+ 	PutU32(m_Buffer, components);
+ 	PutU32(m_Buffer, lang);
+ 	PutU32(m_Buffer, phenotypes);
++	PutU32(m_Buffer, rallyTexture);
++	PutU32(m_Buffer, rallyMask);
++	PutF32(m_Buffer, NodeFloat(rallyRenderer.GetChild("LineThickness")));
++	m_Buffer.push_back(lineCap("LineStartCap"));
++	m_Buffer.push_back(lineCap("LineEndCap"));
+ 	EndRecord(m_Buffer, start);
+ }
+ 
++const std::vector<u8>& CSpeculaFeed::RallyGroup(CSimulation2& simulation, entity_id_t ent, const std::vector<CFixedVector2D>& points, std::unordered_map<entity_id_t, SRallyGroup>& current)
++{
++	CmpPtr<ICmpPosition> cmpPosition(simulation, ent);
++	CmpPtr<ICmpOwnership> cmpOwnership(simulation, ent);
++	const player_id_t owner = cmpOwnership ? cmpOwnership->GetOwner() : INVALID_PLAYER;
++	const bool placed = cmpPosition && cmpPosition->IsInWorld();
++	std::vector<i32> key = { owner };
++	if (placed)
++	{
++		const CFixedVector2D position = cmpPosition->GetPosition2D();
++		key.insert(key.end(), { position.X.GetInternalValue(), position.Y.GetInternalValue(), cmpPosition->GetRotation().Y.GetInternalValue() });
++	}
++	for (const CFixedVector2D& point : points)
++		key.insert(key.end(), { point.X.GetInternalValue(), point.Y.GetInternalValue() });
++
++	SRallyGroup& group = current[ent];
++	const auto last = m_RallyGroups.find(ent);
++	if (last != m_RallyGroups.end() && last->second.key == key)
++	{
++		group = last->second;
++		return group.bytes;
++	}
++	group.key = std::move(key);
++	std::vector<u8>& bytes = group.bytes;
++	const u8 count = placed ? static_cast<u8>(std::min<size_t>(points.size(), 0xFF)) : 0;
++	bytes.push_back(count);
++
++	// CreateMarkerEntity's template, and the actor CCmpVisualActor makes of
++	// it with the marker's own civ.
++	CmpPtr<ICmpTemplateManager> cmpTemplateManager(simulation, SYSTEM_ENTITY);
++	const CParamNode* templateNode = cmpTemplateManager ? cmpTemplateManager->GetTemplate(cmpTemplateManager->GetCurrentTemplateName(ent)) : nullptr;
++	const CParamNode* rallyRenderer = templateNode ? &templateNode->GetChild("RallyPointRenderer") : nullptr;
++	std::wstring markerActor;
++	CmpPtr<ICmpPlayerManager> cmpPlayerManager(simulation, SYSTEM_ENTITY);
++	if (count && rallyRenderer && rallyRenderer->IsOk() && cmpPlayerManager && owner != INVALID_PLAYER)
++	{
++		CmpPtr<ICmpIdentity> cmpPlayerIdentity(simulation, cmpPlayerManager->GetPlayerByID(owner));
++		std::wstring markerTemplate = rallyRenderer->GetChild("MarkerTemplate").ToWString();
++		if (cmpPlayerIdentity && !markerTemplate.empty())
++		{
++			PS::ReplaceSubrange(markerTemplate, L"{civ}", cmpPlayerIdentity->GetCiv());
++			if (const CParamNode* marker = cmpTemplateManager->GetTemplate(utf8_from_wstring(markerTemplate)))
++			{
++				markerActor = marker->GetChild("VisualActor").GetChild("Actor").ToWString();
++				PS::ReplaceSubrange(markerActor, L"{civ}", marker->GetChild("Identity").GetChild("Civ").ToWString());
++			}
++		}
++	}
++	PutU32(bytes, InternString(utf8_from_wstring(markerActor)));
++
++	CmpPtr<ICmpFootprint> cmpFootprint(simulation, ent);
++	CmpPtr<ICmpPathfinder> cmpPathfinder(simulation, SYSTEM_ENTITY);
++	const bool pathed = rallyRenderer && rallyRenderer->IsOk() && cmpPathfinder;
++	const pass_class_t passClass = pathed ? cmpPathfinder->GetPassabilityClass(rallyRenderer->GetChild("LinePassabilityClass").ToString()) : 0;
++	const entity_pos_t lineRadius = pathed ? rallyRenderer->GetChild("LineThickness").ToFixed() : entity_pos_t::Zero();
++	for (size_t i = 0; i < count; ++i)
++	{
++		PutF32(bytes, points[i].X.ToFloat());
++		PutF32(bytes, points[i].Y.ToFloat());
++		const std::vector<CVector2D> path = pathed ?
++			RallyPath(simulation.GetSimContext(), cmpPosition, cmpFootprint, points, i, passClass, lineRadius) :
++			std::vector<CVector2D>();
++		const size_t length = std::min<size_t>(path.size(), 0xFFFF);
++		PutU16(bytes, static_cast<u16>(length));
++		for (size_t j = 0; j < length; ++j)
++		{
++			PutF32(bytes, path[j].X);
++			PutF32(bytes, path[j].Y);
++		}
++	}
++	return group.bytes;
++}
++
+ // The session GUI reads and clears this list every update; nothing else
+ // does in a nonvisual observer, and it is not serialized.
+ void CSpeculaFeed::WriteRenames(CSimulation2& simulation)
+@@ -1139,6 +1468,7 @@ void CSpeculaFeed::WriteDetails(CSimulation2& simulation, u32 turn)
+ 	std::unordered_map<entity_id_t, SDetailGroups> current;
+ 	// Producers of one owner list the same items.
+ 	SProductionCache productionCache;
++	std::unordered_map<entity_id_t, SRallyGroup> rallyGroups;
+ 	for (size_t i = 0; i < iids.size(); ++i)
+ 	{
+ 		if (iids[i] < 0)
+@@ -1421,6 +1751,27 @@ void CSpeculaFeed::WriteDetails(CSimulation2& simulation, u32 turn)
+ 					++group[0];
+ 				}
+ 			}
++			else if (interface == "RallyPoint")
++			{
++				if (!sampleLists)
++				{
++					const auto last = m_LastDetails.find(ent);
++					if (last != m_LastDetails.end())
++						groups[DETAIL_RALLY] = last->second[DETAIL_RALLY];
++					continue;
++				}
++				JS::RootedValue positions(rq.cx);
++				ScriptFunction::Call(rq, component, "GetPositions", &positions);
++				const u32 count = ArrayLength(rq, positions);
++				std::vector<CFixedVector2D> points;
++				for (u32 j = 0; j < count; ++j)
++				{
++					JS::RootedValue position(rq.cx);
++					Script::GetPropertyInt(rq, positions, static_cast<int>(j), &position);
++					points.emplace_back(entity_pos_t::FromFloat(PropertyFloat(rq, position, "x")), entity_pos_t::FromFloat(PropertyFloat(rq, position, "z")));
++				}
++				groups[DETAIL_RALLY] = RallyGroup(simulation, ent, points, rallyGroups);
++			}
+ 			else if (interface == "Garrisonable" || interface == "Turretable")
+ 			{
+ 				std::vector<u8>& group = groups[DETAIL_HOLDER];
+@@ -1436,6 +1787,8 @@ void CSpeculaFeed::WriteDetails(CSimulation2& simulation, u32 turn)
+ 		}
+ 	}
+ 
++	PutStats(simulation, rq, turn, current);
++
+ 	std::vector<u8> payload;
+ 	u32 changed = 0;
+ 	for (const std::pair<const entity_id_t, SDetailGroups>& entry : current)
+@@ -1470,6 +1823,11 @@ void CSpeculaFeed::WriteDetails(CSimulation2& simulation, u32 turn)
+ 			PutU32(m_Buffer, id);
+ 		EndRecord(m_Buffer, start);
+ 	}
++	if (sampleLists)
++	{
++		m_RallyGroups = std::move(rallyGroups);
++		WriteTemplateData(simulation, rq, current, productionCache);
++	}
+ 	m_LastDetails = std::move(current);
+ 
+ 	m_DetailsSeconds += timer_Time() - startTime;
+@@ -1481,6 +1839,136 @@ void CSpeculaFeed::WriteDetails(CSimulation2& simulation, u32 turn)
+ 	}
+ }
+ 
++// What the tooltips read: GetTemplateData of each template an entity or a
++// trainable list has, for the owner, as GetTemplateData in
++// gui/session/session.js asks for it, and of each researchable technology
++// for the owner's civ, as GetTechnologyData there makes it. A template's is
++// sent again when GuiInterface flags its owner's modifiers as changed.
++void CSpeculaFeed::WriteTemplateData(CSimulation2& simulation, const ScriptRequest& rq, const std::unordered_map<entity_id_t, SDetailGroups>& entities, const SProductionCache& cache)
++{
++	CmpPtr<ICmpTemplateManager> cmpTemplateManager(simulation, SYSTEM_ENTITY);
++	CmpPtr<ICmpPlayerManager> cmpPlayerManager(simulation, SYSTEM_ENTITY);
++	if (!cmpTemplateManager || !cmpPlayerManager)
++		return;
++
++	// The session GUI reads and clears these flags each update; nothing
++	// else does in a nonvisual observer, and they are not serialized.
++	std::set<player_id_t> modified;
++	for (player_id_t player = 0; player < cmpPlayerManager->GetNumPlayers(); ++player)
++	{
++		JS::RootedValue arg(rq.cx);
++		JS::RootedValue result(rq.cx);
++		CallGui(simulation, player, L"IsTemplateModified", arg, &result);
++		if (Truthy(result))
++			modified.insert(player);
++	}
++	if (!modified.empty())
++	{
++		JS::RootedValue arg(rq.cx);
++		JS::RootedValue ignored(rq.cx);
++		CallGui(simulation, INVALID_PLAYER, L"ResetTemplateModified", arg, &ignored);
++	}
++
++	std::set<std::pair<std::string, player_id_t>> templates;
++	for (const std::pair<const entity_id_t, SDetailGroups>& entry : entities)
++	{
++		CmpPtr<ICmpOwnership> cmpOwnership(simulation, entry.first);
++		templates.emplace(cmpTemplateManager->GetCurrentTemplateName(entry.first),
++			cmpOwnership ? cmpOwnership->GetOwner() : INVALID_PLAYER);
++	}
++	for (const auto& entry : cache.trainable)
++		templates.emplace(entry.first.second, entry.first.first);
++	for (const std::pair<std::string, player_id_t>& key : templates)
++	{
++		const auto sent = m_TemplateData.find(key);
++		if (sent != m_TemplateData.end() && modified.find(key.second) == modified.end())
++			continue;
++		JS::RootedValue arg(rq.cx);
++		JS::RootedValue data(rq.cx);
++		Script::CreateObject(rq, &arg, "templateName", key.first, "player", key.second);
++		CallGui(simulation, key.second, L"GetTemplateData", arg, &data);
++		if (!data.isObject())
++			continue;
++		std::string json = Script::StringifyJSON(rq, &data, false);
++		if (sent != m_TemplateData.end() && sent->second == json)
++			continue;
++		const u32 name = InternString(key.first);
++		const size_t start = BeginRecord(m_Buffer, RECORD_TEMPLATE_DATA);
++		PutU32(m_Buffer, name);
++		PutI32(m_Buffer, key.second);
++		m_Buffer.insert(m_Buffer.end(), json.begin(), json.end());
++		EndRecord(m_Buffer, start);
++		m_TemplateData[key] = std::move(json);
++	}
++
++	JS::RootedValue global(rq.cx, rq.globalValue());
++	JS::RootedValue technologyTemplates(rq.cx);
++	JS::RootedValue resources(rq.cx);
++	if (!ScriptInterface::GetGlobalProperty(rq, "TechnologyTemplates", &technologyTemplates) ||
++	    !ScriptInterface::GetGlobalProperty(rq, "Resources", &resources))
++		return;
++	for (const auto& entry : cache.technologies)
++	{
++		const auto civ = cache.civs.find(entry.first.first);
++		if (civ == cache.civs.end() || entry.first.second.empty())
++			continue;
++		if (!m_TechnologyData.emplace(entry.first.second, civ->second).second)
++			continue;
++		JS::RootedValue techTemplate(rq.cx);
++		JS::RootedValue data(rq.cx);
++		ScriptFunction::Call(rq, technologyTemplates, "Get", &techTemplate, entry.first.second);
++		if (!techTemplate.isObject())
++			continue;
++		ScriptFunction::Call(rq, global, "GetTechnologyDataHelper", &data, techTemplate, civ->second, resources);
++		if (!data.isObject())
++			continue;
++		const std::string json = Script::StringifyJSON(rq, &data, false);
++		const u32 name = InternString(entry.first.second);
++		const u32 civName = InternString(civ->second);
++		const size_t start = BeginRecord(m_Buffer, RECORD_TECHNOLOGY_DATA);
++		PutU32(m_Buffer, name);
++		PutU32(m_Buffer, civName);
++		m_Buffer.insert(m_Buffer.end(), json.begin(), json.end());
++		EndRecord(m_Buffer, start);
++	}
++}
++
++// Fills the stats slot of every entity: read anew every
++// STATS_INTERVAL_TURNS turns, else as last written. Each distinct JSON goes
++// out once, as a kind 20 record.
++void CSpeculaFeed::PutStats(CSimulation2& simulation, const ScriptRequest& rq, u32 turn, std::unordered_map<entity_id_t, SDetailGroups>& entities)
++{
++	if (m_DetailsTurns != 0 && turn % STATS_INTERVAL_TURNS != 0)
++	{
++		for (std::pair<const entity_id_t, SDetailGroups>& entry : entities)
++		{
++			const auto last = m_LastDetails.find(entry.first);
++			if (last != m_LastDetails.end())
++				entry.second[DETAIL_STATS] = last->second[DETAIL_STATS];
++		}
++		return;
++	}
++	JS::RootedValue reader(rq.cx);
++	if (!simulation.GetScriptInterface().Eval(STATS_SCRIPT, &reader) || !reader.isObject())
++		return;
++	for (std::pair<const entity_id_t, SDetailGroups>& entry : entities)
++	{
++		JS::RootedValue stats(rq.cx);
++		if (!ScriptFunction::Call(rq, reader, "stats", &stats, entry.first) || !stats.isObject())
++			continue;
++		std::string json = Script::StringifyJSON(rq, &stats, false);
++		const auto [it, inserted] = m_StatsIndices.try_emplace(std::move(json), static_cast<u32>(m_StatsIndices.size()));
++		if (inserted)
++		{
++			const size_t start = BeginRecord(m_Buffer, RECORD_STATS);
++			PutU32(m_Buffer, it->second);
++			m_Buffer.insert(m_Buffer.end(), it->first.begin(), it->first.end());
++			EndRecord(m_Buffer, start);
++		}
++		PutU32(entry.second[DETAIL_STATS], it->second);
++	}
++}
++
+ // Read through the GUI interface, as the session GUI does every turn: team
+ // and diplomacy live only in JS components.
+ void CSpeculaFeed::WritePlayers(CSimulation2& simulation)
+diff --git a/source/network/SpeculaFeed.h b/source/network/SpeculaFeed.h
+index 64a9bd1c79..f27f59aaff 100644
+--- a/source/network/SpeculaFeed.h
++++ b/source/network/SpeculaFeed.h
+@@ -22,6 +22,7 @@
+ #include "lib/code_annotation.h"
+ #include "lib/types.h"
+ #include "maths/Fixed.h"
++#include "maths/FixedVector2D.h"
+ #include "maths/FixedVector3D.h"
+ #include "ps/CStr.h"
+ #include "simulation2/helpers/Player.h"
+@@ -29,6 +30,7 @@
+ 
+ #include <array>
+ #include <map>
++#include <set>
+ #include <string>
+ #include <unordered_map>
+ #include <utility>
+@@ -136,7 +138,11 @@ class ScriptRequest;
+  *    name, u32 icon, u32 selection group name, u32 rank, u32 classes, u32
+  *    visible classes, u32 select sound group, u32 components, u32 lang,
+  *    u32 phenotypes (Identity's Lang and Phenotype tokens, which Sound.js
+- *    puts into the select group's {lang} and {phenotype}). Strings are
++ *    puts into the select group's {lang} and {phenotype}), u32 rally line
++ *    texture string, u32 rally line mask string, f32 rally line
++ *    thickness, u8 rally line start cap, u8 rally line end cap
++ *    (RallyPointRenderer's; the textures as full VFS paths, none without
++ *    the component; caps 0 flat, 1 round, 2 sharp, 3 square). Strings are
+  *    string records (none when absent), read from the template as is: the
+  *    textures relative to art/textures/selection/, the icon to
+  *    art/textures/ui/session/portraits/, the sound group to audio/, the
+@@ -150,7 +156,7 @@ class ScriptRequest;
+  *    each: Health, Capturable, ResourceSupply, ProductionQueue,
+  *    GarrisonHolder, Promotion, ResourceGatherer, Foundation, Repairable,
+  *    UnitAI, Trainer, Researcher, Pack, Upgrade, Trader, Garrisonable,
+- *    Turretable, Attack, Auras, Heal, from bit 0 up.
++ *    Turretable, Attack, Auras, Heal, RallyPoint, from bit 0 up.
+  *  - kind 12 entity details, before the turn record: u32 count, count x
+  *    {u32 id, u32 mask, then for each bit set, in this order: 1 f32
+  *    hitpoints, f32 max hitpoints; 2 u8 n, n x f32 capture points by
+@@ -176,7 +182,17 @@ class ScriptRequest;
+  *    n, n x i8 owner of each garrisoned entity of group 128, in its order
+  *    (-1 for none), since they are out of the world and the entity records
+  *    leave them out; 262144 u32 trainable and 524288 u32 researchable kind
+- *    17 list}, then u32 count, count x u32
++ *    17 list; 1048576 u8 n, u32 marker actor string, n x {f32 x, f32 z,
++ *    u16 m, m x {f32 x, f32 z}} rally points, as RallyPoint.GetPositions
++ *    gives them (a target's position where the owner sees it), each with
++ *    the line CCmpRallyPointRenderer draws to it, from the point back to
++ *    the previous one or the footprint's edge (when the pathfinder finds
++ *    no path, from there to the point, as the engine does), smoothed but
++ *    not split by what the viewer has explored. The marker is the actor of
++ *    the owner's civ's MarkerTemplate. Sampled every PLAYERS_INTERVAL_TURNS
++ *    turns, n = 0 when unset; 2097152 u32 kind 20 stats index, read every
++ *    STATS_INTERVAL_TURNS turns for every entity that has a group}, then
++ *    u32 count, count x u32
+  *    id of entities that no longer have any of them. A group is written
+  *    when it differs from what was last written for the entity, so every
+  *    group an entity has comes on the first turn it is seen. Local entities
+@@ -213,6 +229,26 @@ class ScriptRequest;
+  *    producer's GetTechCostMultiplier, without population and time. An
+  *    empty slot of the researchable row is a none string; it and every item
+  *    of a producer without an owner have flag 1, no limit and no costs.
++ *  - kind 18 template data, on a turn that samples the production lists:
++ *    u32 template name string, i32 player, then the rest of the record as
++ *    UTF-8 JSON of GuiInterface.GetTemplateData for that player (the
++ *    technology-modified values the tooltips show). Sent for the template
++ *    of every entity of a kind 12 record and every trainable item, for its
++ *    owner, the first time, and again when GuiInterface.IsTemplateModified
++ *    holds for the player and the JSON changed.
++ *  - kind 19 technology data, likewise: u32 technology name string, u32
++ *    civ string, then UTF-8 JSON of GetTechnologyDataHelper for that civ,
++ *    as the session GUI's GetTechnologyData makes it, once for each
++ *    researchable technology and researcher's civ.
++ *  - kind 20 stats, before the kind 12 record that first uses it: u32
++ *    index, then the rest of the record as UTF-8 JSON of the part of
++ *    GuiInterface.GetEntityState the attack and resistance tooltip reads
++ *    (attack, resistance, buildingAI, heal, resourceGatherRates, speed,
++ *    garrisonHolder, garrisonable, turretHolder, population, loot,
++ *    resourceTrickle, upkeep), the values after every modifier of the
++ *    entity. A ranged attack's elevationAdaptedRange is rounded to whole
++ *    metres off its range and the turret points are one 0 each, so that
++ *    entities share them. Indices count up from 0.
+  */
+ class CSpeculaFeed
+ {
+@@ -315,7 +351,17 @@ private:
+ 	 * The last bytes written for each kind 12 group of an entity, by group
+ 	 * bit; an empty slot is a group the entity does not have.
+ 	 */
+-	using SDetailGroups = std::array<std::vector<u8>, 20>;
++	using SDetailGroups = std::array<std::vector<u8>, 22>;
++
++	/**
++	 * An entity's rally group bytes and what they were computed from, as the
++	 * pathfinder is too slow to ask again every sample.
++	 */
++	struct SRallyGroup
++	{
++		std::vector<i32> key;
++		std::vector<u8> bytes;
++	};
+ 
+ 	struct STechnologyState
+ 	{
+@@ -351,6 +397,9 @@ private:
+ 	void PutProductionItem(u32 name, u8 flags, u16 canBeAdded, const std::vector<std::pair<std::string, float>>& costs, std::vector<u8>& out);
+ 	void PutTrainable(CSimulation2& simulation, const ScriptRequest& rq, player_id_t owner, const std::string& templateName, SProductionCache& cache, std::vector<u8>& out);
+ 	void PutResearchable(CSimulation2& simulation, const ScriptRequest& rq, player_id_t owner, const std::string& technology, const std::map<std::string, float>& multipliers, u8 flags, SProductionCache& cache, std::vector<u8>& out);
++	void WriteTemplateData(CSimulation2& simulation, const ScriptRequest& rq, const std::unordered_map<entity_id_t, SDetailGroups>& entities, const SProductionCache& cache);
++	void PutStats(CSimulation2& simulation, const ScriptRequest& rq, u32 turn, std::unordered_map<entity_id_t, SDetailGroups>& entities);
++	const std::vector<u8>& RallyGroup(CSimulation2& simulation, entity_id_t ent, const std::vector<CFixedVector2D>& points, std::unordered_map<entity_id_t, SRallyGroup>& current);
+ 	bool Send();
+ 	void Disable(const char* what);
+ 
+@@ -363,6 +412,13 @@ private:
+ 	std::map<std::vector<std::pair<u32, u32>>, u32> m_VariableSetIndices;
+ 	std::map<std::pair<u32, std::vector<u8>>, u32> m_ProductionListIndices;
+ 	std::unordered_map<entity_id_t, SDetailGroups> m_LastDetails;
++	std::unordered_map<entity_id_t, SRallyGroup> m_RallyGroups;
++	// The kind 18 JSON last sent, by template and player, and the kind 19
++	// (technology, civ) pairs sent.
++	std::map<std::pair<std::string, player_id_t>, std::string> m_TemplateData;
++	std::set<std::pair<std::string, std::string>> m_TechnologyData;
++	// Each distinct kind 20 stats JSON, by its index.
++	std::unordered_map<std::string, u32> m_StatsIndices;
+ 	std::vector<u8> m_LastPlayers;
+ 	std::vector<u8> m_LastEconomy;
+ 	// Time spent reading the kind 12 details, for the cost log.

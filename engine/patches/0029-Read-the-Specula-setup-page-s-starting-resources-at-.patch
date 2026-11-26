@@ -1,0 +1,29 @@
+From f9776cb09f7f4ed207a86a138f6a98d4afef6137 Mon Sep 17 00:00:00 2001
+From: Viktor Semenov <suit.uanic@gmail.com>
+Date: Wed, 11 Nov 2026 11:05:51 +0000
+Subject: [PATCH 29/45] Read the Specula setup page's starting resources at
+ autostart
+
+---
+ .../data/mods/public/autostart/autostart_specula_play.js  | 8 ++++++++
+ 1 file changed, 8 insertions(+)
+
+diff --git a/binaries/data/mods/public/autostart/autostart_specula_play.js b/binaries/data/mods/public/autostart/autostart_specula_play.js
+index 928002b8dc..73bc43eca9 100644
+--- a/binaries/data/mods/public/autostart/autostart_specula_play.js
++++ b/binaries/data/mods/public/autostart/autostart_specula_play.js
+@@ -73,6 +73,14 @@ class AutoStartSpeculaPlay
+ 			this.settings.mapExploration.setExplored(true);
+ 		if ('autostart-specula-revealed' in this.cmdLineArgs)
+ 			this.settings.mapExploration.setRevealed(true);
++		// The setup page's Starting Resources; cmd_line_args.js has no
++		// option for it.
++		if ('autostart-specula-resources' in this.cmdLineArgs)
++			this.settings.startingResources.setResources(+this.cmdLineArgs['autostart-specula-resources']);
++		// The setup page's Starting Resources; cmd_line_args.js has no
++		// option for it.
++		if ('autostart-specula-resources' in this.cmdLineArgs)
++			this.settings.startingResources.setResources(+this.cmdLineArgs['autostart-specula-resources']);
+ 
+ 		this.settings.launchGame(this.playerAssignments, !('autostart-disable-replay' in this.cmdLineArgs));
+ 		Engine.SwitchGuiPage("page_loading.xml", {

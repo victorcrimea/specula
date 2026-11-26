@@ -1,0 +1,218 @@
+From e774ed969653c6ee4a454fe98a475de14d6bf7ae Mon Sep 17 00:00:00 2001
+From: Viktor Semenov <suit.uanic@gmail.com>
+Date: Thu, 8 Oct 2026 01:47:15 +0000
+Subject: [PATCH 10/45] Send the map's water and sky in the Specula feed
+
+CMapReader gives the water colour, tint, waviness, murkiness, wind angle
+and type to the renderer's WaterManager, and the sky set to SkyManager,
+both absent in nonvisual mode. It now also writes them to the feed's
+environment, reset to WaterManager's defaults and no sky at every map
+load, and the terrain record (feed v13) carries them after the post
+effect.
+---
+ source/graphics/MapReader.cpp  | 36 ++++++++++++++++++++++++++++++++++
+ source/network/SpeculaFeed.cpp | 28 +++++++++++++++++++++++++-
+ source/network/SpeculaFeed.h   | 34 +++++++++++++++++++++++++++++---
+ 3 files changed, 94 insertions(+), 4 deletions(-)
+
+diff --git a/source/graphics/MapReader.cpp b/source/graphics/MapReader.cpp
+index f81555861c..dd77d909cd 100644
+--- a/source/graphics/MapReader.cpp
++++ b/source/graphics/MapReader.cpp
+@@ -150,6 +150,7 @@ void CMapReader::LoadMap(const VfsPath& pathname, const ScriptContext& cx,  JS::
+ 	if (pPostproc)
+ 		pPostproc->SetPostEffect(L"default");
+ 	CSpeculaFeed::SetPostEffect(L"default");
++	CSpeculaFeed::ResetEnvironment();
+ 
+ 	// load map or script settings script
+ 	if (settings.isUndefined())
+@@ -740,6 +741,7 @@ void CXMLReader::ReadEnvironment(XMBElement parent)
+ 
+ 		if (element_name == el_skyset)
+ 		{
++			CSpeculaFeed::Environment().skySet = element.GetText().FromUTF8();
+ 			if (m_MapReader.pSkyMan)
+ 				m_MapReader.pSkyMan->SetSkySet(element.GetText().FromUTF8());
+ 		}
+@@ -833,6 +835,29 @@ void CXMLReader::ReadEnvironment(XMBElement parent)
+ 						continue;
+ 					}
+ 
++					CSpeculaFeed::SEnvironment& feed = CSpeculaFeed::Environment();
++					const auto readColor = [&]()
++					{
++						XMBAttributeList colorAttrs = waterelement.GetAttributes();
++						return CColor(
++							colorAttrs.GetNamedItem(at_r).ToFloat(),
++							colorAttrs.GetNamedItem(at_g).ToFloat(),
++							colorAttrs.GetNamedItem(at_b).ToFloat(),
++							1.f);
++					};
++					if (water_element_name == el_type)
++						feed.waterType = waterelement.GetText() == "default" ? L"ocean" : waterelement.GetText().FromUTF8();
++					else if (water_element_name == el_color)
++						feed.waterColor = readColor();
++					else if (water_element_name == el_tint)
++						feed.waterTint = readColor();
++					else if (water_element_name == el_waviness)
++						feed.waviness = waterelement.GetText().ToFloat();
++					else if (water_element_name == el_murkiness)
++						feed.murkiness = waterelement.GetText().ToFloat();
++					else if (water_element_name == el_windangle)
++						feed.windAngle = waterelement.GetText().ToFloat();
++
+ 					// The rest are purely graphical effects, and should be ignored if
+ 					// graphics are disabled
+ 					if (!m_MapReader.pWaterMan)
+@@ -1646,6 +1671,7 @@ int CMapReader::ParseEnvironment()
+ 
+ 	std::wstring skySet;
+ 	GET_ENVIRONMENT_PROPERTY(envObj, SkySet, skySet)
++	CSpeculaFeed::Environment().skySet = skySet;
+ 	if (pSkyMan)
+ 		pSkyMan->SetSkySet(skySet);
+ 
+@@ -1688,6 +1714,16 @@ int CMapReader::ParseEnvironment()
+ 		GET_ENVIRONMENT_PROPERTY(waterBodyObj, WindAngle, pWaterMan->m_WindAngle)
+ 	}
+ 
++	CSpeculaFeed::SEnvironment& feed = CSpeculaFeed::Environment();
++	GET_ENVIRONMENT_PROPERTY(waterBodyObj, Type, feed.waterType)
++	if (feed.waterType == L"default")
++		feed.waterType = L"ocean";
++	GET_ENVIRONMENT_PROPERTY(waterBodyObj, Color, feed.waterColor)
++	GET_ENVIRONMENT_PROPERTY(waterBodyObj, Tint, feed.waterTint)
++	GET_ENVIRONMENT_PROPERTY(waterBodyObj, Waviness, feed.waviness)
++	GET_ENVIRONMENT_PROPERTY(waterBodyObj, Murkiness, feed.murkiness)
++	GET_ENVIRONMENT_PROPERTY(waterBodyObj, WindAngle, feed.windAngle)
++
+ 	JS::RootedValue fogObject(rq.cx);
+ 	GET_ENVIRONMENT_PROPERTY(envObj, Fog, &fogObject);
+ 
+diff --git a/source/network/SpeculaFeed.cpp b/source/network/SpeculaFeed.cpp
+index adaa53b9ac..8eb95671b7 100644
+--- a/source/network/SpeculaFeed.cpp
++++ b/source/network/SpeculaFeed.cpp
+@@ -56,7 +56,7 @@
+ 
+ namespace
+ {
+-constexpr u32 FEED_VERSION = 12;
++constexpr u32 FEED_VERSION = 13;
+ constexpr u8 RECORD_TEMPLATE = 1;
+ constexpr u8 RECORD_TURN = 2;
+ constexpr u8 RECORD_MAP = 3;
+@@ -106,6 +106,7 @@ std::vector<std::string> g_TerrainTextureNames;
+ std::vector<u16> g_TerrainTextureTiles;
+ std::vector<u32> g_TerrainTexturePriorities;
+ std::string g_PostEffect = "default";
++CSpeculaFeed::SEnvironment g_Environment;
+ 
+ struct SEntity
+ {
+@@ -419,6 +420,16 @@ void CSpeculaFeed::SetPostEffect(const std::wstring& name)
+ 	g_PostEffect = utf8_from_wstring(name);
+ }
+ 
++void CSpeculaFeed::ResetEnvironment()
++{
++	g_Environment = SEnvironment();
++}
++
++CSpeculaFeed::SEnvironment& CSpeculaFeed::Environment()
++{
++	return g_Environment;
++}
++
+ // Mirrors the test CCmpSoundManager::PlaySoundGroup makes for the displayed
+ // player, for every player at once.
+ u16 CSpeculaFeed::Visibility(const CSimContext& context, entity_id_t ent)
+@@ -709,6 +720,21 @@ void CSpeculaFeed::WriteTerrain(CSimulation2& simulation)
+ 	PutF32(m_Buffer, g_LightEnv.m_Bloom);
+ 	PutU16(m_Buffer, static_cast<u16>(g_PostEffect.size()));
+ 	m_Buffer.insert(m_Buffer.end(), g_PostEffect.begin(), g_PostEffect.end());
++	for (const CColor& color : { g_Environment.waterColor, g_Environment.waterTint })
++	{
++		PutF32(m_Buffer, color.r);
++		PutF32(m_Buffer, color.g);
++		PutF32(m_Buffer, color.b);
++	}
++	PutF32(m_Buffer, g_Environment.waviness);
++	PutF32(m_Buffer, g_Environment.murkiness);
++	PutF32(m_Buffer, g_Environment.windAngle);
++	for (const std::wstring& name : { g_Environment.waterType, g_Environment.skySet })
++	{
++		const std::string utf8 = utf8_from_wstring(name);
++		PutU16(m_Buffer, static_cast<u16>(utf8.size()));
++		m_Buffer.insert(m_Buffer.end(), utf8.begin(), utf8.end());
++	}
+ 
+ 	const u16* heights = terrain->GetHeightMap();
+ 	for (size_t i = 0; i < verticesPerSide * verticesPerSide; ++i)
+diff --git a/source/network/SpeculaFeed.h b/source/network/SpeculaFeed.h
+index 76e43f58f4..259dd3f572 100644
+--- a/source/network/SpeculaFeed.h
++++ b/source/network/SpeculaFeed.h
+@@ -18,6 +18,7 @@
+ #ifndef INCLUDED_SPECULAFEED
+ #define INCLUDED_SPECULAFEED
+ 
++#include "graphics/Color.h"
+ #include "lib/code_annotation.h"
+ #include "lib/types.h"
+ #include "maths/Fixed.h"
+@@ -40,7 +41,7 @@ class CSimulation2;
+  * socket. It only reads the simulation, after each turn, so it cannot
+  * change the state hash.
+  *
+- * Feed format v12, little-endian: "SPCF", u32 version, then records of
++ * Feed format v13, little-endian: "SPCF", u32 version, then records of
+  * u8 kind, u32 payload length, payload.
+  *  - kind 1 template: u32 index, u16 name length, UTF-8 name, f32 minimap
+  *    icon size, u8 flags, then the icon file name relative to
+@@ -76,8 +77,12 @@ class CSimulation2;
+  *    CLightEnv holds them), f32 r, g, b sun colour, f32 r, g, b ambient
+  *    colour, f32 r, g, b fog colour, f32 fog factor, f32 fog max, f32
+  *    brightness, f32 contrast, f32 saturation, f32 bloom, u16 length,
+- *    UTF-8 post effect name ("default", "hdr", "DOF"), (n+1)^2 x u16
+- *    heights, u32 texture count, count x
++ *    UTF-8 post effect name ("default", "hdr", "DOF"), f32 r, g, b
++ *    water colour, f32 r, g, b water tint, f32 waviness, f32 murkiness,
++ *    f32 wind angle (radians), u16 length, UTF-8 water type ("ocean",
++ *    "lake", "clap", ...; the name of a set of normal maps), u16 length,
++ *    UTF-8 sky set (empty: none), (n+1)^2 x u16 heights, u32 texture
++ *    count, count x
+  *    {u16 length, UTF-8 name}, n^2 x u16 texture index (0xFFFF: none),
+  *    n^2 x u32 blend priority. Heights and tiles are row-major, x fastest.
+  *  - kind 5 players, before the turn record, whenever they change: u32
+@@ -133,6 +138,29 @@ public:
+ 	 */
+ 	static void SetPostEffect(const std::wstring& name);
+ 
++	/**
++	 * What CMapReader gives the renderer's WaterManager and SkyManager,
++	 * both absent in nonvisual mode, so it writes them here as well.
++	 */
++	struct SEnvironment
++	{
++		// WaterManager's constructor; SkyManager starts without a set.
++		std::wstring waterType = L"ocean";
++		CColor waterColor = CColor(0.3f, 0.35f, 0.7f, 1.0f);
++		CColor waterTint = CColor(0.28f, 0.3f, 0.59f, 1.0f);
++		float waviness = 8.0f;
++		float murkiness = 0.45f;
++		float windAngle = 0.0f;
++		std::wstring skySet;
++	};
++
++	/**
++	 * Sets WaterManager's and SkyManager's initial values, as a map leaves
++	 * unset what it does not name.
++	 */
++	static void ResetEnvironment();
++	static SEnvironment& Environment();
++
+ 	/**
+ 	 * Called by CCmpSoundManager, which plays nothing in nonvisual mode;
+ 	 * the sounds go out with the turn they were played in. No-ops when no

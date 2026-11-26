@@ -1,0 +1,221 @@
+From 5a4a82bf479b74cdadbfbe96cb6b71dfd370a3ee Mon Sep 17 00:00:00 2001
+From: Viktor Semenov <suit.uanic@gmail.com>
+Date: Tue, 6 Oct 2026 23:14:52 +0000
+Subject: [PATCH 05/45] Send territory and terrain blend priorities in the
+ Specula feed
+
+Feed format v8. A territory record carries ICmpTerritoryManager's grid
+(owner, connected and blinking bits per tile, without the internal
+processed bit) before the turn record, whenever the territory or its
+blinking changed, as the AI follows them through NeedUpdateAI. The
+territory manager does not serialize its grid and visual clients
+compute it every frame, so reading it cannot change the simulation or
+its hash.
+
+The terrain record also gains each tile's blend priority, which
+CMapReader now hands on beside the texture index.
+
+A nonvisual observer now quits once its connection to the host is
+gone: nothing reads the GUI's netstatus message in that mode, so it
+would otherwise wait for turns forever instead of exiting to be
+restarted.
+---
+ source/graphics/MapReader.cpp  | 10 ++++++++--
+ source/main.cpp                |  6 ++++++
+ source/network/SpeculaFeed.cpp | 29 +++++++++++++++++++++++++++--
+ source/network/SpeculaFeed.h   | 16 ++++++++++++----
+ 4 files changed, 53 insertions(+), 8 deletions(-)
+
+diff --git a/source/graphics/MapReader.cpp b/source/graphics/MapReader.cpp
+index 375786949e..6f2916c569 100644
+--- a/source/graphics/MapReader.cpp
++++ b/source/graphics/MapReader.cpp
+@@ -372,13 +372,19 @@ int CMapReader::ApplyTerrainData()
+ 		// Specula: m_Tiles is in patch order; the feed wants row-major tiles.
+ 		const ssize_t tilesPerSide = m_PatchesPerSide * PATCH_SIZE;
+ 		std::vector<u16> tileTextures(SQR(tilesPerSide));
++		std::vector<u32> tilePriorities(SQR(tilesPerSide));
+ 		const STileDesc* tile = m_Tiles.data();
+ 		for (ssize_t j = 0; j < m_PatchesPerSide; ++j)
+ 			for (ssize_t i = 0; i < m_PatchesPerSide; ++i)
+ 				for (ssize_t m = 0; m < PATCH_SIZE; ++m)
+ 					for (ssize_t k = 0; k < PATCH_SIZE; ++k)
+-						tileTextures[(j * PATCH_SIZE + m) * tilesPerSide + i * PATCH_SIZE + k] = (tile++)->m_Tex1Index;
+-		CSpeculaFeed::SetTerrainTextures(m_TerrainTextureNames, std::move(tileTextures));
++					{
++						const ssize_t at = (j * PATCH_SIZE + m) * tilesPerSide + i * PATCH_SIZE + k;
++						tileTextures[at] = tile->m_Tex1Index;
++						tilePriorities[at] = tile->m_Priority;
++						++tile;
++					}
++		CSpeculaFeed::SetTerrainTextures(m_TerrainTextureNames, std::move(tileTextures), std::move(tilePriorities));
+ 
+ 		if (CTerrainTextureManager::IsInitialised())
+ 		{
+diff --git a/source/main.cpp b/source/main.cpp
+index 0ad09c1815..ec60671577 100644
+--- a/source/main.cpp
++++ b/source/main.cpp
+@@ -509,6 +509,12 @@ static void NonVisualFrame()
+ 
+ 	if (g_Game->IsGameFinished())
+ 		QuitEngine(EXIT_SUCCESS);
++
++	// Specula: nothing reads the GUI's netstatus message in nonvisual mode,
++	// so a vanished host would otherwise leave the observer waiting for
++	// turns forever instead of exiting to be restarted.
++	if (g_NetClient && g_NetClient->GetCurrState() == NCS_UNCONNECTED)
++		QuitEngine(EXIT_FAILURE);
+ }
+ 
+ static void MainControllerInit()
+diff --git a/source/network/SpeculaFeed.cpp b/source/network/SpeculaFeed.cpp
+index da0a6ae6e4..ec84e0afe5 100644
+--- a/source/network/SpeculaFeed.cpp
++++ b/source/network/SpeculaFeed.cpp
+@@ -35,8 +35,10 @@
+ #include "simulation2/components/ICmpRangeManager.h"
+ #include "simulation2/components/ICmpTemplateManager.h"
+ #include "simulation2/components/ICmpTerrain.h"
++#include "simulation2/components/ICmpTerritoryManager.h"
+ #include "simulation2/components/ICmpVisual.h"
+ #include "simulation2/components/ICmpWaterManager.h"
++#include "simulation2/helpers/Grid.h"
+ #include "simulation2/system/CmpPtr.h"
+ #include "simulation2/system/Entity.h"
+ #include "simulation2/system/ParamNode.h"
+@@ -49,7 +51,7 @@
+ 
+ namespace
+ {
+-constexpr u32 FEED_VERSION = 6;
++constexpr u32 FEED_VERSION = 8;
+ constexpr u8 RECORD_TEMPLATE = 1;
+ constexpr u8 RECORD_TURN = 2;
+ constexpr u8 RECORD_MAP = 3;
+@@ -57,6 +59,7 @@ constexpr u8 RECORD_TERRAIN = 4;
+ constexpr u8 RECORD_PLAYERS = 5;
+ constexpr u8 RECORD_STRING = 6;
+ constexpr u8 RECORD_VARIANT_SET = 7;
++constexpr u8 RECORD_TERRITORY = 8;
+ constexpr u8 COLOR_MINIMAP = 1;
+ constexpr u8 HAS_VISUAL = 2;
+ constexpr u8 ANIMATION_ONCE = 4;
+@@ -81,6 +84,7 @@ const CStr ANIMATION_KEY = "animation";
+ 
+ std::vector<std::string> g_TerrainTextureNames;
+ std::vector<u16> g_TerrainTextureTiles;
++std::vector<u32> g_TerrainTexturePriorities;
+ 
+ struct SEntity
+ {
+@@ -201,6 +205,7 @@ void CSpeculaFeed::OnTurn(CSimulation2& simulation, u32 turn)
+ 
+ 	if (m_LastPlayers.empty() || turn % PLAYERS_INTERVAL_TURNS == 0)
+ 		WritePlayers(simulation);
++	WriteTerritory(simulation);
+ 
+ 	// Template records must precede the turn record that first uses them,
+ 	// so the entities are collected before the turn record is written.
+@@ -314,10 +319,11 @@ void CSpeculaFeed::OnTurn(CSimulation2& simulation, u32 turn)
+ 	Send();
+ }
+ 
+-void CSpeculaFeed::SetTerrainTextures(const std::vector<std::string>& names, std::vector<u16> tiles)
++void CSpeculaFeed::SetTerrainTextures(const std::vector<std::string>& names, std::vector<u16> tiles, std::vector<u32> priorities)
+ {
+ 	g_TerrainTextureNames = names;
+ 	g_TerrainTextureTiles = std::move(tiles);
++	g_TerrainTexturePriorities = std::move(priorities);
+ }
+ 
+ // An empty text is no string: an actor or animation that was never set.
+@@ -436,6 +442,23 @@ void CSpeculaFeed::WritePlayers(CSimulation2& simulation)
+ 	m_LastPlayers = std::move(payload);
+ }
+ 
++// The territory manager's own dirty ids, as the AI follows them, so the grid
++// is sent only when ownership or decay changed.
++void CSpeculaFeed::WriteTerritory(CSimulation2& simulation)
++{
++	CmpPtr<ICmpTerritoryManager> cmpTerritoryManager(simulation, SYSTEM_ENTITY);
++	if (!cmpTerritoryManager || !cmpTerritoryManager->NeedUpdateAI(&m_TerritoryDirtyID, &m_TerritoryBlinkingDirtyID))
++		return;
++	const Grid<u8>& grid = cmpTerritoryManager->GetTerritoryGrid();
++	const size_t start = BeginRecord(m_Buffer, RECORD_TERRITORY);
++	PutU32(m_Buffer, grid.width());
++	PutU32(m_Buffer, grid.height());
++	for (u16 j = 0; j < grid.height(); ++j)
++		for (u16 i = 0; i < grid.width(); ++i)
++			m_Buffer.push_back(static_cast<u8>(grid.get(i, j) & ~ICmpTerritoryManager::TERRITORY_PROCESSED_MASK));
++	EndRecord(m_Buffer, start);
++}
++
+ // Terrain and water level are written once: they only change through
+ // trigger scripts, which the view does not follow yet.
+ void CSpeculaFeed::WriteTerrain(CSimulation2& simulation)
+@@ -475,6 +498,8 @@ void CSpeculaFeed::WriteTerrain(CSimulation2& simulation)
+ 		}
+ 	for (size_t i = 0; i < tilesPerSide * tilesPerSide; ++i)
+ 		PutU16(m_Buffer, haveTextures ? g_TerrainTextureTiles[i] : NO_TEXTURE);
++	for (size_t i = 0; i < tilesPerSide * tilesPerSide; ++i)
++		PutU32(m_Buffer, haveTextures ? g_TerrainTexturePriorities[i] : 0);
+ 	EndRecord(m_Buffer, start);
+ }
+ 
+diff --git a/source/network/SpeculaFeed.h b/source/network/SpeculaFeed.h
+index 07ccdf4f78..3d53231875 100644
+--- a/source/network/SpeculaFeed.h
++++ b/source/network/SpeculaFeed.h
+@@ -35,7 +35,7 @@ class CSimulation2;
+  * socket. It only reads the simulation, after each turn, so it cannot
+  * change the state hash.
+  *
+- * Feed format v6, little-endian: "SPCF", u32 version, then records of
++ * Feed format v8, little-endian: "SPCF", u32 version, then records of
+  * u8 kind, u32 payload length, payload.
+  *  - kind 1 template: u32 index, u16 name length, UTF-8 name, f32 minimap
+  *    icon size, u8 flags, then the icon file name relative to
+@@ -63,12 +63,17 @@ class CSimulation2;
+  *  - kind 4 terrain, right after the map record: u32 tiles per side n,
+  *    i32 water level (raw 16.16), f32 shallow water depth in metres,
+  *    u8 circular, (n+1)^2 x u16 heights, u32 texture count, count x
+- *    {u16 length, UTF-8 name}, n^2 x u16 texture index (0xFFFF: none).
+- *    Heights and tiles are row-major, x fastest.
++ *    {u16 length, UTF-8 name}, n^2 x u16 texture index (0xFFFF: none),
++ *    n^2 x u32 blend priority. Heights and tiles are row-major, x fastest.
+  *  - kind 5 players, before the turn record, whenever they change: u32
+  *    count n, n x {u16 name length, UTF-8 name, u8 r, u8 g, u8 b, i32 team
+  *    (-1: none), u8 state (0 active, 1 defeated, 2 won), n x u8 stance
+  *    towards player j (0 enemy, 1 ally, 2 neutral)}. Index 0 is gaia.
++ *  - kind 8 territory, before the turn record, whenever it changes: u32
++ *    width, u32 height, width*height x u8 territory tile, row-major, x
++ *    fastest, as ICmpTerritoryManager's grid without the processed bit:
++ *    owner in 0x1F, connected 0x20, blinking 0x40. A tile is
++ *    NAVCELLS_PER_TERRITORY_TILE navcells wide.
+  */
+ class CSpeculaFeed
+ {
+@@ -83,11 +88,12 @@ public:
+ 	 * Called by CMapReader while loading, which happens before the feed
+ 	 * exists; the textures are kept until the terrain record is written.
+ 	 */
+-	static void SetTerrainTextures(const std::vector<std::string>& names, std::vector<u16> tiles);
++	static void SetTerrainTextures(const std::vector<std::string>& names, std::vector<u16> tiles, std::vector<u32> priorities);
+ 
+ private:
+ 	void WriteTerrain(CSimulation2& simulation);
+ 	void WritePlayers(CSimulation2& simulation);
++	void WriteTerritory(CSimulation2& simulation);
+ 	u32 InternString(const std::string& text);
+ 	u32 InternVariants(const std::map<CStr, CStr>& selections);
+ 	bool Send();
+@@ -100,6 +106,8 @@ private:
+ 	std::unordered_map<std::string, u32> m_StringIndices;
+ 	std::map<std::vector<std::pair<u32, u32>>, u32> m_VariantSetIndices;
+ 	std::vector<u8> m_LastPlayers;
++	size_t m_TerritoryDirtyID = 0;
++	size_t m_TerritoryBlinkingDirtyID = 0;
+ };
+ 
+ #endif // INCLUDED_SPECULAFEED

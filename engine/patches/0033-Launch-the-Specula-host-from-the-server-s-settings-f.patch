@@ -1,0 +1,73 @@
+From aa0baa3288bbdcc252b7064bf3ee582cfb820bdc Mon Sep 17 00:00:00 2001
+From: Viktor Semenov <suit.uanic@gmail.com>
+Date: Sat, 21 Nov 2026 18:00:11 +0000
+Subject: [PATCH 33/45] Launch the Specula host from the server's settings file
+
+The script reads the finalized initAttributes from the JSON file named
+by -autostart-specula-settings (a VFS path; the server writes it as
+config/matchsettings.mp.json in a per-run config dir), applies them with
+fromInitAttributes and launches. The server's match id is kept rather
+than replaced by Engine.GetMatchID. The command line settings and the
+explored, revealed and starting resources options are gone.
+---
+ .../autostart/autostart_specula_play.js       | 38 +++++++++----------
+ 1 file changed, 17 insertions(+), 21 deletions(-)
+
+diff --git a/binaries/data/mods/public/autostart/autostart_specula_play.js b/binaries/data/mods/public/autostart/autostart_specula_play.js
+index 73bc43eca9..4bb2029b4e 100644
+--- a/binaries/data/mods/public/autostart/autostart_specula_play.js
++++ b/binaries/data/mods/public/autostart/autostart_specula_play.js
+@@ -1,9 +1,12 @@
+ /**
+  * Specula: hosts a game for Specula's web players. The host itself only
+- * observes; the web players' slots stay unassigned and without AI, and
+- * the Specula feed posts their commands as the controller (see
++ * observes; the web players' slots stay unassigned, and the Specula feed
++ * posts their commands as the controller (see
+  * CNetClientTurnManager::PostSpeculaCommands). The game starts as soon as
+  * the host has joined its own server, without waiting for other clients.
++ * The settings are the server's, resolved and final, in the JSON file
++ * -autostart-specula-settings names (a VFS path); -autostart= only has to be
++ * non-empty.
+  */
+ class AutoStartSpeculaPlay
+ {
+@@ -61,26 +64,19 @@ class AutoStartSpeculaPlay
+ 	{
+ 		this.launched = true;
+ 
+-		this.settings = new GameSettings().init();
++		const path = this.cmdLineArgs['autostart-specula-settings'];
++		const attribs = path && Engine.ReadJSONFile(path);
++		if (!attribs)
++		{
++			error("Specula: cannot read the settings file " + path);
++			return;
++		}
+ 
+-		// The player count comes from the map or -autostart-players, not
+-		// from the clients, as the players are not clients.
+-		parseCmdLineArgs(this.settings, this.cmdLineArgs);
+-		// The setup page's Explored Map and Revealed Map, as the game
+-		// setup's checkboxes set them: -autostart-visibility=revealed would
+-		// also set Allied View.
+-		if ('autostart-specula-explored' in this.cmdLineArgs)
+-			this.settings.mapExploration.setExplored(true);
+-		if ('autostart-specula-revealed' in this.cmdLineArgs)
+-			this.settings.mapExploration.setRevealed(true);
+-		// The setup page's Starting Resources; cmd_line_args.js has no
+-		// option for it.
+-		if ('autostart-specula-resources' in this.cmdLineArgs)
+-			this.settings.startingResources.setResources(+this.cmdLineArgs['autostart-specula-resources']);
+-		// The setup page's Starting Resources; cmd_line_args.js has no
+-		// option for it.
+-		if ('autostart-specula-resources' in this.cmdLineArgs)
+-			this.settings.startingResources.setResources(+this.cmdLineArgs['autostart-specula-resources']);
++		this.settings = new GameSettings().init();
++		this.settings.fromInitAttributes(attribs, false);
++		// MatchID.onFinalizeAttributes would replace the server's id with
++		// Engine.GetMatchID(), and the server already names the match by it.
++		this.settings.matchID.onFinalizeAttributes = a => { a.matchID = attribs.matchID; };
+ 
+ 		this.settings.launchGame(this.playerAssignments, !('autostart-disable-replay' in this.cmdLineArgs));
+ 		Engine.SwitchGuiPage("page_loading.xml", {

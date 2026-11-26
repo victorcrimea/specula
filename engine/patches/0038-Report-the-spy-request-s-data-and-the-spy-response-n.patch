@@ -1,0 +1,238 @@
+From 44a28a07addb93a46f19df01c5702b4fd6153448 Mon Sep 17 00:00:00 2001
+From: Viktor Semenov <suit.uanic@gmail.com>
+Date: Mon, 23 Nov 2026 14:56:04 +0000
+Subject: [PATCH 38/45] Report the spy request's data and the spy-response
+ notification in the Specula feed
+
+---
+ .../simulation/components/GuiInterface.js     | 57 +++++++++++-
+ source/network/SpeculaFeed.cpp                | 88 +++++++++++++++++++
+ source/network/SpeculaFeed.h                  | 13 ++-
+ 3 files changed, 154 insertions(+), 4 deletions(-)
+
+diff --git a/binaries/data/mods/public/simulation/components/GuiInterface.js b/binaries/data/mods/public/simulation/components/GuiInterface.js
+index 99483c32e5..714ffb0dec 100644
+--- a/binaries/data/mods/public/simulation/components/GuiInterface.js
++++ b/binaries/data/mods/public/simulation/components/GuiInterface.js
+@@ -873,7 +873,7 @@ GuiInterface.prototype.PushNotification = function(notification)
+ 
+ 	// The chat lines the session GUI would build from the other typed
+ 	// notifications; the client formats them, so they are copied as sent.
+-	if (["defeat", "won", "phase", "tribute", "barter", "diplomacy", "aichat"].includes(notification.type))
++	if (["defeat", "won", "phase", "tribute", "barter", "diplomacy", "aichat", "spy-response"].includes(notification.type))
+ 	{
+ 		const copy = Object.assign({}, notification);
+ 		if (notification.type == "phase")
+@@ -901,6 +901,60 @@ GuiInterface.prototype.GetSpeculaEvents = function()
+ 	return events;
+ };
+ 
++// What the diplomacy window's spy button reads (SpyRequestButton.update):
++// the spy template's failure cost ratio and the technologies its
++// requirements name, and per player its spy cost multiplier, whether the
++// template is disabled and whether the requirements are met.
++GuiInterface.prototype.GetSpeculaSpy = function()
++{
++	const result = {
++		"failureCostRatio": 0,
++		"techs": [],
++		"players": []
++	};
++	const cmpTemplateManager = Engine.QueryInterface(SYSTEM_ENTITY, IID_TemplateManager);
++	const template = cmpTemplateManager && cmpTemplateManager.GetTemplate("special/spy");
++	if (!template)
++		return result;
++
++	result.failureCostRatio =
++		template.VisionSharing && +template.VisionSharing.FailureCostRatio || 0;
++
++	const techs = [];
++	const collectTechs = requirements =>
++	{
++		for (const kind in requirements)
++		{
++			const requirement = requirements[kind];
++			if (kind === "All" || kind === "Any")
++				collectTechs(requirement);
++			else if (kind === "Techs" && requirement._string)
++				for (const tech of requirement._string.split(/\s+/))
++					if (tech)
++						techs.push(tech[0] === "!" ? tech.substring(1) : tech);
++		}
++	};
++	const requirements = template.Identity && template.Identity.Requirements;
++	if (requirements)
++		collectTechs(requirements);
++	result.techs = techs;
++
++	const cmpPlayerManager = Engine.QueryInterface(SYSTEM_ENTITY, IID_PlayerManager);
++	const numPlayers = cmpPlayerManager.GetNumPlayers();
++	for (let i = 0; i < numPlayers; ++i)
++	{
++		const cmpPlayer = Engine.QueryInterface(cmpPlayerManager.GetPlayerByID(i), IID_Player);
++		result.players.push({
++			"multiplier": cmpPlayer ? cmpPlayer.GetSpyCostMultiplier() : 1,
++			"disabled": cmpPlayer ? !!cmpPlayer.GetDisabledTemplates()["special/spy"] : true,
++			"requirementsMet": !requirements ||
++				RequirementsHelper.AreRequirementsMet(requirements, i)
++		});
++	}
++
++	return result;
++};
++
+ // Every player's pending time texts, as GetTimeNotifications filters them
+ // for one; the viewer picks its own, so the whole list is keyframed.
+ GuiInterface.prototype.GetSpeculaTimeNotifications = function()
+@@ -2167,6 +2221,7 @@ GuiInterface.prototype.exposedFunctions = {
+ 	"GetSpeculaSummaries": 1,
+ 	"GetSpeculaNotes": 1,
+ 	"GetSpeculaEvents": 1,
++	"GetSpeculaSpy": 1,
+ 	"GetSpeculaTimeNotifications": 1,
+ 	"GetCampaignGameEndData": 1,
+ 	"GetRenamedEntities": 1,
+diff --git a/source/network/SpeculaFeed.cpp b/source/network/SpeculaFeed.cpp
+index 3f6e28e4d7..d88ced2610 100644
+--- a/source/network/SpeculaFeed.cpp
++++ b/source/network/SpeculaFeed.cpp
+@@ -2491,6 +2491,10 @@ void CSpeculaFeed::WriteTemplateData(CSimulation2& simulation, const ScriptReque
+ 	}
+ 	for (const auto& entry : cache.trainable)
+ 		templates.emplace(entry.first.second, entry.first.first);
++	// The diplomacy window's spy tooltip reads the template for every
++	// player, as GetTemplateData does.
++	for (player_id_t player = 1; player < cmpPlayerManager->GetNumPlayers(); ++player)
++		templates.emplace("special/spy", player);
+ 	for (const std::pair<std::string, player_id_t>& key : templates)
+ 	{
+ 		const auto sent = m_TemplateData.find(key);
+@@ -2545,6 +2549,54 @@ void CSpeculaFeed::WriteTemplateData(CSimulation2& simulation, const ScriptReque
+ 		m_Buffer.insert(m_Buffer.end(), json.begin(), json.end());
+ 		EndRecord(m_Buffer, start);
+ 	}
++
++	// The spy template's technologies, for the diplomacy window's
++	// requirements tooltip; the window reads them for the seat's own civ.
++	JS::RootedValue spyArg(rq.cx);
++	JS::RootedValue spy(rq.cx);
++	JS::RootedValue spyTechs(rq.cx);
++	CallGui(simulation, INVALID_PLAYER, L"GetSpeculaSpy", spyArg, &spy);
++	if (Script::GetProperty(rq, spy, "techs", &spyTechs))
++	{
++		const u32 spyTechCount = ArrayLength(rq, spyTechs);
++		for (u32 i = 0; i < spyTechCount; ++i)
++		{
++			JS::RootedValue value(rq.cx);
++			Script::GetPropertyInt(rq, spyTechs, static_cast<int>(i), &value);
++			const std::string technology = StringOf(rq, value);
++			for (player_id_t player = 1; player < cmpPlayerManager->GetNumPlayers(); ++player)
++			{
++				std::string civ;
++				const auto known = cache.civs.find(player);
++				if (known != cache.civs.end())
++					civ = known->second;
++				else
++				{
++					CmpPtr<ICmpIdentity> cmpIdentity(simulation, cmpPlayerManager->GetPlayerByID(player));
++					if (cmpIdentity)
++						civ = CStrW(cmpIdentity->GetCiv()).ToUTF8();
++				}
++				if (!m_TechnologyData.emplace(technology, civ).second)
++					continue;
++				JS::RootedValue techTemplate(rq.cx);
++				JS::RootedValue data(rq.cx);
++				ScriptFunction::Call(rq, technologyTemplates, "Get", &techTemplate, technology);
++				if (!techTemplate.isObject())
++					continue;
++				ScriptFunction::Call(rq, global, "GetTechnologyDataHelper", &data, techTemplate, civ, resources);
++				if (!data.isObject())
++					continue;
++				const std::string json = Script::StringifyJSON(rq, &data, false);
++				const u32 name = InternString(technology);
++				const u32 civName = InternString(civ);
++				const size_t start = BeginRecord(m_Buffer, RECORD_TECHNOLOGY_DATA);
++				PutU32(m_Buffer, name);
++				PutU32(m_Buffer, civName);
++				m_Buffer.insert(m_Buffer.end(), json.begin(), json.end());
++				EndRecord(m_Buffer, start);
++			}
++		}
++	}
+ }
+ 
+ // Fills the stats slot of every entity: read anew every
+@@ -2831,6 +2883,42 @@ void CSpeculaFeed::WritePlayers(CSimulation2& simulation)
+ 		PutU16(playerGui, Clamp16(static_cast<u32>(PropertyFloat(rq, ship, "total"))));
+ 		PutU16(playerGui, Clamp16(static_cast<u32>(PropertyFloat(rq, ship, "trading"))));
+ 	}
++	// The diplomacy window's spy button, trailing so older hooks' records
++	// still read: the spied template's failed bribe ratio and technologies,
++	// then each player's spy cost multiplier and flags (1 requirements met,
++	// 2 the template is disabled).
++	JS::RootedValue spy(rq.cx);
++	JS::RootedValue failureRatio(rq.cx);
++	JS::RootedValue spyTechs(rq.cx);
++	JS::RootedValue spyPlayers(rq.cx);
++	cmpGuiInterface->ScriptCall(INVALID_PLAYER, L"GetSpeculaSpy", arg, &spy);
++	if (Script::GetProperty(rq, spy, "failureCostRatio", &failureRatio) &&
++	    Script::GetProperty(rq, spy, "techs", &spyTechs) &&
++	    Script::GetProperty(rq, spy, "players", &spyPlayers))
++	{
++		PutF32(playerGui, PropertyFloat(rq, spy, "failureCostRatio"));
++		const u32 techCount = std::min<u32>(ArrayLength(rq, spyTechs), 0xFFFF);
++		PutU16(playerGui, static_cast<u16>(techCount));
++		for (u32 i = 0; i < techCount; ++i)
++		{
++			JS::RootedValue value(rq.cx);
++			Script::GetPropertyInt(rq, spyTechs, static_cast<int>(i), &value);
++			PutU32(playerGui, InternString(StringOf(rq, value)));
++		}
++		const u32 spyCount = ArrayLength(rq, spyPlayers);
++		PutU32(playerGui, spyCount);
++		for (u32 i = 0; i < spyCount; ++i)
++		{
++			JS::RootedValue player(rq.cx);
++			bool disabled = false;
++			bool met = false;
++			Script::GetPropertyInt(rq, spyPlayers, static_cast<int>(i), &player);
++			Script::GetProperty(rq, player, "disabled", disabled);
++			Script::GetProperty(rq, player, "requirementsMet", met);
++			PutF32(playerGui, PropertyFloat(rq, player, "multiplier"));
++			playerGui.push_back((met ? 1 : 0) | (disabled ? 2 : 0));
++		}
++	}
+ 	if (playerGui != m_LastPlayerGui)
+ 	{
+ 		const size_t guiStart = BeginRecord(m_Buffer, RECORD_PLAYER_GUI);
+diff --git a/source/network/SpeculaFeed.h b/source/network/SpeculaFeed.h
+index e0554108af..8def0ddbb7 100644
+--- a/source/network/SpeculaFeed.h
++++ b/source/network/SpeculaFeed.h
+@@ -292,8 +292,14 @@ class ScriptRequest;
+  *  - kind 21 player GUI data, with the economy, when it changed: u32 count n,
+  *    n x {u16 f, f x u32 formation template string (Player.GetFormations,
+  *    the formations the player's civ may use), u8 m, m x {u32 resource code
+- *    string, f32 buy price, f32 sell price} (Barter.GetPrices)}. Index 0 is
+- *    gaia.
++ *    string, f32 buy price, f32 sell price} (Barter.GetPrices), u8 can
++ *    barter, u8 g, g x {u32 goods code string, u8 percent}
++ *    (GetTradingGoods), five u16 trader counts (GetTraderNumber)}, then,
++ *    when the hook has it, the spy block: {f32 the spy template's
++ *    VisionSharing.FailureCostRatio, u16 tech count, that many u32
++ *    technology strings, u32 player count, per player {f32 spy cost
++ *    multiplier, u8 flags (1 requirements met, 2 the template is
++ *    disabled)}} (GuiInterface.GetSpeculaSpy). Index 0 is gaia.
+  *  - kind 22 formation data, the first time a formation template is named:
+  *    u32 template string, then UTF-8 JSON {name, tooltip, disabledTooltip,
+  *    icon, minCount}: GuiInterface.GetFormationInfoFromTemplate and the
+@@ -331,7 +337,8 @@ class ScriptRequest;
+  *    position 0 for kind 2).
+  *  - kind 30 events, before the turn record, when the simulation pushed
+  *    any (GuiInterface.GetSpeculaEvents): UTF-8 JSON array of the defeat,
+- *    won, phase, tribute, barter, diplomacy and aichat notifications.
++ *    won, phase, tribute, barter, diplomacy, aichat and spy-response
++ *    notifications.
+  *  - kind 31 time notifications, when the list changed
+  *    (GuiInterface.GetSpeculaTimeNotifications): UTF-8 JSON array of
+  *    {players, message, parameters, translateMessage, translateParameters,

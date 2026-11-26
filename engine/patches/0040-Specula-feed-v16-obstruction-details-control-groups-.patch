@@ -1,0 +1,628 @@
+From 5cbcec838163c963a51b4278e6cfce8284e2be95 Mon Sep 17 00:00:00 2001
+From: Viktor Semenov <suit.uanic@gmail.com>
+Date: Tue, 24 Nov 2026 17:59:44 +0000
+Subject: [PATCH 40/45] Specula feed v16: obstruction details, control groups,
+ wall piece data; drop the placement queries
+
+---
+ source/main.cpp                         |   4 +-
+ source/network/NetClientTurnManager.cpp |   4 +-
+ source/network/NetClientTurnManager.h   |   6 +-
+ source/network/SpeculaFeed.cpp          | 310 +++++++++++-------------
+ source/network/SpeculaFeed.h            |  59 ++---
+ 5 files changed, 178 insertions(+), 205 deletions(-)
+
+diff --git a/source/main.cpp b/source/main.cpp
+index 3fa311ce7a..bbdba2d1ef 100644
+--- a/source/main.cpp
++++ b/source/main.cpp
+@@ -520,10 +520,10 @@ static void NonVisualFrame()
+ 		if (g_Game->GetTurnManager()->Update(frameLength, 1))
+ 			debug_printf("Turn %u (%u)...\n", turn++, DEFAULT_TURN_LENGTH);
+ 
+-	// Specula: the play host's placement previews wait for no turn. A
++	// Specula: the play host's pause waits for no turn. A
+ 	// networked game's turn manager is the one CNetClient made.
+ 	if (g_NetClient && g_Game && g_Game->IsGameStarted() && g_Game->GetTurnManager())
+-		static_cast<CNetClientTurnManager*>(g_Game->GetTurnManager())->AnswerSpeculaQueries();
++		static_cast<CNetClientTurnManager*>(g_Game->GetTurnManager())->AnswerSpeculaUplink();
+ 
+ 	g_Profiler.Frame();
+ 
+diff --git a/source/network/NetClientTurnManager.cpp b/source/network/NetClientTurnManager.cpp
+index 8ba927e56b..a413695cfd 100644
+--- a/source/network/NetClientTurnManager.cpp
++++ b/source/network/NetClientTurnManager.cpp
+@@ -119,10 +119,10 @@ void CNetClientTurnManager::NotifyFinishedUpdate(u32 turn)
+ 		m_SpeculaFeed->OnTurn(m_Simulation2, turn);
+ }
+ 
+-void CNetClientTurnManager::AnswerSpeculaQueries()
++void CNetClientTurnManager::AnswerSpeculaUplink()
+ {
+ 	if (m_SpeculaFeed)
+-		m_SpeculaFeed->AnswerQueries(m_Simulation2);
++		m_SpeculaFeed->AnswerUplink();
+ }
+ 
+ void CNetClientTurnManager::PostSpeculaCommands(u32 turn)
+diff --git a/source/network/NetClientTurnManager.h b/source/network/NetClientTurnManager.h
+index 337524ad7f..c1e8fa301e 100644
+--- a/source/network/NetClientTurnManager.h
++++ b/source/network/NetClientTurnManager.h
+@@ -55,10 +55,10 @@ public:
+ 	void OnSyncError(u32 turn, const CStr& expectedHash, const std::vector<CSyncErrorMessage::S_m_PlayerNames>& playerNames);
+ 
+ 	/**
+-	 * Specula: answers the feed's placement queries, every frame rather
+-	 * than every turn, as the session GUI calls GuiInterface.
++	 * Specula: reads the feed's uplink, every frame rather than every
++	 * turn, so that a pause takes hold between turns.
+ 	 */
+-	void AnswerSpeculaQueries();
++	void AnswerSpeculaUplink();
+ 
+ private:
+ 	void NotifyFinishedOwnCommands(u32 turn) override;
+diff --git a/source/network/SpeculaFeed.cpp b/source/network/SpeculaFeed.cpp
+index d8bc45dc9a..f7f9039646 100644
+--- a/source/network/SpeculaFeed.cpp
++++ b/source/network/SpeculaFeed.cpp
+@@ -83,7 +83,9 @@
+ 
+ namespace
+ {
+-constexpr u32 FEED_VERSION = 15;
++constexpr u32 FEED_VERSION = 16;
++// Bit 128 of kind 11's obstruction flags, past the engine's own flag bits.
++constexpr u8 OBSTRUCTION_ACTIVE = 128;
+ constexpr u8 RECORD_TEMPLATE = 1;
+ constexpr u8 RECORD_TURN = 2;
+ constexpr u8 RECORD_MAP = 3;
+@@ -105,7 +107,6 @@ constexpr u8 RECORD_TECHNOLOGY_DATA = 19;
+ constexpr u8 RECORD_STATS = 20;
+ constexpr u8 RECORD_PLAYER_GUI = 21;
+ constexpr u8 RECORD_FORMATION_DATA = 22;
+-constexpr u8 RECORD_QUERY_REPLY = 23;
+ constexpr u8 RECORD_LOS = 24;
+ constexpr u8 RECORD_SUMMARY = 25;
+ constexpr u8 RECORD_PAUSE = 26;
+@@ -114,17 +115,14 @@ constexpr u8 RECORD_INIT_ATTRIBUTES = 28;
+ constexpr u8 RECORD_NOTIFICATIONS = 29;
+ constexpr u8 RECORD_EVENTS = 30;
+ constexpr u8 RECORD_TIME_NOTIFICATIONS = 31;
++constexpr u8 RECORD_CONTROL_GROUPS = 32;
+ constexpr u8 UPLINK_COMMAND = 1;
+-constexpr u8 UPLINK_QUERY = 2;
+ constexpr u8 UPLINK_PAUSE = 3;
+ constexpr u8 UPLINK_SUMMARY = 4;
+ // A paused game plays no turns, so the encoder's watchdog, which otherwise
+ // counts the silence between turns, hears this instead; well under its
+ // 120 s limit.
+ constexpr double KEEPALIVE_SECONDS = 10.0;
+-constexpr u8 QUERY_BUILDING_PREVIEW = 1;
+-constexpr u8 QUERY_FOUNDATION_SNAP = 2;
+-constexpr u8 QUERY_WALL_PREVIEW = 3;
+ // Far above any command the GUI posts; a longer record means the stream is
+ // out of step.
+ constexpr u32 UPLINK_MAX_RECORD = 1 << 20;
+@@ -555,34 +553,6 @@ IComponent* PlayerComponent(CSimulation2& simulation, const ScriptRequest& rq, p
+ 	return simulation.GetSimContext().GetComponentManager().QueryInterface(playerEnt, iid.toInt32());
+ }
+ 
+-// The preview's attack range, which vanilla's RangeOverlayManager draws round
+-// it; the reply is the only way it reaches the client.
+-void AddPreviewRanges(CSimulation2& simulation, const ScriptRequest& rq, JS::HandleValue result)
+-{
+-	if (!result.isObject())
+-		return;
+-	CmpPtr<ICmpGuiInterface> cmpGuiInterface(simulation, SYSTEM_ENTITY);
+-	if (!cmpGuiInterface)
+-		return;
+-	JS::RootedValue gui(rq.cx, cmpGuiInterface->GetJSInstance());
+-	JS::RootedValue placement(rq.cx);
+-	if (!Script::GetProperty(rq, gui, "placementEntity", &placement) || !placement.isObject())
+-		return;
+-	int entValue = 0;
+-	if (!Script::GetPropertyInt(rq, placement, 1, entValue))
+-		return;
+-	JS::RootedValue iid(rq.cx);
+-	if (!ScriptInterface::GetGlobalProperty(rq, "IID_Attack", &iid) || !iid.isInt32())
+-		return;
+-	IComponent* attack = simulation.GetSimContext().GetComponentManager().QueryInterface(static_cast<entity_id_t>(entValue), iid.toInt32());
+-	if (!attack)
+-		return;
+-	JS::RootedValue component(rq.cx, attack->GetJSInstance());
+-	JS::RootedValue overlays(rq.cx);
+-	if (ScriptFunction::Call(rq, component, "GetRangeOverlays", &overlays))
+-		Script::SetProperty(rq, result, "ranges", overlays);
+-}
+-
+ // getEntityLimitAndCount's canBeAddedCount (gui/session/input.js), where
+ // NaN, as there, is no limit.
+ float CanBeAddedCount(CSimulation2& simulation, const ScriptRequest& rq, player_id_t player, const std::string& templateName, JS::HandleValue data)
+@@ -766,66 +736,53 @@ std::string TemplateActor(CmpPtr<ICmpTemplateManager>& cmpTemplateManager, const
+ 	return templateNode ? templateNode->GetChild("VisualActor").GetChild("Actor").ToString() : std::string();
+ }
+ 
+-// GetEdgesOfStaticObstructionsOnScreenNearTo, over every static obstruction
+-// near the point, as there is no screen.
+-JS::Value StaticEdgesNear(CSimulation2& simulation, const ScriptRequest& rq, entity_pos_t x, entity_pos_t z)
++// What the client's placement preview needs besides GetTemplateData: the
++// attack range overlay's look (Attack.GetRangeOverlays reads it from the
++// template, and the radii are the data's own), and, for a wall set, each of
++// its pieces' data, as they are not buildable and so not sent on their own.
++void AddPlacementData(CSimulation2& simulation, const ScriptRequest& rq, CmpPtr<ICmpTemplateManager>& cmpTemplateManager, const std::pair<std::string, player_id_t>& key, JS::HandleValue data)
+ {
+-	JS::RootedValue edgeList(rq.cx);
+-	Script::CreateArray(rq, &edgeList);
+-	int edgeListIndex = 0;
+-
+-	const float distanceThreshold{g_ConfigDB.Get("gui.session.snaptoedgesdistancethreshold", 10.0f)};
+-	const CFixedVector2D entityPos(x, z);
+-	for (const std::pair<const entity_id_t, IComponent*>& entry : simulation.GetEntitiesWithInterfaceUnordered(IID_Obstruction))
++	const CParamNode* templateNode = cmpTemplateManager->GetTemplate(key.first);
++	if (templateNode)
+ 	{
+-		const ICmpObstruction* cmpObstruction = static_cast<const ICmpObstruction*>(entry.second);
+-		if (cmpObstruction->GetObstructionType() != ICmpObstruction::STATIC)
+-			continue;
++		const CParamNode& overlay = templateNode->GetChild("Attack").GetChild("Ranged").GetChild("RangeOverlay");
++		if (overlay.IsOk())
++		{
++			JS::RootedValue value(rq.cx);
++			Script::CreateObject(rq, &value,
++				"texture", overlay.GetChild("LineTexture").ToString(),
++				"mask", overlay.GetChild("LineTextureMask").ToString(),
++				"thickness", static_cast<double>(NodeFloat(overlay.GetChild("LineThickness"))));
++			Script::SetProperty(rq, data, "rangeOverlay", value);
++		}
++	}
+ 
+-		CmpPtr<ICmpPosition> cmpPosition(simulation, entry.first);
+-		if (!cmpPosition || !cmpPosition->IsInWorld())
++	JS::RootedValue wallSet(rq.cx);
++	JS::RootedValue templates(rq.cx);
++	if (!Script::GetProperty(rq, data, "wallSet", &wallSet) || !wallSet.isObject() ||
++	    !Script::GetProperty(rq, wallSet, "templates", &templates) || !templates.isObject())
++		return;
++	JS::RootedValue pieces(rq.cx);
++	Script::CreateObject(rq, &pieces);
++	for (const char* type : { "tower", "long", "medium", "short" })
++	{
++		JS::RootedValue name(rq.cx);
++		Script::GetProperty(rq, templates, type, &name);
++		const std::string pieceName = StringOf(rq, name);
++		if (pieceName.empty())
+ 			continue;
+-
+-		const CFixedVector2D halfSize = cmpObstruction->GetStaticSize() / 2;
+-		if (halfSize.X.IsZero() || halfSize.Y.IsZero() || std::max(halfSize.X, halfSize.Y) <= fixed::FromInt(2))
++		JS::RootedValue arg(rq.cx);
++		JS::RootedValue piece(rq.cx);
++		Script::CreateObject(rq, &arg, "templateName", pieceName, "player", key.second);
++		CallGui(simulation, key.second, L"GetTemplateData", arg, &piece);
++		if (!piece.isObject())
+ 			continue;
+-
+-		std::array<CFixedVector2D, 4> corners = {
+-			CFixedVector2D(-halfSize.X, -halfSize.Y),
+-			CFixedVector2D(-halfSize.X, halfSize.Y),
+-			halfSize,
+-			CFixedVector2D(halfSize.X, -halfSize.Y)
+-		};
+-		const fixed angle = cmpPosition->GetRotation().Y;
+-		for (CFixedVector2D& corner : corners)
+-			corner = corner.Rotate(angle) + cmpPosition->GetPosition2D();
+-
+-		for (size_t i = 0; i < corners.size(); ++i)
+-		{
+-			JS::RootedValue edge(rq.cx);
+-			const CFixedVector2D& corner = corners[i];
+-			const CFixedVector2D& nextCorner = corners[(i + 1) % corners.size()];
+-
+-			const fixed distanceToEdge = Geometry::DistanceToSegment(entityPos, corner, nextCorner);
+-			if (distanceToEdge.ToFloat() > distanceThreshold)
+-				continue;
+-
+-			CFixedVector2D normal = -(nextCorner - corner).Perpendicular();
+-			normal.Normalize();
+-			Script::CreateObject(
+-				rq,
+-				&edge,
+-				"begin", corner,
+-				"end", nextCorner,
+-				"angle", angle,
+-				"normal", normal,
+-				"order", "cw");
+-
+-			Script::SetPropertyInt(rq, edgeList, edgeListIndex++, edge);
+-		}
++		Script::SetProperty(rq, piece, "actor", TemplateActor(cmpTemplateManager, pieceName));
++		Script::SetProperty(rq, pieces, pieceName.c_str(), piece);
+ 	}
+-	return edgeList;
++	Script::SetProperty(rq, data, "speculaPieces", pieces);
+ }
++
+ } // anonymous namespace
+ 
+ CSpeculaFeed::CSpeculaFeed(const std::string& socketPath)
+@@ -1030,6 +987,8 @@ void CSpeculaFeed::OnTurn(CSimulation2& simulation, u32 turn)
+ 	// of a later one.
+ 	m_Shooter = INVALID_ENTITY;
+ 
++	WriteControlGroups(simulation);
++
+ 	const size_t start = BeginRecord(m_Buffer, RECORD_TURN);
+ 	PutU32(m_Buffer, turn);
+ 	PutU32(m_Buffer, static_cast<u32>(entities.size()));
+@@ -1654,6 +1613,74 @@ void CSpeculaFeed::WriteTemplateDetails(CSimulation2& simulation, u32 index, con
+ 	PutU32(m_Buffer, unhealableClassesString);
+ 	// What the garrison tooltip counts a unit as taking up.
+ 	PutU32(m_Buffer, static_cast<u32>(NodeFloat(templateNode->GetChild("Garrisonable").GetChild("Size"))));
++
++	// What the client's placement check reads, as CCmpObstruction::Init does.
++	const CParamNode& obstruction = templateNode->GetChild("Obstruction");
++	u8 obstructionType = 0;
++	i32 obstructionWidth = 0;
++	i32 obstructionDepth = 0;
++	u8 obstructionFlags = 0;
++	std::vector<std::array<i32, 4>> clusterShapes;
++	if (obstruction.IsOk())
++	{
++		if (obstruction.GetChild("BlockMovement").ToBool())
++			obstructionFlags |= ICmpObstructionManager::FLAG_BLOCK_MOVEMENT;
++		if (obstruction.GetChild("BlockFoundation").ToBool())
++			obstructionFlags |= ICmpObstructionManager::FLAG_BLOCK_FOUNDATION;
++		if (obstruction.GetChild("BlockConstruction").ToBool())
++			obstructionFlags |= ICmpObstructionManager::FLAG_BLOCK_CONSTRUCTION;
++		if (obstruction.GetChild("BlockPathfinding").ToBool())
++			obstructionFlags |= ICmpObstructionManager::FLAG_BLOCK_PATHFINDING;
++		if (obstruction.GetChild("Active").ToBool())
++			obstructionFlags |= OBSTRUCTION_ACTIVE;
++		if (obstruction.GetChild("Unit").IsOk())
++		{
++			obstructionType = 2;
++			obstructionWidth = obstruction.GetChild("Unit").GetChild("@radius").ToFixed().GetInternalValue();
++		}
++		else if (obstruction.GetChild("Static").IsOk())
++		{
++			obstructionType = 1;
++			obstructionWidth = obstruction.GetChild("Static").GetChild("@width").ToFixed().GetInternalValue();
++			obstructionDepth = obstruction.GetChild("Static").GetChild("@depth").ToFixed().GetInternalValue();
++		}
++		else
++		{
++			obstructionType = 3;
++			fixed maxX = fixed::Zero();
++			fixed maxZ = fixed::Zero();
++			fixed minX = fixed::Zero();
++			fixed minZ = fixed::Zero();
++			for (const std::pair<const std::string, CParamNode>& shapeNode : obstruction.GetChild("Obstructions").GetChildren())
++			{
++				const fixed width = shapeNode.second.GetChild("@width").ToFixed();
++				const fixed depth = shapeNode.second.GetChild("@depth").ToFixed();
++				const fixed dx = shapeNode.second.GetChild("@x").ToFixed();
++				const fixed dz = shapeNode.second.GetChild("@z").ToFixed();
++				clusterShapes.push_back({ dx.GetInternalValue(), dz.GetInternalValue(), width.GetInternalValue(), depth.GetInternalValue() });
++				maxX = std::max(maxX, dx + width / 2);
++				maxZ = std::max(maxZ, dz + depth / 2);
++				minX = std::min(minX, dx - width / 2);
++				minZ = std::min(minZ, dz - depth / 2);
++			}
++			obstructionWidth = fixed::FromInt(2).Multiply(std::max(maxX, -minX)).GetInternalValue();
++			obstructionDepth = fixed::FromInt(2).Multiply(std::max(maxZ, -minZ)).GetInternalValue();
++		}
++	}
++	u8 placementFlags = 0;
++	if (templateNode->GetChild("BuildRestrictions").IsOk())
++		placementFlags |= 1;
++	if (templateNode->GetChild("WallPiece").IsOk())
++		placementFlags |= 2;
++	m_Buffer.push_back(obstructionType);
++	PutI32(m_Buffer, obstructionWidth);
++	PutI32(m_Buffer, obstructionDepth);
++	m_Buffer.push_back(obstructionFlags);
++	m_Buffer.push_back(placementFlags);
++	PutU32(m_Buffer, static_cast<u32>(clusterShapes.size()));
++	for (const std::array<i32, 4>& shapeValues : clusterShapes)
++		for (const i32 value : shapeValues)
++			PutI32(m_Buffer, value);
+ 	EndRecord(m_Buffer, start);
+ }
+ 
+@@ -1926,6 +1953,31 @@ void CSpeculaFeed::WriteTimeNotifications(CSimulation2& simulation)
+ 	EndRecord(m_Buffer, start);
+ }
+ 
++// Only wall pieces have a control group other than their own id, so the
++// list is short; it is sorted so that an unchanged set compares equal.
++void CSpeculaFeed::WriteControlGroups(CSimulation2& simulation)
++{
++	std::vector<std::array<u32, 3>> groups;
++	for (const std::pair<const entity_id_t, IComponent*>& entry : simulation.GetEntitiesWithInterfaceUnordered(IID_Obstruction))
++	{
++		const ICmpObstruction* cmpObstruction = static_cast<const ICmpObstruction*>(entry.second);
++		const entity_id_t group = cmpObstruction->GetControlGroup();
++		const entity_id_t group2 = cmpObstruction->GetControlGroup2();
++		if (group != entry.first || group2 != INVALID_ENTITY)
++			groups.push_back({ static_cast<u32>(entry.first), static_cast<u32>(group), static_cast<u32>(group2) });
++	}
++	std::sort(groups.begin(), groups.end());
++	if (groups == m_LastControlGroups)
++		return;
++	m_LastControlGroups = groups;
++	const size_t start = BeginRecord(m_Buffer, RECORD_CONTROL_GROUPS);
++	PutU32(m_Buffer, static_cast<u32>(groups.size()));
++	for (const std::array<u32, 3>& entry : groups)
++		for (const u32 value : entry)
++			PutU32(m_Buffer, value);
++	EndRecord(m_Buffer, start);
++}
++
+ // The groups of the components Fogging.js copies into a mirage, whose
+ // copies answer the same getters (the *Mirage classes); false for any other
+ // interface.
+@@ -2693,6 +2745,7 @@ void CSpeculaFeed::WriteTemplateData(CSimulation2& simulation, const ScriptReque
+ 		if (!data.isObject())
+ 			continue;
+ 		Script::SetProperty(rq, data, "actor", TemplateActor(cmpTemplateManager, key.first));
++		AddPlacementData(simulation, rq, cmpTemplateManager, key, data);
+ 		std::string json = Script::StringifyJSON(rq, &data, false);
+ 		if (sent != m_TemplateData.end() && sent->second == json)
+ 			continue;
+@@ -3385,7 +3438,7 @@ std::vector<std::pair<player_id_t, std::string>> CSpeculaFeed::ReadCommands()
+ 	return std::exchange(m_Commands, {});
+ }
+ 
+-void CSpeculaFeed::AnswerQueries(CSimulation2& simulation)
++void CSpeculaFeed::AnswerUplink()
+ {
+ 	ReadUplink();
+ 	if (m_PauseChanged)
+@@ -3410,79 +3463,6 @@ void CSpeculaFeed::AnswerQueries(CSimulation2& simulation)
+ 		EndRecord(m_Buffer, start);
+ 		Send();
+ 	}
+-	if (m_Queries.empty())
+-		return;
+-
+-	const ScriptInterface& scriptInterface = simulation.GetScriptInterface();
+-	ScriptRequest rq(scriptInterface);
+-	CmpPtr<ICmpTemplateManager> cmpTemplateManager(simulation, SYSTEM_ENTITY);
+-	for (const SQuery& query : std::exchange(m_Queries, {}))
+-	{
+-		JS::RootedValue arg(rq.cx);
+-		JS::RootedValue result(rq.cx);
+-		if (!Script::ParseJSON(rq, query.json, &arg) || !arg.isObject())
+-			LOGERROR("Specula feed: query %u is not a JSON object", query.id);
+-		else if (query.method == QUERY_BUILDING_PREVIEW)
+-		{
+-			if (CallGui(simulation, query.player, L"SetBuildingPlacementPreview", arg, &result))
+-				AddPreviewRanges(simulation, rq, result);
+-		}
+-		else if (query.method == QUERY_FOUNDATION_SNAP)
+-		{
+-			bool snapToEdges = false;
+-			Script::GetProperty(rq, arg, "snapToEdges", snapToEdges);
+-			if (snapToEdges)
+-			{
+-				float x = 0.0f;
+-				float z = 0.0f;
+-				Script::GetProperty(rq, arg, "x", x);
+-				Script::GetProperty(rq, arg, "z", z);
+-				JS::RootedValue edges(rq.cx, StaticEdgesNear(simulation, rq, entity_pos_t::FromFloat(x), entity_pos_t::FromFloat(z)));
+-				Script::SetProperty(rq, arg, "snapToEdges", edges);
+-			}
+-			CallGui(simulation, query.player, L"GetFoundationSnapData", arg, &result);
+-		}
+-		else if (query.method == QUERY_WALL_PREVIEW)
+-		{
+-			std::string wallSetName;
+-			Script::GetProperty(rq, arg, "wallSet", wallSetName);
+-			JS::RootedValue dataArg(rq.cx);
+-			JS::RootedValue data(rq.cx);
+-			JS::RootedValue wallSet(rq.cx);
+-			if (!wallSetName.empty())
+-			{
+-				Script::CreateObject(rq, &dataArg, "templateName", wallSetName, "player", query.player);
+-				CallGui(simulation, query.player, L"GetTemplateData", dataArg, &data);
+-			}
+-			if (data.isObject())
+-				Script::GetProperty(rq, data, "wallSet", &wallSet);
+-			// SetWallPlacementPreview takes a missing wall set, as an empty
+-			// name gives, as the end of the preview.
+-			Script::SetProperty(rq, arg, "wallSet", wallSet);
+-			CallGui(simulation, query.player, L"SetWallPlacementPreview", arg, &result);
+-			JS::RootedValue pieces(rq.cx);
+-			if (result.isObject() && cmpTemplateManager)
+-				Script::GetProperty(rq, result, "pieces", &pieces);
+-			for (u32 i = 0; i < ArrayLength(rq, pieces); ++i)
+-			{
+-				JS::RootedValue piece(rq.cx);
+-				Script::GetPropertyInt(rq, pieces, static_cast<int>(i), &piece);
+-				std::string pieceTemplate;
+-				if (!piece.isObject() || !Script::GetProperty(rq, piece, "template", pieceTemplate))
+-					continue;
+-				Script::SetProperty(rq, piece, "actor", TemplateActor(cmpTemplateManager, pieceTemplate));
+-			}
+-		}
+-
+-		std::string json = result.isUndefined() ? std::string() : Script::StringifyJSON(rq, &result, false);
+-		if (json.empty())
+-			json = "null";
+-		const size_t start = BeginRecord(m_Buffer, RECORD_QUERY_REPLY);
+-		PutU32(m_Buffer, query.id);
+-		m_Buffer.insert(m_Buffer.end(), json.begin(), json.end());
+-		EndRecord(m_Buffer, start);
+-	}
+-	Send();
+ }
+ 
+ void CSpeculaFeed::ReadUplink()
+@@ -3529,13 +3509,6 @@ void CSpeculaFeed::ReadUplink()
+ 		if (kind == UPLINK_COMMAND && length >= 1)
+ 			m_Commands.emplace_back(static_cast<i8>(payload[0]),
+ 				std::string(reinterpret_cast<const char*>(payload + 1), length - 1));
+-		else if (kind == UPLINK_QUERY && length >= 6)
+-		{
+-			u32 id;
+-			std::memcpy(&id, payload, sizeof(id));
+-			m_Queries.push_back({ id, static_cast<i8>(payload[4]), payload[5],
+-				std::string(reinterpret_cast<const char*>(payload + 6), length - 6) });
+-		}
+ 		else if (kind == UPLINK_PAUSE && length >= 2)
+ 		{
+ 			const player_id_t player = static_cast<i8>(payload[0]);
+@@ -3558,7 +3531,6 @@ void CSpeculaFeed::Disable(const char* what)
+ 	m_Buffer.clear();
+ 	m_Inbox.clear();
+ 	m_Commands.clear();
+-	m_Queries.clear();
+ 	m_Pausers.clear();
+ 	m_PauseChanged = false;
+ 	m_Sounds.clear();
+diff --git a/source/network/SpeculaFeed.h b/source/network/SpeculaFeed.h
+index 0c7a77c3e2..1d8ef405f5 100644
+--- a/source/network/SpeculaFeed.h
++++ b/source/network/SpeculaFeed.h
+@@ -46,7 +46,7 @@ class ScriptRequest;
+  * socket. It only reads the simulation, after each turn, so it cannot
+  * change the state hash.
+  *
+- * Feed format v15, little-endian: "SPCF", u32 version, then records of
++ * Feed format v16, little-endian: "SPCF", u32 version, then records of
+  * u8 kind, u32 payload length, payload.
+  *  - kind 1 template: u32 index, u16 name length, UTF-8 name, f32 minimap
+  *    icon size, u8 flags, then the icon file name relative to
+@@ -162,7 +162,16 @@ class ScriptRequest;
+  *    older hook ends before it), u32 GarrisonHolder List and u32
+  *    TurretHolder points' AllowedClasses, ";" between points, empty for a
+  *    point open to all (what the garrison and occupy-turret actions match;
+- *    an older hook ends before them). Strings are
++ *    an older hook ends before them), then the Obstruction as
++ *    CCmpObstruction::Init reads it: u8 type (0 none, 1 static, 2 unit, 3
++ *    cluster), i32 width and i32 depth in raw 16.16 (a static's
++ *    @width/@depth, a unit's radius as width and 0 depth, a cluster's
++ *    bounding box, m_Size0 and m_Size1), u8 flags (1 BlockMovement, 2
++ *    BlockFoundation, 4 BlockConstruction, 8 BlockPathfinding, 128
++ *    Active), u8 placement flags (1 BuildRestrictions, 2 WallPiece), u32
++ *    cluster shape count n, n x {i32 x, i32 z, i32 width, i32 depth} raw
++ *    16.16 (a cluster's sub-shapes; an older hook, v15, ends before all
++ *    of this). Strings are
+  *    string records (none when absent), read from the template as is: the
+  *    textures relative to art/textures/selection/, the icon to
+  *    art/textures/ui/session/portraits/, the sound group to audio/, the
+@@ -270,7 +279,12 @@ class ScriptRequest;
+  *    u32 template name string, i32 player, then the rest of the record as
+  *    UTF-8 JSON of GuiInterface.GetTemplateData for that player (the
+  *    technology-modified values the tooltips show), plus "actor", the
+- *    template's VisualActor/Actor, which a placement preview draws. Sent
++ *    template's VisualActor/Actor, which a placement preview draws, and
++ *    two fork-only fields: "rangeOverlay" {texture, mask, thickness} from
++ *    the template's Attack/Ranged/RangeOverlay (only when it has one), and
++ *    for a template with a wallSet "speculaPieces" {template: its
++ *    GetTemplateData plus "actor"} for the set's tower, long, medium and
++ *    short pieces, which are not buildable and so not sent otherwise. Sent
+  *    for the template
+  *    of every entity of a kind 12 record and every trainable and buildable
+  *    item, for its owner, the first time, and again when
+@@ -304,9 +318,6 @@ class ScriptRequest;
+  *    u32 template string, then UTF-8 JSON {name, tooltip, disabledTooltip,
+  *    icon, minCount}: GuiInterface.GetFormationInfoFromTemplate and the
+  *    template's RequiredMemberCount, which CanMoveEntsIntoFormation tests.
+- *  - kind 23 query reply, between turns, for each uplink query: u32 id,
+- *    then UTF-8 JSON of the GuiInterface call's result ("null" for none);
+- *    each piece of a SetWallPlacementPreview result has "actor" added.
+  *  - kind 24 LOS, before the turn record, when any player's changed: u32
+  *    vertices per side v (ICmpRangeManager::GetVerticesPerSide, one vertex
+  *    every LOS_TILE_SIZE metres), u8 players n, then for players 1 to n:
+@@ -343,6 +354,11 @@ class ScriptRequest;
+  *    (GuiInterface.GetSpeculaTimeNotifications): UTF-8 JSON array of
+  *    {players, message, parameters, translateMessage, translateParameters,
+  *    endTime}, every player's, written on the first turn too.
++ *  - kind 32 control groups, before the turn record, when the list
++ *    changed: u32 count n, then n x {u32 entity, u32 control group, u32
++ *    second control group (0 for none)}, sorted, for every entity with an
++ *    Obstruction whose group is not its own id or whose second group is
++ *    set (in vanilla only wall pieces). Absent means none.
+  */
+ class CSpeculaFeed
+ {
+@@ -360,13 +376,6 @@ public:
+ 	 * payload:
+ 	 *  - kind 1 command: i8 player, then UTF-8 JSON of a simulation
+ 	 *    command as the session GUI posts it.
+-	 *  - kind 2 query: u32 id, i8 player, u8 method, then UTF-8 JSON of
+-	 *    the argument of a GuiInterface call the session GUI makes while
+-	 *    placing a structure: method 1 SetBuildingPlacementPreview, 2
+-	 *    GetFoundationSnapData (snapToEdges true asks for the edges near
+-	 *    the point, which the feed finds, as there is no screen), 3
+-	 *    SetWallPlacementPreview (wallSet the wallset's template name).
+-	 *    Answered by a kind 23 record.
+ 	 *  - kind 3 pause: i8 player, u8 paused (0 or 1). The game is paused
+ 	 *    while any player has it paused; answered by a kind 26 record.
+ 	 *  - kind 4 summary: no payload. The next turn writes a kind 25 summary.
+@@ -375,11 +384,10 @@ public:
+ 	std::vector<std::pair<player_id_t, std::string>> ReadCommands();
+ 
+ 	/**
+-	 * Answers the queries read so far at once, between turns, as the
+-	 * session GUI calls GuiInterface between turns: the previews are local
+-	 * entities, which the feed leaves out.
++	 * Reads the uplink and answers a pause change at once, and writes the
++	 * keepalive while paused, every frame rather than every turn.
+ 	 */
+-	void AnswerQueries(CSimulation2& simulation);
++	void AnswerUplink();
+ 
+ 	/**
+ 	 * Called by CMapReader while loading, which happens before the feed
+@@ -522,6 +530,7 @@ private:
+ 	void WriteNotifications(CSimulation2& simulation);
+ 	void WriteEvents(CSimulation2& simulation);
+ 	void WriteTimeNotifications(CSimulation2& simulation);
++	void WriteControlGroups(CSimulation2& simulation);
+ 	u32 InternTemplate(CSimulation2& simulation, entity_id_t ent, const std::string& templateName);
+ 	u32 InternString(const std::string& text);
+ 	u32 InternVariants(const std::map<CStr, CStr>& selections);
+@@ -536,27 +545,17 @@ private:
+ 	const std::vector<u8>& RallyGroup(CSimulation2& simulation, entity_id_t ent, const std::vector<CFixedVector2D>& points, std::unordered_map<entity_id_t, SRallyGroup>& current);
+ 	bool Send();
+ 	void Disable(const char* what);
+-	// Moves the whole uplink records received so far to m_Commands and
+-	// m_Queries.
++	// Moves the whole uplink records received so far to m_Commands.
+ 	void ReadUplink();
+ 
+-	struct SQuery
+-	{
+-		u32 id;
+-		player_id_t player;
+-		u8 method;
+-		std::string json;
+-	};
+-
+ 	int m_Socket = -1;
+ 	bool m_MapSent = false;
+ 	std::vector<u8> m_Buffer;
+ 	// Uplink bytes read but not yet a whole record.
+ 	std::vector<u8> m_Inbox;
+ 	std::vector<std::pair<player_id_t, std::string>> m_Commands;
+-	std::vector<SQuery> m_Queries;
+ 	// The players who have the game paused; a change is reported by the next
+-	// AnswerQueries, which runs every frame, paused or not.
++	// AnswerUplink, which runs every frame, paused or not.
+ 	std::set<player_id_t> m_Pausers;
+ 	bool m_PauseChanged = false;
+ 	// When the last pause or keepalive record went out, on timer_Time.
+@@ -577,6 +576,8 @@ private:
+ 	std::vector<u8> m_LastPlayers;
+ 	// The kind 31 JSON last sent; empty until the first turn writes it.
+ 	std::string m_LastTimeNotifications;
++	// The last kind 32 list written, to write one only when it changes.
++	std::vector<std::array<u32, 3>> m_LastControlGroups;
+ 	// The kind 25 cadence: a capture is due on the first turn, every
+ 	// SUMMARY_INTERVAL_TURNS, and when a player's outcome changes; the
+ 	// final one, on the turn the game finishes, is the last.

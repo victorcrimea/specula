@@ -1,0 +1,136 @@
+From b8b8bf6fa9193f43c096417730c1617fffb24851 Mon Sep 17 00:00:00 2001
+From: Viktor Semenov <suit.uanic@gmail.com>
+Date: Thu, 19 Nov 2026 16:35:29 +0000
+Subject: [PATCH 32/45] Pause the game from the Specula feed
+
+Uplink kind 3 pauses or resumes for a seat, record kind 26 reports who
+has the game paused and kind 27 is a keepalive every 10 s while paused.
+---
+ source/main.cpp                |  4 +++-
+ source/network/SpeculaFeed.cpp | 37 ++++++++++++++++++++++++++++++++++
+ source/network/SpeculaFeed.h   | 12 +++++++++++
+ 3 files changed, 52 insertions(+), 1 deletion(-)
+
+diff --git a/source/main.cpp b/source/main.cpp
+index 1a7162ef66..3fa311ce7a 100644
+--- a/source/main.cpp
++++ b/source/main.cpp
+@@ -514,7 +514,9 @@ static void NonVisualFrame()
+ 	lastFrame = now;
+ 
+ 	static u32 turn = 0;
+-	if (g_Game && g_Game->IsGameStarted() && g_Game->GetTurnManager())
++	// Specula: this calls the turn manager directly, so CGame::Update's pause
++	// check never applies.
++	if (g_Game && g_Game->IsGameStarted() && !g_Game->m_Paused && g_Game->GetTurnManager())
+ 		if (g_Game->GetTurnManager()->Update(frameLength, 1))
+ 			debug_printf("Turn %u (%u)...\n", turn++, DEFAULT_TURN_LENGTH);
+ 
+diff --git a/source/network/SpeculaFeed.cpp b/source/network/SpeculaFeed.cpp
+index 7a9daf9078..30572ad51e 100644
+--- a/source/network/SpeculaFeed.cpp
++++ b/source/network/SpeculaFeed.cpp
+@@ -108,8 +108,15 @@ constexpr u8 RECORD_FORMATION_DATA = 22;
+ constexpr u8 RECORD_QUERY_REPLY = 23;
+ constexpr u8 RECORD_LOS = 24;
+ constexpr u8 RECORD_SUMMARY = 25;
++constexpr u8 RECORD_PAUSE = 26;
++constexpr u8 RECORD_KEEPALIVE = 27;
+ constexpr u8 UPLINK_COMMAND = 1;
+ constexpr u8 UPLINK_QUERY = 2;
++constexpr u8 UPLINK_PAUSE = 3;
++// A paused game plays no turns, so the encoder's watchdog, which otherwise
++// counts the silence between turns, hears this instead; well under its
++// 120 s limit.
++constexpr double KEEPALIVE_SECONDS = 10.0;
+ constexpr u8 QUERY_BUILDING_PREVIEW = 1;
+ constexpr u8 QUERY_FOUNDATION_SNAP = 2;
+ constexpr u8 QUERY_WALL_PREVIEW = 3;
+@@ -2921,6 +2928,28 @@ std::vector<std::pair<player_id_t, std::string>> CSpeculaFeed::ReadCommands()
+ void CSpeculaFeed::AnswerQueries(CSimulation2& simulation)
+ {
+ 	ReadUplink();
++	if (m_PauseChanged)
++	{
++		m_PauseChanged = false;
++		if (g_Game)
++			g_Game->m_Paused = !m_Pausers.empty();
++		const size_t start = BeginRecord(m_Buffer, RECORD_PAUSE);
++		m_Buffer.push_back(static_cast<u8>(m_Pausers.size()));
++		for (const player_id_t player : m_Pausers)
++			m_Buffer.push_back(static_cast<u8>(player));
++		EndRecord(m_Buffer, start);
++		Send();
++		m_LastKeepAlive = timer_Time();
++	}
++	// Only while paused: a running game that gets no turns is stuck in a
++	// way the frame loop does not see, and the watchdog must still notice.
++	if (!m_Pausers.empty() && timer_Time() - m_LastKeepAlive >= KEEPALIVE_SECONDS)
++	{
++		m_LastKeepAlive = timer_Time();
++		const size_t start = BeginRecord(m_Buffer, RECORD_KEEPALIVE);
++		EndRecord(m_Buffer, start);
++		Send();
++	}
+ 	if (m_Queries.empty())
+ 		return;
+ 
+@@ -3044,6 +3073,12 @@ void CSpeculaFeed::ReadUplink()
+ 			m_Queries.push_back({ id, static_cast<i8>(payload[4]), payload[5],
+ 				std::string(reinterpret_cast<const char*>(payload + 6), length - 6) });
+ 		}
++		else if (kind == UPLINK_PAUSE && length >= 2)
++		{
++			const player_id_t player = static_cast<i8>(payload[0]);
++			const bool changed = payload[1] ? m_Pausers.insert(player).second : m_Pausers.erase(player) > 0;
++			m_PauseChanged = m_PauseChanged || changed;
++		}
+ 		at += 5 + length;
+ 	}
+ 	m_Inbox.erase(m_Inbox.begin(), m_Inbox.begin() + at);
+@@ -3059,6 +3094,8 @@ void CSpeculaFeed::Disable(const char* what)
+ 	m_Inbox.clear();
+ 	m_Commands.clear();
+ 	m_Queries.clear();
++	m_Pausers.clear();
++	m_PauseChanged = false;
+ 	m_Sounds.clear();
+ 	if (g_SoundFeed == this)
+ 		g_SoundFeed = nullptr;
+diff --git a/source/network/SpeculaFeed.h b/source/network/SpeculaFeed.h
+index b8db5872af..5c836268ed 100644
+--- a/source/network/SpeculaFeed.h
++++ b/source/network/SpeculaFeed.h
+@@ -316,6 +316,10 @@ class ScriptRequest;
+  *    {u8 view, u32 length, UTF-8 JSON of GuiInterface.GetSpeculaSummaries
+  *    element view}. View 0 has every player; view n >= 1 only player n, Gaia
+  *    and the mutual allies sharing player n's LOS.
++ *  - kind 26 pause, between turns, when the set of players pausing the game
++ *    changed (uplink kind 3): u8 count n, then n x i8 player, ascending.
++ *    The game is paused while n > 0. Never written at the start of a game.
++ *  - kind 27 keepalive, every 10 s while paused: no payload.
+  */
+ class CSpeculaFeed
+ {
+@@ -340,6 +344,8 @@ public:
+ 	 *    the point, which the feed finds, as there is no screen), 3
+ 	 *    SetWallPlacementPreview (wallSet the wallset's template name).
+ 	 *    Answered by a kind 23 record.
++	 *  - kind 3 pause: i8 player, u8 paused (0 or 1). The game is paused
++	 *    while any player has it paused; answered by a kind 26 record.
+ 	 * Unknown kinds are skipped.
+ 	 */
+ 	std::vector<std::pair<player_id_t, std::string>> ReadCommands();
+@@ -518,6 +524,12 @@ private:
+ 	std::vector<u8> m_Inbox;
+ 	std::vector<std::pair<player_id_t, std::string>> m_Commands;
+ 	std::vector<SQuery> m_Queries;
++	// The players who have the game paused; a change is reported by the next
++	// AnswerQueries, which runs every frame, paused or not.
++	std::set<player_id_t> m_Pausers;
++	bool m_PauseChanged = false;
++	// When the last pause or keepalive record went out, on timer_Time.
++	double m_LastKeepAlive = 0.0;
+ 	std::unordered_map<std::string, u32> m_TemplateIndices;
+ 	std::unordered_map<std::string, u32> m_StringIndices;
+ 	std::map<std::vector<std::pair<u32, u32>>, u32> m_VariantSetIndices;

@@ -1,0 +1,287 @@
+From 1ad16105d528bdb67bf762cf16cb0cb27392f0f6 Mon Sep 17 00:00:00 2001
+From: Viktor Semenov <suit.uanic@gmail.com>
+Date: Wed, 11 Nov 2026 09:28:15 +0000
+Subject: [PATCH 27/45] Make command delay configurable for lowest possible
+ delay in web mode
+
+---
+ source/network/NetClientTurnManager.cpp       | 18 ++++++-----
+ source/network/NetClientTurnManager.h         |  8 ++---
+ source/network/NetServerTurnManager.cpp       |  6 ++--
+ source/network/NetServerTurnManager.h         |  4 +++
+ .../simulation2/system/LocalTurnManager.cpp   |  4 +--
+ source/simulation2/system/TurnManager.cpp     | 30 +++++++++++++++----
+ source/simulation2/system/TurnManager.h       | 13 ++++++++
+ 7 files changed, 61 insertions(+), 22 deletions(-)
+
+diff --git a/source/network/NetClientTurnManager.cpp b/source/network/NetClientTurnManager.cpp
+index 670bf44d58..8ba927e56b 100644
+--- a/source/network/NetClientTurnManager.cpp
++++ b/source/network/NetClientTurnManager.cpp
+@@ -51,7 +51,7 @@
+ extern CStrW g_UniqueLogPostfix;
+ 
+ CNetClientTurnManager::CNetClientTurnManager(CSimulation2& simulation, CNetClient& client, int clientId, IReplayLogger& replay)
+-	: CTurnManager(simulation, DEFAULT_TURN_LENGTH, COMMAND_DELAY_MP, clientId, replay), m_NetClient(client)
++	: CTurnManager(simulation, DEFAULT_TURN_LENGTH, MultiplayerCommandDelay(), clientId, replay), m_NetClient(client)
+ {
+ 	const std::string speculaFeed{g_ConfigDB.Get("specula.feed", std::string{})};
+ 	if (!speculaFeed.empty())
+@@ -66,7 +66,7 @@ void CNetClientTurnManager::PostCommand(JS::HandleValue data)
+ 	NETCLIENTTURN_LOG("PostCommand()\n");
+ 
+ 	// Transmit command to server
+-	CSimulationMessage msg(m_Simulation2.GetScriptInterface(), m_ClientId, m_PlayerId, m_CurrentTurn + m_CommandDelay, data);
++	CSimulationMessage msg(m_Simulation2.GetScriptInterface(), m_ClientId, m_PlayerId, m_OwnCommandsTurn + 1, data);
+ 	m_NetClient.SendMessage(&msg);
+ 
+ 	// Add to our local queue
+@@ -78,6 +78,11 @@ void CNetClientTurnManager::NotifyFinishedOwnCommands(u32 turn)
+ {
+ 	NETCLIENTTURN_LOG("NotifyFinishedOwnCommands(%d)\n", turn);
+ 
++	// Specula: read as late as possible, so a web player's command waits
++	// for no more than the command delay.
++	if (m_SpeculaFeed)
++		PostSpeculaCommands(turn);
++
+ 	CEndCommandBatchMessage msg;
+ 
+ 	msg.m_Turn = turn;
+@@ -111,10 +116,7 @@ void CNetClientTurnManager::NotifyFinishedUpdate(u32 turn)
+ 
+ 	// After the hash is sent, so the feed never delays the sync check.
+ 	if (m_SpeculaFeed)
+-	{
+ 		m_SpeculaFeed->OnTurn(m_Simulation2, turn);
+-		PostSpeculaCommands();
+-	}
+ }
+ 
+ void CNetClientTurnManager::AnswerSpeculaQueries()
+@@ -123,7 +125,7 @@ void CNetClientTurnManager::AnswerSpeculaQueries()
+ 		m_SpeculaFeed->AnswerQueries(m_Simulation2);
+ }
+ 
+-void CNetClientTurnManager::PostSpeculaCommands()
++void CNetClientTurnManager::PostSpeculaCommands(u32 turn)
+ {
+ 	const ScriptInterface& scriptInterface = m_Simulation2.GetScriptInterface();
+ 	ScriptRequest rq(scriptInterface);
+@@ -135,7 +137,7 @@ void CNetClientTurnManager::PostSpeculaCommands()
+ 			LOGERROR("Specula feed: command for player %d is not a JSON object", player);
+ 			continue;
+ 		}
+-		CSimulationMessage msg(scriptInterface, m_ClientId, player, m_CurrentTurn + m_CommandDelay, data);
++		CSimulationMessage msg(scriptInterface, m_ClientId, player, turn, data);
+ 		m_NetClient.SendMessage(&msg);
+ 	}
+ }
+@@ -145,7 +147,7 @@ void CNetClientTurnManager::OnDestroyConnection()
+ 	// Attempt to flush messages before leaving.
+ 	// Notice the sending is not reliable and rarely makes it to the Server.
+ 	if (m_NetClient.GetCurrState() == NCS_INGAME)
+-		NotifyFinishedOwnCommands(m_CurrentTurn + m_CommandDelay);
++		NotifyFinishedOwnCommands(++m_OwnCommandsTurn);
+ }
+ 
+ void CNetClientTurnManager::OnSimulationMessage(CSimulationMessage* msg)
+diff --git a/source/network/NetClientTurnManager.h b/source/network/NetClientTurnManager.h
+index f085d49998..337524ad7f 100644
+--- a/source/network/NetClientTurnManager.h
++++ b/source/network/NetClientTurnManager.h
+@@ -66,11 +66,11 @@ private:
+ 	void NotifyFinishedUpdate(u32 turn) override;
+ 
+ 	/**
+-	 * Specula: posts the commands the feed read, each as PostCommand would
+-	 * but for its own player; the server accepts them only from the
+-	 * controller and for a player no client holds.
++	 * Specula: posts the commands the feed read for @p turn, each as
++	 * PostCommand would but for its own player; the server accepts them
++	 * only from the controller and for a player no client holds.
+ 	 */
+-	void PostSpeculaCommands();
++	void PostSpeculaCommands(u32 turn);
+ 
+ 	CNetClient& m_NetClient;
+ 
+diff --git a/source/network/NetServerTurnManager.cpp b/source/network/NetServerTurnManager.cpp
+index bf0edc6b55..3d6f1d7a72 100644
+--- a/source/network/NetServerTurnManager.cpp
++++ b/source/network/NetServerTurnManager.cpp
+@@ -40,13 +40,13 @@
+ #endif
+ 
+ CNetServerTurnManager::CNetServerTurnManager(CNetServerWorker& server)
+-	: m_NetServer(server), m_ReadyTurn(COMMAND_DELAY_MP - 1), m_TurnLength(DEFAULT_TURN_LENGTH)
++	: m_NetServer(server), m_CommandDelay(MultiplayerCommandDelay()), m_ReadyTurn(m_CommandDelay - 1), m_TurnLength(DEFAULT_TURN_LENGTH)
+ {
+ 	// Turn 0 is not actually executed, store a dummy value.
+ 	m_SavedTurnLengths.push_back(0);
+ 	// Turns [1..COMMAND_DELAY - 1] are special: all clients run them without waiting on a server command batch.
+ 	// Because of this, they are always run with the default MP turn length.
+-	for (u32 i = 1; i < COMMAND_DELAY_MP; ++i)
++	for (u32 i = 1; i < m_CommandDelay; ++i)
+ 		m_SavedTurnLengths.push_back(m_TurnLength);
+ }
+ 
+@@ -193,7 +193,7 @@ void CNetServerTurnManager::InitialiseClient(int client, u32 turn, bool observer
+ 
+ 	ENSURE(m_ClientsData.find(client) == m_ClientsData.end());
+ 	Client& data = m_ClientsData[client];
+-	data.readyTurn = turn + COMMAND_DELAY_MP - 1;
++	data.readyTurn = turn + m_CommandDelay - 1;
+ 	data.simulatedTurn = turn;
+ 	data.isObserver = observer;
+ }
+diff --git a/source/network/NetServerTurnManager.h b/source/network/NetServerTurnManager.h
+index 73e5034bd4..4941be9381 100644
+--- a/source/network/NetServerTurnManager.h
++++ b/source/network/NetServerTurnManager.h
+@@ -95,6 +95,10 @@ private:
+ 	// Map of turn -> {Client ID -> state hash}; old indexes <= min(m_ClientsSimulated) are deleted
+ 	std::map<u32, std::map<int, std::string>> m_ClientStateHashes;
+ 
++	/// Specula: MultiplayerCommandDelay(), declared before m_ReadyTurn,
++	/// which is initialised from it
++	u32 m_CommandDelay;
++
+ 	/// The latest turn for which we have received all commands from all clients
+ 	u32 m_ReadyTurn;
+ 
+diff --git a/source/simulation2/system/LocalTurnManager.cpp b/source/simulation2/system/LocalTurnManager.cpp
+index 2fb6b6d70f..3d382b2658 100644
+--- a/source/simulation2/system/LocalTurnManager.cpp
++++ b/source/simulation2/system/LocalTurnManager.cpp
+@@ -34,12 +34,12 @@ CLocalTurnManager::CLocalTurnManager(CSimulation2& simulation, IReplayLogger& re
+ 
+ void CLocalTurnManager::PostCommand(player_id_t playerid, JS::HandleValue data)
+ {
+-	AddCommand(m_ClientId, playerid, data, m_CurrentTurn + m_CommandDelay);
++	AddCommand(m_ClientId, playerid, data, m_OwnCommandsTurn + 1);
+ }
+ 
+ void CLocalTurnManager::PostCommand(JS::HandleValue data)
+ {
+-	AddCommand(m_ClientId, m_PlayerId, data, m_CurrentTurn + m_CommandDelay);
++	AddCommand(m_ClientId, m_PlayerId, data, m_OwnCommandsTurn + 1);
+ }
+ 
+ void CLocalTurnManager::NotifyFinishedOwnCommands(u32 turn)
+diff --git a/source/simulation2/system/TurnManager.cpp b/source/simulation2/system/TurnManager.cpp
+index d8dc7df5fe..1a5bb1b147 100644
+--- a/source/simulation2/system/TurnManager.cpp
++++ b/source/simulation2/system/TurnManager.cpp
+@@ -23,6 +23,7 @@
+ #include "lib/debug.h"
+ #include "maths/MathUtil.h"
+ #include "ps/CLogger.h"
++#include "ps/ConfigDB.h"
+ #include "ps/Profile.h"
+ #include "ps/Profiler2.h"
+ #include "ps/Replay.h"
+@@ -46,8 +47,13 @@
+ 
+ const CStr CTurnManager::EventNameSavegameLoaded = "SavegameLoaded";
+ 
++u32 MultiplayerCommandDelay()
++{
++	return static_cast<u32>(std::max(1, g_ConfigDB.Get("specula.commanddelay", static_cast<int>(COMMAND_DELAY_MP))));
++}
++
+ CTurnManager::CTurnManager(CSimulation2& simulation, u32 defaultTurnLength, u32 commandDelay, int clientId, IReplayLogger& replay)
+-	: m_Simulation2(simulation), m_CurrentTurn(0), m_CommandDelay(commandDelay), m_ReadyTurn(commandDelay - 1), m_TurnLength(defaultTurnLength),
++	: m_Simulation2(simulation), m_CurrentTurn(0), m_CommandDelay(commandDelay), m_ReadyTurn(commandDelay - 1), m_OwnCommandsTurn(commandDelay - 1), m_TurnLength(defaultTurnLength),
+ 	m_PlayerId(-1), m_ClientId(clientId), m_DeltaSimTime(0), m_Replay(replay),
+ 	m_FinalTurn(std::numeric_limits<u32>::max()), m_TimeWarpNumTurns(0)
+ {
+@@ -60,6 +66,7 @@ void CTurnManager::ResetState(u32 newCurrentTurn, u32 newReadyTurn)
+ {
+ 	m_CurrentTurn = newCurrentTurn;
+ 	m_ReadyTurn = newReadyTurn;
++	m_OwnCommandsTurn = newCurrentTurn + m_CommandDelay - 1;
+ 	m_DeltaSimTime = 0;
+ 	size_t queuedCommandsSize = m_QueuedCommands.size();
+ 	m_QueuedCommands.clear();
+@@ -89,8 +96,14 @@ bool CTurnManager::Update(float simFrameLength, size_t maxTurns)
+ 
+ 	NETTURN_LOG("Update current=%d ready=%d\n", m_CurrentTurn, m_ReadyTurn);
+ 
++	// Specula: with a delay of one turn, the next turn's commands can only
++	// be closed now that it is due, and must be before it can be ready.
++	// (In single-player that makes it ready at once.)
++	if (m_OwnCommandsTurn == m_CurrentTurn)
++		NotifyFinishedOwnCommands(++m_OwnCommandsTurn);
++
+ 	// Check that the next turn is ready for execution
+-	if (m_ReadyTurn <= m_CurrentTurn && m_CommandDelay > 1)
++	if (m_ReadyTurn <= m_CurrentTurn)
+ 	{
+ 		// Oops, we wanted to start the next turn but it's not ready yet -
+ 		// there must be too much network lag.
+@@ -100,7 +113,10 @@ bool CTurnManager::Update(float simFrameLength, size_t maxTurns)
+ 		// Reset the next-turn timer to 0 so we try again next update but
+ 		// so we don't rush to catch up in subsequent turns.
+ 		// TODO: we should do clever rate adjustment instead of just pausing like this.
+-		m_DeltaSimTime = 0;
++		// Specula: a delay of one turn waits here for the round trip every
++		// turn, which must not slow the game down.
++		if (m_CommandDelay > 1)
++			m_DeltaSimTime = 0;
+ 
+ 		return false;
+ 	}
+@@ -113,15 +129,19 @@ bool CTurnManager::Update(float simFrameLength, size_t maxTurns)
+ 		if (m_DeltaSimTime < 0)
+ 			break;
+ 
++		if (m_OwnCommandsTurn == m_CurrentTurn)
++			NotifyFinishedOwnCommands(++m_OwnCommandsTurn);
++
+ 		// Check that the i'th next turn is still ready
+-		if (m_ReadyTurn <= m_CurrentTurn && m_CommandDelay > 1)
++		if (m_ReadyTurn <= m_CurrentTurn)
+ 			break;
+ 
+ 		// To avoid confusing the profiler, we need to trigger the new turn
+ 		// while we're not nested inside any PROFILE blocks
+ 		g_Profiler.Turn();
+ 
+-		NotifyFinishedOwnCommands(m_CurrentTurn + m_CommandDelay);
++		if (m_OwnCommandsTurn < m_CurrentTurn + m_CommandDelay)
++			NotifyFinishedOwnCommands(++m_OwnCommandsTurn);
+ 
+ 		// Increase now, so Update can send new commands for a subsequent turn
+ 		++m_CurrentTurn;
+diff --git a/source/simulation2/system/TurnManager.h b/source/simulation2/system/TurnManager.h
+index b4a724dc99..7c31257414 100644
+--- a/source/simulation2/system/TurnManager.h
++++ b/source/simulation2/system/TurnManager.h
+@@ -80,6 +80,15 @@ inline constexpr u32 COMMAND_DELAY_SP = 1;
+  */
+ inline constexpr u32 COMMAND_DELAY_MP = 4;
+ 
++/**
++ * Specula: the multiplayer command delay, COMMAND_DELAY_MP unless the
++ * specula.commanddelay config sets it (at least 1). The Specula play host
++ * is its game's only client and the server runs in its process, so the
++ * round trip is short enough for one turn; every client of a game must
++ * use the server's value.
++ */
++u32 MultiplayerCommandDelay();
++
+ /**
+  * Common turn system (used by clients and offline games).
+  */
+@@ -197,6 +206,10 @@ protected:
+ 	/// The latest turn for which we have received all commands from all clients
+ 	u32 m_ReadyTurn;
+ 
++	/// The latest turn for which we have sent all our own commands; new
++	/// commands are scheduled for the turn after it
++	u32 m_OwnCommandsTurn;
++
+ 	// Current turn length
+ 	u32 m_TurnLength;
+ 

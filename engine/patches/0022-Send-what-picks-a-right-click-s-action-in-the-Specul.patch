@@ -1,0 +1,109 @@
+From ed9e122a542a084b649bb871a499c697ec3c3d18 Mon Sep 17 00:00:00 2001
+From: Viktor Semenov <suit.uanic@gmail.com>
+Date: Mon, 9 Nov 2026 23:47:52 +0000
+Subject: [PATCH 22/45] Send what picks a right click's action in the Specula
+ template details
+
+Kind 11 appends the ResourceSupply type, the ResourceGatherer rate
+names, the ResourceDropsite types and the Attack types, each with its
+RestrictedClasses, which unit_actions.js reads to choose a right click's
+action and cursor, and flags Identity's Controllable false (4096). An
+encoder reads them only when the record is long enough, so the feed
+stays v14.
+---
+ source/network/SpeculaFeed.cpp | 25 +++++++++++++++++++++++++
+ source/network/SpeculaFeed.h   | 10 ++++++++--
+ 2 files changed, 33 insertions(+), 2 deletions(-)
+
+diff --git a/source/network/SpeculaFeed.cpp b/source/network/SpeculaFeed.cpp
+index 596ba12eb2..df6937b12b 100644
+--- a/source/network/SpeculaFeed.cpp
++++ b/source/network/SpeculaFeed.cpp
+@@ -73,6 +73,7 @@
+ #include <cstring>
+ #include <limits>
+ #include <set>
++#include <sstream>
+ #include <string_view>
+ #include <sys/socket.h>
+ #include <sys/un.h>
+@@ -124,6 +125,7 @@ constexpr u16 TEMPLATE_FOOTPRINT = 256;
+ constexpr u16 TEMPLATE_STATUS_BARS = 512;
+ constexpr u16 TEMPLATE_INFINITE_SUPPLY = 1024;
+ constexpr u16 TEMPLATE_UNDELETABLE = 2048;
++constexpr u16 TEMPLATE_UNCONTROLLABLE = 4096;
+ // Kind 12 group bits, which are also the slots of SDetailGroups.
+ constexpr size_t DETAIL_HEALTH = 0;
+ constexpr size_t DETAIL_CAPTURE = 1;
+@@ -1379,6 +1381,25 @@ void CSpeculaFeed::WriteTemplateDetails(CSimulation2& simulation, u32 index, con
+ 	const CParamNode& rallyRenderer = templateNode->GetChild("RallyPointRenderer");
+ 	const u32 rallyTexture = InternString(rallyRenderer.GetChild("LineTexture").ToString());
+ 	const u32 rallyMask = InternString(rallyRenderer.GetChild("LineTextureMask").ToString());
++	// What unit_actions.js reads to pick a right click's action and cursor.
++	const u32 supplyType = InternString(templateNode->GetChild("ResourceSupply").GetChild("Type").ToString());
++	std::string gatherRates;
++	for (const std::pair<const std::string, CParamNode>& rate : templateNode->GetChild("ResourceGatherer").GetChild("Rates").GetChildren())
++		gatherRates += (gatherRates.empty() ? "" : " ") + rate.first;
++	const u32 gatherRatesString = InternString(gatherRates);
++	const u32 dropsiteTypes = InternString(templateNode->GetChild("ResourceDropsite").GetChild("Types").ToString());
++	// "Type" or "Type:Class,Class" for each attack type, so that a token
++	// list stays one token per type.
++	std::string attackTypes;
++	for (const std::pair<const std::string, CParamNode>& type : templateNode->GetChild("Attack").GetChildren())
++	{
++		attackTypes += (attackTypes.empty() ? "" : " ") + type.first;
++		std::istringstream restricted(type.second.GetChild("RestrictedClasses").ToString());
++		std::string restrictedClass;
++		for (char separator = ':'; restricted >> restrictedClass; separator = ',')
++			attackTypes += separator + restrictedClass;
++	}
++	const u32 attackTypesString = InternString(attackTypes);
+ 	// StrToLineCapType warns about anything but a cap name.
+ 	const auto lineCap = [&](const char* name) -> u8 {
+ 		const CParamNode& cap = rallyRenderer.GetChild(name);
+@@ -1436,6 +1457,8 @@ void CSpeculaFeed::WriteTemplateDetails(CSimulation2& simulation, u32 index, con
+ 		flags |= TEMPLATE_INFINITE_SUPPLY;
+ 	if (templateNode->GetChild("Identity").GetChild("Undeletable").ToString() == "true")
+ 		flags |= TEMPLATE_UNDELETABLE;
++	if (templateNode->GetChild("Identity").GetChild("Controllable").ToString() == "false")
++		flags |= TEMPLATE_UNCONTROLLABLE;
+ 
+ 	u32 components = 0;
+ 	for (size_t i = 0; i < std::size(DETAIL_INTERFACES); ++i)
+@@ -1466,6 +1489,8 @@ void CSpeculaFeed::WriteTemplateDetails(CSimulation2& simulation, u32 index, con
+ 	PutF32(m_Buffer, NodeFloat(rallyRenderer.GetChild("LineThickness")));
+ 	m_Buffer.push_back(lineCap("LineStartCap"));
+ 	m_Buffer.push_back(lineCap("LineEndCap"));
++	for (const u32 string : { supplyType, gatherRatesString, dropsiteTypes, attackTypesString })
++		PutU32(m_Buffer, string);
+ 	EndRecord(m_Buffer, start);
+ }
+ 
+diff --git a/source/network/SpeculaFeed.h b/source/network/SpeculaFeed.h
+index f9ac16cdc5..27e0beda94 100644
+--- a/source/network/SpeculaFeed.h
++++ b/source/network/SpeculaFeed.h
+@@ -143,7 +143,12 @@ class ScriptRequest;
+  *    texture string, u32 rally line mask string, f32 rally line
+  *    thickness, u8 rally line start cap, u8 rally line end cap
+  *    (RallyPointRenderer's; the textures as full VFS paths, none without
+- *    the component; caps 0 flat, 1 round, 2 sharp, 3 square). Strings are
++ *    the component; caps 0 flat, 1 round, 2 sharp, 3 square), u32
++ *    ResourceSupply type (e.g. "wood.tree"), u32 ResourceGatherer rate
++ *    names, space separated, u32 ResourceDropsite types, u32 Attack types,
++ *    space separated, each as "Type" or "Type:Class,Class" with its
++ *    RestrictedClasses (what unit_actions.js picks a right click's action
++ *    by; an older hook ends before them). Strings are
+  *    string records (none when absent), read from the template as is: the
+  *    textures relative to art/textures/selection/, the icon to
+  *    art/textures/ui/session/portraits/, the sound group to audio/, the
+@@ -153,7 +158,8 @@ class ScriptRequest;
+  *    always visible, 16 the selection box is the footprint (else the model
+  *    bounds), 32 the footprint is a square (else a circle), 64 the overlay
+  *    has its own square shape, 128 its own circle shape, 256 Footprint, 512
+- *    StatusBars, 1024 an infinite resource supply, 2048 Identity's Undeletable. Components, one bit
++ *    StatusBars, 1024 an infinite resource supply, 2048 Identity's Undeletable, 4096 Identity's
++ *    Controllable false. Components, one bit
+  *    each: Health, Capturable, ResourceSupply, ProductionQueue,
+  *    GarrisonHolder, Promotion, ResourceGatherer, Foundation, Repairable,
+  *    UnitAI, Trainer, Researcher, Pack, Upgrade, Trader, Garrisonable,

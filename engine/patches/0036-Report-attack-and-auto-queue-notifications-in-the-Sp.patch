@@ -1,0 +1,182 @@
+From 21758ae30723731a6200d18ec7fea8aabd00b78e Mon Sep 17 00:00:00 2001
+From: Viktor Semenov <suit.uanic@gmail.com>
+Date: Sun, 22 Nov 2026 02:11:03 +0000
+Subject: [PATCH 36/45] Report attack and auto-queue notifications in the
+ Specula feed
+
+GuiInterface keeps a copy of the attack notifications and the "Could not
+auto-queue unit" text, which a nonvisual observer has no GUI to show, and
+kind 29, before the turn record, carries them: the player, the attacker,
+whether the target is a domestic animal or a unit, the target entity and
+the position. A new kind rather than a new version, so older readers skip
+it.
+---
+ .../simulation/components/GuiInterface.js     | 37 +++++++++++++
+ source/network/SpeculaFeed.cpp                | 52 +++++++++++++++++++
+ source/network/SpeculaFeed.h                  |  7 +++
+ 3 files changed, 96 insertions(+)
+
+diff --git a/binaries/data/mods/public/simulation/components/GuiInterface.js b/binaries/data/mods/public/simulation/components/GuiInterface.js
+index 91febe29a1..a34358537a 100644
+--- a/binaries/data/mods/public/simulation/components/GuiInterface.js
++++ b/binaries/data/mods/public/simulation/components/GuiInterface.js
+@@ -29,6 +29,7 @@ GuiInterface.prototype.Init = function()
+ 	this.placementWallEntities = undefined;
+ 	this.placementWallLastAngle = 0;
+ 	this.notifications = [];
++	this.speculaNotes = [];
+ 	this.renamedEntities = [];
+ 	this.miragedEntities = [];
+ 	this.timeNotificationID = 1;
+@@ -853,6 +854,41 @@ GuiInterface.prototype.PushNotification = function(notification)
+ 		this.AddTimeNotification(notification);
+ 	else
+ 		this.notifications.push(notification);
++
++	// The headless engine has no GUI to show these two, so the Specula feed
++	// reads them here. The auto-queue one is untyped, so it is matched by its
++	// message, which is the only thing that tells it from the other texts.
++	// focusAttack follows a target that is a unit and looks at the position
++	// otherwise; the class is taken now, as the viewer cannot ask later.
++	if (notification.type == "attack")
++		this.speculaNotes.push({
++			"kind": 1,
++			"player": notification.players[0],
++			"attacker": notification.attacker,
++			"domestic": !!notification.targetIsDomesticAnimal,
++			"unit": !!Engine.QueryInterface(notification.target, IID_Identity)?.HasClass("Unit"),
++			"target": notification.target,
++			"x": notification.position.x,
++			"z": notification.position.z
++		});
++	else if (notification.message == "Could not auto-queue unit, de-activating.")
++		this.speculaNotes.push({
++			"kind": 2,
++			"player": notification.players[0],
++			"attacker": 0,
++			"domestic": false,
++			"unit": false,
++			"target": 0,
++			"x": 0,
++			"z": 0
++		});
++};
++
++GuiInterface.prototype.GetSpeculaNotes = function()
++{
++	const notes = this.speculaNotes;
++	this.speculaNotes = [];
++	return notes;
+ };
+ 
+ GuiInterface.prototype.GetNotifications = function()
+@@ -2097,6 +2133,7 @@ GuiInterface.prototype.exposedFunctions = {
+ 	"GetInitAttributes": 1,
+ 	"GetReplayMetadata": 1,
+ 	"GetSpeculaSummaries": 1,
++	"GetSpeculaNotes": 1,
+ 	"GetCampaignGameEndData": 1,
+ 	"GetRenamedEntities": 1,
+ 	"ClearRenamedEntities": 1,
+diff --git a/source/network/SpeculaFeed.cpp b/source/network/SpeculaFeed.cpp
+index 54ca8adbac..92d75d44c6 100644
+--- a/source/network/SpeculaFeed.cpp
++++ b/source/network/SpeculaFeed.cpp
+@@ -111,6 +111,7 @@ constexpr u8 RECORD_SUMMARY = 25;
+ constexpr u8 RECORD_PAUSE = 26;
+ constexpr u8 RECORD_KEEPALIVE = 27;
+ constexpr u8 RECORD_INIT_ATTRIBUTES = 28;
++constexpr u8 RECORD_NOTIFICATIONS = 29;
+ constexpr u8 UPLINK_COMMAND = 1;
+ constexpr u8 UPLINK_QUERY = 2;
+ constexpr u8 UPLINK_PAUSE = 3;
+@@ -861,6 +862,7 @@ void CSpeculaFeed::OnTurn(CSimulation2& simulation, u32 turn)
+ 	WriteTerritory(simulation);
+ 	WriteLos(simulation);
+ 	WriteRenames(simulation);
++	WriteNotifications(simulation);
+ 
+ 	// Template records must precede the turn record that first uses them,
+ 	// so the entities are collected before the turn record is written.
+@@ -1779,6 +1781,56 @@ void CSpeculaFeed::WriteRenames(CSimulation2& simulation)
+ 	EndRecord(m_Buffer, start);
+ }
+ 
++// The session GUI would show these; a nonvisual observer has none, and the
++// list is not serialized.
++void CSpeculaFeed::WriteNotifications(CSimulation2& simulation)
++{
++	CmpPtr<ICmpGuiInterface> cmpGuiInterface(simulation, SYSTEM_ENTITY);
++	if (!cmpGuiInterface)
++		return;
++	ScriptRequest rq(simulation.GetScriptInterface());
++	JS::RootedValue arg(rq.cx);
++	JS::RootedValue notes(rq.cx);
++	cmpGuiInterface->ScriptCall(INVALID_PLAYER, L"GetSpeculaNotes", arg, &notes);
++
++	const u32 count = ArrayLength(rq, notes);
++	if (!count)
++		return;
++	const size_t start = BeginRecord(m_Buffer, RECORD_NOTIFICATIONS);
++	PutU32(m_Buffer, count);
++	for (u32 i = 0; i < count; ++i)
++	{
++		JS::RootedValue note(rq.cx);
++		u32 kind = 0;
++		i32 player = 0;
++		i32 attacker = 0;
++		bool domestic = false;
++		bool unit = false;
++		u32 target = 0;
++		double x = 0;
++		double z = 0;
++		if (Script::GetPropertyInt(rq, notes, static_cast<int>(i), &note))
++		{
++			Script::GetProperty(rq, note, "kind", kind);
++			Script::GetProperty(rq, note, "player", player);
++			Script::GetProperty(rq, note, "attacker", attacker);
++			Script::GetProperty(rq, note, "domestic", domestic);
++			Script::GetProperty(rq, note, "unit", unit);
++			Script::GetProperty(rq, note, "target", target);
++			Script::GetProperty(rq, note, "x", x);
++			Script::GetProperty(rq, note, "z", z);
++		}
++		m_Buffer.push_back(Clamp8(kind));
++		m_Buffer.push_back(Clamp8(static_cast<u32>(std::max(player, 0))));
++		m_Buffer.push_back(Clamp8(static_cast<u32>(std::max(attacker, 0))));
++		m_Buffer.push_back((domestic ? 1 : 0) | (unit ? 2 : 0));
++		PutU32(m_Buffer, target);
++		PutF32(m_Buffer, static_cast<float>(x));
++		PutF32(m_Buffer, static_cast<float>(z));
++	}
++	EndRecord(m_Buffer, start);
++}
++
+ // The groups of the components Fogging.js copies into a mirage, whose
+ // copies answer the same getters (the *Mirage classes); false for any other
+ // interface.
+diff --git a/source/network/SpeculaFeed.h b/source/network/SpeculaFeed.h
+index a6498e9a81..4e6778f9ec 100644
+--- a/source/network/SpeculaFeed.h
++++ b/source/network/SpeculaFeed.h
+@@ -323,6 +323,12 @@ class ScriptRequest;
+  *  - kind 28 init attributes, once, with the first turn's map record: UTF-8
+  *    JSON of CSimulation2::GetInitAttributes, what the simulation started
+  *    with.
++ *  - kind 29 notifications, before the turn record, when the simulation
++ *    pushed any (GuiInterface.GetSpeculaNotes): u32 count n, then n x
++ *    {u8 kind (1 attacked, 2 auto-queue stopped), u8 player, u8 attacker,
++ *    u8 flags (1 the target is a domestic animal, 2 it is a unit), u32
++ *    target entity, f32 x, f32 z}, the position in metres (target and
++ *    position 0 for kind 2).
+  */
+ class CSpeculaFeed
+ {
+@@ -496,6 +502,7 @@ private:
+ 	void WriteDetails(CSimulation2& simulation, u32 turn);
+ 	static bool PutMiragedGroup(const ScriptRequest& rq, std::string_view interface, JS::HandleValue component, SDetailGroups& groups);
+ 	void WriteRenames(CSimulation2& simulation);
++	void WriteNotifications(CSimulation2& simulation);
+ 	u32 InternTemplate(CSimulation2& simulation, entity_id_t ent, const std::string& templateName);
+ 	u32 InternString(const std::string& text);
+ 	u32 InternVariants(const std::map<CStr, CStr>& selections);

@@ -1,0 +1,686 @@
+From 78e35b123bea9110b52b66c154d59ee8219cbb1a Mon Sep 17 00:00:00 2001
+From: Viktor Semenov <suit.uanic@gmail.com>
+Date: Mon, 9 Nov 2026 23:47:52 +0000
+Subject: [PATCH 21/45] Let a Specula player command an unassigned slot of a
+ hosted game
+
+-autostart-specula-play (autostart_specula_play.js, chosen in
+entrypoint.js) hosts a game as an observer and launches it once its own
+assignment exists, with -autostart-players slots and the web player's
+left unassigned. The feed socket now also reads an uplink from the
+encoder: kind 1 records are simulation commands for a player, which
+CNetClientTurnManager posts after each turn's feed, and kind 2 records
+are the placement queries (SetBuildingPlacementPreview,
+GetFoundationSnapData, SetWallPlacementPreview), answered between turns
+in feed record 23. Template data names the VisualActor a preview draws,
+and kind 21 adds the ceasefire end.
+
+NetServer lets the controller command a player that no enabled
+assignment holds, as 54619460d4 does, for unassigned slots only. A
+nonvisual host now runs its turns in real time and sleeps 1 ms a frame,
+where it ran as fast as it could. The feed stays v14.
+---
+ .../autostart/autostart_specula_play.js       |  76 ++++++
+ .../data/mods/public/autostart/entrypoint.js  |   5 +-
+ source/main.cpp                               |  24 +-
+ source/network/NetClientTurnManager.cpp       |  29 +++
+ source/network/NetClientTurnManager.h         |  13 +
+ source/network/NetServer.cpp                  |  12 +-
+ source/network/SpeculaFeed.cpp                | 231 ++++++++++++++++++
+ source/network/SpeculaFeed.h                  |  50 +++-
+ 8 files changed, 435 insertions(+), 5 deletions(-)
+ create mode 100644 binaries/data/mods/public/autostart/autostart_specula_play.js
+
+diff --git a/binaries/data/mods/public/autostart/autostart_specula_play.js b/binaries/data/mods/public/autostart/autostart_specula_play.js
+new file mode 100644
+index 0000000000..b6cc35d122
+--- /dev/null
++++ b/binaries/data/mods/public/autostart/autostart_specula_play.js
+@@ -0,0 +1,76 @@
++/**
++ * Specula: hosts a game for Specula's web players. The host itself only
++ * observes; the web players' slots stay unassigned and without AI, and
++ * the Specula feed posts their commands as the controller (see
++ * CNetClientTurnManager::PostSpeculaCommands). The game starts as soon as
++ * the host has joined its own server, without waiting for other clients.
++ */
++class AutoStartSpeculaPlay
++{
++	constructor(cmdLineArgs)
++	{
++		this.launched = false;
++		this.playerAssignments = {};
++		this.cmdLineArgs = cmdLineArgs;
++
++		try
++		{
++			const playerName = cmdLineArgs['autostart-playername'] || "specula";
++			const port = +(cmdLineArgs['autostart-port'] ?? 5073);
++			Engine.StartNetworkHost(playerName, port, "", false, !('autostart-disable-replay' in cmdLineArgs));
++		}
++		catch (e)
++		{
++			const message = sprintf(translate("Cannot host game: %(message)s."), { "message": e.message });
++			messageBox(400, 200, message, translate("Error"));
++		}
++	}
++
++	onTick()
++	{
++		while (true)
++		{
++			const message = Engine.PollNetworkClient();
++			if (!message)
++				break;
++
++			switch (message.type)
++			{
++			case "players":
++				// Unlike AutoStartHost, nobody is given a slot: the host
++				// stays an observer.
++				this.playerAssignments = message.newAssignments;
++				Engine.SendNetworkReady(2);
++				break;
++			case "ready":
++				if (this.playerAssignments[message.guid])
++					this.playerAssignments[message.guid].status = message.status;
++				break;
++			case "start":
++				return true;
++			default:
++			}
++		}
++
++		if (!this.launched && Object.keys(this.playerAssignments).length)
++			this.onLaunch();
++		return false;
++	}
++
++	onLaunch()
++	{
++		this.launched = true;
++
++		this.settings = new GameSettings().init();
++
++		// The player count comes from the map or -autostart-players, not
++		// from the clients, as the players are not clients.
++		parseCmdLineArgs(this.settings, this.cmdLineArgs);
++
++		this.settings.launchGame(this.playerAssignments, !('autostart-disable-replay' in this.cmdLineArgs));
++		Engine.SwitchGuiPage("page_loading.xml", {
++			"attribs": this.settings.finalizedAttributes,
++			"playerAssignments": this.playerAssignments
++		});
++	}
++}
+diff --git a/binaries/data/mods/public/autostart/entrypoint.js b/binaries/data/mods/public/autostart/entrypoint.js
+index cc782fdcfd..42ce4f2b80 100644
+--- a/binaries/data/mods/public/autostart/entrypoint.js
++++ b/binaries/data/mods/public/autostart/entrypoint.js
+@@ -43,7 +43,10 @@ function autostartHost(cmdLineArgs, networked = false)
+ 	Engine.LoadScript("gamesettings/");
+ 	Engine.LoadScript("gamesettings/attributes/");
+ 
+-	if (networked)
++	// Specula: a host for web players, see autostart_specula_play.js.
++	if (networked && 'autostart-specula-play' in cmdLineArgs)
++		autostartInstance = new AutoStartSpeculaPlay(cmdLineArgs);
++	else if (networked)
+ 		autostartInstance = new AutoStartHost(cmdLineArgs);
+ 	else
+ 		autostartInstance = new AutoStart(cmdLineArgs);
+diff --git a/source/main.cpp b/source/main.cpp
+index ec60671577..1a7162ef66 100644
+--- a/source/main.cpp
++++ b/source/main.cpp
+@@ -53,6 +53,8 @@ that of Atlas depending on commandline parameters.
+ #include "lib/types.h"
+ #include "lobby/IXmppClient.h"
+ #include "network/NetClient.h"
++#include "network/NetClientTurnManager.h"
++#include "network/NetServer.h"
+ #include "ps/ArchiveBuilder.h"
+ #include "ps/CConsole.h"
+ #include "ps/CLogger.h"
+@@ -105,6 +107,7 @@ that of Atlas depending on commandline parameters.
+ #include <optional>
+ #include <span>
+ #include <string>
++#include <thread>
+ #include <utility>
+ #include <vector>
+ 
+@@ -500,13 +503,32 @@ static void NonVisualFrame()
+ 	if (g_NetClient)
+ 		g_NetClient->Poll();
+ 
++	// Specula: a host sets the game's pace for its clients, so the Specula
++	// play host runs its turns in real time; a joined client runs each turn
++	// as soon as its host has sent it.
++	static double lastFrame = timer_Time();
++	const double now = timer_Time();
++	const float frameLength = g_NetServer && g_Game ?
++		static_cast<float>(now - lastFrame) * g_Game->GetSimRate() :
++		static_cast<float>(DEFAULT_TURN_LENGTH);
++	lastFrame = now;
++
+ 	static u32 turn = 0;
+ 	if (g_Game && g_Game->IsGameStarted() && g_Game->GetTurnManager())
+-		if (g_Game->GetTurnManager()->Update(DEFAULT_TURN_LENGTH, 1))
++		if (g_Game->GetTurnManager()->Update(frameLength, 1))
+ 			debug_printf("Turn %u (%u)...\n", turn++, DEFAULT_TURN_LENGTH);
+ 
++	// Specula: the play host's placement previews wait for no turn. A
++	// networked game's turn manager is the one CNetClient made.
++	if (g_NetClient && g_Game && g_Game->IsGameStarted() && g_Game->GetTurnManager())
++		static_cast<CNetClientTurnManager*>(g_Game->GetTurnManager())->AnswerSpeculaQueries();
++
+ 	g_Profiler.Frame();
+ 
++	// Specula: nor does the host spin a core between its turns.
++	if (g_NetServer)
++		std::this_thread::sleep_for(std::chrono::milliseconds(1));
++
+ 	if (g_Game->IsGameFinished())
+ 		QuitEngine(EXIT_SUCCESS);
+ 
+diff --git a/source/network/NetClientTurnManager.cpp b/source/network/NetClientTurnManager.cpp
+index d7ae28ff5b..670bf44d58 100644
+--- a/source/network/NetClientTurnManager.cpp
++++ b/source/network/NetClientTurnManager.cpp
+@@ -31,6 +31,9 @@
+ #include "ps/Pyrogenesis.h"
+ #include "ps/Replay.h"
+ #include "ps/Util.h"
++#include "scriptinterface/JSON.h"
++#include "scriptinterface/ScriptInterface.h"
++#include "scriptinterface/ScriptRequest.h"
+ #include "simulation2/Simulation2.h"
+ 
+ #include <cstddef>
+@@ -108,7 +111,33 @@ void CNetClientTurnManager::NotifyFinishedUpdate(u32 turn)
+ 
+ 	// After the hash is sent, so the feed never delays the sync check.
+ 	if (m_SpeculaFeed)
++	{
+ 		m_SpeculaFeed->OnTurn(m_Simulation2, turn);
++		PostSpeculaCommands();
++	}
++}
++
++void CNetClientTurnManager::AnswerSpeculaQueries()
++{
++	if (m_SpeculaFeed)
++		m_SpeculaFeed->AnswerQueries(m_Simulation2);
++}
++
++void CNetClientTurnManager::PostSpeculaCommands()
++{
++	const ScriptInterface& scriptInterface = m_Simulation2.GetScriptInterface();
++	ScriptRequest rq(scriptInterface);
++	for (const auto& [player, json] : m_SpeculaFeed->ReadCommands())
++	{
++		JS::RootedValue data(rq.cx);
++		if (!Script::ParseJSON(rq, json, &data) || !data.isObject())
++		{
++			LOGERROR("Specula feed: command for player %d is not a JSON object", player);
++			continue;
++		}
++		CSimulationMessage msg(scriptInterface, m_ClientId, player, m_CurrentTurn + m_CommandDelay, data);
++		m_NetClient.SendMessage(&msg);
++	}
+ }
+ 
+ void CNetClientTurnManager::OnDestroyConnection()
+diff --git a/source/network/NetClientTurnManager.h b/source/network/NetClientTurnManager.h
+index 85b831eb65..f085d49998 100644
+--- a/source/network/NetClientTurnManager.h
++++ b/source/network/NetClientTurnManager.h
+@@ -54,11 +54,24 @@ public:
+ 
+ 	void OnSyncError(u32 turn, const CStr& expectedHash, const std::vector<CSyncErrorMessage::S_m_PlayerNames>& playerNames);
+ 
++	/**
++	 * Specula: answers the feed's placement queries, every frame rather
++	 * than every turn, as the session GUI calls GuiInterface.
++	 */
++	void AnswerSpeculaQueries();
++
+ private:
+ 	void NotifyFinishedOwnCommands(u32 turn) override;
+ 
+ 	void NotifyFinishedUpdate(u32 turn) override;
+ 
++	/**
++	 * Specula: posts the commands the feed read, each as PostCommand would
++	 * but for its own player; the server accepts them only from the
++	 * controller and for a player no client holds.
++	 */
++	void PostSpeculaCommands();
++
+ 	CNetClient& m_NetClient;
+ 
+ 	std::unique_ptr<CSpeculaFeed> m_SpeculaFeed;
+diff --git a/source/network/NetServer.cpp b/source/network/NetServer.cpp
+index 98ed8f7631..e926ea1bae 100644
+--- a/source/network/NetServer.cpp
++++ b/source/network/NetServer.cpp
+@@ -1212,9 +1212,19 @@ bool CNetServerWorker::OnSimulationCommand(CNetServerSession* session, CFsmEvent
+ 		Script::GetProperty(rq, settings, "CheatsEnabled", cheatsEnabled);
+ 
+ 	PlayerAssignmentMap::iterator it = server.m_PlayerAssignments.find(session->GetGUID());
++	// Specula: the controller may also command a player no client holds,
++	// which is how the Specula play host drives its web players' slots
++	// (the rule ../0ad's AI routing gives the controller for AI slots).
++	const bool controllerForUnassigned = session->GetGUID() == server.m_ControllerGUID &&
++		message->m_Player > 0 &&
++		std::none_of(server.m_PlayerAssignments.begin(), server.m_PlayerAssignments.end(),
++			[&](const PlayerAssignmentMap::value_type& p) {
++				return p.second.m_Enabled && p.second.m_PlayerID == message->m_Player;
++			});
+ 	// When cheating is disabled, fail if the player the message claims to
+ 	// represent does not exist or does not match the sender's player name
+-	if (!cheatsEnabled && (it == server.m_PlayerAssignments.end() || it->second.m_PlayerID != message->m_Player))
++	if (!cheatsEnabled && !controllerForUnassigned &&
++		(it == server.m_PlayerAssignments.end() || it->second.m_PlayerID != message->m_Player))
+ 		return true;
+ 
+ 	// Send it back to all clients that have finished
+diff --git a/source/network/SpeculaFeed.cpp b/source/network/SpeculaFeed.cpp
+index 4575d70e5f..596ba12eb2 100644
+--- a/source/network/SpeculaFeed.cpp
++++ b/source/network/SpeculaFeed.cpp
+@@ -29,6 +29,7 @@
+ #include "maths/Vector2D.h"
+ #include "ps/CLogger.h"
+ #include "ps/CStr.h"
++#include "ps/ConfigDB.h"
+ #include "ps/Game.h"
+ #include "ps/World.h"
+ #include "ps/algorithm.h"
+@@ -43,6 +44,7 @@
+ #include "simulation2/components/ICmpIdentity.h"
+ #include "simulation2/components/ICmpMinimap.h"
+ #include "simulation2/components/ICmpMirage.h"
++#include "simulation2/components/ICmpObstruction.h"
+ #include "simulation2/components/ICmpObstructionManager.h"
+ #include "simulation2/components/ICmpOwnership.h"
+ #include "simulation2/components/ICmpPathfinder.h"
+@@ -65,6 +67,7 @@
+ #include "simulation2/system/SimContext.h"
+ 
+ #include <algorithm>
++#include <array>
+ #include <cerrno>
+ #include <cmath>
+ #include <cstring>
+@@ -74,6 +77,7 @@
+ #include <sys/socket.h>
+ #include <sys/un.h>
+ #include <unistd.h>
++#include <utility>
+ 
+ namespace
+ {
+@@ -99,6 +103,15 @@ constexpr u8 RECORD_TECHNOLOGY_DATA = 19;
+ constexpr u8 RECORD_STATS = 20;
+ constexpr u8 RECORD_PLAYER_GUI = 21;
+ constexpr u8 RECORD_FORMATION_DATA = 22;
++constexpr u8 RECORD_QUERY_REPLY = 23;
++constexpr u8 UPLINK_COMMAND = 1;
++constexpr u8 UPLINK_QUERY = 2;
++constexpr u8 QUERY_BUILDING_PREVIEW = 1;
++constexpr u8 QUERY_FOUNDATION_SNAP = 2;
++constexpr u8 QUERY_WALL_PREVIEW = 3;
++// Far above any command the GUI posts; a longer record means the stream is
++// out of step.
++constexpr u32 UPLINK_MAX_RECORD = 1 << 20;
+ constexpr u16 TEMPLATE_SELECTABLE = 1;
+ constexpr u16 TEMPLATE_EDITOR_ONLY = 2;
+ constexpr u16 TEMPLATE_OUTLINE = 4;
+@@ -667,6 +680,73 @@ std::vector<CVector2D> RallyPath(const CSimContext& context, CmpPtr<ICmpPosition
+ 	SimRender::InterpolatePointsRNS(coords, false, 0, 4);
+ 	return coords;
+ }
++
++std::string TemplateActor(CmpPtr<ICmpTemplateManager>& cmpTemplateManager, const std::string& templateName)
++{
++	const CParamNode* templateNode = cmpTemplateManager->GetTemplate(templateName);
++	return templateNode ? templateNode->GetChild("VisualActor").GetChild("Actor").ToString() : std::string();
++}
++
++// GetEdgesOfStaticObstructionsOnScreenNearTo, over every static obstruction
++// near the point, as there is no screen.
++JS::Value StaticEdgesNear(CSimulation2& simulation, const ScriptRequest& rq, entity_pos_t x, entity_pos_t z)
++{
++	JS::RootedValue edgeList(rq.cx);
++	Script::CreateArray(rq, &edgeList);
++	int edgeListIndex = 0;
++
++	const float distanceThreshold{g_ConfigDB.Get("gui.session.snaptoedgesdistancethreshold", 10.0f)};
++	const CFixedVector2D entityPos(x, z);
++	for (const std::pair<const entity_id_t, IComponent*>& entry : simulation.GetEntitiesWithInterfaceUnordered(IID_Obstruction))
++	{
++		const ICmpObstruction* cmpObstruction = static_cast<const ICmpObstruction*>(entry.second);
++		if (cmpObstruction->GetObstructionType() != ICmpObstruction::STATIC)
++			continue;
++
++		CmpPtr<ICmpPosition> cmpPosition(simulation, entry.first);
++		if (!cmpPosition || !cmpPosition->IsInWorld())
++			continue;
++
++		const CFixedVector2D halfSize = cmpObstruction->GetStaticSize() / 2;
++		if (halfSize.X.IsZero() || halfSize.Y.IsZero() || std::max(halfSize.X, halfSize.Y) <= fixed::FromInt(2))
++			continue;
++
++		std::array<CFixedVector2D, 4> corners = {
++			CFixedVector2D(-halfSize.X, -halfSize.Y),
++			CFixedVector2D(-halfSize.X, halfSize.Y),
++			halfSize,
++			CFixedVector2D(halfSize.X, -halfSize.Y)
++		};
++		const fixed angle = cmpPosition->GetRotation().Y;
++		for (CFixedVector2D& corner : corners)
++			corner = corner.Rotate(angle) + cmpPosition->GetPosition2D();
++
++		for (size_t i = 0; i < corners.size(); ++i)
++		{
++			JS::RootedValue edge(rq.cx);
++			const CFixedVector2D& corner = corners[i];
++			const CFixedVector2D& nextCorner = corners[(i + 1) % corners.size()];
++
++			const fixed distanceToEdge = Geometry::DistanceToSegment(entityPos, corner, nextCorner);
++			if (distanceToEdge.ToFloat() > distanceThreshold)
++				continue;
++
++			CFixedVector2D normal = -(nextCorner - corner).Perpendicular();
++			normal.Normalize();
++			Script::CreateObject(
++				rq,
++				&edge,
++				"begin", corner,
++				"end", nextCorner,
++				"angle", angle,
++				"normal", normal,
++				"order", "cw");
++
++			Script::SetPropertyInt(rq, edgeList, edgeListIndex++, edge);
++		}
++	}
++	return edgeList;
++}
+ } // anonymous namespace
+ 
+ CSpeculaFeed::CSpeculaFeed(const std::string& socketPath)
+@@ -2061,6 +2141,7 @@ void CSpeculaFeed::WriteTemplateData(CSimulation2& simulation, const ScriptReque
+ 		CallGui(simulation, key.second, L"GetTemplateData", arg, &data);
+ 		if (!data.isObject())
+ 			continue;
++		Script::SetProperty(rq, data, "actor", TemplateActor(cmpTemplateManager, key.first));
+ 		std::string json = Script::StringifyJSON(rq, &data, false);
+ 		if (sent != m_TemplateData.end() && sent->second == json)
+ 			continue;
+@@ -2346,6 +2427,16 @@ void CSpeculaFeed::WritePlayers(CSimulation2& simulation)
+ 		std::string battle;
+ 		payload.push_back(battleState.isString() && Script::FromJSVal(rq, battleState, battle) && battle == "BATTLE" ? BATTLE_BATTLE : BATTLE_PEACE);
+ 	}
++	// The end rather than the time left, so the record changes only when
++	// a ceasefire starts or ends.
++	bool ceasefireActive = false;
++	double ceasefireRemaining = 0;
++	double timeElapsed = 0;
++	Script::GetProperty(rq, simulationState, "ceasefireActive", ceasefireActive);
++	Script::GetProperty(rq, simulationState, "ceasefireTimeRemaining", ceasefireRemaining);
++	Script::GetProperty(rq, simulationState, "timeElapsed", timeElapsed);
++	PutU32(payload, ceasefireActive && ceasefireRemaining > 0 ?
++		static_cast<u32>(std::min(timeElapsed + ceasefireRemaining, 4294967295.0)) : 0);
+ 
+ 	if (payload == m_LastPlayers)
+ 		return;
+@@ -2470,6 +2561,143 @@ bool CSpeculaFeed::Send()
+ 	return true;
+ }
+ 
++std::vector<std::pair<player_id_t, std::string>> CSpeculaFeed::ReadCommands()
++{
++	ReadUplink();
++	return std::exchange(m_Commands, {});
++}
++
++void CSpeculaFeed::AnswerQueries(CSimulation2& simulation)
++{
++	ReadUplink();
++	if (m_Queries.empty())
++		return;
++
++	const ScriptInterface& scriptInterface = simulation.GetScriptInterface();
++	ScriptRequest rq(scriptInterface);
++	CmpPtr<ICmpTemplateManager> cmpTemplateManager(simulation, SYSTEM_ENTITY);
++	for (const SQuery& query : std::exchange(m_Queries, {}))
++	{
++		JS::RootedValue arg(rq.cx);
++		JS::RootedValue result(rq.cx);
++		if (!Script::ParseJSON(rq, query.json, &arg) || !arg.isObject())
++			LOGERROR("Specula feed: query %u is not a JSON object", query.id);
++		else if (query.method == QUERY_BUILDING_PREVIEW)
++			CallGui(simulation, query.player, L"SetBuildingPlacementPreview", arg, &result);
++		else if (query.method == QUERY_FOUNDATION_SNAP)
++		{
++			bool snapToEdges = false;
++			Script::GetProperty(rq, arg, "snapToEdges", snapToEdges);
++			if (snapToEdges)
++			{
++				float x = 0.0f;
++				float z = 0.0f;
++				Script::GetProperty(rq, arg, "x", x);
++				Script::GetProperty(rq, arg, "z", z);
++				JS::RootedValue edges(rq.cx, StaticEdgesNear(simulation, rq, entity_pos_t::FromFloat(x), entity_pos_t::FromFloat(z)));
++				Script::SetProperty(rq, arg, "snapToEdges", edges);
++			}
++			CallGui(simulation, query.player, L"GetFoundationSnapData", arg, &result);
++		}
++		else if (query.method == QUERY_WALL_PREVIEW)
++		{
++			std::string wallSetName;
++			Script::GetProperty(rq, arg, "wallSet", wallSetName);
++			JS::RootedValue dataArg(rq.cx);
++			JS::RootedValue data(rq.cx);
++			JS::RootedValue wallSet(rq.cx);
++			if (!wallSetName.empty())
++			{
++				Script::CreateObject(rq, &dataArg, "templateName", wallSetName, "player", query.player);
++				CallGui(simulation, query.player, L"GetTemplateData", dataArg, &data);
++			}
++			if (data.isObject())
++				Script::GetProperty(rq, data, "wallSet", &wallSet);
++			// SetWallPlacementPreview takes a missing wall set, as an empty
++			// name gives, as the end of the preview.
++			Script::SetProperty(rq, arg, "wallSet", wallSet);
++			CallGui(simulation, query.player, L"SetWallPlacementPreview", arg, &result);
++			JS::RootedValue pieces(rq.cx);
++			if (result.isObject() && cmpTemplateManager)
++				Script::GetProperty(rq, result, "pieces", &pieces);
++			for (u32 i = 0; i < ArrayLength(rq, pieces); ++i)
++			{
++				JS::RootedValue piece(rq.cx);
++				Script::GetPropertyInt(rq, pieces, static_cast<int>(i), &piece);
++				std::string pieceTemplate;
++				if (!piece.isObject() || !Script::GetProperty(rq, piece, "template", pieceTemplate))
++					continue;
++				Script::SetProperty(rq, piece, "actor", TemplateActor(cmpTemplateManager, pieceTemplate));
++			}
++		}
++
++		std::string json = result.isUndefined() ? std::string() : Script::StringifyJSON(rq, &result, false);
++		if (json.empty())
++			json = "null";
++		const size_t start = BeginRecord(m_Buffer, RECORD_QUERY_REPLY);
++		PutU32(m_Buffer, query.id);
++		m_Buffer.insert(m_Buffer.end(), json.begin(), json.end());
++		EndRecord(m_Buffer, start);
++	}
++	Send();
++}
++
++void CSpeculaFeed::ReadUplink()
++{
++	if (m_Socket < 0)
++		return;
++
++	u8 chunk[4096];
++	while (true)
++	{
++		const ssize_t result = recv(m_Socket, chunk, sizeof(chunk), MSG_DONTWAIT);
++		if (result < 0)
++		{
++			if (errno == EINTR)
++				continue;
++			if (errno != EAGAIN && errno != EWOULDBLOCK)
++			{
++				Disable("recv");
++				return;
++			}
++			break;
++		}
++		// 0 is the encoder's end; the next send notices it.
++		if (result == 0)
++			break;
++		m_Inbox.insert(m_Inbox.end(), chunk, chunk + result);
++	}
++
++	size_t at = 0;
++	while (m_Inbox.size() - at >= 5)
++	{
++		const u8 kind = m_Inbox[at];
++		u32 length;
++		std::memcpy(&length, m_Inbox.data() + at + 1, sizeof(length));
++		if (length > UPLINK_MAX_RECORD)
++		{
++			errno = EPROTO;
++			Disable("uplink");
++			return;
++		}
++		if (m_Inbox.size() - at - 5 < length)
++			break;
++		const u8* payload = m_Inbox.data() + at + 5;
++		if (kind == UPLINK_COMMAND && length >= 1)
++			m_Commands.emplace_back(static_cast<i8>(payload[0]),
++				std::string(reinterpret_cast<const char*>(payload + 1), length - 1));
++		else if (kind == UPLINK_QUERY && length >= 6)
++		{
++			u32 id;
++			std::memcpy(&id, payload, sizeof(id));
++			m_Queries.push_back({ id, static_cast<i8>(payload[4]), payload[5],
++				std::string(reinterpret_cast<const char*>(payload + 6), length - 6) });
++		}
++		at += 5 + length;
++	}
++	m_Inbox.erase(m_Inbox.begin(), m_Inbox.begin() + at);
++}
++
+ void CSpeculaFeed::Disable(const char* what)
+ {
+ 	LOGERROR("Specula feed: %s failed: %s, feed disabled", what, std::strerror(errno));
+@@ -2477,6 +2705,9 @@ void CSpeculaFeed::Disable(const char* what)
+ 		close(m_Socket);
+ 	m_Socket = -1;
+ 	m_Buffer.clear();
++	m_Inbox.clear();
++	m_Commands.clear();
++	m_Queries.clear();
+ 	m_Sounds.clear();
+ 	if (g_SoundFeed == this)
+ 		g_SoundFeed = nullptr;
+diff --git a/source/network/SpeculaFeed.h b/source/network/SpeculaFeed.h
+index cffae2bc5a..f9ac16cdc5 100644
+--- a/source/network/SpeculaFeed.h
++++ b/source/network/SpeculaFeed.h
+@@ -98,7 +98,8 @@ class ScriptRequest;
+  *    count n, n x {u16 name length, UTF-8 name, u8 r, u8 g, u8 b, i32 team
+  *    (-1: none), u8 state (0 active, 1 defeated, 2 won), n x u8 stance
+  *    towards player j (0 enemy, 1 ally, 2 neutral), u16 civ length, UTF-8
+- *    civ code, u8 battle state (0 peace, 1 battle)}. Index 0 is gaia.
++ *    civ code, u8 battle state (0 peace, 1 battle)}, then u32 ceasefire end
++ *    in simulation milliseconds (0: no ceasefire). Index 0 is gaia.
+  *  - kind 8 territory, before the turn record, whenever it changes: u32
+  *    width, u32 height, width*height x u8 territory tile, row-major, x
+  *    fastest, as ICmpTerritoryManager's grid without the processed bit:
+@@ -245,7 +246,9 @@ class ScriptRequest;
+  *  - kind 18 template data, on a turn that samples the production lists:
+  *    u32 template name string, i32 player, then the rest of the record as
+  *    UTF-8 JSON of GuiInterface.GetTemplateData for that player (the
+- *    technology-modified values the tooltips show). Sent for the template
++ *    technology-modified values the tooltips show), plus "actor", the
++ *    template's VisualActor/Actor, which a placement preview draws. Sent
++ *    for the template
+  *    of every entity of a kind 12 record and every trainable and buildable
+  *    item, for its owner, the first time, and again when
+  *    GuiInterface.IsTemplateModified holds for the player and the JSON
+@@ -272,6 +275,9 @@ class ScriptRequest;
+  *    u32 template string, then UTF-8 JSON {name, tooltip, disabledTooltip,
+  *    icon, minCount}: GuiInterface.GetFormationInfoFromTemplate and the
+  *    template's RequiredMemberCount, which CanMoveEntsIntoFormation tests.
++ *  - kind 23 query reply, between turns, for each uplink query: u32 id,
++ *    then UTF-8 JSON of the GuiInterface call's result ("null" for none);
++ *    each piece of a SetWallPlacementPreview result has "actor" added.
+  */
+ class CSpeculaFeed
+ {
+@@ -282,6 +288,31 @@ public:
+ 
+ 	void OnTurn(CSimulation2& simulation, u32 turn);
+ 
++	/**
++	 * The commands the encoder has written back over the socket since the
++	 * last call, without waiting: the player each is for and its JSON.
++	 * Uplink format, little-endian records of u8 kind, u32 payload length,
++	 * payload:
++	 *  - kind 1 command: i8 player, then UTF-8 JSON of a simulation
++	 *    command as the session GUI posts it.
++	 *  - kind 2 query: u32 id, i8 player, u8 method, then UTF-8 JSON of
++	 *    the argument of a GuiInterface call the session GUI makes while
++	 *    placing a structure: method 1 SetBuildingPlacementPreview, 2
++	 *    GetFoundationSnapData (snapToEdges true asks for the edges near
++	 *    the point, which the feed finds, as there is no screen), 3
++	 *    SetWallPlacementPreview (wallSet the wallset's template name).
++	 *    Answered by a kind 23 record.
++	 * Unknown kinds are skipped.
++	 */
++	std::vector<std::pair<player_id_t, std::string>> ReadCommands();
++
++	/**
++	 * Answers the queries read so far at once, between turns, as the
++	 * session GUI calls GuiInterface between turns: the previews are local
++	 * entities, which the feed leaves out.
++	 */
++	void AnswerQueries(CSimulation2& simulation);
++
+ 	/**
+ 	 * Called by CMapReader while loading, which happens before the feed
+ 	 * exists; the textures are kept until the terrain record is written.
+@@ -427,10 +458,25 @@ private:
+ 	const std::vector<u8>& RallyGroup(CSimulation2& simulation, entity_id_t ent, const std::vector<CFixedVector2D>& points, std::unordered_map<entity_id_t, SRallyGroup>& current);
+ 	bool Send();
+ 	void Disable(const char* what);
++	// Moves the whole uplink records received so far to m_Commands and
++	// m_Queries.
++	void ReadUplink();
++
++	struct SQuery
++	{
++		u32 id;
++		player_id_t player;
++		u8 method;
++		std::string json;
++	};
+ 
+ 	int m_Socket = -1;
+ 	bool m_MapSent = false;
+ 	std::vector<u8> m_Buffer;
++	// Uplink bytes read but not yet a whole record.
++	std::vector<u8> m_Inbox;
++	std::vector<std::pair<player_id_t, std::string>> m_Commands;
++	std::vector<SQuery> m_Queries;
+ 	std::unordered_map<std::string, u32> m_TemplateIndices;
+ 	std::unordered_map<std::string, u32> m_StringIndices;
+ 	std::map<std::vector<std::pair<u32, u32>>, u32> m_VariantSetIndices;

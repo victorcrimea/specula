@@ -1,0 +1,567 @@
+From f145b29584b342363daa6531ce653e4b7ef4514c Mon Sep 17 00:00:00 2001
+From: Viktor Semenov <suit.uanic@gmail.com>
+Date: Wed, 30 Sep 2026 22:56:00 +0000
+Subject: [PATCH 01/45] Add the Specula observer feed hook
+
+With specula.feed set to a Unix socket path, a network client streams a
+per-turn view of the simulation to specula-server (feed format v3, see
+SpeculaFeed.h). The hook runs after the turn hash is sent and only reads
+the simulation, so it cannot change the state hash.
+
+Each turn carries every in-world entity's id, template, position,
+angle, owner and minimap colour. Template records name each template
+and give its minimap icon. The map size and the terrain (heights, water
+level, per-tile texture names) are sent once; CMapReader keeps the
+texture names even without a texture manager, which a nonvisual
+observer never creates.
+---
+ source/graphics/MapReader.cpp           |  14 ++
+ source/graphics/MapReader.h             |   3 +
+ source/network/NetClientTurnManager.cpp |  12 +
+ source/network/NetClientTurnManager.h   |   5 +
+ source/network/SpeculaFeed.cpp          | 313 ++++++++++++++++++++++++
+ source/network/SpeculaFeed.h            |  76 ++++++
+ 6 files changed, 423 insertions(+)
+ create mode 100644 source/network/SpeculaFeed.cpp
+ create mode 100644 source/network/SpeculaFeed.h
+
+diff --git a/source/graphics/MapReader.cpp b/source/graphics/MapReader.cpp
+index 1e90badc7a..375786949e 100644
+--- a/source/graphics/MapReader.cpp
++++ b/source/graphics/MapReader.cpp
+@@ -42,6 +42,7 @@
+ #include "maths/MathUtil.h"
+ #include "maths/Matrix3D.h"
+ #include "maths/NUSpline.h"
++#include "network/SpeculaFeed.h"
+ #include "ps/CLogger.h"
+ #include "ps/Filesystem.h"
+ #include "ps/Future.h"
+@@ -332,6 +333,7 @@ int CMapReader::UnpackTerrain()
+ 	{
+ 		CStr texturename;
+ 		unpacker.UnpackString(texturename);
++		m_TerrainTextureNames.push_back(texturename);
+ 
+ 		if (CTerrainTextureManager::IsInitialised())
+ 		{
+@@ -367,6 +369,17 @@ int CMapReader::ApplyTerrainData()
+ 		// initialise the terrain
+ 		pTerrain->Initialize(m_PatchesPerSide, &m_Heightmap[0]);
+ 
++		// Specula: m_Tiles is in patch order; the feed wants row-major tiles.
++		const ssize_t tilesPerSide = m_PatchesPerSide * PATCH_SIZE;
++		std::vector<u16> tileTextures(SQR(tilesPerSide));
++		const STileDesc* tile = m_Tiles.data();
++		for (ssize_t j = 0; j < m_PatchesPerSide; ++j)
++			for (ssize_t i = 0; i < m_PatchesPerSide; ++i)
++				for (ssize_t m = 0; m < PATCH_SIZE; ++m)
++					for (ssize_t k = 0; k < PATCH_SIZE; ++k)
++						tileTextures[(j * PATCH_SIZE + m) * tilesPerSide + i * PATCH_SIZE + k] = (tile++)->m_Tex1Index;
++		CSpeculaFeed::SetTerrainTextures(m_TerrainTextureNames, std::move(tileTextures));
++
+ 		if (CTerrainTextureManager::IsInitialised())
+ 		{
+ 			// setup the textures on the minipatches
+@@ -1470,6 +1483,7 @@ if (!Script::GetProperty(rq, val, #prop, out))\
+ 
+ 	while (cur_terrain_tex < num_terrain_tex)
+ 	{
++		m_TerrainTextureNames.push_back(textureNames[cur_terrain_tex]);
+ 		if (CTerrainTextureManager::IsInitialised())
+ 		{
+ 			CTerrainTextureEntry* texentry = g_TexMan.FindTexture(textureNames[cur_terrain_tex]);
+diff --git a/source/graphics/MapReader.h b/source/graphics/MapReader.h
+index 588220e7d0..ab91ddd99c 100644
+--- a/source/graphics/MapReader.h
++++ b/source/graphics/MapReader.h
+@@ -119,6 +119,9 @@ private:
+ 	std::vector<u16> m_Heightmap;
+ 	// list of terrain textures used by map
+ 	std::vector<CTerrainTextureEntry*> m_TerrainTextures;
++	// Specula: kept even without a texture manager, which a nonvisual
++	// observer never creates, so the feed can still name each tile's texture.
++	std::vector<std::string> m_TerrainTextureNames;
+ 	// tile descriptions for each tile
+ 	std::vector<STileDesc> m_Tiles;
+ 	// lightenv stored in file
+diff --git a/source/network/NetClientTurnManager.cpp b/source/network/NetClientTurnManager.cpp
+index 9c5cf20a36..d7ae28ff5b 100644
+--- a/source/network/NetClientTurnManager.cpp
++++ b/source/network/NetClientTurnManager.cpp
+@@ -19,12 +19,14 @@
+ 
+ #include "NetClient.h"
+ #include "NetClientTurnManager.h"
++#include "SpeculaFeed.h"
+ #include "lib/debug.h"
+ #include "lib/os_path.h"
+ #include "lib/path.h"
+ #include "lib/utf8.h"
+ #include "network/NetMessage.h"
+ #include "ps/CLogger.h"
++#include "ps/ConfigDB.h"
+ #include "ps/Profile.h"
+ #include "ps/Pyrogenesis.h"
+ #include "ps/Replay.h"
+@@ -48,8 +50,14 @@ extern CStrW g_UniqueLogPostfix;
+ CNetClientTurnManager::CNetClientTurnManager(CSimulation2& simulation, CNetClient& client, int clientId, IReplayLogger& replay)
+ 	: CTurnManager(simulation, DEFAULT_TURN_LENGTH, COMMAND_DELAY_MP, clientId, replay), m_NetClient(client)
+ {
++	const std::string speculaFeed{g_ConfigDB.Get("specula.feed", std::string{})};
++	if (!speculaFeed.empty())
++		m_SpeculaFeed = std::make_unique<CSpeculaFeed>(speculaFeed);
+ }
+ 
++// Out of line, so that the header needs only a forward declaration of CSpeculaFeed.
++CNetClientTurnManager::~CNetClientTurnManager() = default;
++
+ void CNetClientTurnManager::PostCommand(JS::HandleValue data)
+ {
+ 	NETCLIENTTURN_LOG("PostCommand()\n");
+@@ -97,6 +105,10 @@ void CNetClientTurnManager::NotifyFinishedUpdate(u32 turn)
+ 	msg.m_Turn = turn;
+ 	msg.m_Hash = hash;
+ 	m_NetClient.SendMessage(&msg);
++
++	// After the hash is sent, so the feed never delays the sync check.
++	if (m_SpeculaFeed)
++		m_SpeculaFeed->OnTurn(m_Simulation2, turn);
+ }
+ 
+ void CNetClientTurnManager::OnDestroyConnection()
+diff --git a/source/network/NetClientTurnManager.h b/source/network/NetClientTurnManager.h
+index 03cb4956c6..85b831eb65 100644
+--- a/source/network/NetClientTurnManager.h
++++ b/source/network/NetClientTurnManager.h
+@@ -25,10 +25,12 @@
+ #include "simulation2/system/TurnManager.h"
+ 
+ #include <js/TypeDecls.h>
++#include <memory>
+ #include <vector>
+ 
+ class CNetClient;
+ class CSimulation2;
++class CSpeculaFeed;
+ class IReplayLogger;
+ 
+ /**
+@@ -39,6 +41,7 @@ class CNetClientTurnManager : public CTurnManager
+ 	NONCOPYABLE(CNetClientTurnManager);
+ public:
+ 	CNetClientTurnManager(CSimulation2& simulation, CNetClient& client, int clientId, IReplayLogger& replay);
++	~CNetClientTurnManager();
+ 
+ 	void OnSimulationMessage(CSimulationMessage* msg) override;
+ 
+@@ -57,6 +60,8 @@ private:
+ 	void NotifyFinishedUpdate(u32 turn) override;
+ 
+ 	CNetClient& m_NetClient;
++
++	std::unique_ptr<CSpeculaFeed> m_SpeculaFeed;
+ };
+ 
+ #endif // INCLUDED_NETCLIENTTURNMANAGER
+diff --git a/source/network/SpeculaFeed.cpp b/source/network/SpeculaFeed.cpp
+new file mode 100644
+index 0000000000..5e07aab313
+--- /dev/null
++++ b/source/network/SpeculaFeed.cpp
+@@ -0,0 +1,313 @@
++/* Copyright (C) 2026 Wildfire Games.
++ * This file is part of 0 A.D.
++ *
++ * 0 A.D. is free software: you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation, either version 2 of the License, or
++ * (at your option) any later version.
++ *
++ * 0 A.D. is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with 0 A.D.  If not, see <http://www.gnu.org/licenses/>.
++ */
++
++#include "precompiled.h"
++
++#include "SpeculaFeed.h"
++
++#include "graphics/MiniMapTexture.h"
++#include "graphics/Terrain.h"
++#include "ps/CLogger.h"
++#include "simulation2/Simulation2.h"
++#include "simulation2/components/ICmpMinimap.h"
++#include "simulation2/components/ICmpOwnership.h"
++#include "simulation2/components/ICmpPosition.h"
++#include "simulation2/components/ICmpRangeManager.h"
++#include "simulation2/components/ICmpTemplateManager.h"
++#include "simulation2/components/ICmpTerrain.h"
++#include "simulation2/components/ICmpWaterManager.h"
++#include "simulation2/system/CmpPtr.h"
++#include "simulation2/system/Entity.h"
++
++#include <cerrno>
++#include <cstring>
++#include <sys/socket.h>
++#include <sys/un.h>
++#include <unistd.h>
++
++namespace
++{
++constexpr u32 FEED_VERSION = 3;
++constexpr u8 RECORD_TEMPLATE = 1;
++constexpr u8 RECORD_TURN = 2;
++constexpr u8 RECORD_MAP = 3;
++constexpr u8 RECORD_TERRAIN = 4;
++constexpr u8 COLOR_MINIMAP = 1;
++constexpr u16 NO_TEXTURE = 0xFFFF;
++// CCmpMinimap prepends this to the template's icon file name.
++const std::string ICON_DIRECTORY = "art/textures/ui/session/icons/minimap/";
++
++std::vector<std::string> g_TerrainTextureNames;
++std::vector<u16> g_TerrainTextureTiles;
++
++struct SEntity
++{
++	u32 id;
++	u32 templateIndex;
++	i32 x;
++	i32 z;
++	i32 angle;
++	i32 owner;
++	u8 r;
++	u8 g;
++	u8 b;
++	u8 colorFlags;
++};
++
++void PutU16(std::vector<u8>& buffer, u16 value)
++{
++	buffer.push_back(static_cast<u8>(value));
++	buffer.push_back(static_cast<u8>(value >> 8));
++}
++
++void PutU32(std::vector<u8>& buffer, u32 value)
++{
++	for (int i = 0; i < 4; ++i)
++		buffer.push_back(static_cast<u8>(value >> (8 * i)));
++}
++
++void PutI32(std::vector<u8>& buffer, i32 value)
++{
++	PutU32(buffer, static_cast<u32>(value));
++}
++
++// Returns where the payload starts, for EndRecord to backfill its length.
++size_t BeginRecord(std::vector<u8>& buffer, u8 kind)
++{
++	buffer.push_back(kind);
++	PutU32(buffer, 0);
++	return buffer.size();
++}
++
++void EndRecord(std::vector<u8>& buffer, size_t payloadStart)
++{
++	const u32 length = static_cast<u32>(buffer.size() - payloadStart);
++	for (int i = 0; i < 4; ++i)
++		buffer[payloadStart - 4 + i] = static_cast<u8>(length >> (8 * i));
++}
++} // anonymous namespace
++
++CSpeculaFeed::CSpeculaFeed(const std::string& socketPath)
++{
++	sockaddr_un address{};
++	address.sun_family = AF_UNIX;
++	if (socketPath.size() >= sizeof(address.sun_path))
++	{
++		LOGERROR("Specula feed: socket path too long: %s", socketPath.c_str());
++		return;
++	}
++	std::memcpy(address.sun_path, socketPath.c_str(), socketPath.size());
++
++	m_Socket = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
++	if (m_Socket < 0)
++	{
++		Disable("socket");
++		return;
++	}
++	if (connect(m_Socket, reinterpret_cast<const sockaddr*>(&address), sizeof(address)) != 0)
++	{
++		Disable("connect");
++		return;
++	}
++
++	m_Buffer.insert(m_Buffer.end(), { 'S', 'P', 'C', 'F' });
++	PutU32(m_Buffer, FEED_VERSION);
++	Send();
++}
++
++CSpeculaFeed::~CSpeculaFeed()
++{
++	if (m_Socket >= 0)
++		close(m_Socket);
++}
++
++void CSpeculaFeed::OnTurn(CSimulation2& simulation, u32 turn)
++{
++	if (m_Socket < 0)
++		return;
++
++	CmpPtr<ICmpTemplateManager> cmpTemplateManager(simulation, SYSTEM_ENTITY);
++	if (!cmpTemplateManager)
++		return;
++
++	if (!m_MapSent)
++	{
++		CmpPtr<ICmpTerrain> cmpTerrain(simulation, SYSTEM_ENTITY);
++		if (!cmpTerrain)
++			return;
++		const size_t start = BeginRecord(m_Buffer, RECORD_MAP);
++		PutU32(m_Buffer, cmpTerrain->GetMapSize());
++		EndRecord(m_Buffer, start);
++		WriteTerrain(simulation);
++		m_MapSent = true;
++	}
++
++	// Template records must precede the turn record that first uses them,
++	// so the entities are collected before the turn record is written.
++	std::vector<SEntity> entities;
++	for (const std::pair<entity_id_t, IComponent*>& pair : simulation.GetEntitiesWithInterface(IID_Position))
++	{
++		const entity_id_t ent = pair.first;
++		if (ENTITY_IS_LOCAL(ent))
++			continue;
++
++		const ICmpPosition* cmpPosition = static_cast<const ICmpPosition*>(pair.second);
++		if (!cmpPosition->IsInWorld())
++			continue;
++
++		const std::string templateName = cmpTemplateManager->GetCurrentTemplateName(ent);
++		const auto [it, inserted] = m_TemplateIndices.try_emplace(templateName,
++			static_cast<u32>(m_TemplateIndices.size()));
++		if (inserted)
++		{
++			const size_t start = BeginRecord(m_Buffer, RECORD_TEMPLATE);
++			PutU32(m_Buffer, it->second);
++			PutU16(m_Buffer, static_cast<u16>(templateName.size()));
++			m_Buffer.insert(m_Buffer.end(), templateName.begin(), templateName.end());
++			// The icon comes from the template, so every entity of it shares
++			// the first one's.
++			CmpPtr<ICmpMinimap> cmpMinimap(simulation, ent);
++			const bool hasIcon = cmpMinimap && cmpMinimap->HasIcon();
++			const float iconSize = hasIcon ? cmpMinimap->GetIconSize() : 0.0f;
++			u32 iconSizeBits;
++			std::memcpy(&iconSizeBits, &iconSize, sizeof(iconSizeBits));
++			PutU32(m_Buffer, iconSizeBits);
++			if (hasIcon)
++			{
++				std::string icon = cmpMinimap->GetIconPath();
++				if (icon.compare(0, ICON_DIRECTORY.size(), ICON_DIRECTORY) == 0)
++					icon.erase(0, ICON_DIRECTORY.size());
++				m_Buffer.insert(m_Buffer.end(), icon.begin(), icon.end());
++			}
++			EndRecord(m_Buffer, start);
++		}
++
++		CmpPtr<ICmpOwnership> cmpOwnership(simulation, ent);
++		const CFixedVector2D position = cmpPosition->GetPosition2D();
++		SEntity entity{
++			ent,
++			it->second,
++			position.X.GetInternalValue(),
++			position.Y.GetInternalValue(),
++			cmpPosition->GetRotation().Y.GetInternalValue(),
++			cmpOwnership ? cmpOwnership->GetOwner() : INVALID_PLAYER,
++			0, 0, 0, 0
++		};
++		// The minimap colour already resolves owner to player colour and
++		// gives resources their template colour, as the 2D view needs.
++		CmpPtr<ICmpMinimap> cmpMinimap(simulation, ent);
++		entity_pos_t minimapX, minimapZ;
++		if (cmpMinimap && cmpMinimap->GetRenderData(entity.r, entity.g, entity.b, minimapX, minimapZ))
++			entity.colorFlags = COLOR_MINIMAP;
++		entities.push_back(entity);
++	}
++
++	const size_t start = BeginRecord(m_Buffer, RECORD_TURN);
++	PutU32(m_Buffer, turn);
++	PutU32(m_Buffer, static_cast<u32>(entities.size()));
++	for (const SEntity& entity : entities)
++	{
++		PutU32(m_Buffer, entity.id);
++		PutU32(m_Buffer, entity.templateIndex);
++		PutI32(m_Buffer, entity.x);
++		PutI32(m_Buffer, entity.z);
++		PutI32(m_Buffer, entity.angle);
++		PutI32(m_Buffer, entity.owner);
++		m_Buffer.insert(m_Buffer.end(), { entity.r, entity.g, entity.b, entity.colorFlags });
++	}
++	EndRecord(m_Buffer, start);
++
++	Send();
++}
++
++void CSpeculaFeed::SetTerrainTextures(const std::vector<std::string>& names, std::vector<u16> tiles)
++{
++	g_TerrainTextureNames = names;
++	g_TerrainTextureTiles = std::move(tiles);
++}
++
++// Terrain and water level are written once: they only change through
++// trigger scripts, which the view does not follow yet.
++void CSpeculaFeed::WriteTerrain(CSimulation2& simulation)
++{
++	CmpPtr<ICmpTerrain> cmpTerrain(simulation, SYSTEM_ENTITY);
++	const CTerrain* terrain = cmpTerrain ? cmpTerrain->GetCTerrain() : nullptr;
++	if (!terrain)
++		return;
++	CmpPtr<ICmpWaterManager> cmpWaterManager(simulation, SYSTEM_ENTITY);
++	CmpPtr<ICmpRangeManager> cmpRangeManager(simulation, SYSTEM_ENTITY);
++
++	const size_t tilesPerSide = static_cast<size_t>(terrain->GetTilesPerSide());
++	const size_t verticesPerSide = static_cast<size_t>(terrain->GetVerticesPerSide());
++	// A map whose tiles were never captured still gets its relief, like the
++	// minimap draws a tile without a texture.
++	const bool haveTextures = g_TerrainTextureTiles.size() == tilesPerSide * tilesPerSide;
++
++	const size_t start = BeginRecord(m_Buffer, RECORD_TERRAIN);
++	PutU32(m_Buffer, static_cast<u32>(tilesPerSide));
++	PutI32(m_Buffer, cmpWaterManager ? cmpWaterManager->GetWaterLevel(entity_pos_t::Zero(), entity_pos_t::Zero()).GetInternalValue() : 0);
++	const float shallowDepth = CMiniMapTexture::GetShallowPassageHeight();
++	u32 shallowBits;
++	std::memcpy(&shallowBits, &shallowDepth, sizeof(shallowBits));
++	PutU32(m_Buffer, shallowBits);
++	m_Buffer.push_back(cmpRangeManager && cmpRangeManager->GetLosCircular() ? 1 : 0);
++
++	const u16* heights = terrain->GetHeightMap();
++	for (size_t i = 0; i < verticesPerSide * verticesPerSide; ++i)
++		PutU16(m_Buffer, heights[i]);
++
++	PutU32(m_Buffer, haveTextures ? static_cast<u32>(g_TerrainTextureNames.size()) : 0);
++	if (haveTextures)
++		for (const std::string& name : g_TerrainTextureNames)
++		{
++			PutU16(m_Buffer, static_cast<u16>(name.size()));
++			m_Buffer.insert(m_Buffer.end(), name.begin(), name.end());
++		}
++	for (size_t i = 0; i < tilesPerSide * tilesPerSide; ++i)
++		PutU16(m_Buffer, haveTextures ? g_TerrainTextureTiles[i] : NO_TEXTURE);
++	EndRecord(m_Buffer, start);
++}
++
++bool CSpeculaFeed::Send()
++{
++	size_t sent = 0;
++	while (sent < m_Buffer.size())
++	{
++		// MSG_NOSIGNAL: a vanished encoder must not kill the observer with
++		// SIGPIPE, the feed just stops.
++		const ssize_t result = send(m_Socket, m_Buffer.data() + sent, m_Buffer.size() - sent, MSG_NOSIGNAL);
++		if (result < 0)
++		{
++			if (errno == EINTR)
++				continue;
++			Disable("send");
++			return false;
++		}
++		sent += static_cast<size_t>(result);
++	}
++	m_Buffer.clear();
++	return true;
++}
++
++void CSpeculaFeed::Disable(const char* what)
++{
++	LOGERROR("Specula feed: %s failed: %s, feed disabled", what, std::strerror(errno));
++	if (m_Socket >= 0)
++		close(m_Socket);
++	m_Socket = -1;
++	m_Buffer.clear();
++}
+diff --git a/source/network/SpeculaFeed.h b/source/network/SpeculaFeed.h
+new file mode 100644
+index 0000000000..f73a48acf2
+--- /dev/null
++++ b/source/network/SpeculaFeed.h
+@@ -0,0 +1,76 @@
++/* Copyright (C) 2026 Wildfire Games.
++ * This file is part of 0 A.D.
++ *
++ * 0 A.D. is free software: you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation, either version 2 of the License, or
++ * (at your option) any later version.
++ *
++ * 0 A.D. is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with 0 A.D.  If not, see <http://www.gnu.org/licenses/>.
++ */
++
++#ifndef INCLUDED_SPECULAFEED
++#define INCLUDED_SPECULAFEED
++
++#include "lib/code_annotation.h"
++#include "lib/types.h"
++
++#include <string>
++#include <unordered_map>
++#include <vector>
++
++class CSimulation2;
++
++/**
++ * Streams a per-turn entity snapshot to the Specula encoder over a Unix
++ * socket. It only reads the simulation, after each turn, so it cannot
++ * change the state hash.
++ *
++ * Feed format v3, little-endian: "SPCF", u32 version, then records of
++ * u8 kind, u32 payload length, payload.
++ *  - kind 1 template: u32 index, u16 name length, UTF-8 name, f32 minimap
++ *    icon size, then the icon file name relative to
++ *    art/textures/ui/session/icons/minimap/ (empty: no icon).
++ *  - kind 2 turn: u32 turn, u32 count, count x {u32 id, u32 template,
++ *    i32 x, i32 z, i32 angle, i32 owner, u8 r, u8 g, u8 b, u8 flags},
++ *    x/z/angle as raw 16.16 fixed. Flag 1: r/g/b is the minimap colour.
++ *  - kind 3 map: u32 map size in metres, once before the first turn.
++ *  - kind 4 terrain, right after the map record: u32 tiles per side n,
++ *    i32 water level (raw 16.16), f32 shallow water depth in metres,
++ *    u8 circular, (n+1)^2 x u16 heights, u32 texture count, count x
++ *    {u16 length, UTF-8 name}, n^2 x u16 texture index (0xFFFF: none).
++ *    Heights and tiles are row-major, x fastest.
++ */
++class CSpeculaFeed
++{
++	NONCOPYABLE(CSpeculaFeed);
++public:
++	CSpeculaFeed(const std::string& socketPath);
++	~CSpeculaFeed();
++
++	void OnTurn(CSimulation2& simulation, u32 turn);
++
++	/**
++	 * Called by CMapReader while loading, which happens before the feed
++	 * exists; the textures are kept until the terrain record is written.
++	 */
++	static void SetTerrainTextures(const std::vector<std::string>& names, std::vector<u16> tiles);
++
++private:
++	void WriteTerrain(CSimulation2& simulation);
++	bool Send();
++	void Disable(const char* what);
++
++	int m_Socket = -1;
++	bool m_MapSent = false;
++	std::vector<u8> m_Buffer;
++	std::unordered_map<std::string, u32> m_TemplateIndices;
++};
++
++#endif // INCLUDED_SPECULAFEED

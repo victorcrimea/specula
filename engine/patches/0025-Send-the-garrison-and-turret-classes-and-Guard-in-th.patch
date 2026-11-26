@@ -1,0 +1,82 @@
+From 02b8079bd69ff6950e6cc86211937cd396ccf02f Mon Sep 17 00:00:00 2001
+From: Viktor Semenov <suit.uanic@gmail.com>
+Date: Tue, 10 Nov 2026 13:40:11 +0000
+Subject: [PATCH 25/45] Send the garrison and turret classes and Guard in the
+ Specula template details
+
+Kind 11 now ends with GarrisonHolder's List and the TurretHolder points'
+AllowedClasses (";" between points, empty for a point open to all), and
+the component mask adds Guard as bit 27, so the web client can pick the
+garrison, occupy-turret and guard actions as unit_actions.js does. An
+older hook ends before them; the feed stays v14.
+---
+ source/network/SpeculaFeed.cpp | 16 +++++++++++++++-
+ source/network/SpeculaFeed.h   |  7 +++++--
+ 2 files changed, 20 insertions(+), 3 deletions(-)
+
+diff --git a/source/network/SpeculaFeed.cpp b/source/network/SpeculaFeed.cpp
+index ea536dbf70..351cbbaa19 100644
+--- a/source/network/SpeculaFeed.cpp
++++ b/source/network/SpeculaFeed.cpp
+@@ -182,7 +182,7 @@ const char* const DETAIL_INTERFACES[] = {
+ 	"Promotion", "ResourceGatherer", "Foundation", "Repairable", "UnitAI", "Trainer",
+ 	"Researcher", "Pack", "Upgrade", "Trader", "Garrisonable", "Turretable", "Attack", "Auras",
+ 	"Heal", "RallyPoint", "Builder", "Gate", "AlertRaiser", "ResourceDropsite", "TurretHolder",
+-	"Market"
++	"Market", "Guard"
+ };
+ // Indices of DETAIL_INTERFACES that are read together.
+ constexpr size_t INTERFACE_PACK = 12;
+@@ -1409,6 +1409,18 @@ void CSpeculaFeed::WriteTemplateDetails(CSimulation2& simulation, u32 index, con
+ 		if (group.first.rfind("order_", 0) == 0 || group.first == "focus_fire" || group.first == "invalid_building_placement")
+ 			orderSounds += (orderSounds.empty() ? "" : " ") + group.first + "=" + group.second.ToString();
+ 	const u32 orderSoundsString = InternString(orderSounds);
++	// What the garrison and occupy-turret actions match the units' classes
++	// against: the List and each turret point's AllowedClasses, ";" between
++	// points, a point without any (open to all) left empty.
++	const u32 garrisonClasses = InternString(templateNode->GetChild("GarrisonHolder").GetChild("List").ToString());
++	std::string turretClasses;
++	bool firstPoint = true;
++	for (const std::pair<const std::string, CParamNode>& point : templateNode->GetChild("TurretHolder").GetChild("TurretPoints").GetChildren())
++	{
++		turretClasses += (firstPoint ? "" : ";") + point.second.GetChild("AllowedClasses").ToString();
++		firstPoint = false;
++	}
++	const u32 turretClassesString = InternString(turretClasses);
+ 	// StrToLineCapType warns about anything but a cap name.
+ 	const auto lineCap = [&](const char* name) -> u8 {
+ 		const CParamNode& cap = rallyRenderer.GetChild(name);
+@@ -1507,6 +1519,8 @@ void CSpeculaFeed::WriteTemplateDetails(CSimulation2& simulation, u32 index, con
+ 	for (const u32 string : { supplyType, gatherRatesString, dropsiteTypes, attackTypesString })
+ 		PutU32(m_Buffer, string);
+ 	PutU32(m_Buffer, orderSoundsString);
++	PutU32(m_Buffer, garrisonClasses);
++	PutU32(m_Buffer, turretClassesString);
+ 	EndRecord(m_Buffer, start);
+ }
+ 
+diff --git a/source/network/SpeculaFeed.h b/source/network/SpeculaFeed.h
+index 75262e0d82..6cfe17d70e 100644
+--- a/source/network/SpeculaFeed.h
++++ b/source/network/SpeculaFeed.h
+@@ -151,7 +151,10 @@ class ScriptRequest;
+  *    by; an older hook ends before them), u32 order sound groups, space
+  *    separated "name=path" tokens of the Sound groups gui/session plays
+  *    on an order: order_*, focus_fire and invalid_building_placement (an
+- *    older hook ends before it). Strings are
++ *    older hook ends before it), u32 GarrisonHolder List and u32
++ *    TurretHolder points' AllowedClasses, ";" between points, empty for a
++ *    point open to all (what the garrison and occupy-turret actions match;
++ *    an older hook ends before them). Strings are
+  *    string records (none when absent), read from the template as is: the
+  *    textures relative to art/textures/selection/, the icon to
+  *    art/textures/ui/session/portraits/, the sound group to audio/, the
+@@ -168,7 +171,7 @@ class ScriptRequest;
+  *    GarrisonHolder, Promotion, ResourceGatherer, Foundation, Repairable,
+  *    UnitAI, Trainer, Researcher, Pack, Upgrade, Trader, Garrisonable,
+  *    Turretable, Attack, Auras, Heal, RallyPoint, Builder, Gate, AlertRaiser,
+- *    ResourceDropsite, TurretHolder, Market, from bit 0 up.
++ *    ResourceDropsite, TurretHolder, Market, Guard, from bit 0 up.
+  *  - kind 12 entity details, before the turn record: u32 count, count x
+  *    {u32 id, u32 mask, then for each bit set, in this order: 1 f32
+  *    hitpoints, f32 max hitpoints; 2 u8 n, n x f32 capture points by

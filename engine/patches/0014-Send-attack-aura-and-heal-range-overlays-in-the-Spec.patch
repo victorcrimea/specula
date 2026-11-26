@@ -1,0 +1,118 @@
+From 04612a84d49a829151e842fa22e9f334825513d5 Mon Sep 17 00:00:00 2001
+From: Viktor Semenov <suit.uanic@gmail.com>
+Date: Tue, 20 Oct 2026 13:55:05 +0000
+Subject: [PATCH 14/45] Send attack, aura and heal range overlays in the
+ Specula feed
+
+---
+ source/network/SpeculaFeed.cpp | 47 +++++++++++++++++++++++++++++++++-
+ source/network/SpeculaFeed.h   | 10 +++++---
+ 2 files changed, 53 insertions(+), 4 deletions(-)
+
+diff --git a/source/network/SpeculaFeed.cpp b/source/network/SpeculaFeed.cpp
+index 0b42811830..e4914bf79b 100644
+--- a/source/network/SpeculaFeed.cpp
++++ b/source/network/SpeculaFeed.cpp
+@@ -106,6 +106,12 @@ constexpr size_t DETAIL_RESEARCHABLE = 12;
+ constexpr size_t DETAIL_PROGRESS = 13;
+ constexpr size_t DETAIL_HOLDER = 14;
+ constexpr size_t DETAIL_TRADER = 15;
++constexpr size_t DETAIL_RANGES = 16;
++// Bytes of a range overlay in the ranges group: type, radius, texture,
++// mask, thickness.
++constexpr u8 RANGE_ATTACK = 0;
++constexpr u8 RANGE_AURA = 1;
++constexpr u8 RANGE_HEAL = 2;
+ constexpr u8 QUEUE_UNIT = 0;
+ constexpr u8 QUEUE_TECHNOLOGY = 1;
+ // The scripted components the details are read from, in the bit order of the
+@@ -113,7 +119,8 @@ constexpr u8 QUEUE_TECHNOLOGY = 1;
+ const char* const DETAIL_INTERFACES[] = {
+ 	"Health", "Capturable", "ResourceSupply", "ProductionQueue", "GarrisonHolder",
+ 	"Promotion", "ResourceGatherer", "Foundation", "Repairable", "UnitAI", "Trainer",
+-	"Researcher", "Pack", "Upgrade", "Trader", "Garrisonable", "Turretable"
++	"Researcher", "Pack", "Upgrade", "Trader", "Garrisonable", "Turretable", "Attack", "Auras",
++	"Heal"
+ };
+ // Indices of DETAIL_INTERFACES that are read together.
+ constexpr size_t INTERFACE_PACK = 12;
+@@ -1125,6 +1132,44 @@ void CSpeculaFeed::WriteDetails(CSimulation2& simulation, u32 turn)
+ 				PutU32(group, typeString);
+ 				PutF32(group, PropertyFloat(rq, amount, "traderGain") + PropertyFloat(rq, amount, "market1Gain") + PropertyFloat(rq, amount, "market2Gain"));
+ 			}
++			else if (interface == "Attack" || interface == "Auras" || interface == "Heal")
++			{
++				const size_t slot = DETAIL_RANGES;
++				if (!sampleLists)
++				{
++					// Keeps what was last written, once for each of the
++					// components the entity has.
++					const auto last = m_LastDetails.find(ent);
++					if (last != m_LastDetails.end() && groups[slot].empty())
++						groups[slot] = last->second[slot];
++					continue;
++				}
++				std::vector<u8>& group = groups[slot];
++				// The count comes first and is there even for none, so a
++				// range that goes away is written as a change.
++				if (group.empty())
++					group.push_back(0);
++				JS::RootedValue overlays(rq.cx);
++				ScriptFunction::Call(rq, component, "GetRangeOverlays", &overlays);
++				const u32 count = ArrayLength(rq, overlays);
++				const u8 type = interface == "Attack" ? RANGE_ATTACK : interface == "Auras" ? RANGE_AURA : RANGE_HEAL;
++				for (u32 j = 0; j < count && group[0] < 0xFF; ++j)
++				{
++					JS::RootedValue overlay(rq.cx);
++					if (!Script::GetPropertyInt(rq, overlays, static_cast<int>(j), &overlay))
++						continue;
++					JS::RootedValue texture(rq.cx);
++					JS::RootedValue mask(rq.cx);
++					Script::GetProperty(rq, overlay, "texture", &texture);
++					Script::GetProperty(rq, overlay, "textureMask", &mask);
++					group.push_back(type);
++					PutF32(group, PropertyFloat(rq, overlay, "radius"));
++					PutU32(group, InternString(StringOf(rq, texture)));
++					PutU32(group, InternString(StringOf(rq, mask)));
++					PutF32(group, PropertyFloat(rq, overlay, "thickness"));
++					++group[0];
++				}
++			}
+ 			else if (interface == "Garrisonable" || interface == "Turretable")
+ 			{
+ 				std::vector<u8>& group = groups[DETAIL_HOLDER];
+diff --git a/source/network/SpeculaFeed.h b/source/network/SpeculaFeed.h
+index fbdb088d4a..67be97849c 100644
+--- a/source/network/SpeculaFeed.h
++++ b/source/network/SpeculaFeed.h
+@@ -147,7 +147,7 @@ class CSimulation2;
+  *    each: Health, Capturable, ResourceSupply, ProductionQueue,
+  *    GarrisonHolder, Promotion, ResourceGatherer, Foundation, Repairable,
+  *    UnitAI, Trainer, Researcher, Pack, Upgrade, Trader, Garrisonable,
+- *    Turretable, from bit 0 up.
++ *    Turretable, Attack, Auras, Heal, from bit 0 up.
+  *  - kind 12 entity details, before the turn record: u32 count, count x
+  *    {u32 id, u32 mask, then for each bit set, in this order: 1 f32
+  *    hitpoints, f32 max hitpoints; 2 u8 n, n x f32 capture points by
+@@ -165,7 +165,11 @@ class CSimulation2;
+  *    8192 f32 pack progress, f32 upgrade progress (-1 when not packing or
+  *    upgrading), u32 upgrade target string; 16384 u32 holder id (the
+  *    entity it is garrisoned in or a turret on, 0 for none); 32768 u32 goods
+- *    type string, f32 total gain of a trader}, then u32 count, count x u32
++ *    type string, f32 total gain of a trader; 65536 u8 n, n x {u8 type (0 attack,
++ *    1 aura, 2 heal), f32 radius, u32 texture string, u32 mask string, f32
++ *    thickness} range overlays, as RangeOverlayManager hands them to the
++ *    renderer, sampled every PLAYERS_INTERVAL_TURNS turns and written as n =
++ *    0 for an entity that has the components but no range now}, then u32 count, count x u32
+  *    id of entities that no longer have any of them. A group is written
+  *    when it differs from what was last written for the entity, so every
+  *    group an entity has comes on the first turn it is seen. Local entities
+@@ -288,7 +292,7 @@ private:
+ 	 * The last bytes written for each kind 12 group of an entity, by group
+ 	 * bit; an empty slot is a group the entity does not have.
+ 	 */
+-	using SDetailGroups = std::array<std::vector<u8>, 16>;
++	using SDetailGroups = std::array<std::vector<u8>, 17>;
+ 
+ 	static u16 Visibility(const CSimContext& context, entity_id_t ent);
+ 
