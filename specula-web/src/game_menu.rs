@@ -229,6 +229,8 @@ pub struct Status {
     pub watch: bool,
     /// The visitor's last game can be started again.
     pub rematch: bool,
+    /// The game has only AI players, and ends when its host stays away.
+    pub ai_only: bool,
     /// The visitor's seat, 0 when the game is not theirs.
     pub seat: usize,
     /// A running hosted match's wall time left before its time limit, in
@@ -267,6 +269,7 @@ pub async fn status() -> Result<Status, String> {
         defeated: flag("defeated"),
         watch: flag("watch"),
         rematch: flag("rematch"),
+        ai_only: flag("ai_only"),
         seat: number("seat").unwrap_or(0.0) as usize,
         wall_left_ms: number("wall_left_ms"),
         game_limit_ms: number("game_limit_ms"),

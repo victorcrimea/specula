@@ -780,6 +780,12 @@ body:not([data-debug="storage"]) #stats-storage { display: none; }
   box-sizing: border-box; font: 600 13px system-ui, sans-serif; color: #e6e9eb;
   background: rgba(15, 18, 20, 0.9); border: 1px solid #3a4248; border-radius: 4px; }
 #time-limit[hidden] { display: none; }
+#ai-only-note { position: fixed; left: 50%; top: calc(var(--top-height) + 96px);
+  transform: translateX(-50%); text-align: center;
+  padding: 8px 10px; max-width: min(420px, calc(100vw - 32px)); box-sizing: border-box;
+  font: 600 13px system-ui, sans-serif; color: #e6e9eb;
+  background: rgba(15, 18, 20, 0.9); border: 1px solid #3a4248; border-radius: 4px; }
+#ai-only-note[hidden] { display: none; }
 /* notificationPanel (gui/session/TimeNotificationOverlay.xml): 600 px wide,
    from 60 to 120 px, its sans-bold-stroke-14 lines centred and at the bottom. */
 #notification-text { position: fixed; z-index: 5; left: 50%; top: calc(var(--top-height) + 24px);
@@ -1338,6 +1344,7 @@ body:not([data-debug="storage"]) #stats-storage { display: none; }
 </div>
 <div id="stream-start" role="status" hidden></div>
 <div id="time-limit" role="status" aria-live="polite" hidden></div>
+<div id="ai-only-note" role="status" hidden data-i18n>This is an AI-only match. When the match host leaves, the match is shut down after 5 minutes.</div>
 <div id="notification-text" role="status" aria-live="polite" hidden></div>
 <div id="match-over" role="status" hidden>
 <span id="match-over-text">Match over</span>

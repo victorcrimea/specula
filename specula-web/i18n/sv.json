@@ -213,5 +213,6 @@
   "Unzip it into the replays folder of 0 A.D. 0.28.0.": "Packa upp den i reprismappen för 0 A.D. 0.28.0.",
   "Vanilla 0 A.D. shows at most 8 players in some screens.": "Original-0 A.D. visar högst 8 spelare på vissa skärmar.",
   "Some maps are hidden because they do not support more than 8 players.": "Vissa kartor är dolda eftersom de inte stöder fler än 8 spelare.",
-  "Sim": "Sim"
+  "Sim": "Sim",
+  "This is an AI-only match. When the match host leaves, the match is shut down after 5 minutes.": "Det här är en match med enbart AI. När matchens värd lämnar stängs matchen ned efter 5 minuter."
 }

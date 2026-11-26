@@ -213,5 +213,6 @@
   "Unzip it into the replays folder of 0 A.D. 0.28.0.": "解压到 0 A.D. 0.28.0 的回放文件夹。",
   "Vanilla 0 A.D. shows at most 8 players in some screens.": "原版 0 A.D. 在某些界面中最多只显示 8 名玩家。",
   "Some maps are hidden because they do not support more than 8 players.": "部分地图已隐藏，因为它们不支持超过 8 名玩家。",
-  "Sim": "模拟"
+  "Sim": "模拟",
+  "This is an AI-only match. When the match host leaves, the match is shut down after 5 minutes.": "这是一场仅有 AI 的对局。对局主持人离开后，对局将在 5 分钟后关闭。"
 }

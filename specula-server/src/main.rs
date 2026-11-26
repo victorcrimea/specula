@@ -98,7 +98,7 @@ const USAGE: &str = "usage: specula-server [SOCKET] [--observe HOST:PORT | [--sl
                      [--port-base PORT]] [--max-observers N] [--admin-key KEY] \
                      [--delay SECONDS] [--history DIR] [--history-limit SIZE] [--usage DIR] \
                      [--engine-dir DIR] [--stats-key KEY] [--wall-limit MINUTES] \
-                     [--game-limit MINUTES]";
+                     [--game-limit MINUTES] [--allow-ai-only]";
 /// Relative to the working directory, so the server runs from the repo root.
 pub const WEB_ROOT: &str = "specula-web";
 
@@ -467,6 +467,7 @@ fn play_status(
                 defeated: false,
                 watch: false,
                 rematch: rematch.unwrap_or(false),
+                ai_only: false,
                 seat: None,
                 limits: None,
                 next: None,
@@ -1600,6 +1601,7 @@ fn parse_args() -> Result<Args, String> {
     let mut stats_key = None;
     let mut wall_limit = config::DEFAULT_LIMIT_MINUTES;
     let mut game_limit = config::DEFAULT_LIMIT_MINUTES;
+    let mut ai_only = false;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         if arg == "--delay" {
@@ -1620,6 +1622,8 @@ fn parse_args() -> Result<Args, String> {
             } else {
                 game_limit = minutes;
             }
+        } else if arg == "--allow-ai-only" {
+            ai_only = true;
         } else if arg == "--history" {
             history_dir = args.next().ok_or("--history needs DIR")?.into();
         } else if arg == "--history-limit" {
@@ -1699,6 +1703,7 @@ fn parse_args() -> Result<Args, String> {
             engine_dir,
             wall_limit: Duration::from_secs(u64::from(wall_limit) * 60),
             game_limit: Duration::from_secs(u64::from(game_limit) * 60),
+            ai_only,
         },
         delay,
         history_dir,

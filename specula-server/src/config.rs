@@ -29,6 +29,8 @@ pub struct Config {
     pub wall_limit: Duration,
     /// L2 (D19): how much game time a match may play.
     pub game_limit: Duration,
+    /// Lets a host start a game whose every slot is an AI, to watch it.
+    pub ai_only: bool,
 }
 
 impl Config {
@@ -53,8 +55,13 @@ impl Config {
         } else {
             "admin key off (no --admin-key)"
         };
+        let ai_only = if self.ai_only {
+            ", games with only AI players allowed"
+        } else {
+            ""
+        };
         format!(
-            "{hosting}, at most {} observers, {admin}, matches stop after {} min of wall time or {} min of game time",
+            "{hosting}, at most {} observers, {admin}, matches stop after {} min of wall time or {} min of game time{ai_only}",
             self.max_observers,
             self.wall_limit.as_secs() / 60,
             self.game_limit.as_secs() / 60

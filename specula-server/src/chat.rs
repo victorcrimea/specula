@@ -195,7 +195,7 @@ impl Chat {
         }
     }
 
-    fn is_online(&self, cookie: &str) -> bool {
+    pub fn is_online(&self, cookie: &str) -> bool {
         self.inner.lock().unwrap().online.contains_key(cookie)
     }
 

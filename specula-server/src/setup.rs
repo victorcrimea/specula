@@ -84,6 +84,8 @@ pub struct SetupRoom {
     inner: Mutex<RoomInner>,
     /// Bumped on every change; each socket rebuilds its own state.
     revision: watch::Sender<u64>,
+    /// The server lets a game start with AI players alone.
+    ai_only: bool,
 }
 
 struct RoomInner {
@@ -117,7 +119,7 @@ pub enum Request {
 }
 
 impl SetupRoom {
-    pub fn new(settings: Settings, reserved: Vec<(String, Nickname, u8)>) -> Self {
+    pub fn new(settings: Settings, reserved: Vec<(String, Nickname, u8)>, ai_only: bool) -> Self {
         let until = Instant::now() + RESERVE_FOR;
         SetupRoom {
             inner: Mutex::new(RoomInner {
@@ -137,6 +139,7 @@ impl SetupRoom {
                     .collect(),
             }),
             revision: watch::channel(0).0,
+            ai_only,
         }
     }
 
@@ -425,7 +428,7 @@ impl SetupRoom {
         if !seats.is_host(cookie) {
             return Err("only the host can start the game");
         }
-        if let Some(reason) = blocker(seats, &inner.reserved) {
+        if let Some(reason) = blocker(seats, &inner.reserved, &inner.settings, self.ai_only) {
             return Err(reason);
         }
         let seated = seats.seated_names();
@@ -564,7 +567,7 @@ impl SetupRoom {
             "attributes": settings.to_init_attributes(),
             "gui": { "map_filter": settings.gui.map_filter },
             "offer": offer,
-            "launch_blocker": blocker(seats, &inner.reserved),
+            "launch_blocker": blocker(seats, &inner.reserved, &inner.settings, self.ai_only),
             "reserved": inner.reserved.iter().map(|hold| json!({
                 "slot": hold.player - 1,
                 "name": hold.name.as_str(),
@@ -576,12 +579,24 @@ impl SetupRoom {
 
 /// Why a launch cannot start, from the seats and the rematch's reservations
 /// (U3, M35).
-fn blocker(seats: &Seats, reserved: &[Reservation]) -> Option<&'static str> {
+fn blocker(
+    seats: &Seats,
+    reserved: &[Reservation],
+    settings: &Settings,
+    ai_only: bool,
+) -> Option<&'static str> {
     if !reserved.is_empty() {
         return Some("waiting for the players of the last game");
     }
     if seats.players().is_empty() {
-        return Some("no player is seated");
+        // With the server's opt-in, a game of AIs alone is watched, not played.
+        let ai_slot = (0..settings.player_count.players).any(|slot| {
+            settings.player_removed.get(slot) != Some(&true)
+                && settings.player_ai.get(slot).is_some_and(Option::is_some)
+        });
+        if !(ai_only && ai_slot) {
+            return Some("no player is seated");
+        }
     }
     if !seats.everyone_ready() {
         return Some("not every player is ready");

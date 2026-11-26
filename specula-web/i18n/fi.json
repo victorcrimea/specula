@@ -213,5 +213,6 @@
   "Unzip it into the replays folder of 0 A.D. 0.28.0.": "Pura se 0 A.D. 0.28.0:n tallennekansioon.",
   "Vanilla 0 A.D. shows at most 8 players in some screens.": "Alkuperäinen 0 A.D. näyttää joissakin näkymissä enintään 8 pelaajaa.",
   "Some maps are hidden because they do not support more than 8 players.": "Jotkin kartat on piilotettu, koska ne eivät tue yli 8 pelaajaa.",
-  "Sim": "Sim"
+  "Sim": "Sim",
+  "This is an AI-only match. When the match host leaves, the match is shut down after 5 minutes.": "Tämä on pelkillä tekoälyillä pelattava ottelu. Kun ottelun isäntä poistuu, ottelu suljetaan 5 minuutin kuluttua."
 }

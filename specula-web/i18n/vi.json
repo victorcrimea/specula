@@ -213,5 +213,6 @@
   "Unzip it into the replays folder of 0 A.D. 0.28.0.": "Giải nén vào thư mục phát lại của 0 A.D. 0.28.0.",
   "Vanilla 0 A.D. shows at most 8 players in some screens.": "0 A.D. gốc chỉ hiển thị tối đa 8 người chơi ở một số màn hình.",
   "Some maps are hidden because they do not support more than 8 players.": "Một số bản đồ bị ẩn vì không hỗ trợ hơn 8 người chơi.",
-  "Sim": "Sim"
+  "Sim": "Sim",
+  "This is an AI-only match. When the match host leaves, the match is shut down after 5 minutes.": "Đây là trận chỉ có AI. Khi chủ trận rời đi, trận sẽ bị đóng sau 5 phút."
 }

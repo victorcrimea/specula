@@ -2801,6 +2801,11 @@ async fn run(
         None
     };
     let time_limit = TimeLimit::new(&document, status.as_ref(), page_now());
+    if status.as_ref().is_some_and(|status| status.ai_only)
+        && let Ok(note) = element::<HtmlElement>(&document, "ai-only-note")
+    {
+        note.set_hidden(false);
+    }
     if watch {
         status = None;
     }

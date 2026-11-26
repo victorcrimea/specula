@@ -87,6 +87,8 @@ const FEED_SOCKET_ERROR: &str = "cannot open the feed socket";
 const STOPPING_ERROR: &str = "the server is stopping";
 const STOP_POLL: Duration = Duration::from_secs(1);
 const WATCH_POLL: Duration = Duration::from_secs(1);
+/// How long the host of an all-AI game may be away before it is shut down.
+const HOST_GRACE: Duration = Duration::from_secs(5 * 60);
 /// How long a decided game's engine runs on, so its final summary comes in
 /// and the seat's Continue watching shows a while of the rest.
 const DECIDED_GRACE: Duration = Duration::from_secs(60);
@@ -205,6 +207,8 @@ pub struct Match {
     warned: Mutex<usize>,
     /// When the watcher first saw the game decided.
     decided: Mutex<Option<Instant>>,
+    /// Since when the host of an all-AI game has had no page open.
+    host_gone: Mutex<Option<Instant>>,
     /// The setup a rematch opened for this match (M35), once its host
     /// started one.
     rematch: Mutex<Option<MatchId>>,
@@ -765,7 +769,7 @@ impl Registry {
                 hub,
                 play,
                 seats,
-                room: Arc::new(SetupRoom::new(settings, reserved)),
+                room: Arc::new(SetupRoom::new(settings, reserved, self.config.ai_only)),
                 chat: Arc::new(Chat::new(self.delay)),
                 state: Mutex::new(MatchState::Setup),
                 runner: Mutex::new(None),
@@ -774,6 +778,7 @@ impl Registry {
                 thumb: Mutex::new(None),
                 warned: Mutex::new(0),
                 decided: Mutex::new(None),
+                host_gone: Mutex::new(None),
                 rematch: Mutex::new(None),
             }),
         );
@@ -1168,6 +1173,21 @@ impl Registry {
                 }
                 if left.is_zero() && found.play.tick_limit(limit) && found.play.end_at_limit() {
                     println!("match {id} reached the {limit} time limit, stopping its engine");
+                }
+                if found.play.ai_only() {
+                    // Nobody else can end it, so a host who left must not
+                    // leave an engine running unwatched.
+                    let here = found
+                        .seats
+                        .host()
+                        .is_some_and(|host| found.chat.is_online(&host));
+                    let mut gone = found.host_gone.lock().unwrap();
+                    if here {
+                        *gone = None;
+                    } else if gone.get_or_insert_with(Instant::now).elapsed() >= HOST_GRACE {
+                        drop(gone);
+                        found.play.end_abandoned();
+                    }
                 }
                 if found.play.decided() {
                     let since = *found

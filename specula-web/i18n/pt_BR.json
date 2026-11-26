@@ -213,5 +213,6 @@
   "Unzip it into the replays folder of 0 A.D. 0.28.0.": "Descompacte na pasta de reprises do 0 A.D. 0.28.0.",
   "Vanilla 0 A.D. shows at most 8 players in some screens.": "O 0 A.D. original mostra no máximo 8 jogadores em algumas telas.",
   "Some maps are hidden because they do not support more than 8 players.": "Alguns mapas estão ocultos porque não suportam mais de 8 jogadores.",
-  "Sim": "Sim"
+  "Sim": "Sim",
+  "This is an AI-only match. When the match host leaves, the match is shut down after 5 minutes.": "Esta é uma partida apenas com IA. Quando o anfitrião da partida sai, a partida é encerrada após 5 minutos."
 }

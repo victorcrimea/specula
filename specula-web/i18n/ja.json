@@ -213,5 +213,6 @@
   "Unzip it into the replays folder of 0 A.D. 0.28.0.": "0 A.D. 0.28.0 のリプレイフォルダーに展開してください。",
   "Vanilla 0 A.D. shows at most 8 players in some screens.": "通常の 0 A.D. では、一部の画面で表示されるプレイヤーは最大 8 人です。",
   "Some maps are hidden because they do not support more than 8 players.": "一部のマップは 8 人を超えるプレイヤーに対応していないため、非表示になっています。",
-  "Sim": "シム"
+  "Sim": "シム",
+  "This is an AI-only match. When the match host leaves, the match is shut down after 5 minutes.": "これはAIのみの対戦です。ホストが退出すると、5分後に対戦は終了します。"
 }

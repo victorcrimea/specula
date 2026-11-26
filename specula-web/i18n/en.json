@@ -213,5 +213,6 @@
   "Unzip it into the replays folder of 0 A.D. 0.28.0.": "tooltip of that button: the downloaded zip holds one folder, to be put in the game's own replays folder, for game version 0.28.0",
   "Vanilla 0 A.D. shows at most 8 players in some screens.": "tooltip of the replay download button, appended after the unzip hint when the game had more than 8 players: the 0 A.D. game's own menus were made for 8 players at most",
   "Some maps are hidden because they do not support more than 8 players.": "note over the map preview on the game setup page, shown while the game has more than 8 players: the random maps that cannot place that many players are left out of the map list and of Random",
-  "Sim": "label of the engine simulation time readout in the frame stats, a short word before the milliseconds the server took per turn and their share of the turn"
+  "Sim": "label of the engine simulation time readout in the frame stats, a short word before the milliseconds the server took per turn and their share of the turn",
+  "This is an AI-only match. When the match host leaves, the match is shut down after 5 minutes.": "note at the top of a match page, shown when the hosted match has no human players, only AIs: its host only watches it, and the server ends it 5 minutes after the host's last page closes"
 }

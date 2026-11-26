@@ -213,5 +213,6 @@
   "Unzip it into the replays folder of 0 A.D. 0.28.0.": "Deskonprimatu 0 A.D. 0.28.0 bertsioaren errepikapenen karpetan.",
   "Vanilla 0 A.D. shows at most 8 players in some screens.": "0 A.D. originalak gehienez 8 jokalari erakusten ditu pantaila batzuetan.",
   "Some maps are hidden because they do not support more than 8 players.": "Mapa batzuk ezkutatuta daude, ez dituztelako 8 jokalari baino gehiago onartzen.",
-  "Sim": "Sim"
+  "Sim": "Sim",
+  "This is an AI-only match. When the match host leaves, the match is shut down after 5 minutes.": "Hau AA hutsekin jokatzen den partida da. Partidaren ostalariak alde egiten duenean, partida 5 minutura ixten da."
 }

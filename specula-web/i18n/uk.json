@@ -213,5 +213,6 @@
   "Unzip it into the replays folder of 0 A.D. 0.28.0.": "Розпакуйте в теку записів 0 A.D. 0.28.0.",
   "Vanilla 0 A.D. shows at most 8 players in some screens.": "Звичайна 0 A.D. показує на деяких екранах не більше 8 гравців.",
   "Some maps are hidden because they do not support more than 8 players.": "Деякі мапи приховано, бо вони не підтримують більше 8 гравців.",
-  "Sim": "Сим"
+  "Sim": "Сим",
+  "This is an AI-only match. When the match host leaves, the match is shut down after 5 minutes.": "Це матч лише з ШІ. Коли господар матчу йде, матч завершується через 5 хвилин."
 }

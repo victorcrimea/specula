@@ -22,6 +22,7 @@ use std::process::Command;
 use std::sync::Arc;
 use std::sync::Condvar;
 use std::sync::Mutex;
+use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use std::thread::JoinHandle;
@@ -120,6 +121,7 @@ pub fn setup_json(status: &Status) -> String {
     json.boolean("defeated", status.defeated);
     json.boolean("watch", status.watch);
     json.boolean("rematch", status.rematch);
+    json.boolean("ai_only", status.ai_only);
     json.text(
         "next",
         &status.next.map(|id| id.to_string()).unwrap_or_default(),
@@ -165,6 +167,8 @@ pub struct Status {
     pub watch: bool,
     /// The visitor hosts the last game, which a rematch repeats.
     pub rematch: bool,
+    /// The running game has only AI players; its host watches it.
+    pub ai_only: bool,
     /// The visitor's seat while the game is theirs, running or not, which
     /// the summary reads after the engine has exited.
     pub seat: Option<u8>,
@@ -195,6 +199,8 @@ pub struct Play {
     ledger: Mutex<pause::Ledger>,
     /// The human seats at launch, ascending.
     humans: Mutex<Vec<u8>>,
+    /// The game started with no human seat: the host only watches it.
+    ai_only: AtomicBool,
     /// The in-game control (D17, D44 to D46, D54): a leaf lock, never take
     /// `seats`, `hub`, `ledger` or `inner` while holding it.
     control: Mutex<ControlState>,
@@ -356,6 +362,7 @@ impl Play {
             pause_order: Mutex::new(()),
             ledger: Mutex::new(pause::Ledger::new(&[])),
             humans: Mutex::new(Vec::new()),
+            ai_only: AtomicBool::new(false),
             control: Mutex::new(ControlState::default()),
             groups: Mutex::new(groups::Store::default()),
             group_pushes: broadcast::channel(GROUP_BACKLOG).0,
@@ -418,6 +425,7 @@ impl Play {
         let players = player_list.iter().copied().map(u32::from).collect();
         let mut humans = player_list.clone();
         humans.sort_unstable();
+        self.ai_only.store(humans.is_empty(), Ordering::SeqCst);
         *self.humans.lock().unwrap() = humans;
         self.hub.set_seats(players);
         self.seats.start_presence();
@@ -681,6 +689,7 @@ impl Play {
                         && self.hub.team_eyes(u32::from(seat)).is_none()
                 }),
             rematch: visitor.is_some_and(|visitor| self.seats.is_host(visitor)),
+            ai_only: running && self.ai_only(),
             seat: seat.filter(|&seat| seat != 0),
             limits: None,
             next: None,
@@ -820,10 +829,44 @@ impl Play {
     /// Whether no human seat is still in the game (D17). Asked without
     /// `inner` held, as `seat_defeated` is.
     fn humans_out(&self) -> bool {
+        if self.ai_only() {
+            return self.ai_game_over();
+        }
         self.seats
             .players()
             .into_iter()
             .all(|seat| self.seat_defeated(seat))
+    }
+
+    /// Whether the running game has no human seat at all.
+    pub fn ai_only(&self) -> bool {
+        self.ai_only.load(Ordering::SeqCst)
+    }
+
+    /// The engine has settled an all-AI game: it reported the players, and
+    /// none is still active. Gaia, player 0, is not one of them.
+    fn ai_game_over(&self) -> bool {
+        let players = self.hub.diplomacy();
+        players.len() > 1
+            && players
+                .iter()
+                .skip(1)
+                .all(|(state, _)| *state != PLAYER_ACTIVE)
+    }
+
+    /// Stops the engine of an all-AI game whose host stayed away too long,
+    /// which nobody else can end. Returns whether it stopped one.
+    pub fn end_abandoned(&self) -> bool {
+        let mut inner = self.inner.lock().unwrap();
+        if !(self.ai_only() && inner.game.as_ref().is_some_and(|game| game.running)) {
+            return false;
+        }
+        println!(
+            "game {} lost its host, stopping its engine",
+            self.generation.load(Ordering::SeqCst)
+        );
+        self.stop_engine(&mut inner);
+        true
     }
 
     /// Resigns `owner`'s seat, as the session's Resign does
