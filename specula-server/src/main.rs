@@ -299,6 +299,7 @@ async fn main() {
                 web::asset,
                 web::selection_atlas,
                 web::icon_atlas,
+                web::feedback_script,
                 web::gui_file,
                 web::lang_file
             ],

@@ -16,7 +16,8 @@
 //! a hash of each atlas, so a cache in front of the server cannot keep an
 //! atlas a rebuilt client does not read. `/` names
 //! `gui/session.css?v=SESSION` the same way; the textures and fonts it
-//! names are named by their content.
+//! names are named by their content. The pages name `feedback.js?v=FEEDBACK`
+//! likewise.
 
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -74,11 +75,13 @@ const GUI: &str = "gui";
 const LANG: &str = "lang";
 const LANGS: &str = "langs.txt";
 const SESSION_CSS: &str = "gui/session.css";
+const FEEDBACK: &str = "feedback.js";
 /// Each versioned atlas under its page placeholder.
-const ATLAS_PLACEHOLDERS: [(&str, &str); 3] = [
+const ATLAS_PLACEHOLDERS: [(&str, &str); 4] = [
     ("icons.bin?v=ICONS", ICONS),
     ("selection.bin?v=SELECTION", SELECTION),
     ("gui/session.css?v=SESSION", SESSION_CSS),
+    ("feedback.js?v=FEEDBACK", FEEDBACK),
 ];
 /// Highest quality: a build or a terrain is compressed once and served
 /// many times.
@@ -577,6 +580,16 @@ pub async fn icon_atlas(
     atlases: &State<AtlasVersions>,
 ) -> Option<Encoded<NamedFile>> {
     atlas(ICONS, v, accepts, atlases, ContentType::Binary).await
+}
+
+/// The feedback form's script, which the pages reload only when it changes.
+#[rocket::get("/feedback.js?<v>")]
+pub async fn feedback_script(
+    v: Option<&str>,
+    accepts: AcceptsBrotli,
+    atlases: &State<AtlasVersions>,
+) -> Option<Encoded<NamedFile>> {
+    atlas(FEEDBACK, v, accepts, atlases, ContentType::JavaScript).await
 }
 
 /// The session panels' stylesheet, kept for good only under its current
