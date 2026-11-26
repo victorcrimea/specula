@@ -72,6 +72,7 @@ use crate::setup::LEAVE_GRACE;
 use crate::setup::Request;
 use crate::setup::SetupRoom;
 use crate::setup::catalog_json;
+use crate::usage::Usage;
 use crate::view::Hub;
 use crate::view::Message;
 use crate::view::MetaSource;
@@ -403,6 +404,7 @@ pub struct Registry {
     catalog: Option<Catalog>,
     /// What every setup socket is sent first.
     catalog_json: Option<String>,
+    usage: Arc<Usage>,
     inner: Mutex<Inner>,
     observer_slots: Arc<ObserverSlots>,
 }
@@ -503,6 +505,7 @@ impl Registry {
         history: Option<Arc<Mutex<History>>>,
         broadcast: Option<Arc<Hub>>,
         catalog: Option<Catalog>,
+        usage: Arc<Usage>,
     ) -> Self {
         let slots = vec![None; usize::from(config.slots)];
         let catalog_json = catalog.as_ref().map(catalog_json);
@@ -519,6 +522,7 @@ impl Registry {
             broadcast: broadcast.map(|hub| (MatchId::new_v4(), hub)),
             catalog,
             catalog_json,
+            usage,
             inner: Mutex::new(Inner {
                 matches: HashMap::new(),
                 ended: HashMap::new(),
@@ -1252,6 +1256,7 @@ impl Registry {
             return;
         };
         *found.state.lock().unwrap() = MatchState::Ended;
+        self.usage.end(&id.to_string(), found.play.end_reason());
         // A rematch may already own the slot.
         if inner.slots[usize::from(found.slot)] == Some(id) {
             inner.slots[usize::from(found.slot)] = None;

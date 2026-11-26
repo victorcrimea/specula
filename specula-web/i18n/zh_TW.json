@@ -239,5 +239,16 @@
   "Too many people are watching on this server. Trying again...": "此伺服器上觀看的人太多。正在重試...",
   "Show unfinished matches": "顯示未完成的比賽",
   "+ %(count)s AI": "+ %(count)s 個電腦玩家",
-  "%(count)s AI": "%(count)s 個電腦玩家"
+  "%(count)s AI": "%(count)s 個電腦玩家",
+  "Feedback": "意見回饋",
+  "Send feedback": "傳送意見回饋",
+  "What happened, or what would you change?": "發生了什麼事，或是你想改進什麼？",
+  "Contact (optional)": "聯絡方式（選填）",
+  "Attach a screenshot of the page": "附上頁面截圖",
+  "The game is paused while this window is open, which uses your pause time.": "此視窗開啟期間遊戲會暫停，並消耗你的暫停時間。",
+  "Thank you for your feedback!": "感謝你的意見回饋！",
+  "Could not send the feedback. Try again later.": "無法傳送意見回饋，請稍後再試。",
+  "A cookie keeps your seat in a game. May we also count visits and games, anonymously, to improve the site?": "一個 Cookie 用於保留你在遊戲中的席位。我們是否可以匿名統計造訪和遊戲次數，以改進網站？",
+  "Allow": "允許",
+  "Decline": "拒絕"
 }

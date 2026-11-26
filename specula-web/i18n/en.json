@@ -239,5 +239,16 @@
   "Too many people are watching on this server. Trying again...": "banner on a match page when the server already has the most observers it allows; the page asks again every 15 seconds",
   "Show unfinished matches": "checkbox above the lobby page's replay list: also list stored matches that ended without a winner or were cut short",
   "+ %(count)s AI": "end of the players line of a lobby card, after the human players' names: how many computer players took part, e.g. \"Anna, Ben + 4 AI\"",
-  "%(count)s AI": "players line of a lobby card when only computer players took part, e.g. \"4 AI\""
+  "%(count)s AI": "players line of a lobby card when only computer players took part, e.g. \"4 AI\"",
+  "Feedback": "button among the custom buttons next to Warm up on the game page, and corner button on the other pages, that open the feedback form",
+  "Send feedback": "title of the feedback window",
+  "What happened, or what would you change?": "label of the feedback window's text box, where the player describes a problem or an idea",
+  "Contact (optional)": "label of the feedback window's optional field where the sender can leave an email address or a nickname to be answered at",
+  "Attach a screenshot of the page": "checkbox in the feedback window: sends a picture of the page as it was when the window was opened",
+  "The game is paused while this window is open, which uses your pause time.": "note in the feedback window during a game: the game is paused for the players while the window is open, and the pause is taken from the player's own pause time",
+  "Thank you for your feedback!": "shown in the feedback window once the feedback was sent",
+  "Could not send the feedback. Try again later.": "shown in the feedback window when sending the feedback failed",
+  "A cookie keeps your seat in a game. May we also count visits and games, anonymously, to improve the site?": "notice at the bottom of every page, shown once; the cookie is the one that binds a player to their seat; the question is whether anonymous usage statistics (visits, games, play time) may be logged with it. Followed by the buttons \"Allow\" and \"Decline\"",
+  "Allow": "button of the cookie notice: allow usage statistics",
+  "Decline": "button of the cookie notice: refuse usage statistics"
 }

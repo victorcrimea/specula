@@ -239,5 +239,16 @@
   "Too many people are watching on this server. Trying again...": "Demasiada gente mira en este servidor. Reintentando...",
   "Show unfinished matches": "Mostrar partidas sin terminar",
   "+ %(count)s AI": "+ %(count)s IA",
-  "%(count)s AI": "%(count)s IA"
+  "%(count)s AI": "%(count)s IA",
+  "Feedback": "Comentarios",
+  "Send feedback": "Enviar comentarios",
+  "What happened, or what would you change?": "¿Qué pasó, o qué cambiarías?",
+  "Contact (optional)": "Contacto (opcional)",
+  "Attach a screenshot of the page": "Adjuntar una captura de la página",
+  "The game is paused while this window is open, which uses your pause time.": "La partida está en pausa mientras esta ventana esté abierta, y gasta tu tiempo de pausa.",
+  "Thank you for your feedback!": "¡Gracias por tus comentarios!",
+  "Could not send the feedback. Try again later.": "No se pudieron enviar los comentarios. Inténtalo de nuevo más tarde.",
+  "A cookie keeps your seat in a game. May we also count visits and games, anonymously, to improve the site?": "Una cookie mantiene tu puesto en una partida. ¿Podemos contar además, de forma anónima, visitas y partidas para mejorar el sitio?",
+  "Allow": "Permitir",
+  "Decline": "Rechazar"
 }

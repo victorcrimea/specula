@@ -201,6 +201,9 @@ pub struct Play {
     humans: Mutex<Vec<u8>>,
     /// The game started with no human seat: the host only watches it.
     ai_only: AtomicBool,
+    /// Why the server stopped the engine, for the usage log; None when the
+    /// engine ended on its own (the game was won, or it died).
+    end_reason: Mutex<Option<&'static str>>,
     /// The in-game control (D17, D44 to D46, D54): a leaf lock, never take
     /// `seats`, `hub`, `ledger` or `inner` while holding it.
     control: Mutex<ControlState>,
@@ -363,6 +366,7 @@ impl Play {
             ledger: Mutex::new(pause::Ledger::new(&[])),
             humans: Mutex::new(Vec::new()),
             ai_only: AtomicBool::new(false),
+            end_reason: Mutex::new(None),
             control: Mutex::new(ControlState::default()),
             groups: Mutex::new(groups::Store::default()),
             group_pushes: broadcast::channel(GROUP_BACKLOG).0,
@@ -538,6 +542,11 @@ impl Play {
             position["x"].as_f64()? as f32,
             position["z"].as_f64()? as f32,
         ])
+    }
+
+    /// Why the match's engine stopped, for the usage log.
+    pub fn end_reason(&self) -> &'static str {
+        self.end_reason.lock().unwrap().unwrap_or("game over")
     }
 
     /// Counts a seated page's `play/command` socket while the guard lives;
@@ -865,7 +874,7 @@ impl Play {
             "game {} lost its host, stopping its engine",
             self.generation.load(Ordering::SeqCst)
         );
-        self.stop_engine(&mut inner);
+        self.stop_engine(&mut inner, "host left");
         true
     }
 
@@ -917,7 +926,7 @@ impl Play {
         if !inner.game.as_ref().is_some_and(|game| game.running) {
             return Err("no game of yours is running");
         }
-        self.stop_engine(&mut inner);
+        self.stop_engine(&mut inner, "host ended");
         Ok(())
     }
 
@@ -1391,7 +1400,8 @@ impl Play {
     /// Kills the engine once it has written its replay's metadata.json,
     /// which vanilla's replay menu needs for the summary and which the
     /// engine otherwise writes only on a clean exit.
-    fn stop_engine(&self, inner: &mut Inner) {
+    fn stop_engine(&self, inner: &mut Inner, reason: &'static str) {
+        *self.end_reason.lock().unwrap() = Some(reason);
         // At once rather than once the runner has seen the engine exit, so
         // the page reloaded after this shows the end.
         if let Some(game) = inner.game.as_mut() {
@@ -1466,7 +1476,7 @@ impl Play {
     pub fn end_replaced(&self) {
         let mut inner = self.inner.lock().unwrap();
         if inner.game.as_ref().is_some_and(|game| game.running) {
-            self.stop_engine(&mut inner);
+            self.stop_engine(&mut inner, "replaced");
         }
     }
 
@@ -1477,7 +1487,7 @@ impl Play {
         if !inner.game.as_ref().is_some_and(|game| game.running) {
             return false;
         }
-        self.stop_engine(&mut inner);
+        self.stop_engine(&mut inner, "time limit");
         true
     }
 
@@ -1494,7 +1504,7 @@ impl Play {
             "game {} is decided, stopping its engine",
             self.generation.load(Ordering::SeqCst)
         );
-        self.stop_engine(&mut inner);
+        self.stop_engine(&mut inner, "decided");
         true
     }
 

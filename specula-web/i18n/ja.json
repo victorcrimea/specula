@@ -239,5 +239,16 @@
   "Too many people are watching on this server. Trying again...": "このサーバーで観戦している人が多すぎます。再試行しています...",
   "Show unfinished matches": "未完了の試合を表示",
   "+ %(count)s AI": "+ AI %(count)s 人",
-  "%(count)s AI": "AI %(count)s 人"
+  "%(count)s AI": "AI %(count)s 人",
+  "Feedback": "フィードバック",
+  "Send feedback": "フィードバックを送信",
+  "What happened, or what would you change?": "何が起きましたか？変えたい点はありますか？",
+  "Contact (optional)": "連絡先（任意）",
+  "Attach a screenshot of the page": "ページのスクリーンショットを添付",
+  "The game is paused while this window is open, which uses your pause time.": "このウィンドウが開いている間、ゲームは一時停止され、あなたの一時停止時間を消費します。",
+  "Thank you for your feedback!": "フィードバックありがとうございます！",
+  "Could not send the feedback. Try again later.": "フィードバックを送信できませんでした。後でもう一度お試しください。",
+  "A cookie keeps your seat in a game. May we also count visits and games, anonymously, to improve the site?": "Cookieはゲームでの席を保持します。サイト改善のため、訪問数とゲーム数を匿名で集計してもよろしいですか？",
+  "Allow": "許可",
+  "Decline": "拒否"
 }

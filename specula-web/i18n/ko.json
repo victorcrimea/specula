@@ -239,5 +239,16 @@
   "Too many people are watching on this server. Trying again...": "이 서버를 보는 사람이 너무 많습니다. 다시 시도하는 중...",
   "Show unfinished matches": "끝나지 않은 경기 표시",
   "+ %(count)s AI": "+ AI %(count)s명",
-  "%(count)s AI": "AI %(count)s명"
+  "%(count)s AI": "AI %(count)s명",
+  "Feedback": "피드백",
+  "Send feedback": "피드백 보내기",
+  "What happened, or what would you change?": "무슨 일이 있었나요, 또는 무엇을 바꾸고 싶으신가요?",
+  "Contact (optional)": "연락처(선택 사항)",
+  "Attach a screenshot of the page": "페이지 스크린샷 첨부",
+  "The game is paused while this window is open, which uses your pause time.": "이 창이 열려 있는 동안 게임이 일시 정지되며, 내 일시 정지 시간이 사용됩니다.",
+  "Thank you for your feedback!": "피드백을 보내 주셔서 감사합니다!",
+  "Could not send the feedback. Try again later.": "피드백을 보내지 못했습니다. 나중에 다시 시도해 주세요.",
+  "A cookie keeps your seat in a game. May we also count visits and games, anonymously, to improve the site?": "쿠키 하나가 게임에서 자리를 유지합니다. 사이트 개선을 위해 방문 수와 게임 수도 익명으로 집계해도 될까요?",
+  "Allow": "허용",
+  "Decline": "거부"
 }

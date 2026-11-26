@@ -239,5 +239,16 @@
   "Too many people are watching on this server. Trying again...": "На цьому сервері забагато глядачів. Пробуємо знову...",
   "Show unfinished matches": "Показувати незавершені матчі",
   "+ %(count)s AI": "+ %(count)s ШІ",
-  "%(count)s AI": "%(count)s ШІ"
+  "%(count)s AI": "%(count)s ШІ",
+  "Feedback": "Відгук",
+  "Send feedback": "Надіслати відгук",
+  "What happened, or what would you change?": "Що сталося або що б ви змінили?",
+  "Contact (optional)": "Контакт (необов'язково)",
+  "Attach a screenshot of the page": "Додати знімок сторінки",
+  "The game is paused while this window is open, which uses your pause time.": "Поки це вікно відкрите, гра стоїть на паузі, і це витрачає ваш час паузи.",
+  "Thank you for your feedback!": "Дякуємо за відгук!",
+  "Could not send the feedback. Try again later.": "Не вдалося надіслати відгук. Спробуйте пізніше.",
+  "A cookie keeps your seat in a game. May we also count visits and games, anonymously, to improve the site?": "Cookie зберігає ваше місце в грі. Чи можна також анонімно рахувати відвідування та ігри, щоб покращувати сайт?",
+  "Allow": "Дозволити",
+  "Decline": "Відхилити"
 }

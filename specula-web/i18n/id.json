@@ -239,5 +239,16 @@
   "Too many people are watching on this server. Trying again...": "Terlalu banyak orang menonton di server ini. Mencoba lagi...",
   "Show unfinished matches": "Tampilkan pertandingan yang belum selesai",
   "+ %(count)s AI": "+ %(count)s AI",
-  "%(count)s AI": "%(count)s AI"
+  "%(count)s AI": "%(count)s AI",
+  "Feedback": "Masukan",
+  "Send feedback": "Kirim masukan",
+  "What happened, or what would you change?": "Apa yang terjadi, atau apa yang ingin Anda ubah?",
+  "Contact (optional)": "Kontak (opsional)",
+  "Attach a screenshot of the page": "Lampirkan tangkapan layar halaman",
+  "The game is paused while this window is open, which uses your pause time.": "Permainan dijeda selama jendela ini terbuka, dan memakai waktu jeda Anda.",
+  "Thank you for your feedback!": "Terima kasih atas masukan Anda!",
+  "Could not send the feedback. Try again later.": "Masukan tidak dapat dikirim. Coba lagi nanti.",
+  "A cookie keeps your seat in a game. May we also count visits and games, anonymously, to improve the site?": "Sebuah cookie menjaga kursi Anda dalam permainan. Bolehkah kami juga menghitung kunjungan dan permainan secara anonim untuk meningkatkan situs?",
+  "Allow": "Izinkan",
+  "Decline": "Tolak"
 }

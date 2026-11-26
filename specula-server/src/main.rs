@@ -226,6 +226,7 @@ async fn main() {
         history,
         broadcast,
         catalog,
+        Arc::clone(&usage),
     ));
     if config.slots > 0 {
         let watcher = Arc::clone(&registry);
@@ -262,6 +263,9 @@ async fn main() {
                 match_thumb,
                 match_replay,
                 play_new,
+                feedback,
+                consent,
+                stats_shot,
                 setup_socket,
                 chat_socket,
                 play_action,
@@ -597,6 +601,7 @@ fn new_status(registry: &State<Arc<Registry>>, cookies: &CookieJar<'_>) -> Optio
 fn play_new(
     form: rocket::form::Form<HashMap<String, String>>,
     registry: &State<Arc<Registry>>,
+    usage: &State<Arc<Usage>>,
     cookies: &CookieJar<'_>,
 ) -> Result<String, rocket::response::status::BadRequest<&'static str>> {
     let refuse = rocket::response::status::BadRequest;
@@ -617,7 +622,13 @@ fn play_new(
         .filter(serde_json::Value::is_object);
     registry
         .open_setup(&visitor, nickname, None, batch.as_ref())
-        .map(|id| id.to_string())
+        .map(|id| {
+            usage.setup(
+                usage::consented(cookies).then_some(visitor.as_str()),
+                &id.to_string(),
+            );
+            id.to_string()
+        })
         .map_err(refuse)
 }
 
@@ -787,6 +798,7 @@ fn setup_socket(
     id: MatchId,
     socket: WebSocket,
     registry: &State<Arc<Registry>>,
+    usage: &State<Arc<Usage>>,
     cookies: &CookieJar<'_>,
 ) -> Option<Channel<'static>> {
     if let Some(reason) = registry.closed_reason(id) {
@@ -806,6 +818,8 @@ fn setup_socket(
     }
     let kicks = found.seats.kicks_of(&cookie);
     let registry = Arc::clone(registry);
+    let usage = Arc::clone(usage.inner());
+    let tracked = usage::consented(cookies);
     found.room.open_socket();
     let mut guard = SetupGuard {
         found: Arc::clone(&found),
@@ -862,6 +876,12 @@ fn setup_socket(
                             let result = registry.setup_request(id, &cookie, request);
                             if joined {
                                 guard.member();
+                                if result.is_ok() {
+                                    usage.join(tracked.then_some(cookie.as_str()), &id.to_string());
+                                }
+                            }
+                            if launch && result.is_ok() {
+                                usage.start(tracked.then_some(cookie.as_str()), &id.to_string());
                             }
                             if let (true, Err(reason)) = (launch, result) {
                                 let error = serde_json::json!({ "type": "error", "text": reason });
@@ -1142,11 +1162,14 @@ fn play_command(
     tab: Option<&str>,
     socket: WebSocket,
     registry: &State<Arc<Registry>>,
+    usage: &State<Arc<Usage>>,
     cookies: &CookieJar<'_>,
 ) -> Option<Channel<'static>> {
     let found = registry.hosted(id)?;
     let play = Arc::clone(&found.play);
     let hub = Arc::clone(&found.hub);
+    let usage = Arc::clone(usage.inner());
+    let tracked = usage::consented(cookies);
     let visitor = usage::visitor(cookies);
     let tab = tab.map(str::to_string);
     Some(socket.channel(move |mut stream| {
@@ -1162,6 +1185,10 @@ fn play_command(
             let _presence = bound
                 .and(visitor.as_deref())
                 .map(|cookie| play.present(cookie));
+            let _seat = bound
+                .and(visitor.as_deref())
+                .filter(|_| tracked)
+                .and_then(|cookie| usage.seat(Some(cookie), &id.to_string(), Arc::clone(&play)));
             // The token's list as the feed's ids, for this socket only, since
             // the page numbers its tokens per connection.
             let mut kept: Option<(u32, Vec<u32>)> = None;
@@ -1580,12 +1607,69 @@ fn beat(body: String, usage: &State<Arc<Usage>>, cookies: &CookieJar<'_>) {
     usage.beat(cookies, &body);
 }
 
-/// For the operator only: 404 unless `key` is `--stats-key`.
-#[rocket::get("/stats?<key>")]
-fn stats(key: Option<&str>, usage: &State<Arc<Usage>>) -> Option<MatchInfo> {
+/// The cookie notice's answer: "1" allows usage logging, anything else
+/// declines.
+#[rocket::post("/consent", data = "<body>")]
+fn consent(body: String, usage: &State<Arc<Usage>>, cookies: &CookieJar<'_>) {
+    usage.set_consent(cookies, body.trim() == "1");
+}
+
+/// The feedback form's body (`Usage::feedback`); the reason is for the
+/// visitor, whose page shows it.
+#[rocket::post("/feedback", data = "<body>")]
+async fn feedback(
+    body: rocket::Data<'_>,
+    usage: &State<Arc<Usage>>,
+    cookies: &CookieJar<'_>,
+) -> Result<(), rocket::response::status::BadRequest<&'static str>> {
+    let bytes = body
+        // The header's length prefix and the most the header and the
+        // screenshot may take, rounded up.
+        .open(rocket::data::ToByteUnit::bytes(
+            (4 + usage::FEEDBACK_HEADER_MAX + usage::SHOT_MAX_BYTES) as u64,
+        ))
+        .into_bytes()
+        .await
+        .map_err(|_| rocket::response::status::BadRequest("cannot read the feedback"))?;
+    if !bytes.is_complete() {
+        return Err(rocket::response::status::BadRequest("feedback too large"));
+    }
+    usage
+        .feedback(cookies, &bytes)
+        .map_err(rocket::response::status::BadRequest)
+}
+
+/// For the operator only, as `/stats`.
+#[rocket::get("/stats/shot/<name>?<key>")]
+async fn stats_shot(
+    name: &str,
+    key: Option<&str>,
+    usage: &State<Arc<Usage>>,
+) -> Option<(rocket::http::ContentType, rocket::fs::NamedFile)> {
+    if !usage.authorized(key) {
+        return None;
+    }
+    let file = rocket::fs::NamedFile::open(usage.shot_path(name)?)
+        .await
+        .ok()?;
+    Some((rocket::http::ContentType::JPEG, file))
+}
+
+/// For the operator only: 404 unless `key` is `--stats-key`; with
+/// `feedback`, the feedback people sent instead of the usage.
+#[rocket::get("/stats?<key>&<feedback>")]
+fn stats(
+    key: Option<&str>,
+    feedback: Option<&str>,
+    usage: &State<Arc<Usage>>,
+) -> Option<MatchInfo> {
     usage.authorized(key).then(|| {
         MatchInfo(
-            usage.report(),
+            if feedback.is_some() {
+                usage.feedback_report(key.unwrap_or(""))
+            } else {
+                usage.report()
+            },
             // Nor kept by Cloudflare, which would show it without the key.
             Header::new("Cache-Control", "no-store"),
         )

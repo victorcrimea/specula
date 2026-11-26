@@ -239,5 +239,16 @@
   "Too many people are watching on this server. Trying again...": "Quá nhiều người đang xem trên máy chủ này. Đang thử lại...",
   "Show unfinished matches": "Hiện các trận chưa kết thúc",
   "+ %(count)s AI": "+ %(count)s AI",
-  "%(count)s AI": "%(count)s AI"
+  "%(count)s AI": "%(count)s AI",
+  "Feedback": "Phản hồi",
+  "Send feedback": "Gửi phản hồi",
+  "What happened, or what would you change?": "Đã xảy ra chuyện gì, hoặc bạn muốn thay đổi điều gì?",
+  "Contact (optional)": "Liên hệ (không bắt buộc)",
+  "Attach a screenshot of the page": "Đính kèm ảnh chụp màn hình trang",
+  "The game is paused while this window is open, which uses your pause time.": "Trò chơi tạm dừng khi cửa sổ này mở và sẽ trừ vào thời gian tạm dừng của bạn.",
+  "Thank you for your feedback!": "Cảm ơn phản hồi của bạn!",
+  "Could not send the feedback. Try again later.": "Không thể gửi phản hồi. Vui lòng thử lại sau.",
+  "A cookie keeps your seat in a game. May we also count visits and games, anonymously, to improve the site?": "Một cookie giữ chỗ của bạn trong ván chơi. Chúng tôi có thể đếm ẩn danh lượt truy cập và số ván chơi để cải thiện trang không?",
+  "Allow": "Cho phép",
+  "Decline": "Từ chối"
 }

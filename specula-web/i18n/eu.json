@@ -239,5 +239,16 @@
   "Too many people are watching on this server. Trying again...": "Jende gehiegi ari da zerbitzari honetan ikusten. Berriro saiatzen...",
   "Show unfinished matches": "Erakutsi amaitu gabeko partidak",
   "+ %(count)s AI": "+ %(count)s IA",
-  "%(count)s AI": "%(count)s IA"
+  "%(count)s AI": "%(count)s IA",
+  "Feedback": "Iritzia",
+  "Send feedback": "Bidali iritzia",
+  "What happened, or what would you change?": "Zer gertatu da, edo zer aldatuko zenuke?",
+  "Contact (optional)": "Kontaktua (aukerakoa)",
+  "Attach a screenshot of the page": "Erantsi orriaren pantaila-argazkia",
+  "The game is paused while this window is open, which uses your pause time.": "Jokoa pausan dago leiho hau irekita dagoen bitartean, eta zure pausa-denbora erabiltzen du.",
+  "Thank you for your feedback!": "Eskerrik asko zure iritziagatik!",
+  "Could not send the feedback. Try again later.": "Ezin izan da iritzia bidali. Saiatu berriro geroago.",
+  "A cookie keeps your seat in a game. May we also count visits and games, anonymously, to improve the site?": "Cookie batek zure eserlekua mantentzen du partida batean. Bisitak eta partidak ere anonimoki zenbatu ditzakegu gunea hobetzeko?",
+  "Allow": "Onartu",
+  "Decline": "Ukatu"
 }

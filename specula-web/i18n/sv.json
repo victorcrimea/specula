@@ -239,5 +239,16 @@
   "Too many people are watching on this server. Trying again...": "För många tittar på den här servern. Försöker igen...",
   "Show unfinished matches": "Visa ofullbordade matcher",
   "+ %(count)s AI": "+ %(count)s AI",
-  "%(count)s AI": "%(count)s AI"
+  "%(count)s AI": "%(count)s AI",
+  "Feedback": "Feedback",
+  "Send feedback": "Skicka feedback",
+  "What happened, or what would you change?": "Vad hände, eller vad skulle du ändra?",
+  "Contact (optional)": "Kontakt (valfritt)",
+  "Attach a screenshot of the page": "Bifoga en skärmdump av sidan",
+  "The game is paused while this window is open, which uses your pause time.": "Spelet är pausat medan det här fönstret är öppet och använder din pausetid.",
+  "Thank you for your feedback!": "Tack för din feedback!",
+  "Could not send the feedback. Try again later.": "Det gick inte att skicka feedbacken. Försök igen senare.",
+  "A cookie keeps your seat in a game. May we also count visits and games, anonymously, to improve the site?": "En cookie håller din plats i ett spel. Får vi också räkna besök och spel anonymt för att förbättra webbplatsen?",
+  "Allow": "Tillåt",
+  "Decline": "Avvisa"
 }

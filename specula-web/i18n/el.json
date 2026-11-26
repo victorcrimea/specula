@@ -239,5 +239,16 @@
   "Too many people are watching on this server. Trying again...": "Πάρα πολλοί παρακολουθούν σε αυτόν τον διακομιστή. Γίνεται νέα προσπάθεια...",
   "Show unfinished matches": "Εμφάνιση ημιτελών αγώνων",
   "+ %(count)s AI": "+ %(count)s ΤΝ",
-  "%(count)s AI": "%(count)s ΤΝ"
+  "%(count)s AI": "%(count)s ΤΝ",
+  "Feedback": "Σχόλια",
+  "Send feedback": "Αποστολή σχολίων",
+  "What happened, or what would you change?": "Τι συνέβη ή τι θα αλλάζατε;",
+  "Contact (optional)": "Επικοινωνία (προαιρετικό)",
+  "Attach a screenshot of the page": "Επισύναψη στιγμιότυπου της σελίδας",
+  "The game is paused while this window is open, which uses your pause time.": "Το παιχνίδι είναι σε παύση όσο αυτό το παράθυρο είναι ανοιχτό και καταναλώνει τον χρόνο παύσης σας.",
+  "Thank you for your feedback!": "Ευχαριστούμε για τα σχόλιά σας!",
+  "Could not send the feedback. Try again later.": "Δεν ήταν δυνατή η αποστολή των σχολίων. Δοκιμάστε ξανά αργότερα.",
+  "A cookie keeps your seat in a game. May we also count visits and games, anonymously, to improve the site?": "Ένα cookie κρατά τη θέση σας σε ένα παιχνίδι. Μπορούμε επίσης να μετράμε ανώνυμα επισκέψεις και παιχνίδια για να βελτιώσουμε τον ιστότοπο;",
+  "Allow": "Να επιτραπεί",
+  "Decline": "Απόρριψη"
 }

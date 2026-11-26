@@ -239,5 +239,16 @@
   "Too many people are watching on this server. Trying again...": "此服务器上观看的人太多。正在重试...",
   "Show unfinished matches": "显示未完成的比赛",
   "+ %(count)s AI": "+ %(count)s 个电脑玩家",
-  "%(count)s AI": "%(count)s 个电脑玩家"
+  "%(count)s AI": "%(count)s 个电脑玩家",
+  "Feedback": "反馈",
+  "Send feedback": "发送反馈",
+  "What happened, or what would you change?": "发生了什么，或者你想改进什么？",
+  "Contact (optional)": "联系方式（可选）",
+  "Attach a screenshot of the page": "附上页面截图",
+  "The game is paused while this window is open, which uses your pause time.": "此窗口打开期间游戏会暂停，并消耗你的暂停时间。",
+  "Thank you for your feedback!": "感谢你的反馈！",
+  "Could not send the feedback. Try again later.": "无法发送反馈，请稍后重试。",
+  "A cookie keeps your seat in a game. May we also count visits and games, anonymously, to improve the site?": "一个 Cookie 用于保留你在游戏中的席位。我们是否可以匿名统计访问和游戏次数，以改进网站？",
+  "Allow": "允许",
+  "Decline": "拒绝"
 }

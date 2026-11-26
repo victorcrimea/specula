@@ -239,5 +239,16 @@
   "Too many people are watching on this server. Trying again...": "Túl sokan nézik ezt a szervert. Újrapróbálkozás...",
   "Show unfinished matches": "Befejezetlen meccsek megjelenítése",
   "+ %(count)s AI": "+ %(count)s MI",
-  "%(count)s AI": "%(count)s MI"
+  "%(count)s AI": "%(count)s MI",
+  "Feedback": "Visszajelzés",
+  "Send feedback": "Visszajelzés küldése",
+  "What happened, or what would you change?": "Mi történt, vagy mit változtatnál?",
+  "Contact (optional)": "Elérhetőség (nem kötelező)",
+  "Attach a screenshot of the page": "Az oldal képernyőképének csatolása",
+  "The game is paused while this window is open, which uses your pause time.": "A játék szünetel, amíg ez az ablak nyitva van, és a szüneteidre szánt időt használja.",
+  "Thank you for your feedback!": "Köszönjük a visszajelzést!",
+  "Could not send the feedback. Try again later.": "A visszajelzést nem sikerült elküldeni. Próbáld újra később.",
+  "A cookie keeps your seat in a game. May we also count visits and games, anonymously, to improve the site?": "Egy süti megőrzi a helyedet egy játékban. Névtelenül számolhatjuk-e a látogatásokat és a játékokat is az oldal fejlesztéséhez?",
+  "Allow": "Engedélyezem",
+  "Decline": "Elutasítom"
 }

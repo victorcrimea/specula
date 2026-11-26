@@ -239,5 +239,16 @@
   "Too many people are watching on this server. Trying again...": "Bu sunucuyu izleyen çok fazla kişi var. Yeniden deneniyor...",
   "Show unfinished matches": "Bitmemiş maçları göster",
   "+ %(count)s AI": "+ %(count)s YZ",
-  "%(count)s AI": "%(count)s YZ"
+  "%(count)s AI": "%(count)s YZ",
+  "Feedback": "Geri bildirim",
+  "Send feedback": "Geri bildirim gönder",
+  "What happened, or what would you change?": "Ne oldu ya da neyi değiştirirdiniz?",
+  "Contact (optional)": "İletişim (isteğe bağlı)",
+  "Attach a screenshot of the page": "Sayfanın ekran görüntüsünü ekle",
+  "The game is paused while this window is open, which uses your pause time.": "Bu pencere açık olduğu sürece oyun duraklatılır ve duraklatma süreniz harcanır.",
+  "Thank you for your feedback!": "Geri bildiriminiz için teşekkürler!",
+  "Could not send the feedback. Try again later.": "Geri bildirim gönderilemedi. Lütfen daha sonra tekrar deneyin.",
+  "A cookie keeps your seat in a game. May we also count visits and games, anonymously, to improve the site?": "Bir çerez oyundaki yerinizi korur. Siteyi geliştirmek için ziyaretleri ve oyunları anonim olarak da sayabilir miyiz?",
+  "Allow": "İzin ver",
+  "Decline": "Reddet"
 }

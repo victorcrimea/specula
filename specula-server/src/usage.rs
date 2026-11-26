@@ -3,6 +3,11 @@
 //! the `sv` cookie, set on the first page load; nothing else about the
 //! visitor is kept.
 //!
+//! The `sv` cookie only holds a player's seat. Its id goes into the log only
+//! for a visitor who allowed it (the `sc` cookie, set by `/consent`); for
+//! everyone else the visitor field is `-`, and the events that make no sense
+//! without a visitor (`join`, `played`, `drop`, `back`) are not written.
+//!
 //! Every event is a line of `events.log`, tab separated:
 //! `<unix seconds> <kind> <visitor or -> <fields...>`:
 //!
@@ -13,14 +18,25 @@
 //!   the client's heartbeat while it is shown, `-` for what it did not
 //!   measure.
 //! - `fail <reason>`: the client's renderer could not start.
+//! - `setup <match id>`: someone opened a setup (New game).
+//! - `join <match id>`: someone joined a setup, the host's own page too,
+//!   once per match.
+//! - `start <match id>`: the host launched the game.
+//! - `played <match id> <seconds> <1 if the game was over>`: a seated
+//!   page's game socket closed, after that many seconds open.
+//! - `drop <match id>` / `back <match id> <seconds away>`: that socket
+//!   closed while the game ran, and a seat's socket opened again.
+//! - `end <match id> <reason>`: the match's engine is gone; no visitor.
 //!
 //! The report reads the whole log each time: it survives restarts with no
 //! state of its own, and an early broadcast's log is small.
 
 use std::cmp::Reverse;
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::collections::VecDeque;
 use std::fmt::Write as _;
 use std::fs;
 use std::fs::File;
@@ -45,8 +61,12 @@ use rocket::http::SameSite;
 use rocket::request::FromRequest;
 use rocket::request::Outcome;
 
+use crate::play::Play;
+
 const LOG: &str = "events.log";
 const COOKIE: &str = "sv";
+/// "1": the visitor allowed usage logging, "0": declined.
+const CONSENT_COOKIE: &str = "sc";
 /// About as long as a browser keeps a cookie anyway.
 const COOKIE_DAYS: i64 = 400;
 const DAY: u64 = 86_400;
@@ -59,8 +79,28 @@ const ACTIVE_SECS: u64 = 120;
 const MAX_BEAT_SECS: u64 = 600;
 const DAILY_ROWS: u64 = 14;
 const MAX_FIELD: usize = 4096;
+const FEEDBACK_LOG: &str = "feedback.log";
+const SHOTS_DIR: &str = "shots";
+/// One feedback per visitor in this long.
+const FEEDBACK_GAP_SECS: u64 = 30;
+const FEEDBACK_TEXT_CHARS: usize = 2000;
+const FEEDBACK_SHARE_CHARS: usize = 200;
+pub const FEEDBACK_HEADER_MAX: usize = 8192;
+/// A 1080p detailed frame at JPEG quality 85 is about 0.4 to 0.9 MB; the
+/// page sends at most 1280 px wide at 70, far under this.
+pub const SHOT_MAX_BYTES: usize = 2_000_000;
+/// Screenshots are kept up to this many (so at most 4 GB); later feedback
+/// is text only.
+const SHOTS_MAX: usize = 2000;
+/// Feedback the whole server takes in this window: a visitor's cookie is
+/// free to get, so the per-visitor gap alone does not bound a flood.
+const FEEDBACK_GLOBAL_MAX: usize = 20;
+const FEEDBACK_GLOBAL_WINDOW_SECS: u64 = 600;
+const FEEDBACK_LOG_MAX: u64 = 20 << 20;
+const FEEDBACK_SHOWN: usize = 100;
 
 pub struct Usage {
+    dir: PathBuf,
     path: PathBuf,
     file: Mutex<File>,
     /// None: `/stats` is not served.
@@ -69,6 +109,13 @@ pub struct Usage {
     /// A stored match is counted once per visitor: the client polls the
     /// open match's info while it plays.
     replays: Mutex<HashSet<(String, String)>>,
+    /// (visitor, match) pairs already logged as joined: the page asks to
+    /// join again on every reconnect.
+    joins: Mutex<HashSet<(String, String)>>,
+    /// A seat whose game socket closed mid-game, until it opens again.
+    dropped: Mutex<HashMap<(String, String), Instant>>,
+    feedback_at: Mutex<HashMap<String, Instant>>,
+    feedback_global: Mutex<VecDeque<Instant>>,
 }
 
 impl Usage {
@@ -77,11 +124,16 @@ impl Usage {
         let path = dir.join(LOG);
         let file = OpenOptions::new().create(true).append(true).open(&path)?;
         Ok(Usage {
+            dir,
             path,
             file: Mutex::new(file),
             key,
             live: AtomicUsize::new(0),
             replays: Mutex::new(HashSet::new()),
+            joins: Mutex::new(HashSet::new()),
+            dropped: Mutex::new(HashMap::new()),
+            feedback_at: Mutex::new(HashMap::new()),
+            feedback_global: Mutex::new(VecDeque::new()),
         })
     }
 
@@ -121,9 +173,14 @@ impl Usage {
             );
             id
         });
+        let logged = if consented(cookies) {
+            visitor.as_str()
+        } else {
+            "-"
+        };
         self.log(
             "page",
-            &visitor,
+            logged,
             &[page, referrer.0.as_deref().unwrap_or("-")],
         );
     }
@@ -133,26 +190,206 @@ impl Usage {
         self.live.fetch_add(1, Ordering::Relaxed);
         Watch {
             usage: Arc::clone(self),
-            visitor: visitor(cookies).unwrap_or_else(|| "-".to_string()),
+            visitor: logged_visitor(cookies),
             start: Instant::now(),
         }
     }
 
     pub fn replay(&self, cookies: &CookieJar<'_>, match_id: &str) {
-        let visitor = visitor(cookies).unwrap_or_else(|| "-".to_string());
+        let seen = visitor(cookies).unwrap_or_else(|| "-".to_string());
         if self
             .replays
             .lock()
             .unwrap()
-            .insert((visitor.clone(), match_id.to_string()))
+            .insert((seen, match_id.to_string()))
         {
-            self.log("replay", &visitor, &[match_id]);
+            self.log("replay", &logged_visitor(cookies), &[match_id]);
         }
+    }
+
+    /// `visitor` is None for one who did not allow usage logging.
+    pub fn setup(&self, visitor: Option<&str>, match_id: &str) {
+        self.log("setup", visitor.unwrap_or("-"), &[match_id]);
+    }
+
+    pub fn join(&self, visitor: Option<&str>, match_id: &str) {
+        let Some(visitor) = visitor else {
+            return;
+        };
+        let key = (visitor.to_string(), match_id.to_string());
+        if self.joins.lock().unwrap().insert(key) {
+            self.log("join", visitor, &[match_id]);
+        }
+    }
+
+    pub fn start(&self, visitor: Option<&str>, match_id: &str) {
+        self.log("start", visitor.unwrap_or("-"), &[match_id]);
+    }
+
+    pub fn end(&self, match_id: &str, reason: &str) {
+        self.log("end", "-", &[match_id, reason]);
+    }
+
+    /// Held for as long as a seated page's game socket is open; `visitor` is
+    /// None for one who did not allow usage logging.
+    pub fn seat(
+        self: &Arc<Self>,
+        visitor: Option<&str>,
+        match_id: &str,
+        play: Arc<Play>,
+    ) -> Option<SeatWatch> {
+        let visitor = visitor?;
+        let key = (visitor.to_string(), match_id.to_string());
+        let away = self.dropped.lock().unwrap().remove(&key);
+        if let Some(since) = away {
+            let seconds = since.elapsed().as_secs().to_string();
+            self.log("back", visitor, &[match_id, &seconds]);
+        }
+        Some(SeatWatch {
+            usage: Arc::clone(self),
+            visitor: key.0,
+            match_id: key.1,
+            play,
+            start: Instant::now(),
+        })
+    }
+
+    /// The visitor's answer to the cookie notice.
+    pub fn set_consent(&self, cookies: &CookieJar<'_>, allow: bool) {
+        cookies.add(
+            Cookie::build((CONSENT_COOKIE, if allow { "1" } else { "0" }))
+                .max_age(rocket::time::Duration::days(COOKIE_DAYS))
+                .same_site(SameSite::Lax)
+                .http_only(true),
+        );
+    }
+
+    /// A feedback form's body: a u32 LE length, that many bytes of JSON
+    /// (`text`, `contact`, `page`, `match`), then an optional JPEG. A plain
+    /// body rather than a multipart form, which would need a parser.
+    pub fn feedback(&self, cookies: &CookieJar<'_>, body: &[u8]) -> Result<(), &'static str> {
+        let visitor = visitor(cookies).ok_or("no visitor cookie")?;
+        let length = body
+            .get(..4)
+            .and_then(|bytes| <[u8; 4]>::try_from(bytes).ok())
+            .map(|bytes| u32::from_le_bytes(bytes) as usize)
+            .filter(|length| *length <= FEEDBACK_HEADER_MAX)
+            .ok_or("bad feedback")?;
+        let header: serde_json::Value = body
+            .get(4..4 + length)
+            .and_then(|bytes| serde_json::from_slice(bytes).ok())
+            .ok_or("bad feedback")?;
+        let field = |name: &str, chars: usize| -> String {
+            header[name]
+                .as_str()
+                .unwrap_or("")
+                .chars()
+                .take(chars)
+                .collect()
+        };
+        let text = field("text", FEEDBACK_TEXT_CHARS);
+        if text.trim().is_empty() {
+            return Err("empty feedback");
+        }
+        let image = &body[4 + length..];
+        {
+            let mut last = self.feedback_at.lock().unwrap();
+            let now = Instant::now();
+            if last
+                .get(&visitor)
+                .is_some_and(|at| at.elapsed().as_secs() < FEEDBACK_GAP_SECS)
+            {
+                return Err("wait a little before sending more");
+            }
+            let mut all = self.feedback_global.lock().unwrap();
+            while all
+                .front()
+                .is_some_and(|at| at.elapsed().as_secs() >= FEEDBACK_GLOBAL_WINDOW_SECS)
+            {
+                all.pop_front();
+            }
+            if all.len() >= FEEDBACK_GLOBAL_MAX {
+                return Err("too much feedback just now, try again later");
+            }
+            all.push_back(now);
+            last.retain(|_, at| at.elapsed().as_secs() < FEEDBACK_GAP_SECS);
+            last.insert(visitor.clone(), now);
+        }
+        let log_path = self.dir.join(FEEDBACK_LOG);
+        if fs::metadata(&log_path).is_ok_and(|meta| meta.len() > FEEDBACK_LOG_MAX) {
+            return Err("feedback is full");
+        }
+        let at = unix_now();
+        let mut shot = "-".to_string();
+        let jpeg = image.len() <= SHOT_MAX_BYTES && image.starts_with(&[0xff, 0xd8, 0xff]);
+        let dir = self.dir.join(SHOTS_DIR);
+        if jpeg
+            && fs::create_dir_all(&dir).is_ok()
+            && fs::read_dir(&dir).is_ok_and(|entries| entries.count() < SHOTS_MAX)
+        {
+            let name = format!("{at}-{}.jpg", new_id());
+            if fs::write(dir.join(&name), image).is_ok() {
+                shot = name;
+            }
+        }
+        // A newline would split the line; the report turns this back.
+        let text = text.replace('\n', "\\n");
+        let line = format!(
+            "{at}\t{}\t{}\t{}\t{}\t{shot}\t{}\n",
+            logged_visitor(cookies),
+            clean(&field("page", FEEDBACK_SHARE_CHARS)),
+            clean(&field("match", FEEDBACK_SHARE_CHARS)),
+            clean(&field("contact", FEEDBACK_SHARE_CHARS)),
+            clean(&text),
+        );
+        OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_path)
+            .and_then(|mut file| file.write_all(line.as_bytes()))
+            .map_err(|error| {
+                eprintln!("cannot log feedback: {error}");
+                "cannot save feedback"
+            })
+    }
+
+    /// The newest feedback first, for the operator; `key` goes into the
+    /// screenshots' links.
+    pub fn feedback_report(&self, key: &str) -> String {
+        let text = fs::read_to_string(self.dir.join(FEEDBACK_LOG)).unwrap_or_default();
+        let mut out = String::new();
+        let lines: Vec<&str> = text.lines().collect();
+        let _ = writeln!(out, "{} feedback, newest first\n", lines.len());
+        for line in lines.iter().rev().take(FEEDBACK_SHOWN) {
+            let parts: Vec<&str> = line.splitn(7, '\t').collect();
+            let [at, visitor, page, match_id, contact, shot, text] = parts.as_slice() else {
+                continue;
+            };
+            let at = at.parse().map_or(String::new(), format_time);
+            let _ = writeln!(
+                out,
+                "{at} UTC visitor {visitor} page {page} match {match_id} contact {contact}"
+            );
+            if *shot != "-" {
+                let _ = writeln!(out, "  screenshot: /stats/shot/{shot}?key={key}");
+            }
+            let _ = writeln!(out, "  {}\n", text.replace("\\n", "\n  "));
+        }
+        out
+    }
+
+    /// The file of a stored screenshot, by name.
+    pub fn shot_path(&self, name: &str) -> Option<PathBuf> {
+        let plain = !name.starts_with('.')
+            && name
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b"-_.".contains(&byte));
+        plain.then(|| self.dir.join(SHOTS_DIR).join(name))
     }
 
     /// The body of a `/beat` beacon, as `usage.rs` in the client writes it.
     pub fn beat(&self, cookies: &CookieJar<'_>, body: &str) {
-        let visitor = visitor(cookies).unwrap_or_else(|| "-".to_string());
+        let visitor = logged_visitor(cookies);
         let fields: Vec<&str> = body.trim_end().split('\t').collect();
         match fields.as_slice() {
             ["beat", seconds, mode, renderer, fps, cpu, gpu, settings] => {
@@ -186,6 +423,34 @@ impl Usage {
             return format!("cannot read {}: {error}\n", self.path.display());
         }
         report(&text, unix_now(), self.live.load(Ordering::Relaxed))
+    }
+}
+
+/// Held for as long as a seated page's game socket is open.
+pub struct SeatWatch {
+    usage: Arc<Usage>,
+    visitor: String,
+    match_id: String,
+    play: Arc<Play>,
+    start: Instant,
+}
+
+impl Drop for SeatWatch {
+    fn drop(&mut self) {
+        let seconds = self.start.elapsed().as_secs().to_string();
+        let over = !self.play.game_running();
+        self.usage.log(
+            "played",
+            &self.visitor,
+            &[&self.match_id, &seconds, if over { "1" } else { "0" }],
+        );
+        if !over {
+            self.usage.dropped.lock().unwrap().insert(
+                (self.visitor.clone(), self.match_id.clone()),
+                Instant::now(),
+            );
+            self.usage.log("drop", &self.visitor, &[&self.match_id]);
+        }
     }
 }
 
@@ -226,6 +491,20 @@ impl<'r> FromRequest<'r> for Referrer {
             .filter(|referrer| !referrer.is_empty() && Some(referrer) != own.as_ref());
         Outcome::Success(Referrer(referrer))
     }
+}
+
+/// Whether the visitor allowed usage logging.
+pub fn consented(cookies: &CookieJar<'_>) -> bool {
+    cookies
+        .get(CONSENT_COOKIE)
+        .is_some_and(|cookie| cookie.value() == "1")
+}
+
+/// The visitor id for the log: `-` unless they allowed it.
+fn logged_visitor(cookies: &CookieJar<'_>) -> String {
+    visitor(cookies)
+        .filter(|_| consented(cookies))
+        .unwrap_or_else(|| "-".to_string())
 }
 
 /// The visitor id, which also binds a player's seat (`play.rs`).
@@ -312,10 +591,27 @@ struct Period {
     fails: u64,
     /// Stream start and end, for the peak.
     streams: Vec<(u64, u64)>,
+    setup_hosts: HashSet<String>,
+    /// Joined someone else's setup.
+    guests: HashSet<String>,
+    started: HashSet<String>,
+    /// Seconds a seat's game socket was open, by (visitor, match).
+    played: HashMap<(String, String), u64>,
+    /// Seats still connected when the game was over.
+    stayed: HashSet<(String, String)>,
+    ended: BTreeMap<String, u64>,
+    drops: u64,
+    backs: u64,
 }
 
 impl Period {
-    fn add(&mut self, event: &Event, first_seen: &HashMap<&str, u64>, from: u64) {
+    fn add(
+        &mut self,
+        event: &Event,
+        first_seen: &HashMap<&str, u64>,
+        hosts: &HashMap<&str, &str>,
+        from: u64,
+    ) {
         let visitor = event.visitor;
         match event.kind {
             "page" => {
@@ -326,6 +622,40 @@ impl Period {
             }
             "replay" => self.replays += 1,
             "fail" => self.fails += 1,
+            "setup" => {
+                if let Some(visitor) = visitor {
+                    self.setup_hosts.insert(visitor.to_string());
+                }
+            }
+            "join" => {
+                if let (Some(visitor), Some(id)) = (visitor, event.fields.first())
+                    && hosts.get(id) != Some(&visitor)
+                {
+                    self.guests.insert(visitor.to_string());
+                }
+            }
+            "start" => {
+                if let Some(id) = event.fields.first() {
+                    self.started.insert((*id).to_string());
+                }
+            }
+            "played" => {
+                if let (Some(visitor), Some(id), Some(seconds)) =
+                    (visitor, event.fields.first(), number(event.fields.get(1)))
+                {
+                    let key = (visitor.to_string(), (*id).to_string());
+                    if event.fields.get(2) == Some(&"1") {
+                        self.stayed.insert(key.clone());
+                    }
+                    *self.played.entry(key).or_default() += seconds as u64;
+                }
+            }
+            "drop" => self.drops += 1,
+            "back" => self.backs += 1,
+            "end" => {
+                let reason = event.fields.get(1).copied().unwrap_or("?");
+                *self.ended.entry(reason.to_string()).or_default() += 1;
+            }
             _ => {}
         }
         if let Some((seconds, viewer)) = watched(event) {
@@ -377,6 +707,15 @@ fn report(text: &str, now: u64, live_now: usize) -> String {
             first_seen.entry(visitor).or_insert(event.at);
         }
     }
+    // Who opened each setup, so its host is not counted as a guest.
+    let mut hosts: HashMap<&str, &str> = HashMap::new();
+    for event in &events {
+        if event.kind == "setup"
+            && let (Some(visitor), Some(id)) = (event.visitor, event.fields.first())
+        {
+            hosts.insert(id, visitor);
+        }
+    }
     let today_from = now - now % DAY;
     let week_from = now.saturating_sub(WEEK);
     let mut today = Period::default();
@@ -385,18 +724,18 @@ fn report(text: &str, now: u64, live_now: usize) -> String {
     let first_day = (now / DAY).saturating_sub(DAILY_ROWS - 1);
     let mut days: BTreeMap<u64, Period> = BTreeMap::new();
     for event in &events {
-        total.add(event, &first_seen, 0);
+        total.add(event, &first_seen, &hosts, 0);
         if event.at >= week_from {
-            week.add(event, &first_seen, week_from);
+            week.add(event, &first_seen, &hosts, week_from);
         }
         if event.at >= today_from {
-            today.add(event, &first_seen, today_from);
+            today.add(event, &first_seen, &hosts, today_from);
         }
         let day = event.at / DAY;
         if day >= first_day {
             days.entry(day)
                 .or_default()
-                .add(event, &first_seen, day * DAY);
+                .add(event, &first_seen, &hosts, day * DAY);
         }
     }
 
@@ -456,6 +795,54 @@ fn report(text: &str, now: u64, live_now: usize) -> String {
         let _ = writeln!(out, "7-day peak of {peak} at {} UTC", format_time(peak_at));
     }
 
+    let _ = writeln!(out, "\nplaying (a player is a visitor with a seat)");
+    let mut row = |label: &str, value: &dyn Fn(&Period) -> String| {
+        let _ = write!(out, "{label:<28}");
+        for period in periods {
+            let _ = write!(out, "{:>10}", value(period));
+        }
+        let _ = writeln!(out);
+    };
+    row("opened a setup (hosts)", &|period| {
+        period.setup_hosts.len().to_string()
+    });
+    row("joined a setup (guests)", &|period| {
+        period.guests.len().to_string()
+    });
+    row("games started", &|period| period.started.len().to_string());
+    row("players", &|period| players(period, 0).to_string());
+    for minutes in [1, 2, 5, 30, 60] {
+        row(&format!("  played {minutes}+ min"), &|period| {
+            players(period, minutes * 60).to_string()
+        });
+    }
+    row("  still there at the end", &|period| {
+        period
+            .stayed
+            .iter()
+            .map(|(visitor, _)| visitor)
+            .collect::<HashSet<_>>()
+            .len()
+            .to_string()
+    });
+    row("disconnects", &|period| period.drops.to_string());
+    row("  came back", &|period| period.backs.to_string());
+    row("  never came back", &|period| {
+        period.drops.saturating_sub(period.backs).to_string()
+    });
+    let reasons: BTreeSet<&String> = total.ended.keys().collect();
+    row("games ended", &|period| {
+        period.ended.values().sum::<u64>().to_string()
+    });
+    for reason in reasons {
+        row(&format!("  {reason}"), &|period| {
+            period.ended.get(reason).copied().unwrap_or(0).to_string()
+        });
+    }
+    let _ = writeln!(
+        out,
+        "  (minutes: the game socket open, a pause counts; a reload is a disconnect that came back;\n   players, hosts and guests are only those who allowed usage logging, the game counts are all)\n"
+    );
     let recent: Vec<&Event> = events
         .iter()
         .filter(|event| event.at >= week_from)
@@ -489,6 +876,18 @@ fn report(text: &str, now: u64, live_now: usize) -> String {
         );
     }
     out
+}
+
+/// The visitors who had a seat's game socket open for `secs` seconds in
+/// one match.
+fn players(period: &Period, secs: u64) -> usize {
+    period
+        .played
+        .iter()
+        .filter(|(_, seconds)| **seconds >= secs)
+        .map(|((visitor, _), _)| visitor)
+        .collect::<HashSet<_>>()
+        .len()
 }
 
 fn heading(out: &mut String, title: &str) {

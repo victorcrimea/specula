@@ -239,5 +239,16 @@
   "Too many people are watching on this server. Trying again...": "Na tomto serveri sleduje príliš veľa ľudí. Skúšam znova...",
   "Show unfinished matches": "Zobraziť nedokončené zápasy",
   "+ %(count)s AI": "+ %(count)s AI",
-  "%(count)s AI": "%(count)s AI"
+  "%(count)s AI": "%(count)s AI",
+  "Feedback": "Spätná väzba",
+  "Send feedback": "Odoslať spätnú väzbu",
+  "What happened, or what would you change?": "Čo sa stalo, alebo čo by ste zmenili?",
+  "Contact (optional)": "Kontakt (voliteľné)",
+  "Attach a screenshot of the page": "Priložiť snímku stránky",
+  "The game is paused while this window is open, which uses your pause time.": "Hra je pozastavená, kým je toto okno otvorené, a spotrebúva váš čas na pauzy.",
+  "Thank you for your feedback!": "Ďakujeme za vašu spätnú väzbu!",
+  "Could not send the feedback. Try again later.": "Spätnú väzbu sa nepodarilo odoslať. Skúste to neskôr.",
+  "A cookie keeps your seat in a game. May we also count visits and games, anonymously, to improve the site?": "Súbor cookie drží vaše miesto v hre. Môžeme tiež anonymne počítať návštevy a hry, aby sme stránku zlepšovali?",
+  "Allow": "Povoliť",
+  "Decline": "Odmietnuť"
 }
