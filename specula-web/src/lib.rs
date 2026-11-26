@@ -3248,6 +3248,15 @@ async fn run(
     }
     wire_sound(&app, &window);
     wire_warmup(&app);
+    if page == Page::Observer
+        && let Ok(lobby) = element::<HtmlElement>(&document, "lobby-open")
+    {
+        on_click(&lobby, || {
+            if let Some(window) = web_sys::window() {
+                let _ = window.location().set_href("/");
+            }
+        });
+    }
     if page == Page::Observer {
         wire_storage_notice(&app, &document)?;
     }
