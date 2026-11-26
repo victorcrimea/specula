@@ -1780,6 +1780,7 @@ pub(crate) fn serve(
             Record::TimeNotifications(notes) => hub.set_time_notifications(notes),
             Record::ControlGroups(groups) => hub.set_control_groups(&groups),
             Record::KeepAlive => hub.feed_alive(),
+            Record::SimTime(microseconds) => hub.set_sim_time(microseconds),
             Record::MetadataSaved => {
                 if let Some(play) = play {
                     play.metadata_saved();

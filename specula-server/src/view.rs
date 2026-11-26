@@ -1,4 +1,4 @@
-//! The viewer stream, wire format v31: messages for each keyframe, turn or
+//! The viewer stream, wire format v32: messages for each keyframe, turn or
 //! match end, varints and zigzag as in `wire.rs`, positions and heights in
 //! 1/16 m, carried brotli-compressed as below.
 //!
@@ -79,6 +79,11 @@
 //!   to the seats it is for and, with the delay, to the observers. It sits
 //!   in the frame like a flare and is never in a keyframe or the history
 //!   (CONTROL-IMPL V105).
+//! - kind 8 simulation time (v32): varint turn, varint microseconds, the
+//!   mean wall time of the engine's turn updates over the last second or
+//!   so. It is sent at once to every seat and, with the delay, to the
+//!   observers, and sits in the frame like an event, so a stored match
+//!   replays it; never in a keyframe.
 //!
 //! The players section (a keyframe's and a delta's player table) ends with
 //! the engine's time notes (v27): varint count, then count x {varint end
@@ -429,6 +434,7 @@ const MESSAGE_PAUSE: u8 = 4;
 const MESSAGE_FLARE: u8 = 5;
 const MESSAGE_NOTIFICATION: u8 = 6;
 const MESSAGE_EVENT: u8 = 7;
+const MESSAGE_SIM_TIME: u8 = 8;
 const CHANGED_POSITION: u64 = 1;
 const CHANGED_COLOR: u64 = 2;
 const CHANGED_ICON: u64 = 4;
@@ -1876,6 +1882,14 @@ impl Stream {
         self.visual.push(&out.0, None)
     }
 
+    fn sim_time_message(&mut self, turn: u32, microseconds: u32) -> io::Result<TrackOp> {
+        let mut out = Writer::default();
+        out.u8(MESSAGE_SIM_TIME);
+        out.varint(u64::from(turn));
+        out.varint(u64::from(microseconds));
+        self.visual.push(&out.0, None)
+    }
+
     fn event_message(&mut self, turn: u32, json: &str) -> io::Result<TrackOp> {
         let mut out = Writer::default();
         out.u8(MESSAGE_EVENT);
@@ -2685,6 +2699,28 @@ impl Hub {
         match state.observer.event_message(turn, text) {
             Ok(op) => self.queue(state, Release::Flare(op)),
             Err(error) => eprintln!("cannot encode an event: {error}"),
+        }
+    }
+
+    /// How long the engine took per turn over the last second, for the
+    /// frame stats. It is queued like the turns around it for the observers,
+    /// so a viewer sees the cost of the turn on screen, and it is stored, so
+    /// a replay shows it. The seats, who see their game at once, get it at
+    /// once.
+    pub fn set_sim_time(&self, microseconds: u32) {
+        let mut state = self.state.lock().unwrap();
+        if !state.has_turn || state.ended {
+            return;
+        }
+        let turn = state.turn;
+        for seat in &mut state.seats {
+            if let Err(error) = seat.sim_time(turn, microseconds) {
+                eprintln!("cannot encode a simulation time: {error}");
+            }
+        }
+        match state.observer.sim_time_message(turn, microseconds) {
+            Ok(op) => self.queue(&mut state, Release::Flare(op)),
+            Err(error) => eprintln!("cannot encode a simulation time: {error}"),
         }
     }
 

@@ -128,10 +128,17 @@ const DETAIL_LINGER_MS: f64 = 10_000.0;
 /// burst across a window edge still counts whole.
 pub const PEAK_WINDOW_S: u64 = 5;
 
+/// Messages with the turn each is for.
+type Turns = Vec<(u32, Vec<u8>)>;
+
 struct Segment {
     index: u32,
     /// (turn, message); the first is the keyframe.
     messages: Vec<(u32, Vec<u8>)>,
+    /// The engine's simulation time messages (turn, message) of the
+    /// segment, which are no turns of the playback's order; empty for a
+    /// detail segment.
+    sim_times: Vec<(u32, Vec<u8>)>,
 }
 
 /// What applying one live message did.
@@ -231,6 +238,9 @@ struct Playback {
     page_terrain: Cell<(u64, u32)>,
     /// The turn of the last scene message the page was handed.
     page_turn: Cell<u32>,
+    /// The turn of the simulation time message the page was last given
+    /// from a stored segment.
+    sim_posted: Cell<u32>,
     /// The page has something selected, or had until less than
     /// `DETAIL_LINGER_MS` ago.
     detail_wanted: bool,
@@ -513,6 +523,17 @@ impl Playback {
                 Applied::Other => {}
                 Applied::Failed => return,
             }
+        }
+        // A turn and the simulation time that came with it share a frame,
+        // and more than one message would be folded into a keyframe, which
+        // holds no simulation time; so it goes on its own.
+        let (sim_times, shown): (Vec<_>, Vec<_>) = shown
+            .into_iter()
+            .partition(|message| stream::is_sim_time(message));
+        if self.live
+            && let Some(message) = sim_times.last()
+        {
+            self.post_scene(0.0, message);
         }
         if shown.is_empty() {
             return;
@@ -920,6 +941,7 @@ impl Playback {
             match self.next_message(self.playhead) {
                 Next::Message(turn, message) => {
                     self.post_scene(turn_ms, &message);
+                    self.post_sim_time(turn);
                     self.playhead = turn;
                     self.next_due += turn_ms;
                     moved = true;
@@ -1003,14 +1025,23 @@ impl Playback {
             let result = fetched
                 .and_then(|bytes| stream::read_segment(&bytes).map_err(String::from))
                 .and_then(|messages| {
-                    messages
+                    let (sim_times, messages): (Vec<_>, Vec<_>) = messages
+                        .into_iter()
+                        .partition(|message| stream::is_sim_time(message));
+                    let turns = messages
                         .into_iter()
                         .filter(|message| {
                             !stream::is_pause(message) && !stream::is_transient(message)
                         })
                         .map(|message| Ok((stream::message_turn(&message)?, message)))
                         .collect::<Result<Vec<_>, &'static str>>()
-                        .map_err(String::from)
+                        .map_err(String::from)?;
+                    let sim_times = sim_times
+                        .into_iter()
+                        .map(|message| Ok((stream::message_turn(&message)?, message)))
+                        .collect::<Result<Vec<_>, &'static str>>()
+                        .map_err(String::from)?;
+                    Ok((turns, sim_times))
                 });
             if let Some(playback) = this.upgrade() {
                 let mut playback = playback.borrow_mut();
@@ -1025,7 +1056,7 @@ impl Playback {
         &mut self,
         match_id: u64,
         index: u32,
-        result: Result<Vec<(u32, Vec<u8>)>, String>,
+        result: Result<(Turns, Turns), String>,
     ) {
         self.fetching = None;
         if match_id != self.live_scene.match_id {
@@ -1033,11 +1064,15 @@ impl Playback {
             return;
         }
         match result {
-            Ok(messages) => {
+            Ok((messages, sim_times)) => {
                 if self.segments.len() == CACHED_SEGMENTS {
                     self.segments.remove(0);
                 }
-                self.segments.push(Segment { index, messages });
+                self.segments.push(Segment {
+                    index,
+                    messages,
+                    sim_times,
+                });
                 self.resume();
             }
             Err(error) => {
@@ -1097,6 +1132,27 @@ impl Playback {
         out.extend_from_slice(&turn_ms.to_le_bytes());
         out.extend_from_slice(message);
         self.post(&out);
+    }
+
+    /// The engine's simulation time as of `turn`, from the stored segment
+    /// that holds it, for a viewer who is not live (a live one is sent the
+    /// messages as they come).
+    fn post_sim_time(&self, turn: u32) {
+        let index = self.index_of(turn);
+        let Some(segment) = self.segments.iter().find(|segment| segment.index == index) else {
+            return;
+        };
+        let Some((sim_turn, message)) = segment
+            .sim_times
+            .iter()
+            .rev()
+            .find(|(sim_turn, _)| *sim_turn <= turn)
+        else {
+            return;
+        };
+        if self.sim_posted.replace(*sim_turn) != *sim_turn {
+            self.post_scene(0.0, message);
+        }
     }
 
     fn post_status(&self) {
@@ -1622,7 +1678,11 @@ impl Playback {
                 if self.detail_segments.len() == CACHED_SEGMENTS {
                     self.detail_segments.remove(0);
                 }
-                self.detail_segments.push(Segment { index, messages });
+                self.detail_segments.push(Segment {
+                    index,
+                    messages,
+                    sim_times: Vec::new(),
+                });
             }
             // The next turn the page is handed asks again.
             Err(error) => {
@@ -1743,6 +1803,7 @@ fn start() -> Result<(), String> {
             held: Vec::new(),
             page_terrain: Cell::new((0, 0)),
             page_turn: Cell::new(0),
+            sim_posted: Cell::new(0),
             detail_wanted: false,
             detail_linger: None,
             detail_linger_wake: detail_linger_function,

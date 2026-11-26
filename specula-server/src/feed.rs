@@ -47,6 +47,7 @@ const RECORD_EVENTS: u8 = 30;
 const RECORD_TIME_NOTIFICATIONS: u8 = 31;
 const RECORD_CONTROL_GROUPS: u8 = 32;
 const RECORD_METADATA_SAVED: u8 = 33;
+const RECORD_SIM_TIME: u8 = 34;
 const ENTITY_SIZE: usize = 84;
 const ENTITY_SIZE_V14: usize = 74;
 const SOUND_SIZE: usize = 29;
@@ -907,6 +908,9 @@ pub enum Record {
     /// Kind 33: the replay's metadata.json is written, as uplink kind 5
     /// asked.
     MetadataSaved,
+    /// Kind 34: the mean wall time of the engine's simulation updates over
+    /// the last second or so, in microseconds.
+    SimTime(u32),
     /// Kind 28: the simulation's init attributes as JSON, once at the start.
     InitAttributes(Vec<u8>),
     /// Kind 29: what the session GUI would tell a player, before the turn
@@ -1122,6 +1126,7 @@ pub fn read_record(reader: &mut impl Read, version: u32) -> io::Result<Option<Re
             }
             RECORD_KEEPALIVE => return Ok(Some(Record::KeepAlive)),
             RECORD_METADATA_SAVED => return Ok(Some(Record::MetadataSaved)),
+            RECORD_SIM_TIME => return Ok(Some(Record::SimTime(Cursor(&payload).u32()?))),
             RECORD_INIT_ATTRIBUTES => return Ok(Some(Record::InitAttributes(payload))),
             RECORD_NOTIFICATIONS => return decode_notifications(&payload).map(Some),
             RECORD_EVENTS => return Ok(Some(Record::Events(payload))),

@@ -2,7 +2,7 @@
 //! one place so a change to one side cannot be missed on the other.
 
 /// In every visual keyframe; deltas follow one, so they need none.
-pub const WIRE_VERSION: u8 = 31;
+pub const WIRE_VERSION: u8 = 32;
 /// The detail stream's keyframes.
 pub const DETAIL_VERSION: u8 = 15;
 /// The terrain resource's layout.

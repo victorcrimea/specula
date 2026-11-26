@@ -1872,6 +1872,15 @@ impl Seat {
         Ok(())
     }
 
+    /// Tells the seat's viewers the engine's simulation time
+    /// (`Hub::set_sim_time`).
+    pub fn sim_time(&mut self, turn: u32, microseconds: u32) -> io::Result<()> {
+        let visual = self.stream.sim_time_message(turn, microseconds)?;
+        self.shown
+            .apply(Release::Flare(visual), None, self.shown.match_id);
+        Ok(())
+    }
+
     /// Tells the seat's viewers its control (`Hub::set_control`).
     pub fn control(&mut self, turn: u32, body: &[u8]) -> io::Result<()> {
         if let Some(op) = self.stream.set_control(turn, body)? {

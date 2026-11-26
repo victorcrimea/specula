@@ -212,5 +212,6 @@
   "Download replay": "다시보기 다운로드",
   "Unzip it into the replays folder of 0 A.D. 0.28.0.": "0 A.D. 0.28.0의 다시보기 폴더에 압축을 푸세요.",
   "Vanilla 0 A.D. shows at most 8 players in some screens.": "기본 0 A.D.는 일부 화면에서 최대 8명의 플레이어만 표시합니다.",
-  "Some maps are hidden because they do not support more than 8 players.": "일부 지도는 8명을 초과하는 플레이어를 지원하지 않아 숨겨져 있습니다."
+  "Some maps are hidden because they do not support more than 8 players.": "일부 지도는 8명을 초과하는 플레이어를 지원하지 않아 숨겨져 있습니다.",
+  "Sim": "시뮬"
 }

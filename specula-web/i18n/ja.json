@@ -212,5 +212,6 @@
   "Download replay": "リプレイをダウンロード",
   "Unzip it into the replays folder of 0 A.D. 0.28.0.": "0 A.D. 0.28.0 のリプレイフォルダーに展開してください。",
   "Vanilla 0 A.D. shows at most 8 players in some screens.": "通常の 0 A.D. では、一部の画面で表示されるプレイヤーは最大 8 人です。",
-  "Some maps are hidden because they do not support more than 8 players.": "一部のマップは 8 人を超えるプレイヤーに対応していないため、非表示になっています。"
+  "Some maps are hidden because they do not support more than 8 players.": "一部のマップは 8 人を超えるプレイヤーに対応していないため、非表示になっています。",
+  "Sim": "シム"
 }

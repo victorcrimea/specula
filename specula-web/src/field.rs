@@ -79,6 +79,7 @@ use crate::far::Request;
 use crate::gpu;
 use crate::idle;
 use crate::impostor;
+use crate::lang;
 use crate::orders;
 use crate::overlay::Mark;
 use crate::overlay::OverlayShape;
@@ -963,6 +964,9 @@ struct Stats {
     models: u32,
     levels: [u32; LEVELS],
     stream: StreamBytes,
+    /// The engine's mean time per turn, microseconds, as the stream last
+    /// told.
+    sim_micros: Option<u32>,
     backend: &'static str,
     adapter: String,
 }
@@ -1522,6 +1526,7 @@ impl Field {
             models: 0,
             levels: [0; LEVELS],
             stream: StreamBytes::default(),
+            sim_micros: None,
             backend,
             adapter,
         };
@@ -4697,6 +4702,10 @@ impl View for Field {
         self.stats.stream = bytes;
     }
 
+    fn set_sim_time(&mut self, micros: Option<u32>) {
+        self.stats.sim_micros = micros;
+    }
+
     fn set_scene(&mut self, scene: &Scene, palette: &[u32]) {
         let entities = &mut self.entities;
         if scene.match_id != entities.match_id {
@@ -5845,10 +5854,17 @@ impl Field {
                 span.average().map_or("-".into(), |ms| format!("{ms:.1}"))
             }
         };
+        // The share of the turn the engine's update takes: at 100% the
+        // match runs slower than real time for everyone.
+        let sim = stats.sim_micros.map_or("-".to_string(), |micros| {
+            let ms = f64::from(micros) / 1000.0;
+            format!("{ms:.0} ms ({:.0}%)", ms * 100.0 / TURN_MS)
+        });
         stats.element.set_text_content(Some(&format!(
-            "FPS {rate:>8.0}\nCPU {:>5} ms\nGPU {:>5} ms\n{:>12}",
+            "FPS {rate:>8.0}\nCPU {:>5} ms\nGPU {:>5} ms\n{} {sim:>14}\n{:>12}",
             ms(times.frame, true),
             ms(times.gpu, gpu_measured),
+            lang::translate("Sim"),
             stats.backend,
         )));
 

@@ -212,5 +212,6 @@
   "Download replay": "Lataa tallenne",
   "Unzip it into the replays folder of 0 A.D. 0.28.0.": "Pura se 0 A.D. 0.28.0:n tallennekansioon.",
   "Vanilla 0 A.D. shows at most 8 players in some screens.": "Alkuperäinen 0 A.D. näyttää joissakin näkymissä enintään 8 pelaajaa.",
-  "Some maps are hidden because they do not support more than 8 players.": "Jotkin kartat on piilotettu, koska ne eivät tue yli 8 pelaajaa."
+  "Some maps are hidden because they do not support more than 8 players.": "Jotkin kartat on piilotettu, koska ne eivät tue yli 8 pelaajaa.",
+  "Sim": "Sim"
 }

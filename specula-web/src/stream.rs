@@ -29,6 +29,7 @@ const MESSAGE_PAUSE: u8 = 4;
 const MESSAGE_FLARE: u8 = 5;
 const MESSAGE_NOTIFICATION: u8 = 6;
 const MESSAGE_EVENT: u8 = 7;
+const MESSAGE_SIM_TIME: u8 = 8;
 const CHANGED_POSITION: u64 = 1;
 const CHANGED_COLOR: u64 = 2;
 const CHANGED_ICON: u64 = 4;
@@ -872,7 +873,7 @@ impl Scene {
             MESSAGE_KEYFRAME => self.apply_keyframe(&mut cursor)?,
             MESSAGE_DELTA => self.apply_delta(&mut cursor, progress)?,
             MESSAGE_PAUSE => self.apply_pause(&mut cursor)?,
-            MESSAGE_FLARE | MESSAGE_NOTIFICATION | MESSAGE_EVENT => {
+            MESSAGE_FLARE | MESSAGE_NOTIFICATION | MESSAGE_EVENT | MESSAGE_SIM_TIME => {
                 cursor.0 = &[];
             }
             _ => return Err("unknown message kind"),
@@ -1996,10 +1997,23 @@ pub fn is_event(message: &[u8]) -> bool {
     message.first() == Some(&MESSAGE_EVENT)
 }
 
+/// The engine's simulation time: varint turn, varint microseconds.
+pub fn is_sim_time(message: &[u8]) -> bool {
+    message.first() == Some(&MESSAGE_SIM_TIME)
+}
+
+/// The microseconds of a simulation time message.
+pub fn sim_time_micros(message: &[u8]) -> Result<u32, &'static str> {
+    let (_, body) = message.split_first().ok_or("empty message")?;
+    let mut cursor = ByteReader(body);
+    cursor.varint()?;
+    cursor.varint_u32()
+}
+
 /// A message that is no turn and is in no keyframe: a flare, a
-/// notification or an event.
+/// notification, an event or a simulation time.
 pub fn is_transient(message: &[u8]) -> bool {
-    is_flare(message) || is_notification(message) || is_event(message)
+    is_flare(message) || is_notification(message) || is_event(message) || is_sim_time(message)
 }
 
 pub const NOTE_ATTACKED: u8 = 1;

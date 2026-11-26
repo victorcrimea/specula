@@ -369,6 +369,9 @@ trait View {
     }
     /// What the stream has brought for the shown match, for statistics.
     fn set_stream_bytes(&mut self, _bytes: StreamBytes) {}
+    /// The engine's mean time per turn in microseconds over the last
+    /// second, for statistics; none until the stream has told.
+    fn set_sim_time(&mut self, _micros: Option<u32>) {}
     /// The ground the camera sees, x and z in metres, for the minimap.
     fn view_outline(&self) -> Option<[[f32; 2]; 4]> {
         None
@@ -650,6 +653,8 @@ struct App {
     /// The match whose UUID was asked for, so it is asked once.
     link_fetch: u64,
     stream_bytes: StreamBytes,
+    /// The newest simulation time the stream brought, in microseconds.
+    sim_micros: Option<u32>,
     match_over: MatchOver,
     stream_start: StreamStart,
     time_limit: Option<TimeLimit>,
@@ -1364,6 +1369,7 @@ impl App {
             loading.show(self.renderer.downloads(), now);
         }
         self.renderer.set_stream_bytes(self.stream_bytes);
+        self.renderer.set_sim_time(self.sim_micros);
         let progress = ((now - self.turn_start) / self.turn_interval).clamp(0.0, 1.0) as f32;
         if self.dirty || progress != self.progress || self.renderer.animating() {
             self.dirty = !self.renderer.draw(progress);
@@ -2945,6 +2951,7 @@ async fn run(
         link_uuid: None,
         link_fetch: 0,
         stream_bytes: StreamBytes::default(),
+        sim_micros: None,
         match_over: MatchOver {
             button: element(&document, "current")?,
             popup: element(&document, "match-over")?,
@@ -6195,6 +6202,15 @@ fn receive(app_rc: &Rc<RefCell<App>>, turn_ms: f64, message: &[u8]) {
     }
     if stream::is_event(message) {
         receive_event(app_rc, message);
+        return;
+    }
+    if stream::is_sim_time(message) {
+        match stream::sim_time_micros(message) {
+            Ok(micros) => app_rc.borrow_mut().sim_micros = Some(micros),
+            Err(error) => {
+                web_sys::console::error_1(&format!("bad simulation time: {error}").into());
+            }
+        }
         return;
     }
     let app = &mut *app_rc.borrow_mut();
