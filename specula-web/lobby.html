@@ -139,7 +139,10 @@ let replayCount = PAGE;
 // Matches that ended with no result are mostly ones nobody played.
 const UNFINISHED_KEY = "specula.lobby.unfinished";
 const unfinished = document.getElementById("unfinished");
-try { unfinished.checked = localStorage.getItem(UNFINISHED_KEY) === "1"; } catch {}
+// On unless the visitor turned it off, so a game one left before its result
+// still shows.
+unfinished.checked = true;
+try { unfinished.checked = localStorage.getItem(UNFINISHED_KEY) !== "0"; } catch {}
 let lobby = null;
 
 const fill = (text, values) => {

@@ -2024,6 +2024,10 @@ struct State {
     new_feed: bool,
     /// Set from the end of a match until the next one's first turn.
     ended: bool,
+    /// The engine sent its final capture. The players record that carries
+    /// the states only comes every few turns, so a feed closed soon after
+    /// the result would otherwise leave the match undecided.
+    final_seen: bool,
     /// When the feed last connected or sent a turn, for the observer
     /// watchdog.
     feed_activity: Option<Instant>,
@@ -2329,6 +2333,7 @@ impl Hub {
                 teams_held: true,
                 new_feed: true,
                 ended: false,
+                final_seen: false,
                 feed_activity: None,
                 next_uuid: uuid,
                 meta_source: None,
@@ -3110,6 +3115,9 @@ impl Hub {
             }
             state.teams_held
         };
+        if is_final {
+            self.state.lock().unwrap().final_seen = true;
+        }
         let Some(raw) = summary_envelope(turn, is_final, teams_held, &full) else {
             return;
         };
@@ -3373,13 +3381,14 @@ impl Hub {
             Vec::new()
         };
         // Player states are the feed's: 1 defeated, 2 won.
-        let decided = state
-            .observer
-            .players
-            .players
-            .iter()
-            .skip(1)
-            .any(|player| player.state != 0);
+        let decided = state.final_seen
+            || state
+                .observer
+                .players
+                .players
+                .iter()
+                .skip(1)
+                .any(|player| player.state != 0);
         let winners = state
             .observer
             .players
@@ -3461,6 +3470,7 @@ impl Hub {
             }
             self.store_meta(state, false);
             state.ended = false;
+            state.final_seen = false;
             state.first_turn = turn;
             let players = state.seat_players.clone();
             state.seats.retain(|seat| players.contains(&seat.player));
