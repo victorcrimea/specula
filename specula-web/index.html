@@ -919,7 +919,7 @@ body:not([data-debug="storage"]) #stats-storage { display: none; }
   display: flex; align-items: center; gap: 4px; -webkit-text-stroke: 2px black; paint-order: stroke fill; }
 /* ChatOverlay: the last lines at the screen's top left, which pass clicks
    through to the game. */
-#chat-overlay { position: fixed; z-index: 5; left: 3px; top: 131px; bottom: 240px; width: 60%;
+#chat-overlay { position: fixed; z-index: 5; left: 3px; top: calc(var(--top-height) + 131px); bottom: 240px; width: 60%;
   overflow: hidden; pointer-events: none; font-size: 14px; font-weight: 700; color: white;
   -webkit-text-stroke: 2px black; paint-order: stroke fill; line-height: 1.25;
   font-family: "0ad sans", "0ad sans fallback", sans-serif; }
@@ -1065,7 +1065,7 @@ body:not([data-debug="storage"]) #stats-storage { display: none; }
 #storage-notice-buttons { display: flex; justify-content: flex-end; gap: 6px; margin-top: 12px; }
 #storage-notice button { font: inherit; color: #e6e9eb; background: rgba(15, 18, 20, 0.85);
   border: 1px solid #3a4248; border-radius: 4px; padding: 4px 10px; }
-#settings { position: fixed; top: 0; bottom: 0; left: 0;
+#settings { position: fixed; z-index: 100; top: var(--top-height); bottom: 0; left: 0;
   width: min(280px, calc(100vw - 48px)); box-sizing: border-box;
   display: flex; flex-direction: column; overflow: auto;
   font: 13px system-ui, sans-serif; color: #e6e9eb;
