@@ -207,5 +207,7 @@
   "Watch": "Дивитися",
   "Control group %(number)s": "Група керування %(number)s",
   "Download replay": "Завантажити запис",
-  "Unzip it into the replays folder of 0 A.D. 0.28.0.": "Розпакуйте в теку записів 0 A.D. 0.28.0."
+  "Unzip it into the replays folder of 0 A.D. 0.28.0.": "Розпакуйте в теку записів 0 A.D. 0.28.0.",
+  "Vanilla 0 A.D. shows at most 8 players in some screens.": "Звичайна 0 A.D. показує на деяких екранах не більше 8 гравців.",
+  "Some maps are hidden because they do not support more than 8 players.": "Деякі мапи приховано, бо вони не підтримують більше 8 гравців."
 }

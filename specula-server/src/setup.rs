@@ -26,6 +26,8 @@ use crate::seats::Seats;
 use crate::settings::Choice;
 use crate::settings::LandscapeChoice;
 use crate::settings::Launch;
+use crate::settings::MAPS_UP_TO_8_PLAYERS;
+use crate::settings::MAX_PLAYERS_SMALL_MAP;
 use crate::settings::MapInfo;
 use crate::settings::Settings;
 use crate::settings::gamesetup::CEASEFIRE_MAX;
@@ -498,7 +500,14 @@ impl SetupRoom {
             })
             .unwrap_or_default();
         let maps = kind
-            .map(|kind| map_choices(catalog, kind, &settings.gui.map_filter))
+            .map(|kind| {
+                map_choices(
+                    catalog,
+                    kind,
+                    &settings.gui.map_filter,
+                    settings.player_count.players,
+                )
+            })
             .unwrap_or_default();
         let raw = |value: &Option<Value>| value.clone().unwrap_or(Value::Null);
         let sea_level = settings.sea_level_rise.value.map(|_| {
@@ -534,6 +543,7 @@ impl SetupRoom {
             "color_locked": settings.player_color.locked,
             "victory_disabled": settings.victory_conditions.disabled,
             "player_count_max": settings.player_count.max,
+            "hidden_maps": hidden_maps(catalog, settings),
             "pop_per_player": settings.population.per_player.is_some(),
             "resources_per_player": settings.starting_resources.per_player.is_some(),
             "removed": settings.player_removed,
@@ -849,4 +859,24 @@ pub fn catalog_json(catalog: &Catalog) -> String {
         "sea_level_rise_max": SEA_LEVEL_RISE_MAX,
     })
     .to_string()
+}
+
+/// The random maps the setup page leaves out because the game has more than
+/// 8 players, as `map_choices` does; its map browser lists the whole
+/// catalog itself.
+fn hidden_maps(catalog: &Catalog, settings: &Settings) -> Vec<String> {
+    if settings.map.kind != Some(MapType::Random)
+        || settings.player_count.players <= MAX_PLAYERS_SMALL_MAP
+    {
+        return Vec::new();
+    }
+    catalog
+        .maps
+        .iter()
+        .filter(|map| {
+            let name = map.path.rsplit('/').next().unwrap_or_default();
+            map.kind == MapType::Random && MAPS_UP_TO_8_PLAYERS.contains(&name)
+        })
+        .map(|map| map.path.clone())
+        .collect()
 }

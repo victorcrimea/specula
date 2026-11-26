@@ -207,5 +207,7 @@
   "Watch": "Mira",
   "Control group %(number)s": "Grup de control %(number)s",
   "Download replay": "Baixa la repetició",
-  "Unzip it into the replays folder of 0 A.D. 0.28.0.": "Descomprimeix-la a la carpeta de repeticions de 0 A.D. 0.28.0."
+  "Unzip it into the replays folder of 0 A.D. 0.28.0.": "Descomprimeix-la a la carpeta de repeticions de 0 A.D. 0.28.0.",
+  "Vanilla 0 A.D. shows at most 8 players in some screens.": "El 0 A.D. original mostra com a màxim 8 jugadors en algunes pantalles.",
+  "Some maps are hidden because they do not support more than 8 players.": "Alguns mapes estan amagats perquè no admeten més de 8 jugadors."
 }

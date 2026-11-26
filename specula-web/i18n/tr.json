@@ -207,5 +207,7 @@
   "Watch": "İzle",
   "Control group %(number)s": "Kontrol grubu %(number)s",
   "Download replay": "Tekrarı indir",
-  "Unzip it into the replays folder of 0 A.D. 0.28.0.": "0 A.D. 0.28.0 tekrarlar klasörüne çıkarın."
+  "Unzip it into the replays folder of 0 A.D. 0.28.0.": "0 A.D. 0.28.0 tekrarlar klasörüne çıkarın.",
+  "Vanilla 0 A.D. shows at most 8 players in some screens.": "Özgün 0 A.D., bazı ekranlarda en fazla 8 oyuncu gösterir.",
+  "Some maps are hidden because they do not support more than 8 players.": "Bazı haritalar 8'den fazla oyuncuyu desteklemediği için gizlendi."
 }

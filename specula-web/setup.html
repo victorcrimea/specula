@@ -114,7 +114,9 @@ input[type=text] { height: 26px; box-sizing: border-box; padding: 0 6px; border:
 #players-head > div { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 /* Vanilla's heading is wider than its 28 px column and spills both ways. */
 #players-head > .color-head { overflow: visible; display: flex; justify-content: center; }
-#players { display: flex; flex-direction: column; padding: 0 1px; }
+/* Up to 15 rows, so the list scrolls under the fixed heading. */
+#players { display: flex; flex-direction: column; padding: 0 1px; flex: 1 1 auto; min-height: 0;
+  overflow-y: auto; }
 .slot { height: 32px; }
 .slot > * { min-width: 0; }
 .slot .name { text-align: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
@@ -131,6 +133,9 @@ input[type=text] { height: 26px; box-sizing: border-box; padding: 0 6px; border:
 /* MapPreview.xml. */
 #preview { grid-area: preview; position: relative; overflow: hidden; cursor: pointer;
   background-size: 100% 100%; background-repeat: no-repeat; }
+#maps-hidden-note { position: absolute; left: 5px; right: 5px; top: 5px; padding: 3px 5px;
+  font-size: 12px; background: rgba(0, 0, 0, 0.65); text-shadow: 0 0 2px black; }
+#maps-hidden-note[hidden] { display: none; }
 #preview-title { position: absolute; left: 5px; right: 5px; bottom: 2px;
   text-shadow: 0 0 2px black, 0 0 2px black; }
 
@@ -268,6 +273,8 @@ input[type=text] { height: 26px; box-sizing: border-box; padding: 0 6px; border:
   .slot-grid > :nth-child(5) { grid-column: 1 / 3; }
   .slot-grid > :nth-child(6) { grid-column: 3 / 5; }
   #players-head { height: auto; }
+  /* The page itself grows here, so the list needs a bound of its own. */
+  #players { flex: none; max-height: 520px; }
   .slot { height: auto; padding: 2px 5px 2px 0; }
   #preview { min-height: 120px; }
   #map-dialog { inset: 0; grid-template-columns: minmax(0, 1fr);
@@ -305,7 +312,7 @@ input[type=text] { height: 26px; box-sizing: border-box; padding: 0 6px; border:
 <div id="players"></div>
 </section>
 
-<section id="preview" class="gold-box" data-tip="Click to view the list of available maps." data-i18n-attrs="data-tip"><div id="preview-title"></div></section>
+<section id="preview" class="gold-box" data-tip="Click to view the list of available maps." data-i18n-attrs="data-tip"><div id="maps-hidden-note" hidden data-i18n>Some maps are hidden because they do not support more than 8 players.</div><div id="preview-title"></div></section>
 
 <section id="left">
 <div id="spectators-box" class="gold-box">

@@ -829,8 +829,12 @@ body:not([data-debug="storage"]) #stats-storage { display: none; }
 :is(#diplomacy-window, #trade-window, #message-box-dialog, #match-summary, #chat-window) > .titlebar.right { left: calc(50% + 102px); width: 32px;
   background-image: var(--gui-dialog-titlebar-left); scale: -1 -1; }
 #diplomacy-title { left: calc(50% - 96px); top: -16px; width: 192px; height: 32px; }
+/* Specula: past 8 player rows (up to 15) the table stops growing and scrolls;
+   the wasm sets --table-overflow-y, as the rows' last 4 px would otherwise
+   always show a scrollbar. */
 #diplomacy-table { position: relative; margin: 32px 32px 90px;
-  overflow-x: auto; overflow-y: hidden; }
+  overflow-x: auto; overflow-y: var(--table-overflow-y, hidden);
+  max-height: calc(170px - 122px + 20px * 7); }
 #diplomacy-table::after { content: ""; display: block;
   height: calc(var(--dialog-height, 170px) - 122px); }
 #diplomacy-header, #diplomacy-rows { position: absolute; left: 0;

@@ -569,7 +569,7 @@ impl Settings {
         let was_random = old == Some(MapType::Random);
         // MapSize.onTypeChange
         if random && !was_random {
-            self.set_map_size(self.map_size.default);
+            self.set_map_size(catalog, self.map_size.default);
         } else if !random {
             self.map_size.available = false;
         }
@@ -578,7 +578,7 @@ impl Settings {
             self.assign_player_count(catalog, 2);
         }
         if random {
-            self.player_count.max = MAX_PLAYERS;
+            self.player_count.max = self.player_cap();
         }
     }
 
@@ -609,6 +609,10 @@ impl Settings {
         }
         // The setup page's watcher registers after every class.
         self.fill_new_slots(catalog, old);
+        // Specula: more than 8 players hide some random maps.
+        if (old > super::MAX_PLAYERS_SMALL_MAP) != (n > super::MAX_PLAYERS_SMALL_MAP) {
+            self.update_map_list(catalog);
+        }
     }
 
     /// The `victoryConditions.active` watchers.
@@ -941,9 +945,25 @@ impl Settings {
     }
 
     /// `MapSize.setSize`.
-    pub fn set_map_size(&mut self, tiles: u32) {
+    ///
+    /// Specula: a size below `MIN_MAP_SIZE_ABOVE_8` caps the player count at
+    /// 8, clamped the way `PlayerCount.setNb` does.
+    pub fn set_map_size(&mut self, catalog: &Catalog, tiles: u32) {
         self.map_size.available = self.map.kind == Some(MapType::Random);
         self.map_size.size = tiles;
+        if self.map.kind == Some(MapType::Random) {
+            self.player_count.max = self.player_cap();
+            self.set_player_count(catalog, self.player_count.players);
+        }
+    }
+
+    /// The most players a random map of the current size takes.
+    pub fn player_cap(&self) -> usize {
+        if self.map_size.size >= super::MIN_MAP_SIZE_ABOVE_8 {
+            MAX_PLAYERS
+        } else {
+            super::MAX_PLAYERS_SMALL_MAP
+        }
     }
 
     /// `Nomad.setEnabled`.

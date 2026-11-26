@@ -86,8 +86,41 @@ const DEFAULT_MAP_SIZE: u32 = 256;
 const DEFAULT_STARTING_RESOURCES: u32 = 300;
 /// `GameSpeed.init` does not read `game_speeds.json`'s default.
 const DEFAULT_GAME_SPEED: f64 = 1.0;
-/// `g_MaxPlayers` in `gui/common/settings.js`.
-pub const MAX_PLAYERS: usize = 8;
+/// `g_MaxPlayers` in `gui/common/settings.js`, which the hosted engine copy
+/// raises from 8 to 15: `CCmpRangeManager::m_LosPlayerCounts` holds 16 grids
+/// and is indexed by player id, so player 16 aborts the engine.
+pub const MAX_PLAYERS: usize = 15;
+/// Vanilla's cap, and the one on a random map smaller than
+/// `MIN_MAP_SIZE_ABOVE_8`, where more players than this do not fit.
+pub const MAX_PLAYERS_SMALL_MAP: usize = 8;
+/// The smallest random map size (tiles) that takes more than
+/// `MAX_PLAYERS_SMALL_MAP` players.
+pub const MIN_MAP_SIZE_ABOVE_8: u32 = 256;
+/// Random maps that hang or fail to place the players with more than
+/// `MAX_PLAYERS_SMALL_MAP` of them, found by generating every random map at
+/// 15 players (sizes 256 to 512). They stay in the list up to 8 players.
+pub const MAPS_UP_TO_8_PLAYERS: [&str; 20] = [
+    "aegean_sea",
+    "bahrain",
+    "belgian_uplands",
+    "corinthian_isthmus",
+    "danubius",
+    "dodecanese",
+    "elephantine",
+    "english_channel",
+    "fields_of_meroe",
+    "hellas",
+    "lorraine_plain",
+    "lower_nubia",
+    "marmara",
+    "mediterranean",
+    "ngorongoro",
+    "pompeii",
+    "ratumacos",
+    "red_sea",
+    "scythian_rivulet",
+    "the_nile",
+];
 /// `PlayerColor.prototype.DefaultColors`, which the class offers instead of
 /// `player_defaults.json`'s colors.
 const DEFAULT_COLORS: [[u8; 3]; 16] = [

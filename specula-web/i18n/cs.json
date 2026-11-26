@@ -207,5 +207,7 @@
   "Watch": "Sledovat",
   "Control group %(number)s": "Skupina %(number)s",
   "Download replay": "Stáhnout záznam",
-  "Unzip it into the replays folder of 0 A.D. 0.28.0.": "Rozbalte jej do složky se záznamy 0 A.D. 0.28.0."
+  "Unzip it into the replays folder of 0 A.D. 0.28.0.": "Rozbalte jej do složky se záznamy 0 A.D. 0.28.0.",
+  "Vanilla 0 A.D. shows at most 8 players in some screens.": "Původní 0 A.D. zobrazuje na některých obrazovkách nejvýše 8 hráčů.",
+  "Some maps are hidden because they do not support more than 8 players.": "Některé mapy jsou skryté, protože nepodporují více než 8 hráčů."
 }

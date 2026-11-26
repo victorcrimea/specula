@@ -910,6 +910,8 @@ struct OwnerButtons {
     new_match: HtmlButtonElement,
     rematch: HtmlButtonElement,
     /// The follower's Join rematch (M35), shown once the setup opens.
+    /// Whether the tooltip carries the note on more than 8 players.
+    noted: bool,
     join: HtmlButtonElement,
     lobby: HtmlButtonElement,
     can_rematch: bool,
@@ -958,7 +960,7 @@ impl MatchOver {
         *self.error.borrow_mut() = None;
     }
 
-    fn frame(&mut self, now: f64) {
+    fn frame(&mut self, now: f64, players: usize) {
         // A follower asks the server whether the host's rematch opened
         // (M35); the host's own Rematch answers at once. It keeps asking
         // after one did, since that setup can close again (D15, D16, D14).
@@ -1011,6 +1013,21 @@ impl MatchOver {
         }
         let left = self.switch_at - now;
         let text = if let Some(error) = self.error.borrow().clone() {
+            // Vanilla's own screens were laid out for 8 players, so a
+            // downloader of a bigger game is told what to expect.
+            let noted = players > 8;
+            if noted != replay.noted {
+                replay.noted = noted;
+                let mut title =
+                    lang::translate("Unzip it into the replays folder of 0 A.D. 0.28.0.");
+                if noted {
+                    title.push(' ');
+                    title.push_str(&lang::translate(
+                        "Vanilla 0 A.D. shows at most 8 players in some screens.",
+                    ));
+                }
+                replay.button.set_title(&title);
+            }
             error
         } else if self.owner.is_some() {
             lang::translate("Match over")
@@ -1351,7 +1368,8 @@ impl App {
         if let Some(minimap) = &mut self.minimap {
             minimap.frame(progress, self.renderer.view_outline());
         }
-        self.match_over.frame(now);
+        self.match_over
+            .frame(now, self.scene.players.len().saturating_sub(1));
         self.sync_pause();
         self.stream_start.frame(now);
         if let Some(time_limit) = &mut self.time_limit {
@@ -2955,6 +2973,7 @@ async fn run(
         message_box,
         game_menu,
         pause_overlay,
+                    noted: false,
         finish_noticed: status.as_ref().is_some_and(|status| status.defeated),
         pending_follow: None,
         claim_offered: false,

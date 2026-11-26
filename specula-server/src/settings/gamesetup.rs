@@ -130,14 +130,27 @@ pub fn available_filters(catalog: &Catalog, kind: MapType) -> Vec<&'static MapFi
 }
 
 /// Index 0 is the default, as `prepareForDropdown` without a `Default`.
-pub(crate) fn map_choices(catalog: &Catalog, kind: MapType, filter: &str) -> Vec<String> {
+///
+/// Specula: with more than 8 players a random map that cannot place them is
+/// left out, `Random` too then never picks it.
+pub(crate) fn map_choices(
+    catalog: &Catalog,
+    kind: MapType,
+    filter: &str,
+    players: usize,
+) -> Vec<String> {
     let mut choices = Vec::new();
     if kind == MapType::Random {
         choices.push(RANDOM.to_string());
     }
+    let hide = kind == MapType::Random && players > super::MAX_PLAYERS_SMALL_MAP;
     choices.extend(
         map_list(catalog, kind, filter)
             .into_iter()
+            .filter(|map| {
+                let name = map.path.rsplit('/').next().unwrap_or_default();
+                !(hide && super::MAPS_UP_TO_8_PLAYERS.contains(&name))
+            })
             .map(|map| map.path.clone()),
     );
     choices
@@ -162,9 +175,14 @@ pub(super) fn valid_filter(settings: &Settings, catalog: &Catalog, filter: &str)
 
 pub(super) fn valid_map(settings: &Settings, catalog: &Catalog, map: &Choice<String>) -> bool {
     settings.map.kind.is_some_and(|kind| {
-        map_choices(catalog, kind, &settings.gui.map_filter)
-            .iter()
-            .any(|choice| choice == choice_string(map))
+        map_choices(
+            catalog,
+            kind,
+            &settings.gui.map_filter,
+            settings.player_count.players,
+        )
+        .iter()
+        .any(|choice| choice == choice_string(map))
     })
 }
 
@@ -457,7 +475,7 @@ impl Settings {
     }
 
     /// `MapSelection.updateMapList`.
-    fn update_map_list(&mut self, catalog: &Catalog) {
+    pub(super) fn update_map_list(&mut self, catalog: &Catalog) {
         let Some(kind) = self.map.kind else {
             return;
         };
@@ -465,7 +483,12 @@ impl Settings {
         if map_list(catalog, kind, &self.gui.map_filter).is_empty() {
             return;
         }
-        let choices = map_choices(catalog, kind, &self.gui.map_filter);
+        let choices = map_choices(
+            catalog,
+            kind,
+            &self.gui.map_filter,
+            self.player_count.players,
+        );
         self.set_random_options(&choices);
         let current = self.map.map.as_ref().map(choice_string);
         if !current.is_some_and(|current| choices.iter().any(|choice| choice == current)) {
@@ -503,14 +526,14 @@ impl Settings {
                 available_filters(catalog, *kind)
                     .iter()
                     .any(|available| available.name == filter)
-                    && map_choices(catalog, *kind, filter)
+                    && map_choices(catalog, *kind, filter, self.player_count.players)
                         .iter()
                         .any(|choice| choice == choice_string(map)),
                 "map",
             ),
             Change::MapSize(tiles) => ok(valid_map_size(self, catalog, *tiles), "map size"),
             Change::PlayerCount(n) => ok(
-                self.map.kind == Some(MapType::Random) && (1..=MAX_PLAYERS).contains(n),
+                self.map.kind == Some(MapType::Random) && (1..=self.player_cap()).contains(n),
                 "player count",
             ),
             Change::Biome(biome) => ok(valid_biome(self, biome), "biome"),
@@ -626,7 +649,7 @@ impl Settings {
                 self.update_map_list(catalog);
                 self.select_map(catalog, map);
             }
-            Change::MapSize(tiles) => self.set_map_size(tiles),
+            Change::MapSize(tiles) => self.set_map_size(catalog, tiles),
             Change::PlayerCount(n) => self.set_player_count(catalog, n),
             Change::Biome(biome) => self.set_biome(catalog, Some(biome)),
             Change::Daytime(daytime) => self.set_daytime(catalog, Some(daytime)),

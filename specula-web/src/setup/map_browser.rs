@@ -96,12 +96,15 @@ pub(super) struct MapBrowser {
     columns: Option<u32>,
     /// Preview URLs read from session.css, by stem.
     urls: HashMap<String, String>,
+    /// Random map paths left out while the game has more than 8 players.
+    hidden: Vec<String>,
 }
 
 impl MapBrowser {
     pub(super) fn new(document: &Document) -> Result<MapBrowser, String> {
         Ok(MapBrowser {
             document: document.clone(),
+            hidden: Vec::new(),
             root: by_id(document, "map-browser")?,
             grid: by_id(document, "map-grid")?,
             count: by_id(document, "map-count")?,
@@ -198,7 +201,7 @@ impl MapBrowser {
         let map_type = self.map_type.value();
         let filter = self.map_filter.value();
         let query = self.search.value().trim().to_string();
-        let mut entries = filtered_maps(catalog, &map_type, &filter);
+        let mut entries = filtered_maps(catalog, &map_type, &filter, &self.hidden);
         if map_type == "random" {
             entries.insert(0, random_entry());
         }
@@ -207,7 +210,7 @@ impl MapBrowser {
             if entries.is_empty() {
                 entries.push(random_entry());
                 for kind in strings(catalog, "map_types") {
-                    entries.extend(filtered_maps(catalog, &kind, "all"));
+                    entries.extend(filtered_maps(catalog, &kind, "all", &self.hidden));
                 }
                 entries = match_sort(&query, entries);
             }
@@ -397,14 +400,16 @@ fn strings_of(catalog: &JsValue) -> Vec<String> {
 }
 
 /// `MapFilters.getFilteredMaps`, sorted as the server's `map_list` is.
-fn filtered_maps(catalog: &JsValue, map_type: &str, filter: &str) -> Vec<Entry> {
+fn filtered_maps(catalog: &JsValue, map_type: &str, filter: &str, hidden: &[String]) -> Vec<Entry> {
     if map_type.is_empty() || filter.is_empty() {
         return Vec::new();
     }
     let mut maps: Vec<JsValue> = list(catalog, "maps")
         .into_iter()
         .filter(|map| {
-            text(map, "kind") == map_type && strings(map, "filters").iter().any(|f| f == filter)
+            text(map, "kind") == map_type
+                && strings(map, "filters").iter().any(|f| f == filter)
+                && !hidden.contains(&text(map, "path"))
         })
         .collect();
     maps.sort_by_key(|map| text(map, "name").to_lowercase());
@@ -515,6 +520,7 @@ pub(super) fn open(page: &Shared) {
         let current = text(&view.attributes, "map");
         let browser = &mut page.map_browser;
         browser.allow_selection = view.host;
+        browser.hidden = strings(&view.offer, "hidden_maps");
         browser.open = true;
         show(&browser.root, true);
         browser.render_mode();

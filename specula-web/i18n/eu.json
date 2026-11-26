@@ -207,5 +207,7 @@
   "Watch": "Ikusi",
   "Control group %(number)s": "Kontrol-taldea %(number)s",
   "Download replay": "Deskargatu errepikapena",
-  "Unzip it into the replays folder of 0 A.D. 0.28.0.": "Deskonprimatu 0 A.D. 0.28.0 bertsioaren errepikapenen karpetan."
+  "Unzip it into the replays folder of 0 A.D. 0.28.0.": "Deskonprimatu 0 A.D. 0.28.0 bertsioaren errepikapenen karpetan.",
+  "Vanilla 0 A.D. shows at most 8 players in some screens.": "0 A.D. originalak gehienez 8 jokalari erakusten ditu pantaila batzuetan.",
+  "Some maps are hidden because they do not support more than 8 players.": "Mapa batzuk ezkutatuta daude, ez dituztelako 8 jokalari baino gehiago onartzen."
 }

@@ -207,5 +207,7 @@
   "Watch": "觀看",
   "Control group %(number)s": "控制組 %(number)s",
   "Download replay": "下載重播",
-  "Unzip it into the replays folder of 0 A.D. 0.28.0.": "解壓縮到 0 A.D. 0.28.0 的重播資料夾。"
+  "Unzip it into the replays folder of 0 A.D. 0.28.0.": "解壓縮到 0 A.D. 0.28.0 的重播資料夾。",
+  "Vanilla 0 A.D. shows at most 8 players in some screens.": "原版 0 A.D. 在某些畫面中最多只顯示 8 位玩家。",
+  "Some maps are hidden because they do not support more than 8 players.": "部分地圖已隱藏，因為它們不支援超過 8 位玩家。"
 }

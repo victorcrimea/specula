@@ -207,5 +207,7 @@
   "Watch": "Παρακολούθηση",
   "Control group %(number)s": "Ομάδα ελέγχου %(number)s",
   "Download replay": "Λήψη επανάληψης",
-  "Unzip it into the replays folder of 0 A.D. 0.28.0.": "Αποσυμπιέστε το στον φάκελο επαναλήψεων του 0 A.D. 0.28.0."
+  "Unzip it into the replays folder of 0 A.D. 0.28.0.": "Αποσυμπιέστε το στον φάκελο επαναλήψεων του 0 A.D. 0.28.0.",
+  "Vanilla 0 A.D. shows at most 8 players in some screens.": "Το αρχικό 0 A.D. εμφανίζει το πολύ 8 παίκτες σε ορισμένες οθόνες.",
+  "Some maps are hidden because they do not support more than 8 players.": "Ορισμένοι χάρτες είναι κρυμμένοι επειδή δεν υποστηρίζουν περισσότερους από 8 παίκτες."
 }

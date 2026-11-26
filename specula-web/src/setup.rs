@@ -370,6 +370,7 @@ struct Dom {
     error: HtmlElement,
     preview: HtmlElement,
     preview_title: HtmlElement,
+    maps_note: HtmlElement,
     description: HtmlElement,
     copy_link: HtmlElement,
     back: HtmlElement,
@@ -470,6 +471,7 @@ pub async fn run() -> Result<(), String> {
         error: by_id(&document, "error")?,
         preview: by_id(&document, "preview")?,
         preview_title: by_id(&document, "preview-title")?,
+        maps_note: by_id(&document, "maps-hidden-note")?,
         description: by_id(&document, "description")?,
         copy_link: by_id(&document, "copy-link")?,
         back: by_id(&document, "back")?,
@@ -1839,6 +1841,11 @@ fn render_chrome(page: &Page, view: &View) {
     let _ = dom.preview.style().set_property(
         "background-image",
         &format!("var(--gui-mappreview-{key}, var(--gui-mappreview-nopreview))"),
+    );
+    // Specula: with more than 8 players the server leaves some maps out.
+    show(
+        &dom.maps_note,
+        !strings(&view.offer, "hidden_maps").is_empty(),
     );
     render_description(dom, view);
 

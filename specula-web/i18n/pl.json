@@ -207,5 +207,7 @@
   "Watch": "Oglądaj",
   "Control group %(number)s": "Grupa kontrolna %(number)s",
   "Download replay": "Pobierz powtórkę",
-  "Unzip it into the replays folder of 0 A.D. 0.28.0.": "Rozpakuj ją do folderu powtórek 0 A.D. 0.28.0."
+  "Unzip it into the replays folder of 0 A.D. 0.28.0.": "Rozpakuj ją do folderu powtórek 0 A.D. 0.28.0.",
+  "Vanilla 0 A.D. shows at most 8 players in some screens.": "Oryginalne 0 A.D. pokazuje na niektórych ekranach najwyżej 8 graczy.",
+  "Some maps are hidden because they do not support more than 8 players.": "Niektóre mapy są ukryte, ponieważ nie obsługują więcej niż 8 graczy."
 }

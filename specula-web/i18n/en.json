@@ -207,5 +207,7 @@
   "Watch": "button on a lobby card that opens a running match or a replay",
   "Control group %(number)s": "accessible name of a control group button on the left screen edge; %(number)s is the group's number, 1 to 10",
   "Download replay": "button on the end screen and on a lobby replay card that downloads the match as a replay the 0 A.D. game itself can play",
-  "Unzip it into the replays folder of 0 A.D. 0.28.0.": "tooltip of that button: the downloaded zip holds one folder, to be put in the game's own replays folder, for game version 0.28.0"
+  "Unzip it into the replays folder of 0 A.D. 0.28.0.": "tooltip of that button: the downloaded zip holds one folder, to be put in the game's own replays folder, for game version 0.28.0",
+  "Vanilla 0 A.D. shows at most 8 players in some screens.": "tooltip of the replay download button, appended after the unzip hint when the game had more than 8 players: the 0 A.D. game's own menus were made for 8 players at most",
+  "Some maps are hidden because they do not support more than 8 players.": "note over the map preview on the game setup page, shown while the game has more than 8 players: the random maps that cannot place that many players are left out of the map list and of Random"
 }

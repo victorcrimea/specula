@@ -7,7 +7,6 @@ use serde_json::Value;
 use super::Ai;
 use super::Choice;
 use super::LandscapeChoice;
-use super::MAX_PLAYERS;
 use super::RANDOM;
 use super::Settings;
 use super::gamesetup;
@@ -182,7 +181,7 @@ impl Settings {
             .and_then(|tiles| u32::try_from(tiles).ok())
             && gamesetup::valid_map_size(self, catalog, tiles)
         {
-            self.set_map_size(tiles);
+            self.set_map_size(catalog, tiles);
         }
 
         // Nomad
@@ -256,7 +255,7 @@ impl Settings {
                     self.assign_player_count(catalog, count);
                 }
             } else if let Some(list) = players {
-                self.assign_player_count(catalog, list.len().clamp(1, MAX_PLAYERS));
+                self.assign_player_count(catalog, list.len().clamp(1, self.player_cap()));
             }
         }
 

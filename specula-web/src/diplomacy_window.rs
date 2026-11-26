@@ -320,8 +320,10 @@ impl DiplomacyWindow {
                 .resize(scene.players.len(), [DEFAULT_AMOUNT; 4]);
         }
         let height = HEIGHT + ROW_HEIGHT * (players - 1).max(0);
+        let overflow = if players > 8 { "auto" } else { "hidden" };
         self.panel.style(format!(
-            "--dialog-width: {width}px; --dialog-height: {height}px; --rows-top: {ROWS_TOP}px"
+            "--dialog-width: {width}px; --dialog-height: {height}px; --rows-top: {ROWS_TOP}px; \
+             --table-overflow-y: {overflow}"
         ));
         lang::set_text(&self.title, "Diplomacy");
         lang::set_text(&self.close, "Close");

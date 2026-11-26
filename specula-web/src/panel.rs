@@ -79,8 +79,9 @@ const NEEDED_ALPHA_MAX: f64 = 125.0;
 /// The slider's `3 3 35 35` in its button.
 pub(crate) const SLIDER_INSET: f64 = 3.0;
 pub(crate) const SLIDER_SIDE: f64 = 32.0;
-/// `captureBar[n]` and `captureBarMultiple[n]`, `g_MaxPlayers + 1`.
-const CAPTURE_SEGMENTS: usize = 9;
+/// `captureBar[n]` and `captureBarMultiple[n]`, `g_MaxPlayers + 1` with
+/// specula's `g_MaxPlayers` of 15.
+const CAPTURE_SEGMENTS: usize = 16;
 /// `getPlayerColor(id, 128)` and `(id, 160)`, as CSS alphas.
 pub(crate) const BAND_ALPHA: f64 = 128.0 / 255.0;
 const GROUP_ALPHA: f64 = 160.0 / 255.0;

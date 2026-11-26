@@ -207,5 +207,7 @@
   "Watch": "Megtekintés",
   "Control group %(number)s": "%(number)s. vezérlőcsoport",
   "Download replay": "Visszajátszás letöltése",
-  "Unzip it into the replays folder of 0 A.D. 0.28.0.": "Csomagold ki a 0 A.D. 0.28.0 visszajátszásmappájába."
+  "Unzip it into the replays folder of 0 A.D. 0.28.0.": "Csomagold ki a 0 A.D. 0.28.0 visszajátszásmappájába.",
+  "Vanilla 0 A.D. shows at most 8 players in some screens.": "Az eredeti 0 A.D. egyes képernyőkön legfeljebb 8 játékost mutat.",
+  "Some maps are hidden because they do not support more than 8 players.": "Néhány pálya el van rejtve, mert nem támogat 8-nál több játékost."
 }

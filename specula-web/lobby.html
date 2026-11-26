@@ -249,7 +249,9 @@ const render = () => {
     link(el, entry.id, T("Watch"));
     if (entry.replay) {
       link(el, entry.id, T("Download replay"), "/replay.zip");
-      el.lastChild.title = T("Unzip it into the replays folder of 0 A.D. 0.28.0.");
+      el.lastChild.title = T("Unzip it into the replays folder of 0 A.D. 0.28.0.") +
+        (entry.players.length > 8
+          ? " " + T("Vanilla 0 A.D. shows at most 8 players in some screens.") : "");
     }
     return el;
   }));

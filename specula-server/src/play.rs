@@ -1303,9 +1303,9 @@ impl Play {
     }
 
     /// The players still active in the engine when a time limit scores: the
-    /// capture's own players, or 1 to 8 while it has none.
+    /// capture's own players, or 1 to 15 while it has none.
     fn active_players(&self, captured: Option<usize>) -> Vec<u8> {
-        let count = captured.unwrap_or(8);
+        let count = captured.unwrap_or(15);
         (1..=count)
             .filter_map(|index| u8::try_from(index).ok())
             .filter(|player| self.hub.player_state(u32::from(*player)) == Some(PLAYER_ACTIVE))
