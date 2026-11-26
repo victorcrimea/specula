@@ -252,5 +252,6 @@
   "Could not send the feedback. Try again later.": "无法发送反馈，请稍后重试。",
   "A cookie keeps your seat in a game. May we also count visits and games, anonymously, to improve the site?": "一个 Cookie 用于保留你在游戏中的席位。我们是否可以匿名统计访问和游戏次数，以改进网站？",
   "Allow": "允许",
-  "Decline": "拒绝"
+  "Decline": "拒绝",
+  "Source code (GPLv3)": "源代码 (GPLv3)"
 }

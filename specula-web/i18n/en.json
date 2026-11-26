@@ -252,5 +252,6 @@
   "Could not send the feedback. Try again later.": "shown in the feedback window when sending the feedback failed",
   "A cookie keeps your seat in a game. May we also count visits and games, anonymously, to improve the site?": "notice at the bottom of every page, shown once; the cookie is the one that binds a player to their seat; the question is whether anonymous usage statistics (visits, games, play time) may be logged with it. Followed by the buttons \"Allow\" and \"Decline\"",
   "Allow": "button of the cookie notice: allow usage statistics",
-  "Decline": "button of the cookie notice: refuse usage statistics"
+  "Decline": "button of the cookie notice: refuse usage statistics",
+  "Source code (GPLv3)": "link in the lobby page footer to Specula's source code repository; keep GPLv3 as is, it is the licence name"
 }

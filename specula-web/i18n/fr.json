@@ -252,5 +252,6 @@
   "Could not send the feedback. Try again later.": "Impossible d'envoyer le retour. Réessayez plus tard.",
   "A cookie keeps your seat in a game. May we also count visits and games, anonymously, to improve the site?": "Un cookie garde votre place dans une partie. Pouvons-nous aussi compter, de façon anonyme, les visites et les parties pour améliorer le site ?",
   "Allow": "Autoriser",
-  "Decline": "Refuser"
+  "Decline": "Refuser",
+  "Source code (GPLv3)": "Code source (GPLv3)"
 }

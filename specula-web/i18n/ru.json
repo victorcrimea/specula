@@ -252,5 +252,6 @@
   "Could not send the feedback. Try again later.": "Не удалось отправить отзыв. Попробуйте позже.",
   "A cookie keeps your seat in a game. May we also count visits and games, anonymously, to improve the site?": "Cookie хранит ваше место в игре. Можно ли также анонимно считать посещения и игры, чтобы улучшать сайт?",
   "Allow": "Разрешить",
-  "Decline": "Отклонить"
+  "Decline": "Отклонить",
+  "Source code (GPLv3)": "Исходный код (GPLv3)"
 }

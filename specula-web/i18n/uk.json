@@ -252,5 +252,6 @@
   "Could not send the feedback. Try again later.": "Не вдалося надіслати відгук. Спробуйте пізніше.",
   "A cookie keeps your seat in a game. May we also count visits and games, anonymously, to improve the site?": "Cookie зберігає ваше місце в грі. Чи можна також анонімно рахувати відвідування та ігри, щоб покращувати сайт?",
   "Allow": "Дозволити",
-  "Decline": "Відхилити"
+  "Decline": "Відхилити",
+  "Source code (GPLv3)": "Вихідний код (GPLv3)"
 }

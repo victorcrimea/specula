@@ -252,5 +252,6 @@
   "Could not send the feedback. Try again later.": "Δεν ήταν δυνατή η αποστολή των σχολίων. Δοκιμάστε ξανά αργότερα.",
   "A cookie keeps your seat in a game. May we also count visits and games, anonymously, to improve the site?": "Ένα cookie κρατά τη θέση σας σε ένα παιχνίδι. Μπορούμε επίσης να μετράμε ανώνυμα επισκέψεις και παιχνίδια για να βελτιώσουμε τον ιστότοπο;",
   "Allow": "Να επιτραπεί",
-  "Decline": "Απόρριψη"
+  "Decline": "Απόρριψη",
+  "Source code (GPLv3)": "Πηγαίος κώδικας (GPLv3)"
 }

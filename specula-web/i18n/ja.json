@@ -252,5 +252,6 @@
   "Could not send the feedback. Try again later.": "フィードバックを送信できませんでした。後でもう一度お試しください。",
   "A cookie keeps your seat in a game. May we also count visits and games, anonymously, to improve the site?": "Cookieはゲームでの席を保持します。サイト改善のため、訪問数とゲーム数を匿名で集計してもよろしいですか？",
   "Allow": "許可",
-  "Decline": "拒否"
+  "Decline": "拒否",
+  "Source code (GPLv3)": "ソースコード (GPLv3)"
 }

@@ -252,5 +252,6 @@
   "Could not send the feedback. Try again later.": "A visszajelzést nem sikerült elküldeni. Próbáld újra később.",
   "A cookie keeps your seat in a game. May we also count visits and games, anonymously, to improve the site?": "Egy süti megőrzi a helyedet egy játékban. Névtelenül számolhatjuk-e a látogatásokat és a játékokat is az oldal fejlesztéséhez?",
   "Allow": "Engedélyezem",
-  "Decline": "Elutasítom"
+  "Decline": "Elutasítom",
+  "Source code (GPLv3)": "Forráskód (GPLv3)"
 }

@@ -252,5 +252,6 @@
   "Could not send the feedback. Try again later.": "Palautteen lähetys epäonnistui. Yritä myöhemmin uudelleen.",
   "A cookie keeps your seat in a game. May we also count visits and games, anonymously, to improve the site?": "Eväste pitää paikkasi pelissä. Saammeko laskea lisäksi käyntejä ja pelejä nimettömästi sivuston parantamiseksi?",
   "Allow": "Salli",
-  "Decline": "Hylkää"
+  "Decline": "Hylkää",
+  "Source code (GPLv3)": "Lähdekoodi (GPLv3)"
 }

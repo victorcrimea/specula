@@ -252,5 +252,6 @@
   "Could not send the feedback. Try again later.": "Det gick inte att skicka feedbacken. Försök igen senare.",
   "A cookie keeps your seat in a game. May we also count visits and games, anonymously, to improve the site?": "En cookie håller din plats i ett spel. Får vi också räkna besök och spel anonymt för att förbättra webbplatsen?",
   "Allow": "Tillåt",
-  "Decline": "Avvisa"
+  "Decline": "Avvisa",
+  "Source code (GPLv3)": "Källkod (GPLv3)"
 }

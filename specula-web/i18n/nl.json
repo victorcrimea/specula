@@ -252,5 +252,6 @@
   "Could not send the feedback. Try again later.": "De feedback kon niet worden verstuurd. Probeer het later opnieuw.",
   "A cookie keeps your seat in a game. May we also count visits and games, anonymously, to improve the site?": "Een cookie bewaart je plaats in een spel. Mogen we ook anoniem bezoeken en spellen tellen om de site te verbeteren?",
   "Allow": "Toestaan",
-  "Decline": "Weigeren"
+  "Decline": "Weigeren",
+  "Source code (GPLv3)": "Broncode (GPLv3)"
 }

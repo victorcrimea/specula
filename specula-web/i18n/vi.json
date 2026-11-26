@@ -252,5 +252,6 @@
   "Could not send the feedback. Try again later.": "Không thể gửi phản hồi. Vui lòng thử lại sau.",
   "A cookie keeps your seat in a game. May we also count visits and games, anonymously, to improve the site?": "Một cookie giữ chỗ của bạn trong ván chơi. Chúng tôi có thể đếm ẩn danh lượt truy cập và số ván chơi để cải thiện trang không?",
   "Allow": "Cho phép",
-  "Decline": "Từ chối"
+  "Decline": "Từ chối",
+  "Source code (GPLv3)": "Mã nguồn (GPLv3)"
 }

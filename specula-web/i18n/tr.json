@@ -252,5 +252,6 @@
   "Could not send the feedback. Try again later.": "Geri bildirim gönderilemedi. Lütfen daha sonra tekrar deneyin.",
   "A cookie keeps your seat in a game. May we also count visits and games, anonymously, to improve the site?": "Bir çerez oyundaki yerinizi korur. Siteyi geliştirmek için ziyaretleri ve oyunları anonim olarak da sayabilir miyiz?",
   "Allow": "İzin ver",
-  "Decline": "Reddet"
+  "Decline": "Reddet",
+  "Source code (GPLv3)": "Kaynak kodu (GPLv3)"
 }

@@ -252,5 +252,6 @@
   "Could not send the feedback. Try again later.": "Zpětnou vazbu se nepodařilo odeslat. Zkuste to později.",
   "A cookie keeps your seat in a game. May we also count visits and games, anonymously, to improve the site?": "Soubor cookie drží vaše místo ve hře. Smíme také anonymně počítat návštěvy a hry, abychom web zlepšovali?",
   "Allow": "Povolit",
-  "Decline": "Odmítnout"
+  "Decline": "Odmítnout",
+  "Source code (GPLv3)": "Zdrojový kód (GPLv3)"
 }

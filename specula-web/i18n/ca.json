@@ -252,5 +252,6 @@
   "Could not send the feedback. Try again later.": "No s'han pogut enviar els comentaris. Torna-ho a provar més tard.",
   "A cookie keeps your seat in a game. May we also count visits and games, anonymously, to improve the site?": "Una galeta manté el teu seient en una partida. Podem comptar també visites i partides, de manera anònima, per millorar el lloc?",
   "Allow": "Permet",
-  "Decline": "Rebutja"
+  "Decline": "Rebutja",
+  "Source code (GPLv3)": "Codi font (GPLv3)"
 }
