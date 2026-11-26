@@ -218,7 +218,7 @@ const mapName = (map) => (map ? T(map) : T("Unknown map"));
 const preview = (preview) => {
   const thumb = document.createElement("div");
   thumb.className = "thumb";
-  const stem = (preview ?? "").replace(/\.[^.]*$/, "").replace(/[^A-Za-z0-9_-]/g, "");
+  const stem = (preview ?? "").replace(/^.*\//, "").replace(/\.[^.]*$/, "").replace(/[^A-Za-z0-9_-]/g, "");
   thumb.style.backgroundImage = "var(--gui-mappreview-" + (stem || "nopreview") + ", var(--gui-mappreview-nopreview))";
   return thumb;
 };
